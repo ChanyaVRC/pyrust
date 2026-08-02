@@ -14,8 +14,8 @@ mod value_protocols {
     use super::{
         ExpandedCallArg, Interpreter, PyError, PyInstance, Rc, RefCell, Result, Value, ValueKind,
         builtin_data_backing, class_is_subclass_of, compare_values, compare_values_with_op,
-        effective_builtin_receiver, invoke_class_method, lookup_class_attr, metaclass_dunder,
-        value_type_name_str,
+        effective_builtin_receiver, invoke_class_method, lookup_class_attr,
+        metaclass_dunder_for_call, value_type_name_str,
     };
     include!("runtime/value_protocols.rs");
 }
@@ -33,8 +33,8 @@ mod formatting {
         builtin_data_backing, exception_str_with_dispatch, extract_str_value, float_to_bigint,
         full_type_name_str, instance_builtin_data, intern_string, invoke_class_method,
         is_exception_class, is_percent_format_mapping, is_str_or_str_subclass, lookup_class_attr,
-        lookup_value_special_method, normalize_float_slot_result, render_instance_repr,
-        try_value_to_float, value_type_name_str,
+        lookup_value_special_method, metaclass_dunder_for_call, normalize_float_slot_result,
+        render_instance_repr, try_value_to_float, value_type_name_str,
     };
     include!("runtime/formatting.rs");
 }
@@ -141,8 +141,8 @@ pub(crate) use builtin_methods::{
     NativeClassMethodCachePlan, adapt_builtin_subclass_method, bind_builtin_attribute,
     bind_builtin_class_special, bind_cached_native_class_method, builtin_callable_metadata,
     builtin_callable_presentation, dir_names, is_builtin_callable_adapter,
-    is_builtin_class_getitem_sentinel, is_object_protocol_method, make_builtin_generic_alias,
-    primitive_owned_object_dunder,
+    is_builtin_class_getitem_sentinel, is_class_bound_any_callable, is_object_protocol_method,
+    make_builtin_generic_alias, primitive_owned_object_dunder,
 };
 
 mod collection_keys {
@@ -201,9 +201,9 @@ mod expressions {
         is_async_generator_value, is_builtin_class_getitem_sentinel, is_coroutine_value,
         is_not_implemented, is_stop_iteration_error, is_type_alias_class, key_contains_object,
         lookup_class_attr, make_builtin_generic_alias, make_slice_value, metaclass_dunder,
-        nested_object_tuple_key, normalize_index, normalize_index_write, py_mod_i64, range_len,
-        slot_is_dispatchable, type_class_singleton, value_type_name_str, values_are_identical,
-        vm_read,
+        metaclass_dunder_for_call, nested_object_tuple_key, normalize_index, normalize_index_write,
+        py_mod_i64, range_len, slot_is_dispatchable, type_class_singleton, value_type_name_str,
+        values_are_identical, vm_read,
     };
     include!("runtime/expr.rs");
 }
@@ -261,7 +261,7 @@ mod standard_streams {
 mod truthiness {
     use super::{
         Interpreter, Rc, Result, Value, ValueKind, builtin_data_backing, coerce_numeric,
-        invoke_class_method, lookup_class_attr, metaclass_dunder,
+        invoke_class_method, lookup_class_attr, metaclass_dunder_for_call,
     };
     include!("runtime/truthiness.rs");
 }
@@ -288,7 +288,7 @@ mod iteration {
         i64_range_native_cursor_safe, instance_builtin_data, invoke_class_method,
         is_coroutine_value, is_inherited_builtin_iter_sentinel, is_sequence_iter_terminator,
         is_stop_iteration_error, key_ref_to_value, key_to_value, lookup_class_attr,
-        lookup_value_special_method, metaclass_dunder, range_len, value_from_bigint,
+        lookup_value_special_method, metaclass_dunder_for_call, range_len, value_from_bigint,
         value_to_bigint, value_type_name_str,
     };
     include!("runtime/iteration.rs");

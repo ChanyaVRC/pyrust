@@ -45,6 +45,42 @@ pub(crate) fn metaclass_dunder(class: &Rc<RefCell<PyClass>>, name: &str) -> Opti
     lookup_user_metaclass_attr(&meta, name)
 }
 
+/// Resolve an implicit-call slot on a class's metaclass and pre-bind only a
+/// classmethod descriptor to `type(receiver)`.
+///
+/// Returning a bound callable preserves the lookup provenance that the generic
+/// invocation helper cannot infer from a `PyClass` receiver alone. Regular
+/// functions, staticmethods, and arbitrary descriptors stay raw and therefore
+/// retain the existing [`invoke_class_method`] dispatch. Both classmethod
+/// representations share the single metaclass owner chosen here (#2947).
+#[inline]
+pub(crate) fn metaclass_dunder_for_call(
+    class: &Rc<RefCell<PyClass>>,
+    name: &str,
+) -> Option<Result<Value>> {
+    let method = metaclass_dunder(class, name)?;
+    let wrapped = pyrust_builtins::classmethod::as_class_method_any(&method);
+    let tagged = match method.kind() {
+        ValueKind::UserFunction(function)
+            if function.kind == pyrust_core::UserFunctionKind::ClassMethod =>
+        {
+            Some(Rc::clone(function))
+        }
+        _ => None,
+    };
+    if wrapped.is_none() && tagged.is_none() {
+        return Some(Ok(method));
+    }
+
+    let owner = metaclass_of(class);
+    if let Some(wrapped) = wrapped {
+        return Some(pyrust_builtins::classmethod::bind_wrapped_class_method(
+            wrapped, owner,
+        ));
+    }
+    tagged.map(|function| Ok(Value::class_bound_method(function, owner)))
+}
+
 /// Walk `meta`'s MRO looking for `name`, but stop short of the built-in
 /// `type` and `object` singletons — those carry the *default* slots, which
 /// must not be treated as user overrides (that would defeat the fast path
@@ -99,15 +135,19 @@ pub(crate) fn dispatch_metaclass_repr_str(
     class: &Rc<RefCell<PyClass>>,
     name: &str,
 ) -> Option<Result<String>> {
-    let method_val = metaclass_dunder(class, name).or_else(|| {
+    let method_val = metaclass_dunder_for_call(class, name).or_else(|| {
         // `str(cls)` with no metaclass `__str__` falls back to the metaclass
         // `__repr__` (CPython: `type.__str__` calls `type.__repr__`).
         if name == "__str__" {
-            metaclass_dunder(class, "__repr__")
+            metaclass_dunder_for_call(class, "__repr__")
         } else {
             None
         }
     })?;
+    let method_val = match method_val {
+        Ok(method_val) => method_val,
+        Err(error) => return Some(Err(error)),
+    };
     let cls_value = Value::py_class(Rc::clone(class));
     let result = match invoke_class_method(interp, method_val, cls_value, &[]) {
         Ok(v) => v,

@@ -74,7 +74,7 @@ impl Interpreter {
             return Ok(backing);
         }
         // Try __float__ first.
-        if let Some(method_val) = lookup_value_special_method(&val, "__float__") {
+        if let Some(method_val) = lookup_value_special_method(&val, "__float__").transpose()? {
             let result = invoke_class_method(self, method_val, val.clone(), &[])?;
             if let Some(normalized) = normalize_float_slot_result(&result) {
                 return Ok(normalized);

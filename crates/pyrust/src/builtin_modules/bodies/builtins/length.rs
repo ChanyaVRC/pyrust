@@ -128,7 +128,9 @@ pyrust_module! {
                 // A class whose metaclass defines `__len__` (e.g. an `Enum`
                 // subclass under `EnumMeta`): `len(Color)` dispatches the
                 // metaclass slot with the class as the receiver (#2611).
-                let Some(method_val) = crate::interpreter::metaclass_dunder(cls, "__len__") else {
+                let Some(method_val) =
+                    crate::interpreter::metaclass_dunder_for_call(cls, "__len__")
+                else {
                     return Err(PyError::named(
                         "TypeError",
                         format!(
@@ -137,8 +139,7 @@ pyrust_module! {
                         ),
                     ));
                 };
-                let result =
-                    invoke_class_method(_interp, method_val, value.clone(), &[])?;
+                let result = invoke_class_method(_interp, method_val?, value.clone(), &[])?;
                 _interp.normalize_len_result(&result)?
             }
             _ => {

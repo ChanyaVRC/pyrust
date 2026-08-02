@@ -109,3 +109,25 @@ show("methodcaller-int", lambda: o.methodcaller(1))
 show("methodcaller-kw-only", lambda: o.methodcaller(name="upper"))
 show("indexOf-missing", lambda: o.indexOf([1, 2, 3], 9))
 show("concat-nonseq", lambda: o.concat(5, [1]))
+
+# The accelerated operator.index protocol must not capture a user replacement
+# for builtins.range (or any other public helper) when operator is imported.
+import builtins
+import sys
+
+
+class FakeRangeResult:
+    stop = 999
+
+
+real_range = builtins.range
+builtins.range = lambda value: FakeRangeResult()
+sys.modules.pop("operator", None)
+import operator as rebound_operator
+
+builtins.range = real_range
+print("index-rebound-range", rebound_operator.index(5))
+show("index-no-args", lambda: rebound_operator.index())
+show("index-two-args", lambda: rebound_operator.index(1, 2))
+show("index-keyword", lambda: rebound_operator.index(a=1))
+print("index-doc", repr(rebound_operator.index.__doc__))

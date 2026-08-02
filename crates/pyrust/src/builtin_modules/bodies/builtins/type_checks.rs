@@ -212,11 +212,18 @@ fn isinstance_check(
         // dispatch.  `metaclass_dunder` returns `Some` only for a user
         // override, so ordinary classes skip this and keep the fast path.
         //
-        // Issue #2939: bind through `invoke_class_method` so a `staticmethod` /
-        // `classmethod` hook follows the same descriptor rules as every other
-        // implicit dunder instead of unconditionally receiving `cls`.
-        if let Some(ic_fn) = crate::interpreter::metaclass_dunder(cls_rc, "__instancecheck__")
-            && matches!(ic_fn.kind(), ValueKind::UserFunction(_))
+        // Issue #2939: bind through `invoke_class_method` so a `staticmethod`
+        // hook follows the same descriptor rules as every other implicit
+        // dunder instead of unconditionally receiving `cls`. Issue #2947:
+        // pre-bind a classmethod to the metaclass while preserving that direct
+        // hot-helper call site for every other slot shape.
+        if let Some(ic_fn) =
+            crate::interpreter::metaclass_dunder_for_call(cls_rc, "__instancecheck__")
+                .transpose()?
+            && (matches!(
+                ic_fn.kind(),
+                ValueKind::UserFunction(_) | ValueKind::ClassBoundMethod { .. }
+            ) || crate::interpreter::is_class_bound_any_callable(&ic_fn))
         {
             let call_args = [crate::interpreter::ExpandedCallArg {
                 name: None,
@@ -490,11 +497,17 @@ fn issubclass_check(
         // Issue #1955: a metaclass `__subclasscheck__` override takes
         // precedence, mirroring CPython's
         // `type(classinfo).__subclasscheck__(classinfo, cls)` dispatch.
-        // Issue #2939: bind through `invoke_class_method` so a `staticmethod` /
-        // `classmethod` hook follows the same descriptor rules as every other
-        // implicit dunder instead of unconditionally receiving `classinfo`.
-        if let Some(sc_fn) = crate::interpreter::metaclass_dunder(classinfo_rc, "__subclasscheck__")
-            && matches!(sc_fn.kind(), ValueKind::UserFunction(_))
+        // Issue #2939: bind through `invoke_class_method` so a `staticmethod`
+        // hook follows the same descriptor rules as every other implicit
+        // dunder instead of unconditionally receiving `classinfo`. Issue
+        // #2947 pre-binds a classmethod to the metaclass.
+        if let Some(sc_fn) =
+            crate::interpreter::metaclass_dunder_for_call(classinfo_rc, "__subclasscheck__")
+                .transpose()?
+            && (matches!(
+                sc_fn.kind(),
+                ValueKind::UserFunction(_) | ValueKind::ClassBoundMethod { .. }
+            ) || crate::interpreter::is_class_bound_any_callable(&sc_fn))
         {
             let call_args = [crate::interpreter::ExpandedCallArg {
                 name: None,

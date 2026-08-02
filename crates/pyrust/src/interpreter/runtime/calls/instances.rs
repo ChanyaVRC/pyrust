@@ -16,8 +16,8 @@ impl Interpreter {
         // is the built-in `type`) return `None` here and fall through to the
         // existing default construct, preserving the fast path.
         //
-        // Issue #2939: bind through `invoke_class_method` rather than
-        // prepending the class here, so a `staticmethod` / `classmethod`
+        // Issue #2939: bind through the shared descriptor-aware helper rather
+        // than prepending the class here, so a `staticmethod` / `classmethod`
         // metaclass `__call__` follows the same descriptor rules as every other
         // implicit dunder.  The `UserFunction` gate is unchanged: the built-in
         // `type.__call__` sentinel is a `BuiltinFunction` and still falls
@@ -26,11 +26,17 @@ impl Interpreter {
         //
         // Issue #2944: a descriptor `__call__` (a `property`, or any object
         // whose class defines `__get__`) joins the same gate, so
-        // `invoke_class_method` can bind it.  `slot_is_descriptor` is false for
-        // the `BuiltinFunction` `type.__call__` sentinel, so the ordinary
-        // construction fast path still falls straight through.
-        if let Some(call_fn) = crate::interpreter::metaclass_dunder(&class, "__call__")
-            && (matches!(call_fn.kind(), ValueKind::UserFunction(_))
+        // `invoke_class_method` can bind it. Issue #2947 pre-binds a
+        // classmethod using the metaclass lookup provenance while keeping the
+        // original direct call for every other slot. `slot_is_descriptor` is
+        // false for the `BuiltinFunction` `type.__call__` sentinel, so the
+        // ordinary construction fast path still falls straight through.
+        if let Some(call_fn) =
+            crate::interpreter::metaclass_dunder_for_call(&class, "__call__").transpose()?
+            && (matches!(
+                call_fn.kind(),
+                ValueKind::UserFunction(_) | ValueKind::ClassBoundMethod { .. }
+            ) || crate::interpreter::is_class_bound_any_callable(&call_fn)
                 || crate::interpreter::slot_is_descriptor(&call_fn))
         {
             return invoke_class_method(self, call_fn, Value::py_class(Rc::clone(&class)), args);

@@ -102,14 +102,15 @@ pub(crate) fn slot_is_dispatchable(v: &Value) -> bool {
 /// Instance special methods live on the instance's class, while special
 /// methods for a class object live on its metaclass. Keeping that distinction
 /// at the value-protocol boundary prevents individual numeric consumers from
-/// accidentally ignoring metaclass slots.
-pub(crate) fn lookup_value_special_method(value: &Value, name: &str) -> Option<Value> {
+/// accidentally ignoring metaclass slots. The outer `Option` reports a missing
+/// slot; the inner `Result` preserves a descriptor-binding error.
+pub(crate) fn lookup_value_special_method(value: &Value, name: &str) -> Option<Result<Value>> {
     match value.kind() {
         ValueKind::PyInstance(instance) => {
             let class = Rc::clone(&instance.borrow().class);
-            lookup_class_attr(&class, name)
+            lookup_class_attr(&class, name).map(Ok)
         }
-        ValueKind::PyClass(class) => metaclass_dunder(class, name),
+        ValueKind::PyClass(class) => metaclass_dunder_for_call(class, name),
         _ => None,
     }
 }

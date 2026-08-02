@@ -140,7 +140,8 @@ impl Interpreter {
             }
             ValueKind::Generator(_) => IterKind::Generator,
             ValueKind::PyInstance(instance) => IterKind::Instance(Rc::clone(instance)),
-            ValueKind::PyClass(class) => metaclass_dunder(class, "__iter__")
+            ValueKind::PyClass(class) => metaclass_dunder_for_call(class, "__iter__")
+                .transpose()?
                 .map(IterKind::Metaclass)
                 .unwrap_or(IterKind::Other),
             ValueKind::BuiltinObject { ops, .. } if ops.is_iterator() => IterKind::BuiltinIterator,

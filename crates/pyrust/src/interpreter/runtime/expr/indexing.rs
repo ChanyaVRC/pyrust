@@ -232,7 +232,9 @@ impl Interpreter {
                 // implements `Color['RED']` name lookup) is a type-level slot
                 // that takes precedence over the class's own
                 // `__class_getitem__` (#2611).
-                if let Some(getitem_fn) = metaclass_dunder(&class, "__getitem__") {
+                if let Some(getitem_fn) =
+                    metaclass_dunder_for_call(&class, "__getitem__").transpose()?
+                {
                     return invoke_class_method(
                         self,
                         getitem_fn,

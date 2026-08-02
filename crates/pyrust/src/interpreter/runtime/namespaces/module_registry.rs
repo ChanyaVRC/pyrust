@@ -193,8 +193,9 @@ impl Interpreter {
                 Ok(())
             }
             ImportRegistryKind::Protocol => {
-                let method =
-                    lookup_value_special_method(&registry, "__setitem__").ok_or_else(|| {
+                let method = lookup_value_special_method(&registry, "__setitem__")
+                    .transpose()?
+                    .ok_or_else(|| {
                         PyError::named(
                             "TypeError",
                             format!(
@@ -232,8 +233,9 @@ impl Interpreter {
                 Ok(())
             }
             ImportRegistryKind::Protocol => {
-                let method =
-                    lookup_value_special_method(&registry, "__delitem__").ok_or_else(|| {
+                let method = lookup_value_special_method(&registry, "__delitem__")
+                    .transpose()?
+                    .ok_or_else(|| {
                         PyError::named(
                             "TypeError",
                             format!(

@@ -10,10 +10,18 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyClass, Value, ValueKind};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, PyClass, PyDict, Value, ValueKind};
+
+/// Interpreter-owned protocol entry points represented as native built-in
+/// callables without adding a name to the global function registry.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NativeBuiltinIntrinsic {
+    IndexProtocol,
+}
 
 pub struct NativeStaticBuiltinState {
     pub wrapped: Value,
+    intrinsic: Option<NativeBuiltinIntrinsic>,
     name: Rc<String>,
     qualname: Rc<String>,
     receiver: Option<Value>,
@@ -28,12 +36,16 @@ pub struct NativeStaticBuiltinState {
     /// Per-callable `__module__` slot. Native static/class-bound builtins
     /// expose the same mutable slot as captured built-in methods in CPython.
     module: Value,
+    /// Per-callable `__doc__` value. Descriptor-bound wrappers retain their
+    /// historical `None`; module intrinsics may provide CPython metadata.
+    doc: Value,
 }
 
 /// Interpreter-facing call payload for a native builtin wrapper.
 pub struct NativeBuiltinCall {
     pub wrapped: Value,
     pub receiver: Option<Value>,
+    pub intrinsic: Option<NativeBuiltinIntrinsic>,
 }
 
 pub struct NativeStaticBuiltinOps;
@@ -85,10 +97,12 @@ impl BuiltinTypeOps for NativeStaticBuiltinOps {
             return false;
         };
         callable.wrapped == other.wrapped
+            && callable.intrinsic == other.intrinsic
             && callable.receiver == other.receiver
             && callable.hide_receiver == other.hide_receiver
             && callable.display_as_function == other.display_as_function
             && callable.owner_id == other.owner_id
+            && callable.doc == other.doc
     }
 
     fn hash(&self, state: &BuiltinState) -> Option<u64> {
@@ -115,7 +129,7 @@ impl BuiltinTypeOps for NativeStaticBuiltinOps {
                 callable.receiver.clone().unwrap_or_else(Value::none)
             }),
             "__module__" => Some(callable.module.clone()),
-            "__doc__" => Some(Value::none()),
+            "__doc__" => Some(callable.doc.clone()),
             _ => None,
         }
     }
@@ -132,6 +146,7 @@ pub fn native_static_builtin(
     let owner_id = Rc::as_ptr(owner) as i64;
     let state: Box<dyn Any> = Box::new(NativeStaticBuiltinState {
         wrapped,
+        intrinsic: None,
         name,
         qualname,
         receiver: None,
@@ -139,6 +154,7 @@ pub fn native_static_builtin(
         display_as_function: false,
         owner_id,
         module: Value::none(),
+        doc: Value::none(),
     });
     Value::builtin_object(NATIVE_STATIC_BUILTIN_OPS, state)
 }
@@ -157,6 +173,7 @@ pub fn native_class_builtin(
     };
     let state: Box<dyn Any> = Box::new(NativeStaticBuiltinState {
         wrapped,
+        intrinsic: None,
         name,
         qualname,
         receiver: Some(receiver),
@@ -164,6 +181,7 @@ pub fn native_class_builtin(
         display_as_function: false,
         owner_id,
         module: Value::none(),
+        doc: Value::none(),
     });
     Value::builtin_object(NATIVE_STATIC_BUILTIN_OPS, state)
 }
@@ -187,6 +205,7 @@ pub fn native_generation_builtin(
     let owner_id = generation.value_id().unwrap_or(0);
     let state: Box<dyn Any> = Box::new(NativeStaticBuiltinState {
         wrapped,
+        intrinsic: None,
         name,
         qualname,
         receiver: Some(generation),
@@ -194,6 +213,38 @@ pub fn native_generation_builtin(
         display_as_function: true,
         owner_id,
         module: Value::string(module_name),
+        doc: Value::none(),
+    });
+    Value::builtin_object(NATIVE_STATIC_BUILTIN_OPS, state)
+}
+
+/// Create a module-level built-in callable whose behavior is owned by an
+/// interpreter protocol adapter rather than the global function registry.
+///
+/// The private generation token gives each imported callable its own identity
+/// without retaining the module and creating a reference cycle.  It is never
+/// exposed as `__self__` and is not prepended to intrinsic calls.
+pub fn native_intrinsic_builtin(
+    intrinsic: NativeBuiltinIntrinsic,
+    name: impl Into<String>,
+    module_name: &str,
+    doc: Option<&str>,
+) -> Value {
+    let name = Rc::new(name.into());
+    let qualname = Rc::clone(&name);
+    let generation = Value::dict(PyDict::default());
+    let owner_id = generation.value_id().unwrap_or(0);
+    let state: Box<dyn Any> = Box::new(NativeStaticBuiltinState {
+        wrapped: Value::none(),
+        intrinsic: Some(intrinsic),
+        name,
+        qualname,
+        receiver: Some(generation),
+        hide_receiver: true,
+        display_as_function: true,
+        owner_id,
+        module: Value::string(module_name),
+        doc: doc.map_or_else(Value::none, Value::string),
     });
     Value::builtin_object(NATIVE_STATIC_BUILTIN_OPS, state)
 }
@@ -211,6 +262,7 @@ pub fn as_native_static_builtin(value: &Value) -> Option<NativeBuiltinCall> {
     Some(NativeBuiltinCall {
         wrapped: callable.wrapped.clone(),
         receiver: callable.receiver.clone(),
+        intrinsic: callable.intrinsic,
     })
 }
 

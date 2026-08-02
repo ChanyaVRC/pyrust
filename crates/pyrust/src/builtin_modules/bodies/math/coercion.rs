@@ -56,7 +56,7 @@ pub(super) fn math_arg_to_float(interp: &mut crate::Interpreter, val: &Value) ->
             return value_to_float(b, "__SENTINEL__");
         }
         // (2) __float__ — must return an exact float (not int/bool).
-        if let Some(method) = lookup_value_special_method(val, "__float__") {
+        if let Some(method) = lookup_value_special_method(val, "__float__").transpose()? {
             let result = invoke_class_method(interp, method, val.clone(), &[])?;
             return if let Some(normalized) = normalize_float_slot_result(&result) {
                 let ValueKind::Float(value) = normalized.kind() else {

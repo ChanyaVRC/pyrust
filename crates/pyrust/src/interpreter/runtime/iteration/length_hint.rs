@@ -235,7 +235,9 @@ impl Interpreter {
                 // CPython's `seqiter` reports NotImplemented when the sequence
                 // has no length slot at all; `reversed` only ever wraps one
                 // that does.
-                let Some(length_method) = lookup_value_special_method(&object, "__len__") else {
+                let Some(length_method) =
+                    lookup_value_special_method(&object, "__len__").transpose()?
+                else {
                     return Ok(Some(Value::not_implemented()));
                 };
                 let result = invoke_class_method(self, length_method, object, &[])?;

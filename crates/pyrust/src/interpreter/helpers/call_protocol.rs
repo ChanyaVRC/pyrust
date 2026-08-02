@@ -197,7 +197,6 @@ fn resolve_and_validate_builtin_method(
 /// `None` means "not a descriptor wrapper after all" (a `Builtin`-kind
 /// function, or a classmethod whose receiver has no resolvable class); the
 /// caller then falls through to its ordinary receiver-prepending path.
-///
 /// Deliberately `#[cold]` + `#[inline(never)]`: a staticmethod-in-a-dunder-slot
 /// is rare, but [`invoke_class_method`] is the shared implicit-dunder dispatch
 /// path that every `__init__`, `__getitem__`, `__len__` and `__eq__` call goes

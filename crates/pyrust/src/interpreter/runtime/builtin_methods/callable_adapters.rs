@@ -26,6 +26,16 @@ pub(crate) fn is_builtin_callable_adapter(value: &Value) -> bool {
         || pyrust_builtins::generic_alias::as_generic_alias_origin(value).is_some()
 }
 
+/// Whether `value` is the callable adapter produced by binding an arbitrary
+/// Python-created `classmethod` payload.
+///
+/// Metaclass hook gates use this typed question without decoding a concrete
+/// builtin representation in the generic call runtime (#2947).
+#[inline]
+pub(crate) fn is_class_bound_any_callable(value: &Value) -> bool {
+    pyrust_builtins::classmethod::as_class_bound_any(value).is_some()
+}
+
 /// Decode a legacy, unregistered protocol sentinel at the concrete built-in
 /// adapter boundary.
 ///
@@ -156,6 +166,35 @@ impl Interpreter {
         if let Some(call) =
             pyrust_builtins::native_builtin_callable::as_native_static_builtin(function)
         {
+            if let Some(intrinsic) = call.intrinsic {
+                let result = match intrinsic {
+                    pyrust_builtins::native_builtin_callable::NativeBuiltinIntrinsic::IndexProtocol => {
+                        if args.iter().any(|arg| arg.name.is_some()) {
+                            return Err(pyrust_core::type_err!(
+                                "_operator.index() takes no keyword arguments"
+                            ));
+                        }
+                        if args.len() != 1 {
+                            return Err(pyrust_core::type_err!(
+                                "_operator.index() takes exactly one argument ({} given)",
+                                args.len()
+                            ));
+                        }
+                        let result = self.value_to_index(&args[0].value, |value| {
+                            pyrust_core::type_err!(
+                                "'{}' object cannot be interpreted as an integer",
+                                pyrust_core::builtin_type_name(value)
+                            )
+                        })?;
+                        if let ValueKind::Bool(value) = result.kind() {
+                            Value::int(value as i64)
+                        } else {
+                            result
+                        }
+                    }
+                };
+                return Ok(Some(result));
+            }
             if let Some(receiver) = call.receiver {
                 // The descriptor provider guarantees that native class-bound
                 // wrappers contain a BuiltinFunction. Dispatch that payload at
