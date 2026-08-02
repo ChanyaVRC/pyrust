@@ -680,11 +680,7 @@ pyrust_module! {
             let mut attrs = InstanceAttrs::new();
             attrs.insert("obj", user[0].value.clone());
             attrs.insert("_cmp", cmp);
-            Ok(make_instance_with_class(
-                Rc::clone(item_class),
-                "_cmp_key",
-                attrs,
-            ))
+            Ok(make_instance_with_class(Rc::clone(item_class), attrs))
         }
     }
 

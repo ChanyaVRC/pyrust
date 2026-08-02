@@ -102,7 +102,7 @@ fn make_lru_wrapper(
     attrs.insert("_hits", Value::int(0));
     attrs.insert("_misses", Value::int(0));
     attrs.insert("_cache_info_class", cache_info_class);
-    make_instance_with_class(wrapper_class, "_lru_cache_wrapper", attrs)
+    make_instance_with_class(wrapper_class, attrs)
 }
 
 /// Construct the decorator returned by `lru_cache(maxsize=N)`.
@@ -116,7 +116,7 @@ fn make_lru_factory(
     attrs.insert("_maxsize", maxsize.map_or_else(Value::none, Value::int));
     attrs.insert("_typed", Value::bool_(typed));
     attrs.insert("_generation", generation.clone());
-    make_instance_with_class(factory_class, "_lru_cache_factory", attrs)
+    make_instance_with_class(factory_class, attrs)
 }
 
 fn bump_counter(inst: &Rc<RefCell<PyInstance>>, key: &str) {

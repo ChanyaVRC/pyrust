@@ -246,22 +246,10 @@ fn lru_wrapper_classes(
 /// Construct an internal instance from one exact imported generation.
 fn make_instance(generation: &Value, name: &str, attrs: InstanceAttrs) -> Result<Value> {
     let class = generation_class(generation, name)?;
-    Ok(make_instance_with_class(class, name, attrs))
+    Ok(make_instance_with_class(class, attrs))
 }
 
-fn make_instance_with_class(
-    class: Rc<RefCell<PyClass>>,
-    name: &str,
-    attrs: InstanceAttrs,
-) -> Value {
-    // Macro-generated classes do not automatically apply the
-    // `__eq__`-implies-unhashable rule.
-    if name == "_cmp_key" && !class.borrow().attrs.contains_key("__hash__") {
-        class
-            .borrow_mut()
-            .attrs
-            .insert("__hash__".to_string(), Value::none());
-    }
+fn make_instance_with_class(class: Rc<RefCell<PyClass>>, attrs: InstanceAttrs) -> Value {
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
