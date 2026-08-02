@@ -1691,6 +1691,24 @@ pyrust_module! {
             Ok(Value::bool_(true))
         }
 
+        /// Lexicographic deque ordering, matching CPython's sequence
+        /// identity/equality prefix scan and element comparison dispatch.
+        fn __lt__(args) -> Result<Value> {
+            deque_ordering_compare(_interp, args, FN_NAME, BinaryOp::Lt)
+        }
+
+        fn __le__(args) -> Result<Value> {
+            deque_ordering_compare(_interp, args, FN_NAME, BinaryOp::Le)
+        }
+
+        fn __gt__(args) -> Result<Value> {
+            deque_ordering_compare(_interp, args, FN_NAME, BinaryOp::Gt)
+        }
+
+        fn __ge__(args) -> Result<Value> {
+            deque_ordering_compare(_interp, args, FN_NAME, BinaryOp::Ge)
+        }
+
         /// `d + other` — concatenate two deques into a new deque (#2011).
         /// The result inherits `self`'s `maxlen` and is trimmed to it (keeping
         /// the rightmost elements), matching CPython.  A non-deque RHS raises

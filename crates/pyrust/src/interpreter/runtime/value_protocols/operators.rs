@@ -15,18 +15,31 @@ impl Interpreter {
         method: &str,
         rmethod: &str,
     ) -> Option<Result<Value>> {
-        // Subtype priority (mirrors CPython `binary_op1`): when `rmethod` is a
-        // reflected arithmetic slot (e.g. `__radd__`, starts with `__r`) and
-        // `right`'s class is a *proper* subtype of `left`'s class AND `right`'s
-        // resolved `rmethod` slot (via MRO) differs from `left`'s resolved slot
-        // (one is None, or they're different functions), try
-        // `right.rmethod(left)` before `left.method(right)`.  This mirrors
-        // CPython's `slotw != slotv` check in `binary_op1`: a right type that
-        // inherits a different `__radd__` from an intermediate class gets
-        // priority, not only types that directly define `rmethod` in their own
-        // `__dict__`.  Comparison reflected ops (`__gt__`, `__ge__`, …) do not
-        // start with `__r`, so they are unaffected by this check.
-        let right_has_subtype_priority = rmethod.starts_with("__r") && {
+        // Subtype priority mirrors two CPython dispatch paths:
+        //
+        // - `binary_op1` gives a proper RHS subtype's reflected arithmetic
+        //   slot priority only when its resolved slot differs from the LHS
+        //   slot (`slotw != slotv`).
+        // - `do_richcompare` gives a proper RHS subtype's swapped comparison
+        //   (`__gt__` for `<`, `__eq__` for `==`, and so on) priority whenever
+        //   that method resolves, including when it is inherited unchanged.
+        //
+        // In both cases the priority call may return NotImplemented, after
+        // which the ordinary LHS-first chain resumes without calling the RHS
+        // slot twice.
+        let reflected_arithmetic = rmethod.starts_with("__r");
+        // Keep the existing arithmetic hot path to one prefix check: the
+        // richer method-pair classification is needed only for comparisons.
+        let comparison_reflection = !reflected_arithmetic
+            && matches!(
+                (method, rmethod),
+                ("__eq__", "__eq__")
+                    | ("__lt__", "__gt__")
+                    | ("__le__", "__ge__")
+                    | ("__gt__", "__lt__")
+                    | ("__ge__", "__le__")
+            );
+        let right_has_subtype_priority = (reflected_arithmetic || comparison_reflection) && {
             if let (ValueKind::PyInstance(li), ValueKind::PyInstance(ri)) =
                 (left.kind(), right.kind())
             {
@@ -35,7 +48,7 @@ impl Interpreter {
                 if !Rc::ptr_eq(&lc, &rc_class) && class_is_subclass_of(&rc_class, &lc) {
                     let right_slot = lookup_class_attr(&rc_class, rmethod);
                     let left_slot = lookup_class_attr(&lc, rmethod);
-                    right_slot.is_some() && right_slot != left_slot
+                    right_slot.is_some() && (comparison_reflection || right_slot != left_slot)
                 } else {
                     false
                 }
@@ -75,7 +88,7 @@ impl Interpreter {
         // ops (`__gt__`, `__ge__`, …) do not start with `__r`, and CPython
         // *does* try both sides for same-type comparisons, so they must stay
         // unaffected.  See issue #2092.
-        let same_type_reflected_arith = rmethod.starts_with("__r")
+        let same_type_reflected_arith = reflected_arithmetic
             && matches!(
                 (left.kind(), right.kind()),
                 (ValueKind::PyInstance(li), ValueKind::PyInstance(ri))

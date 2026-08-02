@@ -84,3 +84,104 @@ class Orderable:
         return self.v < other.v
 
 print([x.v for x in sorted([Orderable(3), Orderable(1), Orderable(2)])])
+
+
+# A proper RHS subtype gets first refusal through the swapped rich-comparison
+# slot.  This is the do_richcompare rule (distinct from arithmetic __r* slot
+# priority) and applies to equality as well as all four ordering operations.
+events = []
+
+
+class RichBase:
+    def __eq__(self, other):
+        events.append("base eq")
+        return "base eq result"
+
+    def __lt__(self, other):
+        events.append("base lt")
+        return "base lt result"
+
+    def __le__(self, other):
+        events.append("base le")
+        return "base le result"
+
+    def __gt__(self, other):
+        events.append("base gt")
+        return "base gt result"
+
+    def __ge__(self, other):
+        events.append("base ge")
+        return "base ge result"
+
+
+class RichSub(RichBase):
+    def __eq__(self, other):
+        events.append("sub eq")
+        return "sub eq result"
+
+    def __lt__(self, other):
+        events.append("sub lt")
+        return "sub lt result"
+
+    def __le__(self, other):
+        events.append("sub le")
+        return "sub le result"
+
+    def __gt__(self, other):
+        events.append("sub gt")
+        return "sub gt result"
+
+    def __ge__(self, other):
+        events.append("sub ge")
+        return "sub ge result"
+
+
+left = RichBase()
+right = RichSub()
+for label, operation in (
+    ("eq", lambda: left == right),
+    ("lt", lambda: left < right),
+    ("le", lambda: left <= right),
+    ("gt", lambda: left > right),
+    ("ge", lambda: left >= right),
+):
+    events.clear()
+    print("subtype priority", label, operation(), events)
+
+
+# If the priority slot declines, the LHS slot runs next and the RHS slot is
+# not invoked a second time.
+class DecliningBase:
+    def __lt__(self, other):
+        events.append("base lt")
+        return "base fallback"
+
+
+class DecliningSub(DecliningBase):
+    def __gt__(self, other):
+        events.append("sub gt")
+        return NotImplemented
+
+
+events.clear()
+print("subtype not implemented", DecliningBase() < DecliningSub(), events)
+
+
+# Priority also applies when the subtype inherits the swapped method without
+# replacing it: CPython's type-level richcmp slot is still tried on the RHS.
+class InheritedBase:
+    def __lt__(self, other):
+        events.append(type(self).__name__ + " lt")
+        return NotImplemented
+
+    def __gt__(self, other):
+        events.append(type(self).__name__ + " gt")
+        return "inherited rhs"
+
+
+class InheritedSub(InheritedBase):
+    pass
+
+
+events.clear()
+print("subtype inherited", InheritedBase() < InheritedSub(), events)

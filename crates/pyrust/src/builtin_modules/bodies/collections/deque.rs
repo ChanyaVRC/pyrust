@@ -199,6 +199,91 @@ fn deque_require_unmutated(
     Ok(())
 }
 
+/// Shared lexicographic body for deque's four ordering comparisons.
+///
+/// CPython probes each common-prefix pair with identity-then-equality, checks
+/// both deque mutation states after every successful equality, and applies the
+/// requested ordering operation to the first unequal pair.  Length decides
+/// only when one deque is a proper prefix of the other.  A non-deque operand
+/// returns `NotImplemented` so normal reflected comparison dispatch and error
+/// reporting remain in charge.
+fn deque_ordering_compare(
+    interp: &mut crate::Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+    op: BinaryOp,
+) -> Result<Value> {
+    let method_name = fn_name.rsplit('.').next().unwrap_or(fn_name);
+    let Some(receiver) = args.first().filter(|arg| arg.name.is_none()) else {
+        return Err(PyError::named(
+            "TypeError",
+            format!("descriptor '{method_name}' of 'collections.deque' object needs an argument"),
+        ));
+    };
+    let inst = match receiver.value.kind() {
+        ValueKind::PyInstance(inst)
+            if is_canonical_collection_class_or_subclass(
+                &inst.borrow().class,
+                CanonicalCollectionKind::Deque,
+            ) =>
+        {
+            Rc::clone(inst)
+        }
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "descriptor '{method_name}' requires a 'collections.deque' object but received a '{}'",
+                    crate::interpreter::value_type_name_str(&receiver.value)
+                ),
+            ));
+        }
+    };
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return Err(PyError::named(
+            "TypeError",
+            format!("wrapper {method_name}() takes no keyword arguments"),
+        ));
+    }
+    if args.len() != 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("expected 1 argument, got {}", args.len().saturating_sub(1)),
+        ));
+    }
+    let other_inst = match args[1].value.kind() {
+        ValueKind::PyInstance(other_inst)
+            if is_canonical_collection_class_or_subclass(
+                &other_inst.borrow().class,
+                CanonicalCollectionKind::Deque,
+            ) =>
+        {
+            other_inst
+        }
+        _ => return Ok(Value::not_implemented()),
+    };
+
+    let (self_items, self_state, self_version) = deque_items_snapshot_guarded(&inst)?;
+    let (other_items, other_state, other_version) = deque_items_snapshot_guarded(other_inst)?;
+    for (left, right) in self_items.iter().zip(other_items.iter()) {
+        if !interp.values_richcompare_eq(left, right)? {
+            let compared = interp.eval_binary(left.clone(), op, right.clone())?;
+            return Ok(Value::bool_(interp.truthy_value(&compared)?));
+        }
+        deque_require_unmutated(&self_state, self_version, "RuntimeError")?;
+        deque_require_unmutated(&other_state, other_version, "RuntimeError")?;
+    }
+
+    let ordered = match op {
+        BinaryOp::Lt => self_items.len() < other_items.len(),
+        BinaryOp::Le => self_items.len() <= other_items.len(),
+        BinaryOp::Gt => self_items.len() > other_items.len(),
+        BinaryOp::Ge => self_items.len() >= other_items.len(),
+        _ => unreachable!("deque ordering helper received a non-ordering operation"),
+    };
+    Ok(Value::bool_(ordered))
+}
+
 /// Read the maxlen from `self.maxlen` — returns `None` for unbounded.
 fn deque_maxlen(inst: &Rc<RefCell<PyInstance>>) -> Option<usize> {
     let borrow = inst.borrow();
