@@ -113,6 +113,18 @@ pub(crate) fn inject_python_members(
         _ => None,
     };
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
+    // `OrderedDict.move_to_end` is a Python method for normal signature and
+    // descriptor handling, backed by this native exact-entry relink helper.
+    // Seed its globals explicitly; the throwaway exec namespace otherwise
+    // contains only `__name__`.
+    if let Some(helper) = module
+        .borrow()
+        .attrs
+        .get("_ordered_dict_move_to_end")
+        .cloned()
+    {
+        ns.dict_insert(PyKey::str_from("_ordered_dict_move_to_end"), helper)?;
+    }
     interp.exec_source(COLLECTIONS_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
@@ -345,6 +357,44 @@ pyrust_module! {
             "NotImplementedError",
             "Counter.fromkeys() is undefined.  Use Counter(iterable) instead.",
         ))
+    }
+
+    /// Relink the exact entry found by OrderedDict's dict lookup.
+    ///
+    /// The Python method wrapper supplies exactly `(self, key, last)`.  Keep
+    /// truth conversion ahead of hashing/lookup, matching CPython's Argument
+    /// Clinic `last: bool` conversion and ensuring user code cannot stale a
+    /// previously computed entry index.
+    fn _ordered_dict_move_to_end(args) -> Result<Value> {
+        if args.len() != 3 || args.iter().any(|arg| arg.name.is_some()) {
+            return Err(PyError::Runtime(
+                "internal: OrderedDict.move_to_end bridge expected 3 positional arguments"
+                    .to_string(),
+            ));
+        }
+
+        let last = _interp.truthy_value(&args[2].value)?;
+        let key_value = args[1].value.clone();
+        let key = _interp.value_to_pykey(&key_value)?;
+        let backing = coerce_subclass_backing(&args[0].value, &[])
+            .filter(Value::is_dict)
+            .ok_or_else(|| {
+                PyError::Runtime(
+                    "internal: OrderedDict.move_to_end receiver has no dict backing"
+                        .to_string(),
+                )
+            })?;
+        let Some((from, _)) = _interp.dict_lookup(&backing, &key)? else {
+            return Err(PyError::key_error(key_value));
+        };
+        let len = backing.dict_len().ok_or_else(|| {
+            PyError::Runtime(
+                "internal: OrderedDict.move_to_end backing is not a dict".to_string(),
+            )
+        })?;
+        let to = if last { len - 1 } else { 0 };
+        backing.dict_move_index(from, to)?;
+        Ok(Value::none())
     }
 
     class Counter {
