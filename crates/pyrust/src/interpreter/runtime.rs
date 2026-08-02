@@ -126,14 +126,14 @@ mod builtin_methods {
         class_mro_items, coerce_bytes_subclass_arg, coerce_bytes_subclass_join_iterable,
         coerce_bytes_subclass_method_args, coerce_bytes_subclass_method_kwargs,
         coerce_str_subclass_arg, coerce_str_subclass_join_iterable,
-        coerce_str_subclass_method_args, dispatch_property_method, eval_builtin_unary,
-        extract_optional_string, format_dunder_owner, format_dunder_spec_arg,
-        hash_value_with_interp, instance_builtin_data, invoke_class_method,
-        is_ordered_dict_class_or_subclass, is_primitive_class, is_stop_iteration_error,
-        lookup_class_attr, make_iterator, ordered_dict_owner, primitive_class_by_name,
-        primitive_class_dispatch, primitive_class_kind, reject_keyword_args_expanded,
-        render_instance_repr, type_class_singleton, value_class, value_from_bigint,
-        value_to_bigint, value_type_name_str,
+        coerce_str_subclass_method_args, coerce_subclass_backing, dispatch_property_method,
+        effective_builtin_receiver, eval_builtin_unary, extract_optional_string,
+        format_dunder_owner, format_dunder_spec_arg, hash_value_with_interp, instance_builtin_data,
+        invoke_class_method, is_ordered_dict_class_or_subclass, is_primitive_class,
+        is_stop_iteration_error, lookup_class_attr, make_iterator, ordered_dict_owner,
+        primitive_class_by_name, primitive_class_dispatch, primitive_class_kind,
+        reject_keyword_args_expanded, render_instance_repr, type_class_singleton, value_class,
+        value_from_bigint, value_to_bigint, value_type_name_str,
     };
     include!("runtime/builtin_methods.rs");
 }

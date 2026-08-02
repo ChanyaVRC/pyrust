@@ -1,5 +1,9 @@
 use pyrust_derive::pyrust_module;
 
+fn richcmp_subclass_backing(value: Value) -> Value {
+    coerce_subclass_backing(&value, &[]).unwrap_or(value)
+}
+
 pyrust_module! {
     /// Issue #1256: `int.__add__(self, value)` — exposes `int.__add__` as a
     /// class-level attribute so that `int.__add__(1, 2)` and
@@ -167,12 +171,15 @@ pyrust_module! {
     }
 
     /// Issue #1256: `int.__lt__(self, value)`
+    /// Issue #2847: explicit int rich-comparison slots accept int-subclass
+    /// backing on either side without redispatching the subclass override.
     #[py_name = "int.__lt__"]
     fn int_lt_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__lt__", "int")),
         };
+        let b = richcmp_subclass_backing(b);
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
@@ -186,6 +193,7 @@ pyrust_module! {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__le__", "int")),
         };
+        let b = richcmp_subclass_backing(b);
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
@@ -199,6 +207,7 @@ pyrust_module! {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__gt__", "int")),
         };
+        let b = richcmp_subclass_backing(b);
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
@@ -212,6 +221,7 @@ pyrust_module! {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__ge__", "int")),
         };
+        let b = richcmp_subclass_backing(b);
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
@@ -225,6 +235,7 @@ pyrust_module! {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__eq__", "int")),
         };
+        let b = richcmp_subclass_backing(b);
         // CPython's int.__eq__ returns NotImplemented for non-integer types;
         // pyrust's eval_binary(Eq) falls through to values_user_eq which
         // returns False for cross-type comparisons without raising TypeError.
@@ -241,6 +252,7 @@ pyrust_module! {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__ne__", "int")),
         };
+        let b = richcmp_subclass_backing(b);
         // CPython's int.__ne__ returns NotImplemented for non-integer types.
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -418,12 +430,15 @@ pyrust_module! {
     }
 
     /// Issue #1256: `str.__lt__(self, value)`
+    /// Issue #2847: explicit str rich-comparison slots accept str-subclass
+    /// backing on either side without redispatching the subclass override.
     #[py_name = "str.__lt__"]
     fn str_lt_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__lt__", "str")),
         };
+        let b = richcmp_subclass_backing(b);
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
@@ -437,6 +452,7 @@ pyrust_module! {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__le__", "str")),
         };
+        let b = richcmp_subclass_backing(b);
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
@@ -450,6 +466,7 @@ pyrust_module! {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__gt__", "str")),
         };
+        let b = richcmp_subclass_backing(b);
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
@@ -463,6 +480,7 @@ pyrust_module! {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__ge__", "str")),
         };
+        let b = richcmp_subclass_backing(b);
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
@@ -476,6 +494,7 @@ pyrust_module! {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__eq__", "str")),
         };
+        let b = richcmp_subclass_backing(b);
         // CPython's str.__eq__ returns NotImplemented for non-str types;
         // eval_binary(Eq) falls through to values_user_eq which returns False.
         if !matches!(b.kind(), ValueKind::Str(_)) {
@@ -491,6 +510,7 @@ pyrust_module! {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__ne__", "str")),
         };
+        let b = richcmp_subclass_backing(b);
         // CPython's str.__ne__ returns NotImplemented for non-str types.
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());

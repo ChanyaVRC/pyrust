@@ -261,7 +261,8 @@ mod object_comparison {
 mod operators {
     use super::{
         BinaryOp, ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyDict, PyError, Rc, Result, Value,
-        ValueKind, coerce_numeric, float_to_bigint, instance_builtin_data, value_type_name_str,
+        ValueKind, coerce_numeric, coerce_subclass_backing, float_to_bigint, instance_builtin_data,
+        value_type_name_str,
     };
     include!("builtins/operators.rs");
 }

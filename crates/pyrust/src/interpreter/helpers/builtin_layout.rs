@@ -279,20 +279,25 @@ pub(crate) fn find_scalar_primitive_base(class: &Rc<RefCell<PyClass>>) -> Option
 /// `PyInstance` that subclasses `dict`, `list`, or `set`.
 pub(crate) const BUILTIN_DATA_ATTR: &str = "__builtin_data__";
 
-/// Extract the backing primitive value from a `PyInstance` that was
-/// constructed by `call_class_expanded` for a subclass of `dict`,
-/// `list`, or `set`.  Returns `None` for any other instance.
+/// Extract the backing primitive value stored on a `PyInstance`.
+///
+/// This is the raw, hot-path accessor: the storage attribute is writable by
+/// Python code, so finding it alone does not prove that the instance really
+/// belongs to the backing primitive's hierarchy.  Consumers reached from a
+/// user-controlled protocol boundary must use [`effective_builtin_receiver`],
+/// which validates that ancestry before exposing the backing.
 pub(crate) fn instance_builtin_data(inst: &Rc<RefCell<PyInstance>>) -> Option<Value> {
     inst.borrow().attrs.get(BUILTIN_DATA_ATTR).cloned()
 }
 
-/// The dunder-free core of [`effective_builtin_receiver`]: the backing builtin
-/// value of a builtin-subclass `PyInstance`, or `None` for any other value.
+/// The raw storage core used by trusted hot paths: the value found in a
+/// `PyInstance`'s builtin-backing field, or `None` for any other value shape.
 ///
-/// This is the version hot consumers (binary-op operand coercion, iteration,
-/// dict-merge / set-op extraction) want — they perform no override check, so
-/// they must not carry the override-gate tail (`lookup_class_attr` loop,
-/// `Rc::clone`) of [`effective_builtin_receiver`] into their inlined body.
+/// This is the compatibility version used by existing hot consumers
+/// (binary-op operand coercion, iteration, dict-merge / set-op extraction).
+/// It deliberately performs neither an ancestry nor an override check; new
+/// user-controlled protocol boundaries must call
+/// [`effective_builtin_receiver`] instead.
 /// Keeping it a separate `#[inline]` fn lets the hot path collapse to the same
 /// two tag/attr fetches the open-coded sites used before #2386, so coercing a
 /// `class MyInt(int)` operand in a tight binary-op loop stays free of dead
@@ -302,6 +307,22 @@ pub(crate) fn instance_builtin_data(inst: &Rc<RefCell<PyInstance>>) -> Option<Va
 pub(crate) fn builtin_data_backing(v: &Value) -> Option<Value> {
     let inst_rc = v.as_py_instance_rc()?;
     instance_builtin_data(inst_rc)
+}
+
+/// Return a stored builtin backing only when the instance is genuinely in the
+/// canonical hierarchy represented by that backing value.
+///
+/// `__builtin_data__` is an implementation detail represented as a writable
+/// instance attribute.  A plain user class can therefore forge the name; the
+/// class/backing relationship is the provenance check that prevents such an
+/// object from becoming a primitive operand (issue #2847).
+#[inline]
+fn ancestry_validated_builtin_data_backing(v: &Value) -> Option<Value> {
+    let inst_rc = v.as_py_instance_rc()?;
+    let class = Rc::clone(&inst_rc.borrow().class);
+    let backing = instance_builtin_data(inst_rc)?;
+    let backing_class = primitive_class_for_value(&backing)?;
+    class_is_subclass_of(&class, &backing_class).then_some(backing)
 }
 
 /// The single representation-substitutability boundary (issue #2386).
@@ -344,7 +365,7 @@ pub(crate) fn builtin_data_backing(v: &Value) -> Option<Value> {
 /// primitive fast paths) so plain `int`/`str`/`list` operands pay nothing.
 #[inline]
 pub(crate) fn effective_builtin_receiver(v: &Value, override_dunders: &[&str]) -> Option<Value> {
-    let backing = builtin_data_backing(v)?;
+    let backing = ancestry_validated_builtin_data_backing(v)?;
     if override_dunders.is_empty() {
         return Some(backing);
     }

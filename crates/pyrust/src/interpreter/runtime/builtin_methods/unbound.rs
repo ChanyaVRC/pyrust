@@ -149,9 +149,17 @@ impl Interpreter {
             }
             // float instance methods via descriptor call: `float.is_integer(x)`.
             // The float call fn takes an `f64` receiver directly, so this arm
-            // is separate from the generic str/list/… arm below.
+            // is separate from the generic str/list/… arm below.  Rich-
+            // comparison slots are excluded: they need the generic protocol
+            // dispatcher so float-subclass backing is accepted (#2847).
             ValueKind::BuiltinFunction(name)
-                if name.split_once('.').is_some_and(|(t, _)| t == "float") =>
+                if name.split_once('.').is_some_and(|(t, method)| {
+                    t == "float"
+                        && !matches!(
+                            method,
+                            "__eq__" | "__ne__" | "__lt__" | "__le__" | "__gt__" | "__ge__"
+                        )
+                }) =>
             {
                 let (_, method) = name.split_once('.').unwrap();
                 // Issue #2760: `__getnewargs__` takes no keyword arguments; the
@@ -456,6 +464,7 @@ impl Interpreter {
                         t,
                         "int"
                             | "bool"
+                            | "float"
                             | "bytes"
                             | "bytearray"
                             | "str"
@@ -497,16 +506,28 @@ impl Interpreter {
                 let is_dunder = method.starts_with("__")
                     && method.ends_with("__")
                     && !is_method_descriptor_dunder;
-                let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-                    if is_dunder {
-                        pyrust_core::descriptor_needs_arg!(method, type_name)
-                    } else {
-                        pyrust_core::descriptor_needs_arg!(method, type_name, method)
-                    }
-                })?;
+                // Builtin descriptor receivers are positional-only.  Locate
+                // the first positional value rather than treating a leading
+                // keyword as `self`; calls with keywords but no receiver must
+                // keep the descriptor-needs-argument error (#2847).
+                let (self_index, self_arg) = args
+                    .iter()
+                    .enumerate()
+                    .find(|(_, arg)| arg.name.is_none())
+                    .ok_or_else(|| {
+                        if is_dunder {
+                            pyrust_core::descriptor_needs_arg!(method, type_name)
+                        } else {
+                            pyrust_core::descriptor_needs_arg!(method, type_name, method)
+                        }
+                    })?;
+                let self_val = self_arg.value.clone();
                 let mut pos: Vec<Value> = Vec::with_capacity(args.len().saturating_sub(1));
                 let mut kw: PyDict = PyDict::default();
-                for a in &args[1..] {
+                for (index, a) in args.iter().enumerate() {
+                    if index == self_index {
+                        continue;
+                    }
                     match &a.name {
                         Some(n) => {
                             kw.insert(PyKey::str_from(n.as_str()), a.value.clone());
@@ -548,7 +569,7 @@ impl Interpreter {
                     if let Some(inst) = maybe_inst {
                         receiver_ordered =
                             is_ordered_dict_class_or_subclass(&Rc::clone(&inst.borrow().class));
-                        builtin_data_backing(&self_val).unwrap_or(self_val)
+                        coerce_subclass_backing(&self_val, &[]).unwrap_or(self_val)
                     } else {
                         self_val
                     }
@@ -565,6 +586,7 @@ impl Interpreter {
                     // Issue #2424: `bool.__and__(True, False)` — the bool-owned
                     // slot wrappers only accept a `bool` receiver in CPython.
                     ("bool", ValueKind::Bool(_)) => true,
+                    ("float", ValueKind::Float(_)) => true,
                     ("bytes", ValueKind::Bytes(_)) => true,
                     // Issue #2770: `bytearray` is a `BuiltinObject`, not a
                     // dedicated `ValueKind`; gate on its ops `type_name` so the
