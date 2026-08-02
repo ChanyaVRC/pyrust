@@ -139,10 +139,8 @@ pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering>
     compare_values_with_op(a, b, "<")
 }
 
-/// Like `compare_values` but uses `op_name` in the `TypeError` message when
-/// the operand types are incompatible.  CPython's `do_richcompare` emits the
-/// operator token that was actually requested (`<`, `>`, `<=`, `>=`), so
-/// `eval_binary` calls this variant directly for `Gt`, `Le`, and `Ge`.
+type SequencePairStack = smallvec::SmallVec<[(i64, i64); 8]>;
+
 /// One lexicographic-compare step for a `(List, List)` / `(Tuple, Tuple)`
 /// element pair (issue #2216). Mirrors CPython's `list_richcompare`: scan the
 /// `==`-equal prefix and only order the first *differing* element.
@@ -155,11 +153,14 @@ pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering>
 /// `TypeError`). Keeping `==` off the hot path avoids a per-field double
 /// dispatch.
 macro_rules! seq_prefix_step {
-    ($a:expr, $b:expr, $op_name:expr) => {
-        match compare_values_with_op($a, $b, $op_name) {
+    ($a:expr, $b:expr, $op_name:expr, $active_pairs:expr) => {
+        match compare_values_with_op_inner($a, $b, $op_name, $active_pairs) {
             Ok(std::cmp::Ordering::Equal) => continue,
             Ok(ord) => return Ok(ord),
             Err(e) => {
+                if matches!(&e, PyError::Named(class, _) if class.as_ref() == "RecursionError") {
+                    return Err(e);
+                }
                 if $a == $b {
                     continue;
                 }
@@ -169,10 +170,23 @@ macro_rules! seq_prefix_step {
     };
 }
 
+/// Like `compare_values` but uses `op_name` in the `TypeError` message when
+/// the operand types are incompatible.  CPython's `do_richcompare` emits the
+/// operator token that was actually requested (`<`, `>`, `<=`, `>=`), so
+/// `eval_binary` calls this variant directly for `Gt`, `Le`, and `Ge`.
 pub(crate) fn compare_values_with_op(
     a: &Value,
     b: &Value,
     op_name: &str,
+) -> Result<std::cmp::Ordering> {
+    compare_values_with_op_inner(a, b, op_name, &mut SequencePairStack::new())
+}
+
+fn compare_values_with_op_inner(
+    a: &Value,
+    b: &Value,
+    op_name: &str,
+    active_pairs: &mut SequencePairStack,
 ) -> Result<std::cmp::Ordering> {
     use crate::value::PyBigInt;
     match (a.kind(), b.kind()) {
@@ -228,16 +242,54 @@ pub(crate) fn compare_values_with_op(
             Ok(a_rc.borrow().as_slice().cmp(b_rc.borrow().as_slice()))
         }
         (ValueKind::List(x), ValueKind::List(y)) => {
-            for (a, b) in x.iter().zip(y.iter()) {
-                seq_prefix_step!(a, b, op_name);
+            if a.is_identical_to(b) {
+                return Ok(std::cmp::Ordering::Equal);
             }
-            Ok(x.len().cmp(&y.len()))
+            let pair = (
+                a.value_id().expect("list has stable identity"),
+                b.value_id().expect("list has stable identity"),
+            );
+            if active_pairs.contains(&pair) {
+                return Err(pyrust_core::py_err!(
+                    "RecursionError",
+                    "maximum recursion depth exceeded in comparison"
+                ));
+            }
+            active_pairs.push(pair);
+            let result = (|| {
+                for (a, b) in x.iter().zip(y.iter()) {
+                    seq_prefix_step!(a, b, op_name, active_pairs);
+                }
+                Ok(x.len().cmp(&y.len()))
+            })();
+            let popped = active_pairs.pop();
+            debug_assert_eq!(popped, Some(pair));
+            result
         }
         (ValueKind::Tuple(x), ValueKind::Tuple(y)) => {
-            for (a, b) in x.iter().zip(y.iter()) {
-                seq_prefix_step!(a, b, op_name);
+            if a.is_identical_to(b) {
+                return Ok(std::cmp::Ordering::Equal);
             }
-            Ok(x.len().cmp(&y.len()))
+            let pair = (
+                a.value_id().expect("tuple has stable identity"),
+                b.value_id().expect("tuple has stable identity"),
+            );
+            if active_pairs.contains(&pair) {
+                return Err(pyrust_core::py_err!(
+                    "RecursionError",
+                    "maximum recursion depth exceeded in comparison"
+                ));
+            }
+            active_pairs.push(pair);
+            let result = (|| {
+                for (a, b) in x.iter().zip(y.iter()) {
+                    seq_prefix_step!(a, b, op_name, active_pairs);
+                }
+                Ok(x.len().cmp(&y.len()))
+            })();
+            let popped = active_pairs.pop();
+            debug_assert_eq!(popped, Some(pair));
+            result
         }
         // Two slice objects compare as their `(start, stop, step)` tuples
         // (issue #2127), matching CPython's `slice_richcompare`.  Mixed
@@ -260,7 +312,7 @@ pub(crate) fn compare_values_with_op(
                 if x == y {
                     continue;
                 }
-                return compare_values_with_op(x, y, op_name);
+                return compare_values_with_op_inner(x, y, op_name, active_pairs);
             }
             Ok(std::cmp::Ordering::Equal)
         }

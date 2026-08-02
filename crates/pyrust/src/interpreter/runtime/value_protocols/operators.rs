@@ -273,7 +273,11 @@ impl Interpreter {
             // that failed sequence case through the interpreter-aware
             // lexicographic path.  Successful primitive comparisons above
             // retain their existing one-pass fast path.
-            if let Some(sequence_result) = self.richcmp_sequence_order(a, b, false) {
+            if matches!(
+                &primitive_result,
+                Err(PyError::Named(class, _)) if class.as_ref() == "TypeError"
+            ) && let Some(sequence_result) = self.richcmp_sequence_order(a, b, false)
+            {
                 return sequence_result;
             }
             return primitive_result;
@@ -344,7 +348,11 @@ impl Interpreter {
             if primitive_result.is_ok() {
                 return primitive_result;
             }
-            if let Some(sequence_result) = self.richcmp_sequence_order(a, b, true) {
+            if matches!(
+                &primitive_result,
+                Err(PyError::Named(class, _)) if class.as_ref() == "TypeError"
+            ) && let Some(sequence_result) = self.richcmp_sequence_order(a, b, true)
+            {
                 return sequence_result;
             }
             return primitive_result;

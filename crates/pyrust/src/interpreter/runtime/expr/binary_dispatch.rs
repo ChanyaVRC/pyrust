@@ -211,7 +211,7 @@ impl Interpreter {
                 if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Lt) {
                     return r;
                 }
-                self.compare(left, right, "<", |o| o.is_lt())
+                self.compare(left, right, BinaryOp::Lt, "<", |o| o.is_lt())
             }
             BinaryOp::Le => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__le__", "__ge__") {
@@ -220,7 +220,7 @@ impl Interpreter {
                 if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Le) {
                     return r;
                 }
-                self.compare(left, right, "<=", |o| o.is_le())
+                self.compare(left, right, BinaryOp::Le, "<=", |o| o.is_le())
             }
             BinaryOp::Gt => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__gt__", "__lt__") {
@@ -229,7 +229,7 @@ impl Interpreter {
                 if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Gt) {
                     return r;
                 }
-                self.compare(left, right, ">", |o| o.is_gt())
+                self.compare(left, right, BinaryOp::Gt, ">", |o| o.is_gt())
             }
             BinaryOp::Ge => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__ge__", "__le__") {
@@ -238,7 +238,7 @@ impl Interpreter {
                 if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Ge) {
                     return r;
                 }
-                self.compare(left, right, ">=", |o| o.is_ge())
+                self.compare(left, right, BinaryOp::Ge, ">=", |o| o.is_ge())
             }
             BinaryOp::Pow => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__pow__", "__rpow__") {
