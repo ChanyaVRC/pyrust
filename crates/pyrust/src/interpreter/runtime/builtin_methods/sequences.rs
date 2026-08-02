@@ -28,6 +28,7 @@ impl Interpreter {
         matches!(
             target.kind(),
             ValueKind::PyInstance(_)
+                | ValueKind::Generator(_)
                 | ValueKind::List(_)
                 | ValueKind::Tuple(_)
                 | ValueKind::Dict(_)
@@ -37,6 +38,7 @@ impl Interpreter {
             matches!(
                 e.kind(),
                 ValueKind::PyInstance(_)
+                    | ValueKind::Generator(_)
                     | ValueKind::List(_)
                     | ValueKind::Tuple(_)
                     | ValueKind::Dict(_)
@@ -143,10 +145,7 @@ impl Interpreter {
                 let Some(item) = receiver.list_with(|items| items.get(i).cloned()).flatten() else {
                     break;
                 };
-                // Identity short-circuit before `__eq__` (RichCompareBool) keeps a
-                // NaN-bearing complex findable even when a container/instance
-                // element requires this dispatch branch (#2535).
-                if item.is_identical_nan(target) || self.values_user_eq(&item, target)? {
+                if self.values_richcompare_eq(&item, target)? {
                     return Ok(Value::int(i as i64));
                 }
             }
@@ -161,7 +160,7 @@ impl Interpreter {
                 let equal = if !target_dispatches && item.cannot_user_eq() {
                     item == target || item.is_identical_nan(target)
                 } else {
-                    item.is_identical_nan(target) || self.values_user_eq(item, target)?
+                    self.values_richcompare_eq(item, target)?
                 };
                 if equal {
                     return Ok(Value::int((start + i) as i64));
@@ -193,10 +192,7 @@ impl Interpreter {
         if Self::seq_search_needs_dispatch(target, &items) {
             let mut n: i64 = 0;
             for item in &items {
-                // Identity short-circuit before `__eq__` (RichCompareBool) so a
-                // NaN-bearing complex still counts itself when a container/instance
-                // element forced this dispatch branch (#2535).
-                if item.is_identical_nan(target) || self.values_user_eq(item, target)? {
+                if self.values_richcompare_eq(item, target)? {
                     n += 1;
                 }
             }
@@ -226,9 +222,9 @@ impl Interpreter {
     ///   (`value_search_dispatches` is false for both), compare with
     ///   `Value::eq` — the same primitive equality the interpreter-free fast
     ///   path uses.
-    /// - Otherwise dispatch through `values_user_eq`, which checks identity
-    ///   before `__eq__` (matching `PyObject_RichCompareBool(item, x, Py_EQ)`)
-    ///   and may re-enter user code.
+    /// - Otherwise dispatch through `values_richcompare_eq`, which checks
+    ///   identity before `__eq__` (matching
+    ///   `PyObject_RichCompareBool(item, x, Py_EQ)`) and may re-enter user code.
     ///
     /// The element is read fresh from the receiver each iteration and the length
     /// is rechecked before removal, so a user `__eq__` that mutates the list
@@ -306,9 +302,7 @@ impl Interpreter {
                 Some(Some(item)) => item,
                 _ => break,
             };
-            // Identity short-circuit before `__eq__` (RichCompareBool) so a
-            // NaN-bearing complex removes itself even though `==` is False (#2535).
-            if item.is_identical_nan(target) || self.values_user_eq(&item, target)? {
+            if self.values_richcompare_eq(&item, target)? {
                 if receiver.list_with(|items| i < items.len()).unwrap_or(false) {
                     receiver.list_pop_at(i)?;
                 }
@@ -326,6 +320,7 @@ impl Interpreter {
         matches!(
             v.kind(),
             ValueKind::PyInstance(_)
+                | ValueKind::Generator(_)
                 | ValueKind::List(_)
                 | ValueKind::Tuple(_)
                 | ValueKind::Dict(_)
