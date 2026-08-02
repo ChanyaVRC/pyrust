@@ -1926,6 +1926,19 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         let class_name_str = class_name_ident.to_string();
         let class_name_lit = LitStr::new(&class_name_str, class_name_ident.span());
         let class_attrs = &class.attrs;
+        let defines_eq = class
+            .methods
+            .iter()
+            .any(|method| py_short_and_rust_short(method).0 == "__eq__");
+        let defines_hash = class
+            .methods
+            .iter()
+            .any(|method| py_short_and_rust_short(method).0 == "__hash__");
+        let implicit_hash_none = (defines_eq && !defines_hash).then(|| {
+            quote! {
+                attrs.insert("__hash__".to_string(), crate::value::Value::none());
+            }
+        });
 
         let mut method_attr_inserts: Vec<proc_macro2::TokenStream> = Vec::new();
         // `iter_self` classes get a synthesized return-self `__iter__`,
@@ -1980,6 +1993,9 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
                 use indexmap::IndexMap;
                 let mut attrs: IndexMap<String, crate::value::Value> = IndexMap::new();
                 #(#method_attr_inserts)*
+                // Match class-statement finalization: defining equality without
+                // an explicit hash makes every macro-generated class unhashable.
+                #implicit_hash_none
                 crate::value::Value::py_class(Rc::new(RefCell::new(
                     crate::value::PyClass::new(
                         #class_name_lit,
