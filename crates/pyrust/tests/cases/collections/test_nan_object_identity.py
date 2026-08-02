@@ -9,9 +9,9 @@
 #
 # The same-object half of the rule is pinned by builtins/test_nan_identity.py.
 #
-# `hash(nan)` is deliberately NOT asserted: CPython hashes NaN by object id
-# (3.10+) so its values are address-derived, while pyrust keeps the stable
-# sys.hash_info.nan value.  Only the observable container behaviour is pinned.
+# Raw hash numbers stay deliberately unasserted because CPython derives them
+# from process-local object addresses.  The portable per-object hash invariants
+# are pinned by runtime/test_hash_float.py.
 
 a = float("nan")
 b = float("nan")

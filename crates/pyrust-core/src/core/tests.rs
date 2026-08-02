@@ -16,8 +16,8 @@ mod tests {
         STR_MAX_BYTE_LEN, STR_OWNED_HEADER_SIZE, STR_RC_MAX, STR_RC_ONE, STR_SLICE_LAYOUT_SIZE,
         TAG_LIST_BITS, UserFunction, UserFunctionKind, Value, ValueKind, alloc, builtin_type_name,
         drain_free_list, encode_nanbox_heap_pointer, error_type_name, float_bits_as_exact_i64,
-        instance_backing_for_repr, next_fn_id, opaque_layout, py_hash_pykey, range_len,
-        str_is_inline_bits, take_thread_exit_drains, try_nanbox_heap_pointer_payload,
+        instance_backing_for_repr, next_fn_id, opaque_layout, py_hash_nan, py_hash_pykey,
+        range_len, str_is_inline_bits, take_thread_exit_drains, try_nanbox_heap_pointer_payload,
         try_nanbox_owned_string_layout, uncached_utf8_byte_offset, utf8_codepoint_count,
     };
 
@@ -1463,13 +1463,35 @@ mod tests {
 
     #[test]
     fn pykey_distinct_nan_floats_are_distinct_keys() {
-        // #2911: two independently boxed NaNs occupy two dict slots, while a
-        // NaN still finds itself.  `0.0` / `-0.0` must keep collapsing.
+        // #2911/#2954: two independently boxed NaNs occupy two dict slots and
+        // expose distinct non-zero Python hashes, while a NaN still finds and
+        // hashes like itself.  `0.0` / `-0.0` must keep collapsing.
         let a = Value::float(f64::NAN).to_key().expect("NaN is hashable");
         let b = Value::float(f64::NAN).to_key().expect("NaN is hashable");
 
         assert_eq!(a, a.clone(), "a NaN key must find itself");
         assert_ne!(a, b, "two distinct NaN objects must be distinct keys");
+        let a_hash = py_hash_pykey(&a);
+        let b_hash = py_hash_pykey(&b);
+        assert_ne!(a_hash, 0, "a NaN hash must be non-zero");
+        assert_ne!(b_hash, 0, "a NaN hash must be non-zero");
+        assert_ne!(a_hash, b_hash, "distinct NaNs must hash apart");
+        assert_eq!(a_hash, py_hash_pykey(&a.clone()), "alias hash is stable");
+
+        let (PyKey::Float(a_bits), PyKey::Float(b_bits)) = (&a, &b) else {
+            unreachable!("boxed NaNs must produce float keys")
+        };
+        assert_eq!(a_hash, py_hash_nan(f64::from_bits(*a_bits)));
+        assert_eq!(b_hash, py_hash_nan(f64::from_bits(*b_bits)));
+        assert_ne!(
+            py_hash_pykey(&PyKey::Complex(f64::from_bits(*a_bits), 1.0)),
+            py_hash_pykey(&PyKey::Complex(f64::from_bits(*b_bits), 1.0)),
+            "distinct NaN-bearing complex values must hash apart"
+        );
+
+        // The helper applies Python's reserved hash-sentinel remap even for a
+        // hostile NaN bit pattern that rotates to -1.
+        assert_eq!(py_hash_nan(f64::from_bits(u64::MAX)), -2);
 
         let mut set = PySet::default();
         set.insert(a.clone());
