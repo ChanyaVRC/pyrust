@@ -327,16 +327,17 @@ impl Interpreter {
         Err(pyrust_core::type_err!("unhashable type: '{type_name}'"))
     }
 
-    /// `__eq__`-aware comparison of two `PyKey`s that may nest user objects.
-    /// Converts both keys back to their Python `Value` and dispatches through
-    /// [`Self::values_user_eq`], which already recurses element-wise into
-    /// tuples / frozensets and fires user `__eq__` for `PyInstance` elements.
-    /// Used to confirm a same-hash-bucket candidate matches a tuple/frozenset
-    /// lookup key whose nested object compares by `__eq__`, not identity
-    /// (issue #2059).
-    fn nested_object_keys_eq(&mut self, stored: &PyKey, probe: &PyKey) -> Result<bool> {
+    /// Compare a stored dict key with a same-Python-hash probe using Python
+    /// equality.  Keeping `stored` on the left matches dict lookup's rich
+    /// comparison direction and lets `values_user_eq` handle NotImplemented
+    /// fallback, nested objects, and user exceptions.
+    fn pykeys_user_eq(&mut self, stored: &PyKey, probe: &PyKey) -> Result<bool> {
         let stored_val = crate::interpreter::key_to_value(stored.clone());
         let probe_val = crate::interpreter::key_to_value(probe.clone());
         self.values_user_eq(&stored_val, &probe_val)
+    }
+
+    fn nested_object_keys_eq(&mut self, stored: &PyKey, probe: &PyKey) -> Result<bool> {
+        self.pykeys_user_eq(stored, probe)
     }
 }

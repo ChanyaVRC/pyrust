@@ -339,7 +339,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | BuildTuple(r, _, _)
         | BuildString(r, _, _)
         | BuildSlice(r, _)
-        | BuildDict(r, _, _)
+        | BuildDict(r, _, _, _)
         | BinOp(r, _, _, _)
         | BinOpInPlace(r, _, _, _)
         | BinOpConst(r, _, _, _, _)

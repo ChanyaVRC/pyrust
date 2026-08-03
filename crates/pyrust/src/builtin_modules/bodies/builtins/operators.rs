@@ -638,8 +638,42 @@ pyrust_module! {
         let default_val = user_args.get(1).map_or_else(Value::none, |a| a.value.clone());
 
         let keys = _interp.collect_iterable(&iterable)?;
-        let mut map: PyDict =
-            PyDict::with_capacity_and_hasher(keys.len(), Default::default());
+        let is_subclass = bound_class.as_ref().is_some_and(|class| {
+            class.borrow().canonical_tag != Some(pyrust_core::CanonicalClassTag::Dict)
+        });
+        let exact_dict_kind = match iterable.kind() {
+            ValueKind::Dict(dict) => Some(dict.python_key_table_is_unicode()),
+            _ => None,
+        };
+        let exact_set = matches!(iterable.kind(), ValueKind::Set(_))
+            || pyrust_builtins::frozenset::as_items(&iterable).is_some();
+        let mut map = if is_subclass {
+            // CPython only uses its presized dict/set shortcuts when the
+            // newly constructed destination is an exact dict. A subclass
+            // consumes the iterable through ordinary incremental SetItem.
+            PyDict::default()
+        } else if let Some(unicode_only) = exact_dict_kind {
+            // Exact-dict input gets a fresh compact table presized from its
+            // live length while retaining the source Unicode/General kind.
+            PyDict::with_fromkeys_fast_path(
+                keys.len(),
+                Default::default(),
+                unicode_only,
+            )
+        } else if exact_set {
+            // CPython's exact set/frozenset shortcut always allocates a
+            // presized General dict table.
+            PyDict::with_fromkeys_fast_path(
+                keys.len(),
+                Default::default(),
+                false,
+            )
+        } else {
+            // Generic iterables go through incremental PyDict_SetItem from the
+            // shared empty table; duplicate-heavy inputs therefore size from
+            // live keys rather than the iterable's materialized length.
+            PyDict::default()
+        };
         for key in keys {
             let py_key = _interp.value_to_pykey(&key)?;
             // #1914: `dict_insert` dedups `PyKey::Object` keys via user `__eq__`

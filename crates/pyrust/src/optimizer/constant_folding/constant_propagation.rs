@@ -245,7 +245,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | BuildTuple(r, _, _)
         | BuildString(r, _, _)
         | BuildSlice(r, _)
-        | BuildDict(r, _, _)
+        | BuildDict(r, _, _, _)
         | MakeFunction(r, _, _, _, _, _)
         | ImportModule(r, _)
         | LoadExc(r)

@@ -1,3 +1,5 @@
+use pyrust_core::{PyKey, ValueKind};
+
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -13,6 +15,25 @@ pyrust_module! {
         match args.len() {
             0 => Ok(Value::set(PySet::default())),
             1 => {
+                if let ValueKind::Set(source) = args[0].value.kind() {
+                    return Ok(Value::set(PySet::cpython_merged_copy(&source)));
+                }
+                if let Some(source) = pyrust_builtins::frozenset::as_items(&args[0].value) {
+                    return Ok(Value::set(PySet::cpython_merged_copy(&source)));
+                }
+                let dict_keys = match args[0].value.kind() {
+                    ValueKind::Dict(source) => {
+                        Some(source.keys().cloned().collect::<Vec<PyKey>>())
+                    }
+                    _ => None,
+                };
+                if let Some(keys) = dict_keys {
+                    let mut set = PySet::with_cpython_dict_capacity(keys.len());
+                    for key in keys {
+                        _interp.set_insert(&mut set, key)?;
+                    }
+                    return Ok(Value::set(set));
+                }
                 let items = _interp.collect_iterable(&args[0].value)?;
                 let mut set: PySet = PySet::default();
                 for item in items {
@@ -43,6 +64,24 @@ pyrust_module! {
                 // frozenset(frozenset_instance) returns the same object (per CPython).
                 if pyrust_builtins::frozenset::as_items(&args[0].value).is_some() {
                     return Ok(args[0].value.clone());
+                }
+                if let ValueKind::Set(source) = args[0].value.kind() {
+                    return Ok(pyrust_builtins::frozenset::frozenset(
+                        PySet::cpython_merged_copy(&source),
+                    ));
+                }
+                let dict_keys = match args[0].value.kind() {
+                    ValueKind::Dict(source) => {
+                        Some(source.keys().cloned().collect::<Vec<PyKey>>())
+                    }
+                    _ => None,
+                };
+                if let Some(keys) = dict_keys {
+                    let mut set = PySet::with_cpython_dict_capacity(keys.len());
+                    for key in keys {
+                        _interp.set_insert(&mut set, key)?;
+                    }
+                    return Ok(pyrust_builtins::frozenset::frozenset(set));
                 }
                 let items = _interp.collect_iterable(&args[0].value)?;
                 let mut set: PySet = PySet::default();

@@ -293,7 +293,7 @@ pub fn call_resolved(method: Method, receiver: &Value, args: Vec<Value>) -> Resu
         // ── Non-mutating ───────────────────────────────────────────
         // Scoped read borrow + clone is enough; no `&mut` ever taken.
         Method::Copy => receiver
-            .set_with(|items| Value::set(items.clone()))
+            .set_with(|items| Value::set(PySet::cpython_merged_copy(items)))
             .ok_or_else(not_set),
         Method::Union => union(receiver, args),
         Method::Intersection => intersection(receiver, args),
@@ -314,19 +314,78 @@ pub fn call_resolved(method: Method, receiver: &Value, args: Vec<Value>) -> Resu
     }
 }
 
-/// Materialise each arg into an owned `PySet`.  Performed
-/// before any `borrow_mut` on the receiver so a self-aliased call
-/// (`s.update(s)`) reads its own pre-update snapshot, exactly matching
-/// CPython's iterate-then-mutate semantics.
+/// Materialise each arg into an owned `PySet`. Performed before any
+/// `borrow_mut` on the receiver so a self-aliased call (`s.update(s)`) reads
+/// its own pre-update snapshot, exactly matching CPython's iterate-then-mutate
+/// semantics.
 fn collect_iterables(receiver: &Value, args: &[Value]) -> Result<Vec<PySet>> {
     args.iter()
         .map(|arg| snapshot_iterable(receiver, arg))
         .collect()
 }
 
+/// Owned operand shape for `set.union`'s primitive-key fast path.
+///
+/// CPython gives exact sets and exact dicts dedicated merge paths whose
+/// pre-sizing and traversal order differ from a general iterable. Keeping the
+/// origin here avoids erasing that distinction in a temporary `PySet`.
+enum SetOperand {
+    ExactSet(PySet),
+    ExactDict(Vec<PyKey>),
+    Iterable(Vec<PyKey>),
+}
+
+fn collect_set_operand(arg: &Value) -> Result<SetOperand> {
+    if let ValueKind::Set(source) = arg.kind() {
+        return Ok(SetOperand::ExactSet(source.clone()));
+    }
+    if let Some(source) = crate::frozenset::as_items(arg) {
+        return Ok(SetOperand::ExactSet((*source).clone()));
+    }
+
+    let keys = match arg.kind() {
+        ValueKind::Dict(source) => {
+            return Ok(SetOperand::ExactDict(source.keys().cloned().collect()));
+        }
+        ValueKind::List(items) => items.iter().map(to_key).collect::<Result<Vec<_>>>()?,
+        ValueKind::Tuple(items) => items.iter().map(to_key).collect::<Result<Vec<_>>>()?,
+        ValueKind::Str(text) => text
+            .chars()
+            .map(|ch| PyKey::str_from(ch.encode_utf8(&mut [0u8; 4])))
+            .collect(),
+        ValueKind::Range { start, stop, step } => {
+            let mut keys = Vec::new();
+            if step != 0 {
+                let mut current = start;
+                loop {
+                    if step > 0 && current >= stop || step < 0 && current <= stop {
+                        break;
+                    }
+                    keys.push(PyKey::Int(current));
+                    let Some(next) = current.checked_add(step) else {
+                        break;
+                    };
+                    current = next;
+                }
+            }
+            keys
+        }
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'{}' object is not iterable",
+                    pyrust_core::builtin_type_name(arg)
+                ),
+            ));
+        }
+    };
+    Ok(SetOperand::Iterable(keys))
+}
+
 /// True when `v` is a concrete `set` or `frozenset`, i.e. an operand CPython's
-/// `set_intersection` may scan *instead of* the receiver.  Any other iterable
-/// (list, tuple, generator, …) is always the scanned side.
+/// `set_intersection` may scan *instead of* the receiver. Any other iterable
+/// is always the scanned side.
 fn is_concrete_set(v: &Value) -> bool {
     matches!(v.kind(), ValueKind::Set(_)) || crate::frozenset::as_items(v).is_some()
 }
@@ -385,7 +444,7 @@ pub fn intersect_in_place(items: &mut PySet, other: PySet, other_is_set: bool) {
 /// CPython's `set_intersection` scans the smaller of the two tables and inserts
 /// the *scanned* side's elements, so between two `__eq__`-equal but
 /// distinguishable elements (`1 == 1.0 == True`) the survivor comes from the
-/// smaller operand — the argument wins ties.  A non-set iterable argument is
+/// smaller operand — the argument wins ties. A non-set iterable argument is
 /// always the scanned side, whatever its length.
 ///
 /// Both directions retain in place over a table the caller already owns, so
@@ -477,19 +536,19 @@ fn to_key(v: &Value) -> Result<PyKey> {
 
 /// Collect an iterable `Value` into a set of `PyKey`s.
 fn collect_iterable(v: &Value) -> Result<PySet> {
-    let mut out = PySet::default();
     match v.kind() {
-        ValueKind::Set(s) => {
-            for k in s.iter() {
-                out.insert(k.clone());
-            }
-        }
+        ValueKind::Set(s) => return Ok(PySet::cpython_merged_copy(&s)),
         _ if crate::frozenset::as_items(v).is_some() => {
             let rc = crate::frozenset::as_items(v).unwrap();
-            for k in rc.iter() {
-                out.insert(k.clone());
-            }
+            return Ok(PySet::cpython_merged_copy(&rc));
         }
+        _ => {}
+    }
+    let mut out = match v.kind() {
+        ValueKind::Dict(d) => PySet::with_cpython_dict_capacity(d.len()),
+        _ => PySet::default(),
+    };
+    match v.kind() {
         ValueKind::List(items) => {
             for item in items.iter() {
                 out.insert(to_key(item)?);
@@ -548,7 +607,7 @@ fn collect_iterable(v: &Value) -> Result<PySet> {
 /// Remove all keys in `snapshot` while preserving survivor order.
 ///
 /// `retain` is linear in the receiver and avoids `IndexSet::shift_remove`'s
-/// repeated element shifts for multi-key differences.  Keep the single-key
+/// repeated element shifts for multi-key differences. Keep the single-key
 /// lookup path, though: a missing key remains O(1) instead of forcing a full
 /// receiver scan.
 #[inline]
@@ -610,13 +669,37 @@ fn pop(items: &mut PySet) -> Result<Value> {
 // self-aliased calls (`s.union(s)`) read a stable snapshot.
 
 fn union(receiver: &Value, args: &[Value]) -> Result<Value> {
-    let snapshots = collect_iterables(receiver, args)?;
+    let operands = args
+        .iter()
+        .map(|arg| {
+            let aliases_receiver = std::ptr::eq(receiver, arg)
+                || receiver.value_id() == arg.value_id() && receiver.value_id().is_some();
+            collect_set_operand(arg).map(|operand| (aliases_receiver, operand))
+        })
+        .collect::<Result<Vec<_>>>()?;
     receiver
         .set_with(|items| {
-            let mut result = items.clone();
-            for snap in snapshots {
-                for k in snap {
-                    result.insert(k);
+            let mut result = PySet::cpython_merged_copy(items);
+            for (aliases_receiver, operand) in operands {
+                if aliases_receiver {
+                    continue;
+                }
+                match operand {
+                    SetOperand::ExactSet(source) => {
+                        if result.is_empty() {
+                            result = PySet::cpython_merged_copy(&source);
+                            continue;
+                        }
+                        let source_table = source.python_hash_snapshot();
+                        let keys: Vec<PyKey> = source_table.active_keys(&source).cloned().collect();
+                        result.prepare_cpython_merge(source.len());
+                        result.extend(keys);
+                    }
+                    SetOperand::ExactDict(keys) => {
+                        result.prepare_cpython_merge(keys.len());
+                        result.extend(keys);
+                    }
+                    SetOperand::Iterable(keys) => result.extend(keys),
                 }
             }
             Value::set(result)
@@ -628,11 +711,11 @@ fn intersection(receiver: &Value, args: &[Value]) -> Result<Value> {
     let snapshots = collect_iterables(receiver, args)?;
     let snaps_are_sets: Vec<bool> = args.iter().map(is_concrete_set).collect();
     receiver
-        .set_with(move |items| {
+        .set_with(|items| {
             let mut pairs = snapshots.into_iter().zip(snaps_are_sets);
             let mut result = match pairs.next() {
                 // `s.intersection()` is a plain copy.
-                None => items.clone(),
+                None => PySet::cpython_merged_copy(items),
                 Some((snap, is_set)) => intersect_first(items, snap, is_set),
             };
             for (snap, is_set) in pairs {
@@ -652,7 +735,7 @@ fn difference(receiver: &Value, args: &[Value]) -> Result<Value> {
     let snapshots = collect_iterables(receiver, args)?;
     receiver
         .set_with(|items| {
-            let mut result = items.clone();
+            let mut result = PySet::cpython_merged_copy(items);
             for snap in &snapshots {
                 subtract_snapshot(&mut result, snap);
             }

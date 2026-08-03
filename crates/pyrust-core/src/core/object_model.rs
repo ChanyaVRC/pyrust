@@ -27,6 +27,8 @@ use crate::environment::{EnvRef, Environment, NameSet};
 use crate::errors::{PyError, Result};
 use crate::object_identity::{EncodedObjectIdentity, ObjectIdentity, next_obj_id};
 
+include!("dict_probe_index.rs");
+include!("set_probe_index.rs");
 include!("prelude.rs");
 include!("int_string_limits.rs");
 include!("keys.rs");

@@ -43,6 +43,22 @@ pub(super) fn dict_entries_from_value(v: &Value) -> Option<Vec<(PyKey, Value)>> 
     None
 }
 
+/// Clone an existing native dict backing without rebuilding its key table.
+/// This is the `PyDict_Copy` starting point required by `dict | other`: a
+/// dense copy preserves CPython deletion dummies and their probe order.
+pub(super) fn dict_clone_from_value(v: &Value) -> Option<PyDict> {
+    if let Some(dict) = v.dict_with(Clone::clone) {
+        return Some(dict);
+    }
+    if let Some(dict_rc) = pyrust_builtins::mapping_proxy::as_dict_rc(v) {
+        return Some(dict_rc.borrow().clone());
+    }
+    if let Some(backing) = builtin_data_backing(v) {
+        return dict_clone_from_value(&backing);
+    }
+    None
+}
+
 /// Extract entries for `**mapping` / dict-display expansion. Native mapping
 /// representations are decoded here; user objects use the Python mapping
 /// protocol. `None` means the value is not a mapping.

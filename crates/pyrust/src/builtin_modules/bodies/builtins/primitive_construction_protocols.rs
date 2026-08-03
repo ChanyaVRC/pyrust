@@ -89,6 +89,18 @@ pyrust_module! {
         let backing = match rest {
             [] => pyrust_builtins::frozenset::frozenset(PySet::default()),
             [single] => {
+                if let Some(source) = pyrust_builtins::frozenset::as_items(&single.value) {
+                    pyrust_builtins::frozenset::frozenset(PySet::cpython_merged_copy(&source))
+                } else if let ValueKind::Set(source) = single.value.kind() {
+                    pyrust_builtins::frozenset::frozenset(PySet::cpython_merged_copy(&source))
+                } else if let ValueKind::Dict(source) = single.value.kind() {
+                    let keys: Vec<pyrust_core::PyKey> = source.keys().cloned().collect();
+                    let mut set = PySet::with_cpython_dict_capacity(keys.len());
+                    for key in keys {
+                        _interp.set_insert(&mut set, key)?;
+                    }
+                    pyrust_builtins::frozenset::frozenset(set)
+                } else {
                 let items = _interp.collect_iterable(&single.value)?;
                 let mut set: PySet = PySet::default();
                 for item in items {
@@ -96,6 +108,7 @@ pyrust_module! {
                     _interp.set_insert(&mut set, key)?;
                 }
                 pyrust_builtins::frozenset::frozenset(set)
+                }
             }
             _ => {
                 return Err(PyError::named(

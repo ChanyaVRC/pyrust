@@ -113,11 +113,14 @@ impl Interpreter {
                 // Collect keys before moving pos into bound_method_pos_buf
                 // so we can borrow &pos[0] without an extra clone.
                 let keys = self.collect_iterable(&pos[0])?;
-                let mut map: PyDict =
-                    PyDict::with_capacity_and_hasher(keys.len(), Default::default());
+                // `_PyDict_FromKeys` deliberately skips its presized exact-
+                // dict/set fast paths when `cls()` returned a dict subclass.
+                // Build from the shared empty table so duplicate-heavy inputs
+                // resize from their live-key count in the same probe order.
+                let mut map = PyDict::default();
                 for key in &keys {
                     let py_key = self.value_to_pykey(key)?;
-                    map.entry(py_key).or_insert_with(|| default_val.clone());
+                    self.dict_insert(&mut map, py_key, default_val.clone())?;
                 }
                 // Construct `cls()` with no arguments to get a subclass instance
                 // (matching CPython's `dict.fromkeys` classmethod semantics).

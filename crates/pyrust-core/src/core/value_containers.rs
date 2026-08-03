@@ -387,6 +387,24 @@ impl Value {
         Some(f(&rc.borrow()))
     }
 
+    /// Install the dict's lazy Python-hash probe cache without reporting a
+    /// Python-visible mutation. The cache changes neither keys nor values and
+    /// therefore must not invalidate namespace or collection observers.
+    pub fn dict_ensure_python_hash_index(&self) -> Option<()> {
+        let rc = self.dict_rc()?;
+        rc.borrow_mut().ensure_python_hash_index();
+        Some(())
+    }
+
+    /// Apply insertion-only key-table preparation without reporting a logical
+    /// dict mutation. The following insertion/replacement owns that observer
+    /// notification.
+    pub fn dict_prepare_python_insert(&self, key: &PyKey) -> Option<()> {
+        let rc = self.dict_rc()?;
+        rc.borrow_mut().prepare_python_insert(key);
+        Some(())
+    }
+
     /// Scoped mutable access to the dict.
     pub fn dict_with_mut<R>(&self, f: impl FnOnce(&mut PyDict) -> R) -> Option<R> {
         let rc = self.dict_rc()?;

@@ -83,11 +83,40 @@ impl Interpreter {
                         }
                         continue;
                     }
-                    // If the arg is already a set, copy its PyKeys directly.
-                    if arg.is_set() {
-                        let keys: Vec<PyKey> = arg
-                            .set_with(|s| s.iter().cloned().collect())
-                            .unwrap_or_default();
+                    // Exact set/frozenset updates use set_merge: pre-size once
+                    // and consume the source in its CPython slot order. An
+                    // empty receiver may take the source-copy topology.
+                    if let Some((source, _)) = set_items_from_value(&arg) {
+                        if receiver.set_len() == Some(0) {
+                            let replacement = PySet::cpython_merged_copy(&source);
+                            receiver
+                                .set_with_mut(|items| *items = replacement)
+                                .ok_or_else(|| {
+                                    PyError::Runtime("internal: expected set".to_string())
+                                })?;
+                            continue;
+                        }
+                        let source_table = source.python_hash_snapshot();
+                        let keys: Vec<PyKey> = source_table.active_keys(&source).cloned().collect();
+                        receiver
+                            .set_with_mut(|items| items.prepare_cpython_merge(source.len()))
+                            .ok_or_else(|| {
+                                PyError::Runtime("internal: expected set".to_string())
+                            })?;
+                        for pk in keys {
+                            if self.set_lookup(&receiver, &pk)?.is_none() {
+                                receiver.set_add(pk)?;
+                            }
+                        }
+                        continue;
+                    }
+                    if let ValueKind::Dict(source) = arg.kind() {
+                        let keys: Vec<PyKey> = source.keys().cloned().collect();
+                        receiver
+                            .set_with_mut(|items| items.prepare_cpython_merge(keys.len()))
+                            .ok_or_else(|| {
+                                PyError::Runtime("internal: expected set".to_string())
+                            })?;
                         for pk in keys {
                             if self.set_lookup(&receiver, &pk)?.is_none() {
                                 receiver.set_add(pk)?;
@@ -106,7 +135,6 @@ impl Interpreter {
                             | ValueKind::Tuple(_)
                             | ValueKind::Str(_)
                             | ValueKind::Bytes(_)
-                            | ValueKind::Dict(_)
                     ) {
                         for item in self.collect_iterable(&arg)? {
                             let pk = self.value_to_pykey(&item)?;

@@ -345,9 +345,7 @@ impl Interpreter {
                         match bk_kind {
                             BkKind::Dict => {
                                 let key = self.value_to_pykey(&idx_val)?;
-                                backing.dict_with_mut(|dict| {
-                                    dict.insert(key, val_val);
-                                });
+                                self.dict_insert_value(&backing, key, val_val)?;
                                 return Ok(());
                             }
                             BkKind::List => {
@@ -467,49 +465,11 @@ impl Interpreter {
         val_val: Value,
     ) -> Result<()> {
         let key = self.value_to_pykey(&idx_val)?;
-        let needs_dedup = match &key {
-            PyKey::Object { .. } => true,
-            // Issue #2059: `d[k] = v` where `k` is a tuple/frozenset key nesting
-            // a user object must overwrite an `__eq__`-equal-but-distinct
-            // existing key instead of appending a duplicate.  `dict_lookup`
-            // below performs the eq-aware probe.
-            PyKey::Tuple(_) | PyKey::FrozenSet(_) if nested_object_tuple_key(&key) => true,
-            PyKey::None => {
-                let none_hash = pyrust_core::py_hash_none() as u64;
-                regs[obj as usize]
-                    .as_dict()
-                    .map(|d| {
-                        d.keys()
-                            .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
-                    })
-                    .unwrap_or(false)
-            }
-            _ => false,
-        };
-        if needs_dedup {
-            let dict_val = regs[obj as usize]
-                .as_some()
-                .cloned()
-                .unwrap_or(Value::none());
-            let existing = self.dict_lookup(&dict_val, &key)?;
-            regs[obj as usize].dict_with_mut(|dict| {
-                if let Some((idx, _)) = existing {
-                    let existing_key = dict.get_index(idx).map(|(k, _)| k.clone());
-                    if let Some(k) = existing_key {
-                        dict.insert(k, val_val);
-                    } else {
-                        dict.insert(key, val_val);
-                    }
-                } else {
-                    dict.insert(key, val_val);
-                }
-            });
-        } else {
-            regs[obj as usize].dict_with_mut(|dict| {
-                dict.insert(key, val_val);
-            });
-        }
-        Ok(())
+        let dict_val = regs[obj as usize]
+            .as_some()
+            .cloned()
+            .unwrap_or(Value::none());
+        self.dict_insert_value(&dict_val, key, val_val)
     }
 
     /// Execute `del obj[idx]`.
@@ -568,28 +528,19 @@ impl Interpreter {
         }
         if target_kind == 2 {
             let key = self.value_to_pykey(&idx_val)?;
-            // A bare `Object` key, or a tuple/frozenset key nesting a user
-            // object (issue #2059), must use the eq-aware `dict_lookup` so that
-            // `del d[k]` finds an `__eq__`-equal-but-distinct stored key rather
-            // than relying on raw `PyKey` identity.
-            if matches!(&key, PyKey::Object { .. }) || nested_object_tuple_key(&key) {
-                let dict_val = regs[obj as usize]
-                    .as_some()
-                    .cloned()
-                    .unwrap_or(Value::none());
-                let found = self.dict_lookup(&dict_val, &key)?;
-                if let Some((idx, _)) = found {
-                    regs[obj as usize].dict_with_mut(|dict| {
-                        dict.shift_remove_index(idx);
-                    });
-                } else {
-                    return Err(PyError::key_error(idx_val.clone()));
-                }
+            // Route every key through the shared fast-get/eq-aware lookup so
+            // primitive probes can delete an equal stored Object (#2820).
+            let dict_val = regs[obj as usize]
+                .as_some()
+                .cloned()
+                .unwrap_or(Value::none());
+            let found = self.dict_lookup(&dict_val, &key)?;
+            if let Some((idx, _)) = found {
+                regs[obj as usize].dict_with_mut(|dict| {
+                    dict.shift_remove_index(idx);
+                });
             } else {
-                let removed = regs[obj as usize].dict_with_mut(|dict| dict.shift_remove(&key));
-                if !matches!(removed, Some(Some(_))) {
-                    return Err(PyError::key_error(idx_val.clone()));
-                }
+                return Err(PyError::key_error(idx_val.clone()));
             }
             return Ok(());
         }

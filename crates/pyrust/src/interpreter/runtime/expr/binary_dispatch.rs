@@ -328,8 +328,13 @@ impl Interpreter {
                     // #1914: dedup via user `__eq__` for `PyKey::Object` keys.
                     // `dict_extend_dedup` keeps the raw fast path for the common
                     // all-primitive case; later values win on duplicate keys.
-                    let mut merged: PyDict = PyDict::default();
-                    self.dict_extend_dedup(&mut merged, lhs_entries)?;
+                    let mut merged = if let Some(dict) = dict_clone_from_value(&left) {
+                        dict
+                    } else {
+                        let mut dict = PyDict::default();
+                        self.dict_extend_dedup(&mut dict, lhs_entries)?;
+                        dict
+                    };
                     self.dict_extend_dedup(&mut merged, rhs_entries)?;
                     return Ok(Value::dict(merged));
                 }

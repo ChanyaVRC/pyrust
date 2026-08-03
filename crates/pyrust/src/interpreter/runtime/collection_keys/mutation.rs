@@ -1,10 +1,22 @@
 impl Interpreter {
     /// Build a fresh dict from Python-level key/value pairs.
-    pub(crate) fn dict_from_value_pairs<I>(&mut self, capacity: usize, pairs: I) -> Result<Value>
+    pub(crate) fn dict_from_value_pairs<I>(
+        &mut self,
+        capacity: usize,
+        unicode_only: bool,
+        pairs: I,
+    ) -> Result<Value>
     where
         I: IntoIterator<Item = Result<(Value, Value)>>,
     {
-        let mut dict = PyDict::with_capacity_and_hasher(capacity, Default::default());
+        // CPython's `_PyDict_FromItems` scans the already evaluated BUILD_MAP
+        // keys before hashing/inserting any of them so it can choose a Unicode
+        // or General presized table. Preserve that distinction: inferring from
+        // only the first key shrinks duplicate-heavy mixed literals during a
+        // spurious Unicode→General conversion and changes observable probe
+        // order.
+        let mut dict =
+            PyDict::with_capacity_and_known_key_kind(capacity, Default::default(), unicode_only);
         for pair in pairs {
             let (key, value) = pair?;
             let key = self.value_to_pykey(&key)?;
@@ -15,40 +27,37 @@ impl Interpreter {
 
     /// Insert `(key, value)` into a dict that lives at register/local
     /// `dict_value`, dispatching user `__eq__` to deduplicate against an
-    /// existing entry when `key` is a `PyKey::Object` or `PyKey::None`.
-    /// The None case handles cross-variant dedup (issue #906): inserting
-    /// None into a dict that already holds an Object key with hash py_hash_none()
-    /// that __eq__-matches None should overwrite the existing entry, not add a
-    /// second one.
+    /// existing entry when its representation requires Python-level equality.
+    /// This includes Object/Object, nested-object, and primitive/Object
+    /// cross-representation matches (issues #906, #2059, and #2820).
     pub(crate) fn dict_insert(
         &mut self,
         dict: &mut PyDict,
         key: PyKey,
         value: Value,
     ) -> Result<()> {
-        // `PyKey::Object` keys may collide with another Object entry (or with a
-        // stored `PyKey::None`) and require `__eq__` dedup via `dict_lookup_in`.
-        // `PyKey::None` is the cross-variant case (issue #906): a stored
-        // `PyKey::Object{hash == py_hash_none()}` that `__eq__`-matches `None`
-        // must be overwritten rather than creating a second entry.
-        //
-        // Fast path for `PyKey::None` (issue #934): IndexMap already deduplicates
-        // `None == None` natively via `Hash`+`PartialEq`.  We only need the slow
-        // `dict_lookup_in` path when the dict contains a `PyKey::Object` with hash
-        // `py_hash_none()` — an extremely rare cross-variant scenario.  Skip the
-        // entire lookup call in the common case.
+        // CPython converts a unicode-only table before looking up a non-exact
+        // string insertion key, even when that lookup only replaces a value.
+        dict.prepare_python_insert(&key);
+        // Object and nested-object keys always require Python equality.
+        // Primitive keys need it only when the alternate Object-hash bucket
+        // contains a same-Python-hash candidate (#2820); the precheck keeps
+        // homogeneous primitive insertion on its raw IndexMap path.
         let needs_dedup = match &key {
             PyKey::Object { .. } => true,
-            // Issue #2059: a tuple/frozenset key nesting a user object must
-            // dedup against an `__eq__`-equal-but-distinct existing key.
             PyKey::Tuple(_) | PyKey::FrozenSet(_) if nested_object_tuple_key(&key) => true,
-            PyKey::None => {
-                let none_hash = pyrust_core::py_hash_none() as u64;
-                dict.keys()
-                    .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
-            }
-            _ => false,
+            _ => dict_has_object_hash_candidate(dict, &key),
         };
+        if needs_dedup && !dict.has_python_hash_index() {
+            let crosses_representation = match &key {
+                PyKey::Object { .. } => dict.may_have_non_object_key(),
+                _ if nested_object_tuple_key(&key) => !dict.is_empty(),
+                _ => dict.may_have_dynamic_key(),
+            };
+            if crosses_representation {
+                dict.ensure_python_hash_index();
+            }
+        }
         if needs_dedup && let Some((idx, _)) = self.dict_lookup_in(dict, &key)? {
             // Replace value in-place via index access to preserve order.
             let existing_key = dict.get_index(idx).map(|(k, _)| k.clone());
@@ -65,7 +74,7 @@ impl Interpreter {
     /// deduplication without holding its `RefCell` borrow across user code.
     ///
     /// `dict_lookup` scopes the backing-map borrow to raw probes and clones
-    /// only same-hash object-key candidates before dispatching `__eq__`.
+    /// only same-Python-hash candidates before dispatching `__eq__`.
     /// Once it returns, no user code runs between recovering the matching
     /// index and the short mutable borrow used for the actual update.
     pub(crate) fn dict_insert_value(
@@ -74,6 +83,9 @@ impl Interpreter {
         key: PyKey,
         value: Value,
     ) -> Result<()> {
+        receiver
+            .dict_prepare_python_insert(&key)
+            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
         // Primitive keys are fully handled by IndexMap's Hash + PartialEq
         // implementation, including numeric cross-type equality.  Avoid the
         // redundant pre-lookup in that overwhelmingly common case: insert
@@ -83,19 +95,29 @@ impl Interpreter {
         let needs_dedup = match &key {
             PyKey::Object { .. } => true,
             PyKey::Tuple(_) | PyKey::FrozenSet(_) if nested_object_tuple_key(&key) => true,
-            PyKey::None => {
-                let none_hash = pyrust_core::py_hash_none() as u64;
-                receiver
-                    .dict_with(|dict| {
-                        dict.keys().any(|stored| {
-                            matches!(stored,
-                                PyKey::Object { hash, .. } if *hash == none_hash)
-                        })
-                    })
-                    .unwrap_or(false)
-            }
-            _ => false,
+            _ => receiver
+                .dict_with(|dict| dict_has_object_hash_candidate(dict, &key))
+                .unwrap_or(false),
         };
+        if needs_dedup {
+            let activate_hash_index = receiver
+                .dict_with(|dict| {
+                    if dict.has_python_hash_index() {
+                        return false;
+                    }
+                    match &key {
+                        PyKey::Object { .. } => dict.may_have_non_object_key(),
+                        _ if nested_object_tuple_key(&key) => !dict.is_empty(),
+                        _ => dict.may_have_dynamic_key(),
+                    }
+                })
+                .unwrap_or(false);
+            if activate_hash_index {
+                receiver
+                    .dict_ensure_python_hash_index()
+                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+            }
+        }
         let existing = if needs_dedup {
             self.dict_lookup(receiver, &key)?
         } else {

@@ -59,6 +59,139 @@ fn collect_object_bucket_keys_map(
     probe.collected.into_inner()
 }
 
+/// Probe the bucket used by `PyKey::Object` entries with `python_hash`.
+///
+/// Primitive `PyKey` variants intentionally use type-aware Rust hashes for
+/// the backing map, while `PyKey::Object` hashes its precomputed Python hash
+/// directly.  A primitive lookup therefore needs this alternate probe to find
+/// same-Python-hash Object entries after its ordinary `get_full` misses.
+struct ObjectHashBucketProbe<F: Fn(&PyKey) -> bool> {
+    python_hash: u64,
+    is_match: F,
+    collected: std::cell::RefCell<Vec<PyKey>>,
+}
+
+impl<F: Fn(&PyKey) -> bool> std::hash::Hash for ObjectHashBucketProbe<F> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.python_hash.hash(state);
+    }
+}
+
+impl<F: Fn(&PyKey) -> bool> indexmap::Equivalent<PyKey> for ObjectHashBucketProbe<F> {
+    fn equivalent(&self, key: &PyKey) -> bool {
+        if (self.is_match)(key) {
+            self.collected.borrow_mut().push(key.clone());
+        }
+        false
+    }
+}
+
+fn collect_object_hash_bucket_keys_map(
+    dict: &PyDict,
+    python_hash: u64,
+    is_match: impl Fn(&PyKey) -> bool,
+) -> Vec<PyKey> {
+    let probe = ObjectHashBucketProbe {
+        python_hash,
+        is_match,
+        collected: std::cell::RefCell::new(Vec::new()),
+    };
+    let _ = dict.get_index_of(&probe);
+    probe.collected.into_inner()
+}
+
+/// Collect dict keys that require Python-level equality after an exact
+/// `get_full` miss.
+///
+/// A mixed Object/non-Object dict supplies hashes represented by both key kinds
+/// through its unified side index, including deletion-slot reuse order. A hash
+/// represented only by Objects stays on the native O(bucket) probe. An Object
+/// probe against primitive-only candidates must scan for equal Python hashes
+/// because their type-aware Rust hashes do not share the Object bucket;
+/// primitive probes take the inverse cheap path through one alternate Object
+/// bucket. A tuple/frozenset that nests an Object retains its existing fallback.
+fn collect_dict_user_eq_candidates(dict: &PyDict, probe_key: &PyKey) -> Vec<PyKey> {
+    let python_hash = pyrust_core::py_hash_pykey(probe_key) as u64;
+    if let Some(candidates) = dict.python_hash_candidates(python_hash) {
+        return candidates;
+    }
+    let must_scan_non_objects =
+        !dict.has_python_hash_index() || dict.has_non_object_python_hash(python_hash);
+
+    let mut candidates = match probe_key {
+        PyKey::Object {
+            hash: target_hash, ..
+        } => {
+            if dict.may_have_non_object_key() && must_scan_non_objects {
+                // Homogeneous primitive dict (or conservatively poisoned
+                // metadata): there is no alternate Rust bucket to probe.
+                dict.keys()
+                    .filter(|key| pyrust_core::py_hash_pykey(key) as u64 == *target_hash)
+                    .cloned()
+                    .collect()
+            } else if dict.may_have_object_key() {
+                collect_object_bucket_keys_map(
+                    dict,
+                    probe_key,
+                    |key| matches!(key, PyKey::Object { hash, .. } if hash == target_hash),
+                )
+            } else {
+                Vec::new()
+            }
+        }
+        _ => {
+            if dict.may_have_object_key() {
+                collect_object_hash_bucket_keys_map(
+                    dict,
+                    python_hash,
+                    |key| matches!(key, PyKey::Object { hash, .. } if *hash == python_hash),
+                )
+            } else {
+                Vec::new()
+            }
+        }
+    };
+
+    if dict.may_have_non_object_key() && nested_object_tuple_key(probe_key) {
+        candidates.extend(collect_object_bucket_keys_map(
+            dict,
+            probe_key,
+            nested_object_tuple_key,
+        ));
+    }
+    candidates
+}
+
+#[inline]
+fn dict_may_have_user_eq_candidate(dict: &PyDict, probe_key: &PyKey) -> bool {
+    match probe_key {
+        PyKey::Object { .. } => dict.may_have_object_key() || dict.may_have_non_object_key(),
+        _ if nested_object_tuple_key(probe_key) => {
+            dict.may_have_object_key() || dict.may_have_non_object_key()
+        }
+        _ => dict.may_have_dynamic_key(),
+    }
+}
+
+/// Whether a non-Object insertion has a same-Python-hash Object entry that
+/// may compare equal.  This is a single alternate bucket probe, avoiding a
+/// whole-map scan on the common primitive insertion path.
+fn dict_has_object_hash_candidate(dict: &PyDict, probe_key: &PyKey) -> bool {
+    let target_hash = pyrust_core::py_hash_pykey(probe_key) as u64;
+    if let Some(candidates) = dict.python_hash_candidates(target_hash) {
+        return candidates.iter().any(key_contains_object);
+    }
+    if !dict.may_have_object_key() {
+        return false;
+    }
+    !collect_object_hash_bucket_keys_map(
+        dict,
+        target_hash,
+        |key| matches!(key, PyKey::Object { hash, .. } if *hash == target_hash),
+    )
+    .is_empty()
+}
+
 /// `IndexSet` counterpart of [`collect_object_bucket_keys_map`].
 fn collect_object_bucket_keys_set(
     set: &PySet,

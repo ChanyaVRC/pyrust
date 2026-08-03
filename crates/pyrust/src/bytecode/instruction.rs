@@ -9,6 +9,16 @@ pub type Reg = u32;
 /// ever allocated at `u32::MAX`, so it can never collide with a live operand.
 pub const NO_KWARGS: Reg = Reg::MAX;
 
+/// Compile-time knowledge about the exact key-table kind for `BuildDict`.
+/// Dynamic expressions remain `Unknown` and receive CPython's runtime key
+/// scan; literals with a statically decisive key avoid that repeated scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DictKeyKindHint {
+    Unknown,
+    Unicode,
+    General,
+}
+
 /// The exact machine-int range cursor state [`Insn::JumpIfIterNotIntRangeExact`]
 /// admits.  Boxed so the rare closed-form guard does not widen every `Insn`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -476,7 +486,7 @@ pub enum Insn {
     /// in `unpack_slice_key` (issue #931).
     BuildSlice(Reg, Reg),
     /// R[dst] = {R[base]: R[base+1], R[base+2]: R[base+3], ...}  (n key-value pairs)
-    BuildDict(Reg, Reg, u32),
+    BuildDict(Reg, Reg, u32, DictKeyKindHint),
     /// R[base..base+n] = iter_values(R[src])
     Unpack(Reg, Reg, u32),
     /// Extended unpack: R[src] is an iterable; store first `before` elements into
