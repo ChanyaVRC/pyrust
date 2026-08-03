@@ -85,6 +85,30 @@ impl Parser {
         self.end_col_at(self.pos.checked_sub(1)?)
     }
 
+    /// Return the innermost opening delimiter that has not been closed before
+    /// the current token. Used only on the parser's EOF error path.
+    fn unclosed_delimiter(&self) -> Option<char> {
+        let mut delimiters = Vec::new();
+        for token in &self.tokens[..self.pos] {
+            match token {
+                Token::LParen => delimiters.push(('(', ')')),
+                Token::LBracket => delimiters.push(('[', ']')),
+                Token::LBrace => delimiters.push(('{', '}')),
+                Token::RParen if delimiters.last().is_some_and(|&(_, close)| close == ')') => {
+                    delimiters.pop();
+                }
+                Token::RBracket if delimiters.last().is_some_and(|&(_, close)| close == ']') => {
+                    delimiters.pop();
+                }
+                Token::RBrace if delimiters.last().is_some_and(|&(_, close)| close == '}') => {
+                    delimiters.pop();
+                }
+                _ => {}
+            }
+        }
+        delimiters.last().map(|&(open, _)| open)
+    }
+
     pub fn parse_program(&mut self) -> Result<Vec<Stmt>> {
         let mut stmts = Vec::new();
         self.skip_newlines();
