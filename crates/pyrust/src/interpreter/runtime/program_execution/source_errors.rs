@@ -5,10 +5,10 @@
 /// `IndentationError` subclass of `SyntaxError`, matching CPython 3.12's type
 /// (e.g. `too many levels of indentation`, issue #2221); everything else is a
 /// plain `SyntaxError`.
-fn lex_parse_to_exc(e: PyError) -> PyError {
+pub(crate) fn lex_parse_to_exc(e: PyError) -> PyError {
     let msg = match e {
         PyError::Lex(s) | PyError::Parse(s) => s,
-        other => other.to_string(),
+        other => return other,
     };
     if is_indentation_message(&msg) {
         pyrust_core::py_err!("IndentationError", msg)

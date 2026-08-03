@@ -219,6 +219,12 @@ impl Parser {
             }
             Some(Token::LBracket) => self.parse_list_literal(),
             Some(Token::LBrace) => self.parse_dict_or_set_literal(),
+            Some(Token::Eof) => match self.unclosed_delimiter() {
+                Some(delimiter) => Err(PyError::Parse(format!("'{delimiter}' was never closed"))),
+                None => Err(PyError::Parse(
+                    "unexpected token in expression: Some(Eof)".to_string(),
+                )),
+            },
             other => Err(PyError::Parse(format!(
                 "unexpected token in expression: {other:?}"
             ))),
@@ -458,6 +464,10 @@ impl Parser {
         if self.is(token) {
             self.bump();
             Ok(())
+        } else if self.is(&Token::Eof)
+            && let Some(delimiter) = self.unclosed_delimiter()
+        {
+            Err(PyError::Parse(format!("'{delimiter}' was never closed")))
         } else {
             Err(PyError::Parse(format!(
                 "expected {token:?}, found {:?}",

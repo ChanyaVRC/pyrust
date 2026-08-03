@@ -324,9 +324,7 @@ impl Interpreter {
                 // `tb_lineno` and PEP 657 caret anchors (#2438); the import path
                 // previously parsed without line info, so module frames printed no
                 // line number / source line.
-                let (tokens, line_nos, cols, cols_end) = Lexer::new(&src)?.into_tokens_with_pos();
-                let (program, linenos) = Parser::new_with_pos(tokens, line_nos, cols, cols_end)
-                    .parse_program_with_linenos()?;
+                let (program, linenos) = Self::parse_source_to_stmts_with_linenos(&src)?;
                 // Subinterpreter shares the same module_cache so results are visible to parent
                 let mut sub = Interpreter {
                     script_dir: self.script_dir.clone(),

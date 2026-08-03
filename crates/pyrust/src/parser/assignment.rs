@@ -76,6 +76,9 @@ fn lhs_to_assign_stmt(target: &Expr, rhs: Expr) -> Result<Stmt> {
             let assign_targets = exprs_to_assign_targets(&exprs, &flags)?;
             Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets), rhs))
         }
+        Expr::Int(_) => Err(PyError::Parse(
+            "cannot assign to literal here. Maybe you meant '==' instead of '='?".to_string(),
+        )),
         _ => Err(PyError::Parse(
             "cannot assign to this expression".to_string(),
         )),

@@ -196,7 +196,7 @@ impl Parser {
                 // permitted in the RHS expression.
                 if next_flags.iter().any(|&s| s) {
                     return Err(PyError::Parse(
-                        "starred expression is not valid in this context".to_string(),
+                        "can't use starred expression here".to_string(),
                     ));
                 }
                 rhs = if next_items.len() == 1 && !next_had_comma {
@@ -216,7 +216,7 @@ impl Parser {
         // Starred item outside assignment is invalid
         if starred_flags.iter().any(|&s| s) {
             return Err(PyError::Parse(
-                "starred expression is not valid in this context".to_string(),
+                "can't use starred expression here".to_string(),
             ));
         }
 

@@ -10,8 +10,6 @@ use smallvec::smallvec;
 use crate::ast::{AssignTarget, BinaryOp, Expr, Stmt, UnaryOp};
 use crate::bytecode::{FnCode, GlobalCacheEntry};
 use crate::error::{PyError, Result};
-use crate::lexer::Lexer;
-use crate::parser::Parser;
 use crate::value::{
     EnvRef, Environment, GeneratorCell, GeneratorKind, InstanceAttrs, ModuleMutationState,
     PyBigInt, PyBigIntSign, PyClass, PyDict, PyInstance, PyKey, PyModule, PyPow, PySet,

@@ -12,7 +12,7 @@ mod token;
 mod value;
 
 use error::{PyError, Result};
-use interpreter::Interpreter;
+use interpreter::{Interpreter, lex_parse_to_exc};
 use lexer::Lexer;
 use parser::Parser;
 use rustyline::DefaultEditor;
@@ -22,17 +22,6 @@ fn parse_source(src: &str) -> Result<Vec<ast::Stmt>> {
     let tokens = Lexer::new(src)?.into_tokens();
     let mut parser = Parser::new(tokens);
     parser.parse_program()
-}
-
-/// Parse source text and return both the statement list and a parallel vector
-/// of 1-based line numbers (one per top-level statement).  Used by `run_file`
-/// to thread line information through to the compiler.
-fn parse_source_with_linenos(src: &str) -> Result<(Vec<ast::Stmt>, Vec<u32>)> {
-    // Thread per-token start columns through too, so the compiler can record
-    // PEP 657 caret anchors for uncaught tracebacks (issue #2426).
-    let (tokens, line_nos, cols, cols_end) = Lexer::new(src)?.into_tokens_with_pos();
-    let mut parser = Parser::new_with_pos(tokens, line_nos, cols, cols_end);
-    parser.parse_program_with_linenos()
 }
 
 // Interpreter-thread stack, sized so deep Python recursion (up to the default
@@ -59,7 +48,7 @@ const INTERPRETER_STACK_SIZE: usize = 128 * 1024 * 1024;
 fn run_file(path: &str, script_args: &[String]) -> Result<()> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| PyError::Runtime(format!("failed to read '{path}': {e}")))?;
-    let (program, linenos) = parse_source_with_linenos(&src)?;
+    let (program, linenos) = Interpreter::parse_source_to_stmts_with_linenos(&src)?;
     let path_owned = path.to_string();
     let script_args = script_args.to_vec();
     let src_owned = src;
@@ -112,6 +101,10 @@ fn is_incomplete(err: &PyError) -> bool {
     }
 }
 
+fn normalize_repl_error(error: PyError) -> PyError {
+    lex_parse_to_exc(error)
+}
+
 fn run_repl() -> Result<()> {
     println!("PyRust 0.2 (Python-like subset). Type 'exit' or 'quit' to leave.");
 
@@ -142,9 +135,13 @@ fn run_repl() -> Result<()> {
                 // Empty line while in a block flushes the buffer
                 if !buf.is_empty() && trimmed.is_empty() {
                     let src = std::mem::take(&mut buf);
-                    match parse_source(&src).and_then(|p| interpreter.exec_program(&p, true)) {
-                        Ok(()) => {}
-                        Err(e) => eprintln!("{e}"),
+                    match parse_source(&src) {
+                        Ok(program) => {
+                            if let Err(e) = interpreter.exec_program(&program, true) {
+                                eprintln!("{e}");
+                            }
+                        }
+                        Err(e) => eprintln!("{}", normalize_repl_error(e)),
                     }
                     continue;
                 }
@@ -181,7 +178,7 @@ fn run_repl() -> Result<()> {
                     }
                     Err(e) => {
                         buf.clear();
-                        eprintln!("{e}");
+                        eprintln!("{}", normalize_repl_error(e));
                     }
                 }
             }
@@ -290,8 +287,27 @@ mod tests {
     }
 
     #[test]
+    fn unclosed_delimiter_is_not_newly_treated_as_incomplete() {
+        let err = parse_source("x = (1 +\n").unwrap_err();
+        assert_eq!(err.to_string(), "Parse error: '(' was never closed");
+        assert!(!is_incomplete(&err));
+    }
+
+    #[test]
     fn runtime_error_is_not_incomplete() {
         assert!(!is_incomplete(&PyError::Runtime("name error".into())));
+    }
+
+    #[test]
+    fn repl_parse_error_is_normalized_for_display() {
+        let error = normalize_repl_error(PyError::Parse("invalid syntax".into()));
+        assert_eq!(error.to_string(), "SyntaxError: invalid syntax");
+    }
+
+    #[test]
+    fn repl_runtime_error_is_not_reclassified_for_display() {
+        let error = normalize_repl_error(PyError::Runtime("execution failed".into()));
+        assert_eq!(error.to_string(), "Runtime error: execution failed");
     }
 
     // ── integration: parse_source drives is_incomplete ───────────────────────
