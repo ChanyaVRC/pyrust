@@ -1158,10 +1158,10 @@ fn closed_form_guard_leads_the_chain_without_displacing_the_ordinary_copies() {
 
 #[test]
 fn closed_form_traces_a_negated_literal_bound() {
-    // `for v in range(100, 0, -7): total += v`.  A negative literal survives as
-    // `LoadConst` + `UnaryOp(Neg)` + `Move` because `pass_unary_fold` declines
-    // to fold across the loop's back edge, so the trace must interpret the
-    // setup rather than assume one instruction per argument.
+    // `for v in range(100, 0, -7): total += v`.  The full optimizer pipeline
+    // folds this setup before loop versioning, but keep the pass itself robust
+    // when handed the unnormalised `LoadConst` + `UnaryOp(Neg)` + `Move` shape
+    // directly rather than assuming one instruction per argument.
     let insns = vec![
         Insn::LoadGlobal(2, 0),
         Insn::LoadConst(3, 0),

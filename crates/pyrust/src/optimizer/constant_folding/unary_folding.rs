@@ -19,6 +19,7 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
     // use the else-branch constant).  Same guard as `pass_binop_const_fusion` /
     // `pass_cmpjump_fusion`.
     let mut jump_targets: HashSet<usize> = HashSet::new();
+    let mut needs_dead_source = false;
     for (idx, insn) in transformed.iter().enumerate() {
         if let Some(k) = insn_jump_off(insn) {
             let target = idx as i64 + 1 + k as i64;
@@ -26,7 +27,23 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
                 jump_targets.insert(target as usize);
             }
         }
+        needs_dead_source |= matches!(
+            (insn, transformed.get(idx + 1)),
+            (
+                Insn::LoadConst(src, _),
+                Some(Insn::UnaryOp(dst, _, unary_src))
+            ) if src == unary_src && dst != src && *src >= num_locals
+        );
     }
+
+    // Most compiler-emitted literal negations write the result back to the
+    // source temp, which preserves that register's value after fusion.  Only
+    // compute the more expensive cross-block liveness proof when a candidate
+    // writes a distinct destination.  The shared helper uses two linear scans,
+    // avoiding the per-candidate tail scans that made a later, unrelated back
+    // edge reject every literal negation in the function (issue #2907).
+    let dead_after_use = needs_dead_source
+        .then(|| load_const_dead_after_use(&transformed, num_locals, &jump_targets));
 
     let mut i = 0;
     while i + 1 < n {
@@ -38,11 +55,13 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
             (Insn::LoadConst(lc_reg, c_idx), Insn::UnaryOp(dst, op, src))
                 if *src == *lc_reg
                     && *lc_reg >= num_locals
-                    && !slice_has_back_edge(&transformed[i + 2..])
                     // When dst==lc_reg the fusion overwrites lc_reg with the result,
                     // so any later read of lc_reg will see the correct folded value.
                     // When dst!=lc_reg, lc_reg would become uninitialized after removal.
-                    && (*dst == *lc_reg || !reg_is_read_in(&transformed[i + 2..], *lc_reg)) =>
+                    && (*dst == *lc_reg
+                        || dead_after_use
+                            .as_ref()
+                            .is_some_and(|dead| dead[i])) =>
             {
                 let c = &consts[*c_idx as usize];
                 // Fold through canonical built-in unary semantics rather than

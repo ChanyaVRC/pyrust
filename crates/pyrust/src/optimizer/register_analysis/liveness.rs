@@ -33,6 +33,7 @@ fn insn_is_back_edge(insn: &Insn) -> bool {
     )
 }
 
+#[cfg(test)]
 fn slice_has_back_edge(insns: &[Insn]) -> bool {
     insns.iter().any(insn_is_back_edge)
 }

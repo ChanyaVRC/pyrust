@@ -248,11 +248,10 @@ struct ClosedForm {
 /// The setup is *interpreted* over a small int-constant environment rather than
 /// assumed to be one `LoadConst` per argument, because it is not: a negated
 /// literal reaches this pass as `LoadConst` + `UnaryOp(Neg)` + `Move`.
-/// `pass_unary_fold` would normally collapse that to a single `LoadConst`, but
-/// it declines whenever a back edge follows the pair — and a back edge always
-/// does here, since the whole point of the sequence is to feed a loop header.
-/// Reading only the rigid one-instruction-per-argument shape would therefore
-/// leave every negative bound and every negative step permanently unfoldable.
+/// The full optimizer pipeline normally collapses that to one `LoadConst`, but
+/// this pass also stays correct when called directly or given an unnormalised
+/// instruction stream.  Reading only the rigid one-instruction-per-argument
+/// shape would leave negative bounds and steps unrecognised in those inputs.
 fn traced_const_range_bounds(
     insns: &[Insn],
     consts: &[Value],
