@@ -34,11 +34,12 @@ use crate::interpreter::{
     make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
     make_reversed_sequence_iterator, mapping_pairs_via_protocol, method_type_singleton,
     modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, normalize_complex_slot_result,
-    normalize_float_slot_result, normalize_int_slot_result, primitive_class_by_name, py_mod_i64,
-    py_round_half_even_checked, reject_keyword_args_expanded, render_instance_str, render_key_repr,
-    render_value_repr, resolve_zero_arg_super, round_bigint_neg_ndigits, round_float_ndigits,
-    snapshot_current_locals, sync_module_env_to_globals_dict, type_class_singleton,
-    unicode_exc_set_attrs, value_class, value_to_float, value_type_name_str,
+    normalize_float_slot_result, normalize_int_slot_result, primitive_class_by_name,
+    primitive_class_dispatch, py_mod_i64, py_round_half_even_checked, reject_keyword_args_expanded,
+    render_instance_str, render_key_repr, render_value_repr, resolve_zero_arg_super,
+    round_bigint_neg_ndigits, round_float_ndigits, snapshot_current_locals,
+    sync_module_env_to_globals_dict, type_class_singleton, unicode_exc_set_attrs, value_class,
+    value_to_float, value_type_name_str,
 };
 use crate::value::{
     InstanceAttrs, PyBigInt, PyClass, PyDict, PyKey, PySet, PyToPrimitive, PyZero, SortKind,
@@ -236,7 +237,7 @@ mod object_basics {
 mod type_protocols {
     use super::{
         ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyClass, PyDict, PyError, PyKey, Rc, RefCell,
-        Result, Value, ValueKind, type_class_singleton,
+        Result, Value, ValueKind, primitive_class_dispatch, type_class_singleton,
     };
     include!("builtins/type_protocols.rs");
 }

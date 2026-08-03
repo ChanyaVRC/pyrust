@@ -77,6 +77,37 @@ fn ellipsis_ctor(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<
     Ok(Value::ellipsis())
 }
 
+fn dict_view_ctor_error(name: &str) -> Result<Value> {
+    Err(PyError::named(
+        "TypeError",
+        format!("cannot create '{name}' instances"),
+    ))
+}
+
+fn dict_keys_ctor(_interp: &mut Interpreter, _args: &[ExpandedCallArg]) -> Result<Value> {
+    dict_view_ctor_error(pyrust_builtins::dict_views::DICT_KEYS_TYPE_NAME)
+}
+
+fn dict_items_ctor(_interp: &mut Interpreter, _args: &[ExpandedCallArg]) -> Result<Value> {
+    dict_view_ctor_error(pyrust_builtins::dict_views::DICT_ITEMS_TYPE_NAME)
+}
+
+fn dict_values_ctor(_interp: &mut Interpreter, _args: &[ExpandedCallArg]) -> Result<Value> {
+    dict_view_ctor_error(pyrust_builtins::dict_views::DICT_VALUES_TYPE_NAME)
+}
+
+fn odict_keys_ctor(_interp: &mut Interpreter, _args: &[ExpandedCallArg]) -> Result<Value> {
+    dict_view_ctor_error(pyrust_builtins::dict_views::ODICT_KEYS_TYPE_NAME)
+}
+
+fn odict_items_ctor(_interp: &mut Interpreter, _args: &[ExpandedCallArg]) -> Result<Value> {
+    dict_view_ctor_error(pyrust_builtins::dict_views::ODICT_ITEMS_TYPE_NAME)
+}
+
+fn odict_values_ctor(_interp: &mut Interpreter, _args: &[ExpandedCallArg]) -> Result<Value> {
+    dict_view_ctor_error(pyrust_builtins::dict_views::ODICT_VALUES_TYPE_NAME)
+}
+
 /// Identify one of the iterator/slice values migrated to a real built-in class
 /// in issue #3000 without materialising the class as a `Value`.
 ///
@@ -146,18 +177,19 @@ pub(crate) fn builtin_type_class_isinstance_fast(
     Some(actual_kind == expected_kind)
 }
 
-/// Does this class inherit one of issue #3000's native built-in layouts?
+/// Does this class inherit a native built-in layout whose allocator cannot be
+/// bypassed through `object.__new__`?
 ///
-/// The immutable tag exists only on the six real built-in class singletons.
-/// Walking the class graph once therefore distinguishes genuine descendants
-/// from an unrelated same-named user class without repeating a pointer-based
-/// subclass search for every possible base. `slice` cannot have descendants,
-/// but its exact class must still reject bare allocation through
-/// `object.__new__`.
+/// The immutable tag identifies issue #3000's six built-in class singletons;
+/// dictionary views use their typed singleton identity because their hidden,
+/// final classes deliberately have no public constructor tag. Walking the
+/// class graph distinguishes genuine descendants from unrelated same-named
+/// user classes. `slice` and dictionary views cannot have descendants, but
+/// their exact classes must still reject bare allocation.
 #[inline]
 pub(crate) fn class_has_native_builtin_type_ancestor(class: &Rc<RefCell<PyClass>>) -> bool {
     let borrowed = class.borrow();
-    if borrowed.builtin_type_tag.is_some() {
+    if borrowed.builtin_type_tag.is_some() || DictViewClass::from_class(class).is_some() {
         return true;
     }
     if let Some(base) = &borrowed.base

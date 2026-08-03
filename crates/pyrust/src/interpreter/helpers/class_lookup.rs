@@ -426,6 +426,71 @@ thread_local! {
         })
     };
 
+    /// Per-thread class singletons for the plain dictionary views and the
+    /// OrderedDict-specific subclasses. They are real built-in classes, but
+    /// deliberately have no `builtins` binding and no public constructor.
+    static DICT_VIEW_CLASSES: [Rc<RefCell<PyClass>>; DictViewClass::ALL.len()] = {
+        let obj = OBJECT_CLASS.with(Rc::clone);
+        let make = |kind: DictViewClass, base: Rc<RefCell<PyClass>>| {
+            let name = kind.class_name();
+            let mut attrs = IndexMap::new();
+            if kind.is_ordered() {
+                for method in ["__iter__", "__reversed__"] {
+                    let qualified = registered_builtin_method_name(name, method);
+                    attrs.insert(method.to_string(), Value::builtin_function(qualified));
+                }
+            } else {
+                for (dunder, flags) in builtin_methods::slot_dunder_table(name) {
+                    if flags & builtin_methods::SLOT_ATTR == 0 {
+                        continue;
+                    }
+                    let qualified = registered_builtin_method_name(name, dunder);
+                    attrs.insert(dunder.to_string(), Value::builtin_function(qualified));
+                }
+                if kind.is_set_like() {
+                    let qualified = registered_builtin_method_name(name, "isdisjoint");
+                    attrs.insert("isdisjoint".to_string(), Value::builtin_function(qualified));
+                    attrs.insert("__hash__".to_string(), Value::none());
+                }
+            }
+            attrs.insert("__doc__".to_string(), Value::none());
+
+            let mut class = PyClass::new(name, name, Some(Rc::clone(&base)), attrs);
+            class.non_subclassable_name = Some(name);
+            let class = Rc::new(RefCell::new(class));
+            base.borrow()
+                .subclasses
+                .borrow_mut()
+                .push(Rc::downgrade(&class));
+            if !kind.is_ordered() {
+                let mapping = pyrust_builtins::numeric_attrs_descriptor::dict_view_mapping_descriptor(
+                    &class,
+                    kind.view_kind(),
+                );
+                class
+                    .borrow_mut()
+                    .attrs
+                    .insert("mapping".to_string(), mapping);
+            }
+            class
+        };
+
+        let keys = make(DictViewClass::Keys, Rc::clone(&obj));
+        let items = make(DictViewClass::Items, Rc::clone(&obj));
+        let values = make(DictViewClass::Values, obj);
+        let ordered_keys = make(DictViewClass::OrderedKeys, Rc::clone(&keys));
+        let ordered_items = make(DictViewClass::OrderedItems, Rc::clone(&items));
+        let ordered_values = make(DictViewClass::OrderedValues, Rc::clone(&values));
+        [
+            keys,
+            items,
+            values,
+            ordered_keys,
+            ordered_items,
+            ordered_values,
+        ]
+    };
+
     /// Per-thread `PyClass` singleton for the `types.GenericAlias` type — the
     /// type of `list[int]`, `dict[str, int]`, etc. (PEP 585).  In CPython 3.12
     /// `type(list[int])` is `<class 'types.GenericAlias'>`, with
@@ -491,7 +556,7 @@ thread_local! {
             >,
         > = {
         let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity_and_hasher(
-            24,
+            32,
             pyrust_core::PyHasher::default(),
         ));
         PRIMITIVE_CLASSES.with(|c| {
@@ -561,6 +626,19 @@ thread_local! {
                 if let Some(dispatch) = crate::builtin_registry::lookup(kind.class_name()) {
                     cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
                 }
+            }
+        });
+        DICT_VIEW_CLASSES.with(|classes| {
+            for (kind, class) in DictViewClass::ALL.iter().zip(classes) {
+                let dispatch: crate::builtin_registry::BuiltinDispatchFn = match kind {
+                    DictViewClass::Keys => dict_keys_ctor,
+                    DictViewClass::Items => dict_items_ctor,
+                    DictViewClass::Values => dict_values_ctor,
+                    DictViewClass::OrderedKeys => odict_keys_ctor,
+                    DictViewClass::OrderedItems => odict_items_ctor,
+                    DictViewClass::OrderedValues => odict_values_ctor,
+                };
+                cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
             }
         });
         cell

@@ -369,6 +369,14 @@ impl Interpreter {
         // with `CallMethodExpanded` — does not do itself).
         let obj_val = vm_read(regs, obj, num_locals)?;
         self.update_call_method_cache(&obj_val, &method, code, call_site_pc);
-        self.dispatch_method_with_args(regs, num_locals, obj, &method, pos_items, kw_map)
+        self.dispatch_method_with_args(
+            regs,
+            num_locals,
+            obj,
+            &method,
+            pos_items,
+            kw_map,
+            ResolvedMethodCallShape::Fused,
+        )
     }
 }

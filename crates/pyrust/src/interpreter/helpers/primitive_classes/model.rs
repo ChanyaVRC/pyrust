@@ -40,6 +40,95 @@ pub(crate) enum BuiltinTypeClass {
     Reversed,
 }
 
+/// The six opaque dictionary-view classes in CPython: three plain views and
+/// their three OrderedDict-specific final subclasses. Unlike
+/// [`BuiltinTypeClass`], none of these names is bound in the `builtins` module.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DictViewClass {
+    Keys,
+    Items,
+    Values,
+    OrderedKeys,
+    OrderedItems,
+    OrderedValues,
+}
+
+impl DictViewClass {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Keys,
+        Self::Items,
+        Self::Values,
+        Self::OrderedKeys,
+        Self::OrderedItems,
+        Self::OrderedValues,
+    ];
+
+    pub(crate) const fn class_name(self) -> &'static str {
+        match self {
+            Self::Keys => pyrust_builtins::dict_views::DICT_KEYS_TYPE_NAME,
+            Self::Items => pyrust_builtins::dict_views::DICT_ITEMS_TYPE_NAME,
+            Self::Values => pyrust_builtins::dict_views::DICT_VALUES_TYPE_NAME,
+            Self::OrderedKeys => pyrust_builtins::dict_views::ODICT_KEYS_TYPE_NAME,
+            Self::OrderedItems => pyrust_builtins::dict_views::ODICT_ITEMS_TYPE_NAME,
+            Self::OrderedValues => pyrust_builtins::dict_views::ODICT_VALUES_TYPE_NAME,
+        }
+    }
+
+    pub(crate) const fn is_set_like(self) -> bool {
+        matches!(
+            self,
+            Self::Keys | Self::Items | Self::OrderedKeys | Self::OrderedItems
+        )
+    }
+
+    pub(crate) const fn is_ordered(self) -> bool {
+        matches!(
+            self,
+            Self::OrderedKeys | Self::OrderedItems | Self::OrderedValues
+        )
+    }
+
+    pub(crate) const fn view_kind(self) -> pyrust_builtins::dict_views::DictViewKind {
+        match self {
+            Self::Keys | Self::OrderedKeys => pyrust_builtins::dict_views::DictViewKind::Keys,
+            Self::Items | Self::OrderedItems => pyrust_builtins::dict_views::DictViewKind::Items,
+            Self::Values | Self::OrderedValues => pyrust_builtins::dict_views::DictViewKind::Values,
+        }
+    }
+
+    pub(crate) const fn from_view(
+        kind: pyrust_builtins::dict_views::DictViewKind,
+        ordered: bool,
+    ) -> Self {
+        match (kind, ordered) {
+            (pyrust_builtins::dict_views::DictViewKind::Keys, false) => Self::Keys,
+            (pyrust_builtins::dict_views::DictViewKind::Items, false) => Self::Items,
+            (pyrust_builtins::dict_views::DictViewKind::Values, false) => Self::Values,
+            (pyrust_builtins::dict_views::DictViewKind::Keys, true) => Self::OrderedKeys,
+            (pyrust_builtins::dict_views::DictViewKind::Items, true) => Self::OrderedItems,
+            (pyrust_builtins::dict_views::DictViewKind::Values, true) => Self::OrderedValues,
+        }
+    }
+
+    pub(crate) fn from_class_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.class_name() == name)
+    }
+
+    pub(crate) fn from_class(class: &Rc<RefCell<PyClass>>) -> Option<Self> {
+        let ptr = Rc::as_ptr(class);
+        DICT_VIEW_CLASSES.with(|classes| {
+            Self::ALL
+                .into_iter()
+                .zip(classes)
+                .find_map(|(kind, candidate)| (ptr == Rc::as_ptr(candidate)).then_some(kind))
+        })
+    }
+
+    pub(crate) fn singleton(self) -> Rc<RefCell<PyClass>> {
+        DICT_VIEW_CLASSES.with(|classes| Rc::clone(&classes[self as usize]))
+    }
+}
+
 impl BuiltinTypeClass {
     /// Every member, in the order the per-thread singleton array stores them.
     pub(crate) const ALL: [Self; 6] = [

@@ -13,6 +13,13 @@ fn typing_object_readonly_attr_error(class: &Rc<RefCell<PyClass>>, name: &str) -
     }
 }
 
+fn dict_view_mapping_descriptor_owner(target: &Value, name: &str) -> Option<&'static str> {
+    let class = crate::interpreter::primitive_class_for_value(target)?;
+    let descriptor = lookup_class_attr(&class, name)?;
+    pyrust_builtins::numeric_attrs_descriptor::as_dict_view_mapping_descriptor(&descriptor)
+        .map(|info| info.class_name)
+}
+
 include!("attributes/attribute_lookup.rs");
 include!("attributes/protocol_attributes.rs");
 include!("attributes/attribute_cache_policy.rs");

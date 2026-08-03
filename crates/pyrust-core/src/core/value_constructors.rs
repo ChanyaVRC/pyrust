@@ -419,6 +419,15 @@ impl Value {
         Value::opaque(Opaque::Dict(Rc::new(RefCell::new(d))))
     }
 
+    /// Construct a dictionary value that aliases an existing backing map.
+    ///
+    /// Dictionary views keep only this shared backing cell. Runtime protocols
+    /// that must perform callback-safe live lookup can temporarily recover a
+    /// normal `Value` without cloning and detaching the mapping.
+    pub fn dict_shared(d: Rc<RefCell<PyDict>>) -> Self {
+        Value::opaque(Opaque::Dict(d))
+    }
+
     pub fn set(s: PySet) -> Self {
         Value::opaque(Opaque::Set(Rc::new(SetInner {
             items: RefCell::new(s),

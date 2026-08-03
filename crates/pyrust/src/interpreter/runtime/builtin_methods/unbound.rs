@@ -19,6 +19,65 @@ impl Interpreter {
         }
     }
 
+    fn call_dict_view_unbound_descriptor(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        args: &[ExpandedCallArg],
+    ) -> Result<Value> {
+        use pyrust_builtins::dict_views::DictViewKind;
+
+        let (expected_kind, ordered_owner) = match type_name {
+            "dict_keys" => (DictViewKind::Keys, false),
+            "dict_items" => (DictViewKind::Items, false),
+            "dict_values" => (DictViewKind::Values, false),
+            "odict_keys" => (DictViewKind::Keys, true),
+            "odict_items" => (DictViewKind::Items, true),
+            "odict_values" => (DictViewKind::Values, true),
+            _ => unreachable!("dictionary-view owner checked by caller"),
+        };
+        let descriptor_method = pyrust_builtins::dict_views::DictViewBoundMethod::from_name(method);
+        let method_descriptor = descriptor_method.is_some();
+        let receiver = args
+            .first()
+            .filter(|arg| arg.name.is_none())
+            .map(|arg| arg.value.clone())
+            .ok_or_else(|| {
+                if method_descriptor {
+                    pyrust_core::descriptor_needs_arg!(method, type_name, method)
+                } else {
+                    pyrust_core::descriptor_needs_arg!(method, type_name)
+                }
+            })?;
+        let actual_kind = pyrust_builtins::dict_views::view_kind(&receiver);
+        let receiver_matches = actual_kind == Some(expected_kind)
+            && (!ordered_owner || pyrust_builtins::dict_views::is_ordered_view(&receiver));
+        if !receiver_matches {
+            let actual = value_type_name_str(&receiver);
+            return Err(if method_descriptor {
+                pyrust_core::descriptor_requires!(method, type_name, actual, method)
+            } else {
+                pyrust_core::descriptor_requires!(method, type_name, actual)
+            });
+        }
+        if let Some(method) = descriptor_method {
+            let method_args = args.get(1..).unwrap_or_default();
+            let has_kw = method_args.iter().any(|arg| arg.name.is_some());
+            let positional = method_args
+                .iter()
+                .filter(|arg| arg.name.is_none())
+                .map(|arg| arg.value.clone())
+                .collect();
+            return self
+                .call_dict_view_bound_method(receiver, method, type_name, positional, has_kw);
+        }
+        self.call_bound_method_dispatch(
+            Rc::new(method.to_string()),
+            receiver,
+            args.get(1..).unwrap_or_default(),
+        )
+    }
+
     pub(super) fn call_unregistered_builtin_function(
         &mut self,
         function: &Value,
@@ -56,6 +115,22 @@ impl Interpreter {
             {
                 let (type_name, method) = name.split_once('.').unwrap();
                 self.call_primitive_object_dunder(type_name, method, args)
+            }
+            ValueKind::BuiltinFunction(name)
+                if name.split_once('.').is_some_and(|(owner, _)| {
+                    matches!(
+                        owner,
+                        "dict_keys"
+                            | "dict_items"
+                            | "dict_values"
+                            | "odict_keys"
+                            | "odict_items"
+                            | "odict_values"
+                    )
+                }) =>
+            {
+                let (type_name, method) = name.split_once('.').unwrap();
+                self.call_dict_view_unbound_descriptor(type_name, method, args)
             }
             // `float.fromhex` is a classmethod: the first positional arg is the
             // string to parse.  It must be dispatched before the generic

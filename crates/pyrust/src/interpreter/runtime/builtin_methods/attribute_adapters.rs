@@ -295,6 +295,12 @@ impl Interpreter {
         if name == "__qualname__" {
             return Ok(Value::string(metadata.python_qualname()));
         }
+        if name == "__objclass__"
+            && let Some(owner) = metadata.owner()
+            && let Some(class) = dict_view_class_by_name(owner)
+        {
+            return Ok(Value::py_class(class));
+        }
         if name == "__module__" {
             if metadata.kind == crate::builtin_registry::BuiltinCallableKind::MethodDescriptor {
                 return Err(pyrust_core::py_err!(
@@ -498,6 +504,16 @@ impl Interpreter {
                     target.clone(),
                 ));
             }
+            if let Some(method) =
+                pyrust_builtins::numeric_attrs_descriptor::dict_view_mapping_descriptor_method(
+                    target, name,
+                )
+            {
+                return Ok(pyrust_builtins::bound_method::bound_method(
+                    method.name(),
+                    target.clone(),
+                ));
+            }
             // Issue #2133: a `GenericAlias` (`list[int]`) proxies
             // attribute access to its `__origin__`, so `list[int].
             // __name__ == 'list'`, `.__mro__`, instance methods, etc.
@@ -605,7 +621,7 @@ pub(super) fn builtin_has_method(target: &Value, name: &str) -> bool {
     // `__` prefix so the common method-name lookup (`lst.append`, `s.upper`)
     // pays only a cheap byte comparison before the per-type table below.
     if name.starts_with("__") {
-        let type_name = pyrust_core::builtin_type_name(target);
+        let type_name = pyrust_core::builtin_layout_type_name(target);
         if is_protocol_dunder(&type_name, name) {
             return true;
         }

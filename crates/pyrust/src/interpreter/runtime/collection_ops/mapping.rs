@@ -14,14 +14,18 @@ pub(super) fn is_mapping_proxy(v: &Value) -> bool {
     pyrust_builtins::mapping_proxy::is_mapping_proxy(v)
 }
 
-/// Extract key-value pairs from a plain `dict`, a dict-backed subclass, or a
-/// `mappingproxy`. Used by PEP 584 dict algebra and descriptor validation.
+/// Extract key-value pairs from a plain `dict`, a dict-backed subclass, an
+/// instance `__dict__`, or a `mappingproxy`. Used by PEP 584 dict algebra and
+/// descriptor validation.
 pub(super) fn dict_entries_from_value(v: &Value) -> Option<Vec<(PyKey, Value)>> {
     if let Some(entries) = v.dict_with(|d| {
         d.iter()
             .map(|(k, val)| (k.clone(), val.clone()))
             .collect::<Vec<_>>()
     }) {
+        return Some(entries);
+    }
+    if let Some(entries) = pyrust_builtins::instance_dict::as_instance_dict_items(v) {
         return Some(entries);
     }
     if let Some(cls_rc) = pyrust_builtins::mapping_proxy::as_class_rc(v) {
@@ -67,9 +71,6 @@ pub(super) fn mapping_entries_for_expansion(
     value: &Value,
 ) -> Result<Option<Vec<(PyKey, Value)>>> {
     if let Some(entries) = dict_entries_from_value(value) {
-        return Ok(Some(entries));
-    }
-    if let Some(entries) = pyrust_builtins::instance_dict::as_instance_dict_items(value) {
         return Ok(Some(entries));
     }
     if matches!(value.kind(), ValueKind::PyInstance(_)) {

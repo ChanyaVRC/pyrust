@@ -52,7 +52,7 @@ pyrust_module! {
                         "TypeError",
                         format!(
                             "object of type '{}' has no len()",
-                            ops.display_error_name()
+                            ops.display_error_name_for(state)
                         ),
                     ));
                 }

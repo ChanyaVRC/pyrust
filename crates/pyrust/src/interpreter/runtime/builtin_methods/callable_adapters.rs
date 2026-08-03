@@ -4,6 +4,34 @@
 // builtin callable representations. Exact builtin names, descriptor policies,
 // and special constructors stay here rather than leaking into the call router.
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ResolvedMethodCallShape {
+    Fused,
+    Expanded,
+}
+
+impl ResolvedMethodCallShape {
+    /// Mirror CPython 3.12's `maybe_optimize_method_call` stack-use cutoff.
+    /// Keyword calls reserve one additional slot for their names tuple.
+    fn preserves_direct_descriptor_owner(self, args: &[ExpandedCallArg]) -> bool {
+        const CPYTHON_METHOD_CALL_STACK_GUIDELINE: usize = 30;
+
+        if self != Self::Fused {
+            return false;
+        }
+        if args.len() + 1 < CPYTHON_METHOD_CALL_STACK_GUIDELINE {
+            return true;
+        }
+        if args.len() >= CPYTHON_METHOD_CALL_STACK_GUIDELINE {
+            return false;
+        }
+        // Exactly 29 arguments remain: positional-only calls stay fused, but
+        // any keyword reserves the 30th stack slot and forces captured-call
+        // semantics. Other arities never need to scan the argument names.
+        args.iter().all(|arg| arg.name.is_none())
+    }
+}
+
 /// Whether a `BuiltinObject` is one of the typed adapters actually handled by
 /// [`Interpreter::try_call_builtin_callable`].
 ///
@@ -66,6 +94,31 @@ pub(crate) fn bind_legacy_builtin_subclass_backing(
 }
 
 impl Interpreter {
+    /// Call a value resolved by a `CallMethod` opcode without exposing its
+    /// concrete builtin representation to the fast-path domain.
+    ///
+    /// A compiler-fused positional/keyword call within CPython's stack-use
+    /// cutoff is a direct descriptor invocation only when the resolved bound
+    /// callable still targets the object on which the lookup occurred. Larger
+    /// calls, expanded calls, and callables returned from an unrelated
+    /// attribute/property keep normal captured-bound-method semantics.
+    pub(super) fn call_resolved_method(
+        &mut self,
+        lookup_receiver: &Value,
+        resolved: Value,
+        args: &[ExpandedCallArg],
+        shape: ResolvedMethodCallShape,
+    ) -> Result<Value> {
+        if shape.preserves_direct_descriptor_owner(args)
+            && let Some((name, receiver)) =
+                pyrust_builtins::bound_method::as_bound_method(&resolved)
+            && receiver.is_identical_to(lookup_receiver)
+        {
+            return self.call_bound_method_dispatch(name, receiver, args);
+        }
+        self.call_function_expanded(resolved, args)
+    }
+
     /// Preserve object identity for the VM's borrowed-register `id(x)` fast
     /// path.
     ///
@@ -295,7 +348,7 @@ impl Interpreter {
 
         if let Some((name, receiver)) = pyrust_builtins::bound_method::as_bound_method(function) {
             return self
-                .call_bound_method_dispatch(name, receiver, args)
+                .call_captured_bound_method_dispatch(name, receiver, args)
                 .map(Some);
         }
 
@@ -432,8 +485,14 @@ impl Interpreter {
             && let Some(receiver_arg) = args.first()
         {
             let receiver = receiver_arg.value.clone();
-            let receiver_matches = !matches!(receiver.kind(), ValueKind::PyInstance(_))
-                && pyrust_core::builtin_type_name(&receiver) == type_name;
+            let receiver_matches = receiver_arg.name.is_none()
+                && !matches!(receiver.kind(), ValueKind::PyInstance(_))
+                // Dictionary views have a typed unbound-descriptor adapter
+                // that preserves plain-vs-ordered ownership and inherited
+                // method policy. Do not bypass it through the generic layout
+                // table fast path.
+                && pyrust_builtins::dict_views::view_kind(&receiver).is_none()
+                && pyrust_core::builtin_layout_type_name(&receiver) == type_name;
             if receiver_matches {
                 if args[1..].iter().any(|arg| arg.name.is_some()) {
                     return Err(if is_named_protocol_wrapper(method, type_name) {

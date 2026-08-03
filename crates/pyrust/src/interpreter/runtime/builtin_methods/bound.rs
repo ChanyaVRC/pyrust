@@ -42,6 +42,114 @@ impl Interpreter {
         }
     }
 
+    fn dict_view_mapping_descriptor_protocol_call(
+        &mut self,
+        descriptor: Value,
+        info: pyrust_builtins::numeric_attrs_descriptor::DictViewMappingDescriptorInfo,
+        method: pyrust_builtins::numeric_attrs_descriptor::DictViewMappingDescriptorMethod,
+        pos: &[Value],
+        has_kw: bool,
+    ) -> Result<Value> {
+        use pyrust_builtins::numeric_attrs_descriptor::DictViewMappingDescriptorMethod;
+
+        if has_kw {
+            return Err(pyrust_core::type_err!(
+                "wrapper {}() takes no keyword arguments",
+                method.name()
+            ));
+        }
+        match method {
+            DictViewMappingDescriptorMethod::Get if pos.is_empty() => {
+                return Err(pyrust_core::type_err!(
+                    " expected at least 1 argument, got 0"
+                ));
+            }
+            DictViewMappingDescriptorMethod::Get if pos.len() > 2 => {
+                return Err(pyrust_core::type_err!(
+                    " expected at most 2 arguments, got {}",
+                    pos.len()
+                ));
+            }
+            DictViewMappingDescriptorMethod::Set if pos.len() != 2 => {
+                return Err(pyrust_core::type_err!(
+                    " expected 2 arguments, got {}",
+                    pos.len()
+                ));
+            }
+            DictViewMappingDescriptorMethod::Delete if pos.len() != 1 => {
+                return Err(pyrust_core::type_err!(
+                    "expected 1 argument, got {}",
+                    pos.len()
+                ));
+            }
+            _ => {}
+        }
+
+        let instance = &pos[0];
+        if method == DictViewMappingDescriptorMethod::Get && instance.is_none() {
+            if pos.get(1).is_none() || pos.get(1).is_some_and(Value::is_none) {
+                return Err(pyrust_core::type_err!("__get__(None, None) is invalid"));
+            }
+            return Ok(descriptor);
+        }
+        if pyrust_builtins::dict_views::view_kind(instance) != Some(info.view_kind) {
+            let actual = value_type_name_str(instance);
+            return Err(pyrust_core::type_err!(
+                "descriptor 'mapping' for '{}' objects doesn't apply to a '{}' object",
+                info.class_name,
+                actual
+            ));
+        }
+
+        match method {
+            DictViewMappingDescriptorMethod::Get => self.get_attr(instance, "mapping"),
+            DictViewMappingDescriptorMethod::Set | DictViewMappingDescriptorMethod::Delete => {
+                Err(pyrust_core::py_err!(
+                    "AttributeError",
+                    "attribute 'mapping' of '{}' objects is not writable",
+                    info.class_name
+                ))
+            }
+        }
+    }
+
+    fn call_dict_view_bound_method(
+        &mut self,
+        receiver: Value,
+        method: pyrust_builtins::dict_views::DictViewBoundMethod,
+        owner_name: &str,
+        args: Vec<Value>,
+        has_kw: bool,
+    ) -> Result<Value> {
+        if has_kw {
+            return Err(pyrust_core::type_err!(
+                "{}.{}() takes no keyword arguments",
+                owner_name,
+                method.name()
+            ));
+        }
+        match method {
+            pyrust_builtins::dict_views::DictViewBoundMethod::IsDisjoint => {
+                self.dict_view_isdisjoint(receiver, args, owner_name)
+            }
+            pyrust_builtins::dict_views::DictViewBoundMethod::Reversed => {
+                if !args.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "{owner_name}.__reversed__() takes no arguments ({} given)",
+                        args.len()
+                    ));
+                }
+                let arg = ExpandedCallArg {
+                    name: None,
+                    value: receiver,
+                };
+                let dispatch = crate::builtin_registry::lookup("reversed")
+                    .expect("reversed must be in the registry");
+                dispatch(self, &[arg])
+            }
+        }
+    }
+
     /// Dispatch a bound-method call and restore the interpreter's reusable
     /// positional-argument buffer on every return path.
     pub(super) fn call_bound_method_dispatch(
@@ -50,8 +158,38 @@ impl Interpreter {
         receiver_owned: Value,
         args: &[ExpandedCallArg],
     ) -> Result<Value> {
+        self.call_bound_method_dispatch_with_origin(
+            name_rc,
+            receiver_owned,
+            args,
+            pyrust_builtins::dict_views::DictViewBoundMethodOrigin::Direct,
+        )
+    }
+
+    pub(super) fn call_captured_bound_method_dispatch(
+        &mut self,
+        name_rc: std::rc::Rc<String>,
+        receiver_owned: Value,
+        args: &[ExpandedCallArg],
+    ) -> Result<Value> {
+        self.call_bound_method_dispatch_with_origin(
+            name_rc,
+            receiver_owned,
+            args,
+            pyrust_builtins::dict_views::DictViewBoundMethodOrigin::Captured,
+        )
+    }
+
+    fn call_bound_method_dispatch_with_origin(
+        &mut self,
+        name_rc: std::rc::Rc<String>,
+        receiver_owned: Value,
+        args: &[ExpandedCallArg],
+        origin: pyrust_builtins::dict_views::DictViewBoundMethodOrigin,
+    ) -> Result<Value> {
         let mut pos = std::mem::take(&mut self.bound_method_pos_buf);
-        let result = self.bound_method_dispatch_inner(name_rc, receiver_owned, args, &mut pos);
+        let result =
+            self.bound_method_dispatch_inner(name_rc, receiver_owned, args, &mut pos, origin);
         self.bound_method_pos_buf = pos;
         result
     }
@@ -62,6 +200,7 @@ impl Interpreter {
         receiver_owned: Value,
         args: &[ExpandedCallArg],
         pos: &mut Vec<Value>,
+        origin: pyrust_builtins::dict_views::DictViewBoundMethodOrigin,
     ) -> Result<Value> {
         // Borrow the method name as `&str` from the `Rc<String>` rather
         // than cloning into a fresh `String` — the dispatch helpers
@@ -176,6 +315,23 @@ impl Interpreter {
             let args_vec: Vec<Value> = std::mem::take(pos);
             return self.member_descriptor_protocol_call(receiver, method, args_vec);
         }
+        if let Some(descriptor_method) =
+            pyrust_builtins::numeric_attrs_descriptor::DictViewMappingDescriptorMethod::from_name(
+                method,
+            )
+            && let Some(info) =
+                pyrust_builtins::numeric_attrs_descriptor::as_dict_view_mapping_descriptor(
+                    &receiver,
+                )
+        {
+            return self.dict_view_mapping_descriptor_protocol_call(
+                receiver,
+                info,
+                descriptor_method,
+                pos,
+                has_kw,
+            );
+        }
         // Bound-method dispatch: each builtin takes `&Value`
         // and scopes its own `RefCell::borrow_mut()` for the
         // duration of the operation (#448).  No `&mut Vec /
@@ -211,45 +367,20 @@ impl Interpreter {
             let args_vec: Vec<Value> = std::mem::take(pos);
             return self.call_frozenset_method(method, receiver, args_vec);
         }
-        // #1891: set-like dict views (`dict_keys` / `dict_items`) expose
-        // `isdisjoint`, which accepts any iterable and returns True when no
-        // element of the argument is in the view.  Iterating the argument (and
-        // probing the view's `__contains__`) means a `dict_items` view whose
-        // own values are unhashable still works, matching CPython.
-        if !has_kw
-            && method == "isdisjoint"
-            && let Some(kind) = pyrust_builtins::dict_views::view_kind(&receiver)
-            && matches!(
-                kind,
-                pyrust_builtins::dict_views::DictViewKind::Keys
-                    | pyrust_builtins::dict_views::DictViewKind::Items
-            )
+        // #1891/#2093: dictionary-view method descriptors use receiver-state
+        // presentation. Their call origin also matters: direct ordered-view
+        // `isdisjoint` calls report the inherited base owner, while a saved
+        // bound method reports the concrete ordered owner.
+        if let Some(info) =
+            pyrust_builtins::dict_views::bound_method_info(&receiver, method, origin)
         {
-            let args_vec: Vec<Value> = std::mem::take(pos);
-            return self.dict_view_isdisjoint(receiver, args_vec);
-        }
-        // #2093: dict views are reversible by insertion order; expose
-        // `view.__reversed__()` so the dunder is callable (and `reversed(view)`
-        // works through the builtin).  Routes back through the `reversed`
-        // builtin, which materialises the view in reverse.
-        if !has_kw
-            && method == "__reversed__"
-            && pyrust_builtins::dict_views::view_kind(&receiver).is_some()
-        {
-            if !pos.is_empty() {
-                let view_name = value_type_name_str(&receiver);
-                return Err(pyrust_core::type_err!(
-                    "{view_name}.__reversed__() takes no arguments ({} given)",
-                    pos.len()
-                ));
-            }
-            let arg = ExpandedCallArg {
-                name: None,
-                value: receiver,
-            };
-            let dispatch = crate::builtin_registry::lookup("reversed")
-                .expect("reversed must be in the registry");
-            return dispatch(self, &[arg]);
+            return self.call_dict_view_bound_method(
+                receiver,
+                info.method,
+                info.owner_name,
+                std::mem::take(pos),
+                has_kw,
+            );
         }
         // issue #2728: route `mappingproxy.__reversed__()` back through the
         // `reversed` builtin so the returned iterator carries the size-mutation
@@ -342,7 +473,7 @@ impl Interpreter {
         // constructed by `get_attr` only for `builtin_protocol_dunders`
         // names), so dispatch straight through the operator machinery.
         if method.starts_with("__")
-            && is_protocol_dunder(&pyrust_core::builtin_type_name(&receiver), method)
+            && is_protocol_dunder(&pyrust_core::builtin_layout_type_name(&receiver), method)
         {
             // Issue #2423: bytes/bytearray `__getitem__`/`__contains__` and
             // `frozenset.__contains__` reach this bound method-call arm (rather

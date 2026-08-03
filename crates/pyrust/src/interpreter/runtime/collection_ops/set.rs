@@ -19,6 +19,35 @@ pub(super) fn is_setlike_view(v: &Value) -> bool {
     )
 }
 
+/// Cardinality for operands accepted by native set-style comparisons, without
+/// materialising dictionary items (whose values need not be hashable).
+pub(super) fn set_comparison_len(v: &Value) -> Option<usize> {
+    if let ValueKind::Set(items) = v.kind() {
+        return Some(items.len());
+    }
+    if let Some(items) = pyrust_builtins::frozenset::as_items(v) {
+        return Some(items.len());
+    }
+    if is_setlike_view(v) {
+        return pyrust_builtins::dict_views::as_dict_rc(v).map(|dict| dict.borrow().len());
+    }
+    builtin_data_backing(v).and_then(|backing| set_comparison_len(&backing))
+}
+
+/// Whether rich-comparison slots may treat `v` as a native set-like operand.
+/// This is deliberately narrower than general iterability: CPython returns
+/// `NotImplemented` for dict-view comparisons with lists and arbitrary
+/// `collections.abc.Set` implementations.
+pub(super) fn is_set_comparison_operand(v: &Value) -> bool {
+    if matches!(v.kind(), ValueKind::Set(_))
+        || pyrust_builtins::frozenset::as_items(v).is_some()
+        || is_setlike_view(v)
+    {
+        return true;
+    }
+    builtin_data_backing(v).is_some_and(|backing| is_set_comparison_operand(&backing))
+}
+
 /// Extract a set's items and frozen flag from a value that is a `set`,
 /// `frozenset`, or a `PyInstance` subclass backed by either.  Returns
 /// `None` when the value is none of those.
@@ -509,6 +538,56 @@ pub(super) fn set_subset_cmp(
     right: &Value,
     op: BinaryOp,
 ) -> Option<Result<Value>> {
+    let item_view_involved = matches!(
+        pyrust_builtins::dict_views::view_kind(left),
+        Some(pyrust_builtins::dict_views::DictViewKind::Items)
+    ) || matches!(
+        pyrust_builtins::dict_views::view_kind(right),
+        Some(pyrust_builtins::dict_views::DictViewKind::Items)
+    );
+    if item_view_involved {
+        // CPython rejects impossible cardinalities before hashing or
+        // materialising an item view. The ordinary set/frozenset comparison
+        // implementation below remains unchanged.
+        let left_len = set_comparison_len(left)?;
+        let right_len = set_comparison_len(right)?;
+        let impossible = match op {
+            BinaryOp::Lt => left_len >= right_len,
+            BinaryOp::Le => left_len > right_len,
+            BinaryOp::Gt => left_len <= right_len,
+            BinaryOp::Ge => left_len < right_len,
+            _ => unreachable!("set_subset_cmp called with non-comparison op"),
+        };
+        if impossible {
+            return Some(Ok(Value::bool_(false)));
+        }
+
+        let (subset, superset) = match op {
+            BinaryOp::Lt | BinaryOp::Le => (left, right),
+            BinaryOp::Gt | BinaryOp::Ge => (right, left),
+            _ => unreachable!("set_subset_cmp called with non-comparison op"),
+        };
+
+        // Two item views compare directly through their live backing mappings,
+        // so list/dict values never need to become hash keys.
+        if let Some(result) = interp.dict_items_view_is_subset(subset, superset) {
+            return Some(result.map(Value::bool_));
+        }
+
+        // When an item view is the source, iterate its live mapping lazily.
+        // Reaching an item constructs and hashes one fresh tuple; an earlier
+        // membership miss leaves later unhashable items untouched.
+        if let Some(result) = interp.dict_items_view_is_subset_of_setlike(subset, superset) {
+            return Some(result.map(Value::bool_));
+        }
+
+        // When an item view is the containment target, probe it item-by-item.
+        // Mutable set/key-view sources retain their live mutation guards.
+        if let Some(result) = interp.setlike_is_subset_of_dict_items(subset, superset) {
+            return Some(result.map(Value::bool_));
+        }
+    }
+
     // Both operands must be set-like (set/frozenset/subclass or a set-like dict
     // view, issue #1891); otherwise fall through to the normal comparison path
     // so it raises the `'<=' not supported between …` TypeError.

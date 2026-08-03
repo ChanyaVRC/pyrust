@@ -64,7 +64,20 @@ pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
         }
         ValueKind::NotImplemented => Cow::Borrowed("NotImplementedType"),
         ValueKind::Ellipsis => Cow::Borrowed("ellipsis"),
+        ValueKind::BuiltinObject { ops, state } => Cow::Borrowed(ops.display_type_name_for(state)),
+    }
+}
+
+/// Stable state-independent name used only by internal protocol dispatch.
+///
+/// A shared operations table may present more than one Python class through
+/// state-aware metadata. Dispatch keeps the state-free display name so
+/// canonical primitive tags still resolve to their Python class while a
+/// state-multiplexed layout keeps one stable routing name.
+pub fn builtin_layout_type_name(value: &Value) -> Cow<'static, str> {
+    match value.kind() {
         ValueKind::BuiltinObject { ops, .. } => Cow::Borrowed(ops.display_type_name()),
+        _ => builtin_type_name(value),
     }
 }
 
@@ -84,7 +97,7 @@ pub fn error_type_name(value: &Value) -> Cow<'static, str> {
                 .error_name
                 .map_or_else(|| Cow::Owned(class.name.clone()), Cow::Borrowed)
         }
-        ValueKind::BuiltinObject { ops, .. } => Cow::Borrowed(ops.display_error_name()),
+        ValueKind::BuiltinObject { ops, state } => Cow::Borrowed(ops.display_error_name_for(state)),
         _ => builtin_type_name(value),
     }
 }
