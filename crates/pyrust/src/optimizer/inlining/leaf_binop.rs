@@ -100,13 +100,13 @@ fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> 
         resume: usize,
     }
     let mut sites: Vec<Site> = Vec::new();
-    // Best-effort binding of a register to the proto whose function the
-    // compiler stored there: `MakeFunction(f, p, …)` or
-    // `MakeFunction(r, p, …); Move(f, r)`.  The map is carried forward *while*
-    // sites are collected, so a site at instruction `i` binds the latest store
-    // before `i` rather than the whole-function last write — a name re-`def`ed
-    // later in the module no longer wires its earlier call sites to the final
-    // proto, which made them fail the runtime identity check on every call.
+    // Best-effort binding of a register to the proto whose function value it
+    // holds.  The map is carried forward *while* sites are collected, so a site
+    // at instruction `i` binds the latest store before `i` rather than the
+    // whole-function last write — a name re-`def`ed later in the module no
+    // longer wires its earlier call sites to the final proto, which made them
+    // fail the runtime identity check on every call.  Move/CopyReg propagate a
+    // known binding; every other register write kills it.
     //
     // The order that matters here is stream order, not dominance: a
     // `MakeFunction` in one arm of an `if` is the "latest before `i`" for sites
@@ -117,30 +117,30 @@ fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> 
     // call.  Tracking dominance instead would buy nothing on the shapes this
     // pass targets (a leaf `def` at the top of a scope).
     let mut reg_proto: HashMap<Reg, u16> = HashMap::new();
+    let mut written: HashSet<Reg> = HashSet::new();
     let mut i = 0usize;
     while i < n {
-        if let Insn::MakeFunction(r, p, ..) = &insns[i] {
-            let bind = eligible
-                .get(*p as usize)
-                .copied()
-                .flatten()
-                .is_some()
-                .then_some(*p);
-            let aliased = match insns.get(i + 1) {
-                Some(Insn::Move(f, src)) if src == r => Some(*f),
-                _ => None,
-            };
-            // A re-`def` to an *ineligible* proto must kill the old binding as
-            // well, or later sites keep guarding against a proto the name no
-            // longer holds.
-            for reg in std::iter::once(*r).chain(aliased) {
-                match bind {
-                    Some(p) => reg_proto.insert(reg, p),
-                    None => reg_proto.remove(&reg),
-                };
+        let rebound = match &insns[i] {
+            Insn::MakeFunction(dst, proto, ..) => Some((
+                *dst,
+                eligible
+                    .get(*proto as usize)
+                    .copied()
+                    .flatten()
+                    .map(|_| *proto),
+            )),
+            Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
+                Some((*dst, reg_proto.get(src).copied()))
             }
-            i += 1;
-            continue;
+            _ => None,
+        };
+        written.clear();
+        collect_writes(&insns[i], &mut written);
+        for dst in &written {
+            reg_proto.remove(dst);
+        }
+        if let Some((dst, Some(proto))) = rebound {
+            reg_proto.insert(dst, proto);
         }
         if i + 3 >= n {
             i += 1;
@@ -205,8 +205,6 @@ fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> 
             if sites.len() == MAX_INLINE_SITES {
                 break;
             }
-            i += 4;
-            continue;
         }
         i += 1;
     }
