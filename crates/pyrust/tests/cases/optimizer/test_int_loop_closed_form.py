@@ -32,9 +32,9 @@ for m in range(100, 0, -7):
     down += m
 print("negative step", down, m)
 
-# Negative literals reach the pass as an un-folded `UnaryOp(Neg)` sequence
-# (`pass_unary_fold` declines to fold across the loop's back edge), so the whole
-# negative-bound family exercises the trace's constant interpretation.
+# The full optimizer folds negative literals before loop versioning.  These
+# cases exercise the negative-bound family end to end; a direct pass unit test
+# separately keeps the trace robust to an unnormalised `UnaryOp(Neg)` sequence.
 neg = 0
 for na in range(-20, -3):
     neg += na

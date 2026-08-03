@@ -307,6 +307,123 @@ fn unary_fold_skips_unaryop_that_is_jump_target() {
 }
 
 #[test]
+fn unary_fold_folds_negated_literals_before_and_inside_a_loop() {
+    use crate::ast::UnaryOp;
+    use crate::value::ValueKind;
+
+    let code = compile_fn(
+        r#"def f(n):
+    before_int = -5
+    before_float = -2.5
+    inside_int = 0
+    inside_float = 0.0
+    while n:
+        inside_int = -7
+        inside_float = -0.5
+        n = n - 1
+    return before_int, before_float, inside_int, inside_float
+"#,
+    );
+
+    let raw = &code.fn_protos[0].code.insns;
+    assert!(
+        raw.windows(2).any(|pair| matches!(
+            pair,
+            [Insn::LoadConst(reg, _), Insn::UnaryOp(dst, UnaryOp::Neg, src)]
+                if reg == dst && dst == src
+        )),
+        "the compiler must expose the self-destination literal shape: {raw:?}"
+    );
+
+    let optimized = optimize(code);
+    let function = &optimized.fn_protos[0].code;
+    assert!(
+        !function
+            .insns
+            .iter()
+            .any(|insn| matches!(insn, Insn::UnaryOp(_, UnaryOp::Neg, _))),
+        "literal negations must fold even when a later back edge exists: {:?}",
+        function.insns
+    );
+    for expected in [-5, -7] {
+        assert!(
+            function
+                .consts
+                .iter()
+                .any(|value| matches!(value.kind(), ValueKind::Int(value) if value == expected)),
+            "folded int {expected} must remain in the constant pool: {:?}",
+            function.consts
+        );
+    }
+    for expected in [-2.5, -0.5] {
+        assert!(
+            function
+                .consts
+                .iter()
+                .any(|value| matches!(value.kind(), ValueKind::Float(value) if value == expected)),
+            "folded float {expected} must remain in the constant pool: {:?}",
+            function.consts
+        );
+    }
+}
+
+#[test]
+fn unary_fold_folds_distinct_dead_source_before_a_back_edge() {
+    use crate::ast::UnaryOp;
+    use crate::value::{Value, ValueKind};
+
+    // The later loop never reads r3, so removing its defining LoadConst is
+    // safe even though the UnaryOp writes a distinct destination.
+    let mut consts = vec![Value::int(5)];
+    let insns = vec![
+        Insn::LoadConst(3, 0),
+        Insn::UnaryOp(4, UnaryOp::Neg, 3),
+        Insn::JumpIfFalse(0, 1),
+        Insn::Jump(-2),
+        Insn::Return(4),
+    ];
+    let out = pass_unary_fold(insns, 2, &mut consts);
+    assert!(
+        matches!(out[0], Insn::LoadConst(4, _)),
+        "a dead distinct source must fold before an unrelated back edge: {out:?}"
+    );
+    assert!(
+        !out.iter().any(|insn| matches!(insn, Insn::UnaryOp(..))),
+        "the folded UnaryOp must be absent: {out:?}"
+    );
+    let Insn::LoadConst(_, folded) = out[0] else {
+        unreachable!()
+    };
+    assert!(matches!(
+        consts[usize::from(folded)].kind(),
+        ValueKind::Int(-5)
+    ));
+}
+
+#[test]
+fn unary_fold_keeps_distinct_source_live_across_a_back_edge() {
+    use crate::ast::UnaryOp;
+    use crate::value::Value;
+
+    // Folding would remove r3's defining LoadConst while the loop keeps
+    // reading r3 on every trip through its back edge.  Because dst != src,
+    // the folded result in r4 cannot preserve that live source value.
+    let mut consts = vec![Value::int(5)];
+    let insns = vec![
+        Insn::LoadConst(3, 0),
+        Insn::UnaryOp(4, UnaryOp::Neg, 3),
+        Insn::CopyReg(5, 3),
+        Insn::Jump(-2),
+        Insn::Return(4),
+    ];
+    let out = pass_unary_fold(insns.clone(), 2, &mut consts);
+    assert_eq!(
+        out, insns,
+        "a distinct source that stays live across a back edge must not fold"
+    );
+}
+
+#[test]
 fn unary_fold_not_bool() {
     use crate::ast::UnaryOp;
     use crate::value::Value;
