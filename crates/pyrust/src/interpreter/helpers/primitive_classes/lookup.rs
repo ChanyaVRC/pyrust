@@ -41,15 +41,22 @@ pub(crate) fn builtin_type_class_by_name(name: &str) -> Option<Rc<RefCell<PyClas
         .map(BuiltinTypeClass::singleton)
 }
 
+/// Resolve one of the six hidden dictionary-view class names for descriptor
+/// ownership. These classes intentionally remain absent from builtins lookup.
+pub(crate) fn dict_view_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>> {
+    DictViewClass::from_class_name(name).map(DictViewClass::singleton)
+}
+
 /// True when `class` is an interpreter-owned `builtins` type singleton that
 /// carries no [`CanonicalClassTag`](pyrust_core::CanonicalClassTag) — `range`
-/// plus the [`BuiltinTypeClass`] group.  Such a class still has the built-in
-/// type metadata (`__module__ == "builtins"`, a `__doc__` from
-/// [`builtin_class_doc`]) that `type` supplies virtually.
+/// plus the [`BuiltinTypeClass`] and dictionary-view groups.  Such a class
+/// still has the built-in type metadata (`__module__ == "builtins"`, a
+/// `__doc__` from [`builtin_class_doc`]) that `type` supplies virtually.
 pub(crate) fn is_untagged_builtin_type_class(class: &Rc<RefCell<PyClass>>) -> bool {
     let ptr = Rc::as_ptr(class);
     RANGE_CLASS.with(|range| ptr == Rc::as_ptr(range))
         || BUILTIN_TYPE_CLASSES.with(|classes| classes.iter().any(|entry| ptr == Rc::as_ptr(entry)))
+        || DICT_VIEW_CLASSES.with(|classes| classes.iter().any(|entry| ptr == Rc::as_ptr(entry)))
 }
 
 /// Look up the per-primitive `PyClass` singleton for one of the migrated
@@ -144,13 +151,22 @@ pub(crate) fn primitive_class_for_value(v: &Value) -> Option<Rc<RefCell<PyClass>
         ValueKind::Range { .. } | ValueKind::BigRange { .. } => {
             return Some(RANGE_CLASS.with(Rc::clone));
         }
-        ValueKind::BuiltinObject { ops, .. } => ops.canonical_class_tag()?,
+        ValueKind::BuiltinObject { ops, .. } => {
+            if let Some(kind) = pyrust_builtins::dict_views::view_kind(v) {
+                return Some(
+                    DictViewClass::from_view(kind, pyrust_builtins::dict_views::is_ordered_view(v))
+                        .singleton(),
+                );
+            }
+            ops.canonical_class_tag()?
+        }
         _ => return None,
     };
     Some(canonical_class_by_tag(tag))
 }
 
-/// True iff `class` is one of the 11 migrated-primitive class singletons.
+/// True iff `class` is one of the interpreter-owned built-in class singletons
+/// routed through the native constructor dispatch table.
 /// O(1) via the [`PRIMITIVE_CLASS_DISPATCH`] table.
 pub(crate) fn is_primitive_class(class: &Rc<RefCell<PyClass>>) -> bool {
     primitive_class_dispatch(class).is_some()

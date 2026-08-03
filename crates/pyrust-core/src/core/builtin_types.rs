@@ -35,6 +35,17 @@ pub trait BuiltinTypeOps: Any {
             .map_or_else(|| self.type_name(), CanonicalClassTag::canonical_name)
     }
 
+    /// Python-visible class name when presentation depends on the object's
+    /// immutable built-in state.
+    ///
+    /// Most operations tables represent one Python class and keep the static
+    /// default. A shared native layout can override this seam without making
+    /// generic callers decode its concrete state or presentation strings.
+    fn display_type_name_for(&self, state: &BuiltinState) -> &'static str {
+        let _ = state;
+        self.display_type_name()
+    }
+
     /// CPython's `tp_name` spelling used only in error messages.
     ///
     /// Most opaque built-ins use their Python-visible display name. Static
@@ -42,6 +53,17 @@ pub trait BuiltinTypeOps: Any {
     /// without changing repr or type presentation.
     fn display_error_name(&self) -> &'static str {
         self.display_type_name()
+    }
+
+    /// CPython's diagnostic type spelling when it depends on immutable
+    /// built-in state.
+    ///
+    /// Static module-qualified error names remain authoritative by default.
+    /// Shared native layouts can override this without making generic error
+    /// paths decode their concrete state.
+    fn display_error_name_for(&self, state: &BuiltinState) -> &'static str {
+        let _ = state;
+        self.display_error_name()
     }
 
     /// Override the backing state address used for Python object identity.
@@ -83,12 +105,12 @@ pub trait BuiltinTypeOps: Any {
     }
 
     fn setattr(&self, state: &BuiltinState, name: &str, value: Value) -> Result<()> {
-        let _ = (state, value);
+        let _ = value;
         Err(PyError::named(
             "AttributeError",
             format!(
                 "'{}' object has no attribute '{}'",
-                self.display_error_name(),
+                self.display_error_name_for(state),
                 name
             ),
         ))
@@ -100,10 +122,13 @@ pub trait BuiltinTypeOps: Any {
         args: Vec<Value>,
         kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
-        let _ = (state, args, kwargs);
+        let _ = (args, kwargs);
         Err(PyError::named(
             "TypeError",
-            format!("'{}' object is not callable", self.display_error_name()),
+            format!(
+                "'{}' object is not callable",
+                self.display_error_name_for(state)
+            ),
         ))
     }
 
@@ -114,22 +139,24 @@ pub trait BuiltinTypeOps: Any {
         args: Vec<Value>,
         kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
-        let _ = (state, args, kwargs);
+        let _ = (args, kwargs);
         Err(PyError::named(
             "AttributeError",
             format!(
                 "'{}' object has no attribute '{}'",
-                self.display_error_name(),
+                self.display_error_name_for(state),
                 name
             ),
         ))
     }
 
     fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
-        let _ = state;
         Err(PyError::named(
             "TypeError",
-            format!("'{}' object is not iterable", self.display_error_name()),
+            format!(
+                "'{}' object is not iterable",
+                self.display_error_name_for(state)
+            ),
         ))
     }
 
@@ -139,45 +166,45 @@ pub trait BuiltinTypeOps: Any {
     }
 
     fn get_item(&self, state: &BuiltinState, key: &Value) -> Result<Value> {
-        let _ = (state, key);
+        let _ = key;
         Err(PyError::named(
             "TypeError",
             format!(
                 "'{}' object is not subscriptable",
-                self.display_error_name()
+                self.display_error_name_for(state)
             ),
         ))
     }
 
     fn set_item(&self, state: &BuiltinState, key: &Value, value: Value) -> Result<()> {
-        let _ = (state, key, value);
+        let _ = (key, value);
         Err(PyError::named(
             "TypeError",
             format!(
                 "'{}' object does not support item assignment",
-                self.display_error_name()
+                self.display_error_name_for(state)
             ),
         ))
     }
 
     fn delete_item(&self, state: &BuiltinState, key: &Value) -> Result<()> {
-        let _ = (state, key);
+        let _ = key;
         Err(PyError::named(
             "TypeError",
             format!(
                 "'{}' object does not support item deletion",
-                self.display_error_name()
+                self.display_error_name_for(state)
             ),
         ))
     }
 
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
-        let _ = (state, item);
+        let _ = item;
         Err(PyError::named(
             "TypeError",
             format!(
                 "argument of type '{}' is not iterable",
-                self.display_error_name()
+                self.display_error_name_for(state)
             ),
         ))
     }

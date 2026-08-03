@@ -184,6 +184,15 @@ pyrust_module! {
                 ));
             }
         };
+        // Exact primitive classes normally take the dedicated constructor
+        // fast path before generic class construction.  An explicit
+        // `type.__call__(Builtin, ...)` enters here directly, so share that
+        // dispatch without adding a lookup to every ordinary user-class call.
+        // This also keeps hidden final types such as dictionary views from
+        // falling through to a backing-less PyInstance.
+        if let Some(dispatch) = primitive_class_dispatch(&class) {
+            return dispatch(_interp, &args[1..]);
+        }
         _interp.default_construct(class, &args[1..])
     }
 }

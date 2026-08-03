@@ -258,6 +258,7 @@ impl Interpreter {
             }
             _ => {
                 let type_name = pyrust_core::error_type_name(&target);
+                let data_descriptor_owner = dict_view_mapping_descriptor_owner(&target, name);
                 // CPython distinguishes "attribute does not exist" from
                 // "attribute exists on the type but is read-only" (issue #2562).
                 // `(1).real = 5` resolves `real` to a read-only getset_descriptor
@@ -290,9 +291,10 @@ impl Interpreter {
                             "'{type_name}' object attribute '{name}' is read-only"
                         ))
                     } else {
+                        let owner_name = data_descriptor_owner.unwrap_or(type_name.as_ref());
                         Err(pyrust_core::py_err!(
                             "AttributeError",
-                            "attribute '{name}' of '{type_name}' objects is not writable"
+                            "attribute '{name}' of '{owner_name}' objects is not writable"
                         ))
                     };
                 }
@@ -375,6 +377,12 @@ impl Interpreter {
             pyrust_builtins::ordered_mapping::immutable_class_attribute_error(class, name)
         {
             return Err(error);
+        }
+        if crate::interpreter::is_primitive_class(class) {
+            let class_name = class.borrow().name.clone();
+            return Err(pyrust_core::type_err!(
+                "cannot set '{name}' attribute of immutable type '{class_name}'"
+            ));
         }
         // __dict__ is a read-only descriptor on type objects — CPython
         // raises AttributeError on `del C.__dict__`.

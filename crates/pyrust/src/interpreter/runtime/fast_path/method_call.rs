@@ -76,7 +76,12 @@ impl Interpreter {
                     value: arg,
                 });
             }
-            let r = self.call_function_expanded(method_val, &buf);
+            let r = self.call_resolved_method(
+                &obj_val,
+                method_val,
+                &buf,
+                ResolvedMethodCallShape::Fused,
+            );
             self.call_arg_buf = buf;
 
             // Fill or update the inline cache for this user-object call site.
@@ -131,7 +136,15 @@ impl Interpreter {
             return Err(pyrust_core::type_err!("keywords must be strings"));
         }
 
-        self.dispatch_method_with_args(regs, num_locals, obj, method, pos_items, kw_map)
+        self.dispatch_method_with_args(
+            regs,
+            num_locals,
+            obj,
+            method,
+            pos_items,
+            kw_map,
+            ResolvedMethodCallShape::Expanded,
+        )
     }
 
     /// Shared dispatch tail for a method call whose positional args and keyword
@@ -141,6 +154,7 @@ impl Interpreter {
     /// keyword arguments (its keys are guaranteed `str` by the caller).  Routes
     /// through the tagged-container fast dispatch, generator-method dispatch, and
     /// finally the generic `get_attr` + `call_function_expanded` path.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn dispatch_method_with_args(
         &mut self,
         regs: &mut RegSlice,
@@ -149,6 +163,7 @@ impl Interpreter {
         method: &str,
         pos_items: Vec<Value>,
         kw_map: PyDict,
+        call_shape: ResolvedMethodCallShape,
     ) -> Result<Value> {
         let obj_kind = BuiltinContainerKind::classify(regs[obj as usize].as_some());
 
@@ -198,7 +213,7 @@ impl Interpreter {
                     });
                 }
             }
-            let r = self.call_function_expanded(method_val, &buf);
+            let r = self.call_resolved_method(&obj_val, method_val, &buf, call_shape);
             self.call_arg_buf = buf;
             r
         }

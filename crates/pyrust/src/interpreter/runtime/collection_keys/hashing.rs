@@ -117,10 +117,13 @@ fn hash_value(value: &Value) -> Result<i64> {
         // SliceOps::hash was removed in PR #850.
         ValueKind::BuiltinObject { ops, state } => match ops.hash(state) {
             Some(h) => Ok(h as i64),
-            None => Err(PyError::named(
-                "TypeError",
-                format!("unhashable type: '{}'", ops.display_error_name()),
-            )),
+            None => {
+                let type_name = ops.display_error_name_for(state);
+                Err(PyError::named(
+                    "TypeError",
+                    format!("unhashable type: '{type_name}'"),
+                ))
+            }
         },
         // PyInstance arriving here means either the caller didn't intercept
         // it for __hash__ dispatch (e.g. a tuple element), or no __hash__

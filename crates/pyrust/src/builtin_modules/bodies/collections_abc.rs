@@ -78,7 +78,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{ExpandedCallArg, class_is_subclass_of};
+use crate::interpreter::{DictViewClass, ExpandedCallArg, class_is_subclass_of};
 use crate::value::{PyClass, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
@@ -196,6 +196,50 @@ fn canonical_structural_abc_name(class: &Rc<RefCell<PyClass>>) -> Option<&'stati
     None
 }
 
+/// CPython registers the dictionary-view families with the collections ABCs
+/// virtually. Ordered views share their corresponding plain view's ABC shape.
+fn dict_view_is_virtual_abc(kind: DictViewClass, abc: &Rc<RefCell<PyClass>>) -> bool {
+    let is = |candidate: &'static std::thread::LocalKey<Rc<RefCell<PyClass>>>| {
+        candidate.with(|class| Rc::ptr_eq(class, abc))
+    };
+    match kind {
+        DictViewClass::Keys | DictViewClass::OrderedKeys => {
+            is(&ABC_MAPPING_VIEW)
+                || is(&ABC_KEYS_VIEW)
+                || is(&ABC_SET)
+                || is(&ABC_ITERABLE)
+                || is(&ABC_SIZED)
+                || is(&ABC_CONTAINER)
+                || is(&ABC_REVERSIBLE)
+        }
+        DictViewClass::Items | DictViewClass::OrderedItems => {
+            is(&ABC_MAPPING_VIEW)
+                || is(&ABC_ITEMS_VIEW)
+                || is(&ABC_SET)
+                || is(&ABC_ITERABLE)
+                || is(&ABC_SIZED)
+                || is(&ABC_CONTAINER)
+                || is(&ABC_REVERSIBLE)
+        }
+        DictViewClass::Values | DictViewClass::OrderedValues => {
+            is(&ABC_MAPPING_VIEW)
+                || is(&ABC_VALUES_VIEW)
+                || is(&ABC_ITERABLE)
+                || is(&ABC_SIZED)
+                || is(&ABC_CONTAINER)
+                || is(&ABC_REVERSIBLE)
+        }
+    }
+}
+
+fn dict_view_instance_is_virtual_abc(value: &Value, abc: &Rc<RefCell<PyClass>>) -> bool {
+    pyrust_builtins::dict_views::view_kind(value)
+        .map(|kind| {
+            DictViewClass::from_view(kind, pyrust_builtins::dict_views::is_ordered_view(value))
+        })
+        .is_some_and(|kind| dict_view_is_virtual_abc(kind, abc))
+}
+
 // ── Primitive protocol support table ─────────────────────────────────────────
 //
 // Maps (value type tag, dunder name) → bool.  Covers only the dunders that
@@ -268,7 +312,18 @@ fn primitive_value_has_dunder(value: &Value, dunder: &str) -> bool {
 
         // BuiltinObject variants
         ValueKind::BuiltinObject { ops, .. } => {
-            if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) {
+            if let Some(kind) = pyrust_builtins::dict_views::view_kind(value) {
+                match kind {
+                    pyrust_builtins::dict_views::DictViewKind::Values => {
+                        matches!(dunder, "__iter__" | "__len__" | "__reversed__" | "__hash__")
+                    }
+                    pyrust_builtins::dict_views::DictViewKind::Keys
+                    | pyrust_builtins::dict_views::DictViewKind::Items => matches!(
+                        dunder,
+                        "__iter__" | "__len__" | "__reversed__" | "__contains__"
+                    ),
+                }
+            } else if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) {
                 // bytearray: iterable, sized, contains, reversed, NOT hashable
                 matches!(
                     dunder,
@@ -454,6 +509,12 @@ pyrust_module! {
                 format!("{FN_NAME}() first argument must be a class"))),
         };
 
+        // ABC registration is virtual: it must affect isinstance without
+        // adding the ABC to the concrete dictionary-view class's MRO.
+        if dict_view_instance_is_virtual_abc(instance, &abc_class) {
+            return Ok(Value::bool_(true));
+        }
+
         // Step 1: structural hook (instance-based).
         if let Some(abc_name) = canonical_structural_abc_name(&abc_class)
             && let Some(result) = abc_subclasshook(abc_name, instance)
@@ -547,6 +608,13 @@ pyrust_module! {
 
         match subclass_val.kind() {
             ValueKind::PyClass(c_rc) => {
+                // Same virtual registry as `__instancecheck__`, keyed by the
+                // immutable dictionary-view singleton identity.
+                if DictViewClass::from_class(c_rc)
+                    .is_some_and(|kind| dict_view_is_virtual_abc(kind, &abc_class))
+                {
+                    return Ok(Value::bool_(true));
+                }
                 // Step 1: structural hook (class-based).
                 if let Some(abc_name) = canonical_structural_abc_name(&abc_class)
                     && let Some(result) = abc_subclasshook_for_class(abc_name, c_rc)

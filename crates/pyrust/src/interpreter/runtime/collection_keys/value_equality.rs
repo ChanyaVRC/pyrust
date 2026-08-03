@@ -1,4 +1,338 @@
 impl Interpreter {
+    fn dict_items_backing_value(view: &Value) -> Option<Value> {
+        if !matches!(
+            pyrust_builtins::dict_views::view_kind(view),
+            Some(pyrust_builtins::dict_views::DictViewKind::Items)
+        ) {
+            return None;
+        }
+        pyrust_builtins::dict_views::as_dict_rc(view).map(Value::dict_shared)
+    }
+
+    /// Capture the provider-owned mutation watch only for an ordered mapping
+    /// view. Plain dictionary views continue to use `LiveKeyCursor` alone.
+    fn ordered_dict_view_comparison_watch(view: &Value) -> Option<OrderedIterationWatch> {
+        pyrust_builtins::ordered_mapping::view_policy(view)
+            .is_some()
+            .then(|| ordered_iteration_watch(view))
+    }
+
+    /// Advance a lazy set-like comparison source after applying the stronger
+    /// OrderedDict iterator policy. The guard runs on the terminal advance as
+    /// well, so a callback from the last yielded entry cannot be hidden by
+    /// ordinary cursor exhaustion.
+    fn advance_setlike_comparison_cursor(
+        source: &Value,
+        cursor: &mut LiveKeyCursor,
+        recorded_len: usize,
+        ordered_watch: Option<&OrderedIterationWatch>,
+    ) -> Result<Option<LiveDictViewItem>> {
+        if let Some(watch) = ordered_watch {
+            let relinked = watch.relinked();
+            let size_changed = set_comparison_len(source) != Some(recorded_len);
+            if relinked || size_changed {
+                let outcome = ordered_mapping_guard_outcome(source, recorded_len, watch);
+                return Err(PyError::Runtime(outcome.message.to_string()));
+            }
+        }
+        advance_live_key_cursor(source, cursor)
+    }
+
+    /// Compare dictionary-item membership without materialising `(key, value)`
+    /// tuples as set keys. The right mapping is the containment target, so its
+    /// stored key and value own the first equality call.
+    fn dict_mapping_items_are_subset(
+        &mut self,
+        subset_view: &Value,
+        subset: &Value,
+        superset: &Value,
+    ) -> Result<bool> {
+        let expected_len = subset
+            .dict_len()
+            .ok_or_else(|| PyError::Runtime("internal: expected dict backing".to_string()))?;
+        let superset_len = superset
+            .dict_len()
+            .ok_or_else(|| PyError::Runtime("internal: expected dict backing".to_string()))?;
+        if expected_len > superset_len {
+            return Ok(false);
+        }
+        // Values may recursively contain their own item views. Record the
+        // backing pair in stored-value/probe-value order so recursion reaches
+        // the ordinary equality guard instead of growing without bound.
+        if self.eq_cycle_enter(superset, subset) {
+            return Ok(true);
+        }
+
+        let result = (|| -> Result<bool> {
+            let ordered_watch = Self::ordered_dict_view_comparison_watch(subset_view);
+            let mut cursor = LiveKeyCursor::dict(
+                subset_view,
+                pyrust_builtins::dict_views::DictViewKind::Items.live_cursor_code(),
+                expected_len,
+            );
+            while let Some(item) = Self::advance_setlike_comparison_cursor(
+                subset_view,
+                &mut cursor,
+                expected_len,
+                ordered_watch.as_ref(),
+            )? {
+                let LiveDictViewItem::Pair(probe_value, lhs_value) = item else {
+                    unreachable!("dict-items cursor must yield key/value pairs")
+                };
+                // Iterating an item view produces a fresh tuple and the target
+                // mapping hashes that tuple's key again. Converting the live
+                // key value preserves user `__hash__` calls and exceptions.
+                let probe_key = self.value_to_pykey(&probe_value)?;
+                let Some((_, rhs_value)) = self.dict_lookup(superset, &probe_key)? else {
+                    return Ok(false);
+                };
+                if !self.values_richcompare_eq(&rhs_value, &lhs_value)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })();
+        self.eq_cycle_exit(superset, subset);
+        result
+    }
+
+    pub(crate) fn dict_items_views_are_equal(
+        &mut self,
+        left: &Value,
+        right: &Value,
+    ) -> Option<Result<bool>> {
+        let left_backing = Self::dict_items_backing_value(left)?;
+        let right_backing = Self::dict_items_backing_value(right)?;
+        if left_backing.dict_len() != right_backing.dict_len() {
+            return Some(Ok(false));
+        }
+        Some(self.dict_mapping_items_are_subset(left, &left_backing, &right_backing))
+    }
+
+    pub(crate) fn dict_items_view_is_subset(
+        &mut self,
+        subset: &Value,
+        superset: &Value,
+    ) -> Option<Result<bool>> {
+        let subset_backing = Self::dict_items_backing_value(subset)?;
+        let superset_backing = Self::dict_items_backing_value(superset)?;
+        Some(self.dict_mapping_items_are_subset(subset, &subset_backing, &superset_backing))
+    }
+
+    fn dict_mapping_items_are_subset_of_setlike(
+        &mut self,
+        subset_view: &Value,
+        subset: &Value,
+        target: &Value,
+        live_set: Option<&Value>,
+        live_dict: Option<&Value>,
+        set_snapshot: Option<&PySet>,
+    ) -> Result<bool> {
+        let expected_len = subset
+            .dict_len()
+            .ok_or_else(|| PyError::Runtime("internal: expected dict backing".to_string()))?;
+        if self.eq_cycle_enter(target, subset) {
+            return Ok(true);
+        }
+        let result = (|| -> Result<bool> {
+            let ordered_watch = Self::ordered_dict_view_comparison_watch(subset_view);
+            let mut cursor = LiveKeyCursor::dict(
+                subset_view,
+                pyrust_builtins::dict_views::DictViewKind::Items.live_cursor_code(),
+                expected_len,
+            );
+            while let Some(item) = Self::advance_setlike_comparison_cursor(
+                subset_view,
+                &mut cursor,
+                expected_len,
+                ordered_watch.as_ref(),
+            )? {
+                let LiveDictViewItem::Pair(key, value) = item else {
+                    unreachable!("dict-items cursor must yield key/value pairs")
+                };
+                let probe = self.value_to_pykey(&Value::tuple(vec![key, value]))?;
+                let contains = if let Some(set) = live_set {
+                    self.set_lookup(set, &probe)?.is_some()
+                } else if let Some(dict) = live_dict {
+                    self.dict_lookup(dict, &probe)?.is_some()
+                } else {
+                    self.set_lookup_in(
+                        set_snapshot.expect("set-like target must have a lookup backing"),
+                        &probe,
+                    )?
+                    .is_some()
+                };
+                if !contains {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })();
+        self.eq_cycle_exit(target, subset);
+        result
+    }
+
+    /// Lazily iterate a `dict_items` source against another set-like operand.
+    /// Each live item becomes a fresh tuple key only when reached, preserving
+    /// key/value `__hash__` calls and first-miss short-circuiting.
+    pub(crate) fn dict_items_view_is_subset_of_setlike(
+        &mut self,
+        subset: &Value,
+        target: &Value,
+    ) -> Option<Result<bool>> {
+        let subset_backing = Self::dict_items_backing_value(subset)?;
+        if matches!(
+            pyrust_builtins::dict_views::view_kind(target),
+            Some(pyrust_builtins::dict_views::DictViewKind::Items)
+        ) {
+            return None;
+        }
+
+        let live_set = if target.is_set() {
+            Some(target.clone())
+        } else {
+            builtin_data_backing(target).filter(Value::is_set)
+        };
+        let live_dict = matches!(
+            pyrust_builtins::dict_views::view_kind(target),
+            Some(pyrust_builtins::dict_views::DictViewKind::Keys)
+        )
+        .then(|| pyrust_builtins::dict_views::as_dict_rc(target).map(Value::dict_shared))
+        .flatten();
+        let set_snapshot = if live_set.is_none() && live_dict.is_none() {
+            let (items, _) = match self.coerce_set_operand(target)? {
+                Ok(items) => items,
+                Err(error) => return Some(Err(error)),
+            };
+            Some(items)
+        } else {
+            None
+        };
+
+        Some(self.dict_mapping_items_are_subset_of_setlike(
+            subset,
+            &subset_backing,
+            target,
+            live_set.as_ref(),
+            live_dict.as_ref(),
+            set_snapshot.as_ref(),
+        ))
+    }
+
+    /// Lazily scan a mutable set or keys view when a `dict_items` view is the
+    /// containment target. A callback from item-value equality must remain
+    /// able to invalidate the live source iterator.
+    pub(crate) fn setlike_is_subset_of_dict_items(
+        &mut self,
+        subset: &Value,
+        superset: &Value,
+    ) -> Option<Result<bool>> {
+        if !matches!(
+            pyrust_builtins::dict_views::view_kind(superset),
+            Some(pyrust_builtins::dict_views::DictViewKind::Items)
+        ) || matches!(
+            pyrust_builtins::dict_views::view_kind(subset),
+            Some(pyrust_builtins::dict_views::DictViewKind::Items)
+        ) {
+            return None;
+        }
+
+        let live_set =
+            subset.is_set() || builtin_data_backing(subset).is_some_and(|backing| backing.is_set());
+        let keys_view = matches!(
+            pyrust_builtins::dict_views::view_kind(subset),
+            Some(pyrust_builtins::dict_views::DictViewKind::Keys)
+        );
+        let live_source_len = (live_set || keys_view)
+            .then(|| set_comparison_len(subset))
+            .flatten();
+        let ordered_watch = Self::ordered_dict_view_comparison_watch(subset);
+        let mut live_cursor = if live_set {
+            Some(LiveKeyCursor::set(subset))
+        } else if keys_view {
+            Some(LiveKeyCursor::dict(
+                subset,
+                pyrust_builtins::dict_views::DictViewKind::Keys.live_cursor_code(),
+                live_source_len?,
+            ))
+        } else {
+            None
+        };
+        let snapshot = if live_cursor.is_none() {
+            let (items, _) = match self.coerce_set_operand(subset)? {
+                Ok(items) => items,
+                Err(error) => return Some(Err(error)),
+            };
+            Some(items)
+        } else {
+            None
+        };
+
+        if self.eq_cycle_enter(superset, subset) {
+            return Some(Ok(true));
+        }
+        let result = (|| -> Result<bool> {
+            if let Some(cursor) = &mut live_cursor {
+                while let Some(item) = Self::advance_setlike_comparison_cursor(
+                    subset,
+                    cursor,
+                    live_source_len.expect("live set-like source must have a length"),
+                    ordered_watch.as_ref(),
+                )? {
+                    let LiveDictViewItem::Item(candidate) = item else {
+                        unreachable!("set-like cursor must yield individual values")
+                    };
+                    if !self
+                        .dict_items_view_contains(superset, &candidate)
+                        .expect("dict_items superset must have a backing mapping")?
+                    {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+
+            for key in snapshot.expect("immutable set-like source must have a snapshot") {
+                let candidate = crate::interpreter::key_to_value(key);
+                if !self
+                    .dict_items_view_contains(superset, &candidate)
+                    .expect("dict_items superset must have a backing mapping")?
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })();
+        self.eq_cycle_exit(superset, subset);
+        Some(result)
+    }
+
+    /// Interpreter-owned `candidate in dict_items_view` for mixed set-like
+    /// ordering. This preserves dynamic key and stored-value equality.
+    pub(crate) fn dict_items_view_contains(
+        &mut self,
+        view: &Value,
+        candidate: &Value,
+    ) -> Option<Result<bool>> {
+        let backing = Self::dict_items_backing_value(view)?;
+        let tuple_candidate = if candidate.as_tuple().is_some() {
+            candidate.clone()
+        } else {
+            crate::interpreter::builtin_data_backing(candidate).unwrap_or_else(|| candidate.clone())
+        };
+        let pair = match tuple_candidate.as_tuple() {
+            Some(items) if items.len() == 2 => [items[0].clone(), items[1].clone()],
+            _ => return Some(Ok(false)),
+        };
+        Some((|| -> Result<bool> {
+            let key = self.value_to_pykey(&pair[0])?;
+            let Some((_, stored_value)) = self.dict_lookup(&backing, &key)? else {
+                return Ok(false);
+            };
+            self.values_richcompare_eq(&stored_value, &pair[1])
+        })())
+    }
+
     /// Equality membership for frozensets containing a dynamic key. Keep the
     /// hash-index allocation and collision walk out of `values_user_eq`'s hot
     /// primitive/container dispatcher; ordinary primitive frozensets return
@@ -278,6 +612,13 @@ impl Interpreter {
             return result;
         }
 
+        // Item-view equality is directional containment: the right mapping's
+        // stored value owns equality against the left probe value. It must not
+        // hash values, because dictionary items can contain lists/dicts.
+        if let Some(result) = self.dict_items_views_are_equal(a, b) {
+            return result;
+        }
+
         // Issue #1891: the set-like dict views `dict_keys` / `dict_items`
         // compare as sets against any other set-like operand (`set`,
         // `frozenset`, or another set-like view).  CPython's view `__eq__`
@@ -286,6 +627,31 @@ impl Interpreter {
         // with an unhashable value raises `TypeError: unhashable type: …`,
         // which `coerce_set_operand` surfaces.
         if is_setlike_view(a) || is_setlike_view(b) {
+            // Set equality rejects unequal cardinality before materialising or
+            // probing either operand. Thus unhashable item values stay inert
+            // for `items == empty_set` and other size mismatches.
+            if let (Some(a_len), Some(b_len)) = (set_comparison_len(a), set_comparison_len(b))
+                && a_len != b_len
+            {
+                return Ok(false);
+            }
+            // Mixed view equality keeps the receiver as the lazy source.
+            // `items == keys` hashes each reached item tuple, while
+            // `keys == items` probes each key as-is and can return false
+            // without touching an unhashable item value.
+            if let Some(result) = self.dict_items_view_is_subset_of_setlike(a, b) {
+                return result;
+            }
+            if is_setlike_view(a) {
+                if let Some(result) = self.setlike_is_subset_of_dict_items(a, b) {
+                    return result;
+                }
+            } else if let Some(result) = self.dict_items_view_is_subset_of_setlike(b, a) {
+                // Exact set/frozenset equality returns NotImplemented for a
+                // view, so native comparison reaches the reflected item-view
+                // slot and uses that item view as the source.
+                return result;
+            }
             let a_set = self.coerce_set_operand(a);
             let b_set = self.coerce_set_operand(b);
             match (a_set, b_set) {

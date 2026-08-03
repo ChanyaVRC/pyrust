@@ -211,12 +211,12 @@ impl Interpreter {
         &mut self,
         receiver: Value,
         args: Vec<Value>,
+        owner_name: &str,
     ) -> Result<Value> {
-        let view_name = value_type_name_str(&receiver);
         if args.len() != 1 {
             let n = args.len();
             return Err(pyrust_core::type_err!(
-                "{view_name}.isdisjoint() takes exactly one argument ({n} given)"
+                "{owner_name}.isdisjoint() takes exactly one argument ({n} given)"
             ));
         }
         self.iterable_is_disjoint(receiver, args.into_iter().next().unwrap())

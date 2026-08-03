@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use pyrust_core::{
-    BuiltinState, BuiltinTypeOps, PyDict, PyKey, Result, Value, builtin_ops_is, key_repr,
+    BuiltinState, BuiltinTypeOps, PyDict, PyKey, Result, Value, ValueKind, builtin_ops_is, key_repr,
 };
 
 pub type DictRc = Rc<RefCell<PyDict>>;
@@ -24,6 +24,40 @@ pub enum DictViewKind {
     Keys,
     Values,
     Items,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictViewBoundMethod {
+    IsDisjoint,
+    Reversed,
+}
+
+impl DictViewBoundMethod {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "isdisjoint" => Some(Self::IsDisjoint),
+            "__reversed__" => Some(Self::Reversed),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::IsDisjoint => "isdisjoint",
+            Self::Reversed => "__reversed__",
+        }
+    }
+}
+
+pub struct DictViewBoundMethodInfo {
+    pub method: DictViewBoundMethod,
+    pub owner_name: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictViewBoundMethodOrigin {
+    Direct,
+    Captured,
 }
 
 impl DictViewKind {
@@ -41,11 +75,9 @@ impl DictViewKind {
 pub struct DictView {
     pub items: DictRc,
     /// `true` when the view was produced from a `collections.OrderedDict`
-    /// (or a subclass of it).  Only consumed by the size-mutation guard
-    /// (issue #2436) to pick CPython's `"OrderedDict mutated during
-    /// iteration"` wording instead of plain dict's `"dictionary changed
-    /// size during iteration"`.  Plain-dict and other dict-subclass views
-    /// leave it `false`.
+    /// (or a subclass of it). This selects the ordered view's Python-visible
+    /// class/presentation and the OrderedDict-specific mutation error. Plain
+    /// dict and other dict-subclass views leave it `false`.
     pub ordered: bool,
 }
 
@@ -54,17 +86,27 @@ pub struct DictView {
 pub struct DictKeysOps;
 pub const DICT_KEYS_OPS: &DictKeysOps = &DictKeysOps;
 pub const DICT_KEYS_TYPE_NAME: &str = "dict_keys";
+pub const ODICT_KEYS_TYPE_NAME: &str = "odict_keys";
 
 impl BuiltinTypeOps for DictKeysOps {
     fn type_name(&self) -> &'static str {
         DICT_KEYS_TYPE_NAME
     }
 
+    fn display_type_name_for(&self, state: &BuiltinState) -> &'static str {
+        dict_view_type_name(state, DICT_KEYS_TYPE_NAME, ODICT_KEYS_TYPE_NAME)
+    }
+
+    fn display_error_name_for(&self, state: &BuiltinState) -> &'static str {
+        self.display_type_name_for(state)
+    }
+
     fn repr(&self, state: &BuiltinState) -> String {
+        let type_name = self.display_type_name_for(state);
         let view = borrow_view(state).expect("dict_keys state");
         let map = view.borrow();
         let keys: Vec<String> = map.keys().map(key_repr).collect();
-        format!("dict_keys([{}])", keys.join(", "))
+        format!("{type_name}([{}])", keys.join(", "))
     }
 
     fn truthy(&self, state: &BuiltinState) -> bool {
@@ -106,8 +148,7 @@ pub fn dict_keys(rc: DictRc) -> Value {
     dict_keys_tagged(rc, false)
 }
 
-/// Like [`dict_keys`] but records whether the source is an OrderedDict so the
-/// mutation guard can pick the OrderedDict wording (issue #2436).
+/// Like [`dict_keys`] but records whether the source is an OrderedDict.
 pub fn dict_keys_tagged(rc: DictRc, ordered: bool) -> Value {
     let state: Box<dyn Any> = Box::new(DictView { items: rc, ordered });
     Value::builtin_object(DICT_KEYS_OPS, state)
@@ -118,23 +159,57 @@ pub fn dict_keys_tagged(rc: DictRc, ordered: bool) -> Value {
 pub struct DictValuesOps;
 pub const DICT_VALUES_OPS: &DictValuesOps = &DictValuesOps;
 pub const DICT_VALUES_TYPE_NAME: &str = "dict_values";
+pub const ODICT_VALUES_TYPE_NAME: &str = "odict_values";
 
 impl BuiltinTypeOps for DictValuesOps {
     fn type_name(&self) -> &'static str {
         DICT_VALUES_TYPE_NAME
     }
 
+    fn display_type_name_for(&self, state: &BuiltinState) -> &'static str {
+        dict_view_type_name(state, DICT_VALUES_TYPE_NAME, ODICT_VALUES_TYPE_NAME)
+    }
+
+    fn display_error_name_for(&self, state: &BuiltinState) -> &'static str {
+        self.display_type_name_for(state)
+    }
+
     fn repr(&self, state: &BuiltinState) -> String {
+        let type_name = self.display_type_name_for(state);
         let view = borrow_view(state).expect("dict_values state");
         let map = view.borrow();
         let vals: Vec<String> = map.values().map(|v| v.repr_raw()).collect();
-        format!("dict_values([{}])", vals.join(", "))
+        format!("{type_name}([{}])", vals.join(", "))
     }
 
     fn truthy(&self, state: &BuiltinState) -> bool {
         borrow_view(state)
             .map(|rc| !rc.borrow().is_empty())
             .unwrap_or(false)
+    }
+
+    // Values views inherit object's identity comparison: aliases of one view
+    // compare equal, while two views over the same dictionary do not.
+    fn eq(&self, state: &BuiltinState, other: &Value) -> bool {
+        matches!(
+            other.kind(),
+            ValueKind::BuiltinObject {
+                ops,
+                state: other_state,
+            } if builtin_ops_is::<DictValuesOps>(ops) && Rc::ptr_eq(state, other_state)
+        )
+    }
+
+    fn hash(&self, state: &BuiltinState) -> Option<u64> {
+        Some(builtin_state_identity_hash(state))
+    }
+
+    fn to_key(&self, state: &BuiltinState) -> Option<PyKey> {
+        let hash = builtin_state_identity_hash(state);
+        Some(PyKey::Object {
+            hash,
+            value: Value::builtin_object_shared(DICT_VALUES_OPS, state.clone()),
+        })
     }
 
     fn len(&self, state: &BuiltinState) -> Option<usize> {
@@ -175,20 +250,30 @@ pub fn dict_values_tagged(rc: DictRc, ordered: bool) -> Value {
 pub struct DictItemsOps;
 pub const DICT_ITEMS_OPS: &DictItemsOps = &DictItemsOps;
 pub const DICT_ITEMS_TYPE_NAME: &str = "dict_items";
+pub const ODICT_ITEMS_TYPE_NAME: &str = "odict_items";
 
 impl BuiltinTypeOps for DictItemsOps {
     fn type_name(&self) -> &'static str {
         DICT_ITEMS_TYPE_NAME
     }
 
+    fn display_type_name_for(&self, state: &BuiltinState) -> &'static str {
+        dict_view_type_name(state, DICT_ITEMS_TYPE_NAME, ODICT_ITEMS_TYPE_NAME)
+    }
+
+    fn display_error_name_for(&self, state: &BuiltinState) -> &'static str {
+        self.display_type_name_for(state)
+    }
+
     fn repr(&self, state: &BuiltinState) -> String {
+        let type_name = self.display_type_name_for(state);
         let view = borrow_view(state).expect("dict_items state");
         let map = view.borrow();
         let items: Vec<String> = map
             .iter()
             .map(|(k, v)| format!("({}, {})", key_repr(k), v.repr_raw()))
             .collect();
-        format!("dict_items([{}])", items.join(", "))
+        format!("{type_name}([{}])", items.join(", "))
     }
 
     fn truthy(&self, state: &BuiltinState) -> bool {
@@ -316,6 +401,54 @@ pub fn view_kind(value: &Value) -> Option<DictViewKind> {
     view_kind_from_ops(ops)
 }
 
+/// Resolve the concrete call policy for the two dictionary-view method
+/// descriptors. Ordered views own `__reversed__`; direct `isdisjoint` calls
+/// use the inherited plain-view owner, while a saved bound method preserves
+/// CPython's concrete ordered-view error owner.
+pub fn bound_method_info(
+    value: &Value,
+    name: &str,
+    origin: DictViewBoundMethodOrigin,
+) -> Option<DictViewBoundMethodInfo> {
+    let method = DictViewBoundMethod::from_name(name)?;
+    let view_kind = view_kind(value)?;
+    if method == DictViewBoundMethod::IsDisjoint && view_kind == DictViewKind::Values {
+        return None;
+    }
+    let owner_name = match method {
+        // CPython's saved built-in method retains the concrete ordered-view
+        // owner in its call errors, while the fused direct call and unbound
+        // descriptor invocation report the inherited plain-view owner.
+        DictViewBoundMethod::IsDisjoint
+            if origin == DictViewBoundMethodOrigin::Captured && is_ordered_view(value) =>
+        {
+            match view_kind {
+                DictViewKind::Keys => ODICT_KEYS_TYPE_NAME,
+                DictViewKind::Items => ODICT_ITEMS_TYPE_NAME,
+                DictViewKind::Values => {
+                    unreachable!("values views have no isdisjoint descriptor")
+                }
+            }
+        }
+        DictViewBoundMethod::IsDisjoint => match view_kind {
+            DictViewKind::Keys => DICT_KEYS_TYPE_NAME,
+            DictViewKind::Items => DICT_ITEMS_TYPE_NAME,
+            DictViewKind::Values => unreachable!("values views have no isdisjoint descriptor"),
+        },
+        DictViewBoundMethod::Reversed if is_ordered_view(value) => match view_kind {
+            DictViewKind::Keys => ODICT_KEYS_TYPE_NAME,
+            DictViewKind::Items => ODICT_ITEMS_TYPE_NAME,
+            DictViewKind::Values => ODICT_VALUES_TYPE_NAME,
+        },
+        DictViewBoundMethod::Reversed => match view_kind {
+            DictViewKind::Keys => DICT_KEYS_TYPE_NAME,
+            DictViewKind::Items => DICT_ITEMS_TYPE_NAME,
+            DictViewKind::Values => DICT_VALUES_TYPE_NAME,
+        },
+    };
+    Some(DictViewBoundMethodInfo { method, owner_name })
+}
+
 #[inline]
 fn view_kind_from_ops(ops: &dyn BuiltinTypeOps) -> Option<DictViewKind> {
     if builtin_ops_is::<DictKeysOps>(ops) {
@@ -329,11 +462,35 @@ fn view_kind_from_ops(ops: &dyn BuiltinTypeOps) -> Option<DictViewKind> {
     }
 }
 
+fn builtin_state_identity_hash(state: &BuiltinState) -> u64 {
+    let hash = Rc::as_ptr(state) as usize as u64;
+    if hash == u64::MAX { u64::MAX - 1 } else { hash }
+}
+
 fn borrow_view(state: &BuiltinState) -> Option<DictRc> {
     let borrow = state.borrow();
     borrow
         .downcast_ref::<DictView>()
         .map(|v| Rc::clone(&v.items))
+}
+
+fn view_state_is_ordered(state: &BuiltinState) -> bool {
+    state
+        .borrow()
+        .downcast_ref::<DictView>()
+        .is_some_and(|view| view.ordered)
+}
+
+fn dict_view_type_name(
+    state: &BuiltinState,
+    plain_name: &'static str,
+    ordered_name: &'static str,
+) -> &'static str {
+    if view_state_is_ordered(state) {
+        ordered_name
+    } else {
+        plain_name
+    }
 }
 
 /// Serve the `mapping` data attribute shared by all three view types: a live

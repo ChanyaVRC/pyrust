@@ -32,6 +32,13 @@ fn slot_wrapper_parts(name: &str) -> Option<(&str, &str)> {
     if !(dunder.starts_with("__") && dunder.ends_with("__") && dunder.len() > 4) {
         return None;
     }
+    if matches!(
+        type_name,
+        "dict_keys" | "dict_items" | "dict_values" | "odict_keys" | "odict_items" | "odict_values"
+    ) && matches!(dunder, "__repr__" | "__getattribute__")
+    {
+        return Some((type_name, dunder));
+    }
     // Issue #2433: the object-inherited slot dunders.  CPython exposes these as
     // `wrapper_descriptor`s owned by `object` (`<slot wrapper '__init__' of
     // 'object' objects>`).  `__reduce__`/`__reduce_ex__`/`__sizeof__`/`__dir__`/
@@ -227,6 +234,14 @@ const PRIMITIVE_TYPE_NAMES: &[&str] = &[
 /// `object.*`-inherited names, slot-wrapper dunders, and the deferred dunders.
 fn method_descriptor_parts(name: &str) -> Option<(&str, &str)> {
     let (type_name, method) = name.rsplit_once('.')?;
+    if matches!(
+        type_name,
+        "dict_keys" | "dict_items" | "dict_values" | "odict_keys" | "odict_items" | "odict_values"
+    ) && (method == "__reversed__"
+        || method == "isdisjoint" && matches!(type_name, "dict_keys" | "dict_items"))
+    {
+        return Some((type_name, method));
+    }
     // Issue #2399: `range.__reversed__` is a method_descriptor (every other
     // range dunder is a slot wrapper, handled by `slot_wrapper_parts`).
     // `range` is not in `PRIMITIVE_TYPE_NAMES` (it is a VM-native type), so the

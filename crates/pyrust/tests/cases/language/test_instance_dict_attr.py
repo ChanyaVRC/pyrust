@@ -9,6 +9,14 @@
 # through the proxy propagate immediately to the instance, enabling data
 # descriptor `__set__` implementations that store via `obj.__dict__['key'] = v`.
 
+
+def outcome(fn):
+    try:
+        return ("ok", fn())
+    except Exception as exc:
+        return (type(exc).__name__, str(exc))
+
+
 # ── Basic: instance with attrs ──────────────────────────────────────────
 class C:
     pass
@@ -16,6 +24,16 @@ class C:
 c = C()
 c.x = 5
 print(c.__dict__)                        # {'x': 5}
+instance_dict = c.__dict__
+print(
+    "dict-protocol",
+    outcome(lambda: instance_dict.__eq__({"x": 5})),
+    outcome(lambda: instance_dict.__or__({"y": 6})),
+    outcome(lambda: instance_dict.__repr__()),
+    outcome(lambda: instance_dict.__str__()),
+    outcome(lambda: hash(instance_dict)),
+    outcome(lambda: instance_dict | {"y": 6}),
+)
 
 # ── Empty: instance with no attrs ───────────────────────────────────────
 class D:

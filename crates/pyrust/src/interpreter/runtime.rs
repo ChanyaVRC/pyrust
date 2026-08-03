@@ -117,7 +117,8 @@ mod classes {
 
 mod builtin_methods {
     use super::collection_ops::{
-        dict_entries_from_value, set_has_object_key, set_items_from_value, set_subset_cmp,
+        SetOp, dict_entries_from_value, is_set_comparison_operand, set_binary_op,
+        set_has_object_key, set_items_from_value, set_subset_cmp,
         value_iterable_needs_runtime_key_semantics,
     };
     use super::{
@@ -130,14 +131,15 @@ mod builtin_methods {
         class_mro_items, coerce_bytes_subclass_arg, coerce_bytes_subclass_join_iterable,
         coerce_bytes_subclass_method_args, coerce_bytes_subclass_method_kwargs,
         coerce_str_subclass_arg, coerce_str_subclass_join_iterable,
-        coerce_str_subclass_method_args, coerce_subclass_backing, dispatch_property_method,
-        effective_builtin_receiver, eval_builtin_unary, extract_optional_string,
-        format_dunder_owner, format_dunder_spec_arg, hash_value_with_interp, instance_builtin_data,
-        invoke_class_method, is_ordered_dict_class_or_subclass, is_primitive_class,
-        is_stop_iteration_error, lookup_class_attr, make_iterator, ordered_dict_owner,
-        primitive_class_by_name, primitive_class_dispatch, primitive_class_kind,
-        reject_keyword_args_expanded, render_instance_repr, type_class_singleton, value_class,
-        value_from_bigint, value_to_bigint, value_type_name_str,
+        coerce_str_subclass_method_args, coerce_subclass_backing, dict_view_class_by_name,
+        dispatch_property_method, effective_builtin_receiver, eval_builtin_unary,
+        extract_optional_string, format_dunder_owner, format_dunder_spec_arg,
+        hash_value_with_interp, instance_builtin_data, invoke_class_method,
+        is_ordered_dict_class_or_subclass, is_primitive_class, is_stop_iteration_error,
+        lookup_class_attr, make_iterator, ordered_dict_owner, primitive_class_by_name,
+        primitive_class_dispatch, primitive_class_kind, reject_keyword_args_expanded,
+        render_instance_repr, type_class_singleton, value_class, value_from_bigint,
+        value_to_bigint, value_type_name_str, values_are_identical,
     };
     include!("runtime/builtin_methods.rs");
 }
@@ -150,12 +152,16 @@ pub(crate) use builtin_methods::{
 };
 
 mod collection_keys {
-    use super::collection_ops::{is_setlike_view, set_has_object_key};
+    use super::collection_ops::{is_setlike_view, set_comparison_len, set_has_object_key};
+    use super::iteration::{
+        LiveDictViewItem, LiveKeyCursor, OrderedIterationWatch, advance_live_key_cursor,
+        ordered_iteration_watch, ordered_mapping_guard_outcome,
+    };
     use super::{
         Interpreter, PyDict, PyError, PyKey, PySet, Rc, Result, StrKey, Value, ValueKind,
-        class_hash_inherits_builtin_none, coerce_numeric, coerce_subclass_backing,
-        invoke_class_method, lookup_class_attr, py_hash_bigint, py_hash_float, py_hash_int,
-        range_len, slot_is_dispatchable, values_are_identical,
+        builtin_data_backing, class_hash_inherits_builtin_none, coerce_numeric,
+        coerce_subclass_backing, invoke_class_method, lookup_class_attr, py_hash_bigint,
+        py_hash_float, py_hash_int, range_len, slot_is_dispatchable, values_are_identical,
     };
     include!("runtime/collection_keys.rs");
 }
@@ -173,7 +179,7 @@ mod collection_ops {
 use collection_ops::mapping_entries_for_expansion;
 
 mod fast_path {
-    use super::builtin_methods::BuiltinContainerKind;
+    use super::builtin_methods::{BuiltinContainerKind, ResolvedMethodCallShape};
     use super::execution::vm_read;
     use super::{
         BigRangeState, BinaryOp, CallBuiltinCacheEntry, ExpandedCallArg, GlobalCacheEntry,

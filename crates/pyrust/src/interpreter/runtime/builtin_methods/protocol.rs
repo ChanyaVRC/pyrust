@@ -227,6 +227,17 @@ impl Interpreter {
         // an interpreter helper, exposed on every primitive type.  These never
         // collide with the container `__add__`/`__mul__`/… arms below.
         match method {
+            "__getattribute__" => {
+                let attribute = args.pop().unwrap();
+                let ValueKind::Str(name) = attribute.kind() else {
+                    return Err(pyrust_core::type_err!(
+                        "attribute name must be string, not '{}'",
+                        pyrust_core::builtin_type_name(&attribute)
+                    ));
+                };
+                let name = name.to_string();
+                return self.get_attr(&receiver, &name);
+            }
             "__hash__" => {
                 let h = hash_value_with_interp(self, &receiver)?;
                 return Ok(Value::int(h));
@@ -329,6 +340,54 @@ impl Interpreter {
             // operator hot paths untouched.
             "__eq__" | "__ne__" | "__lt__" | "__le__" | "__gt__" | "__ge__" => {
                 let other = args.pop().unwrap();
+                match pyrust_builtins::dict_views::view_kind(&receiver) {
+                    Some(pyrust_builtins::dict_views::DictViewKind::Values) => {
+                        return Ok(match method {
+                            "__eq__" => {
+                                if values_are_identical(&receiver, &other) {
+                                    Value::bool_(true)
+                                } else {
+                                    Value::not_implemented()
+                                }
+                            }
+                            "__ne__" => {
+                                if values_are_identical(&receiver, &other) {
+                                    Value::bool_(false)
+                                } else {
+                                    Value::not_implemented()
+                                }
+                            }
+                            _ => Value::not_implemented(),
+                        });
+                    }
+                    Some(
+                        pyrust_builtins::dict_views::DictViewKind::Keys
+                        | pyrust_builtins::dict_views::DictViewKind::Items,
+                    ) => {
+                        if !is_set_comparison_operand(&other) {
+                            return Ok(Value::not_implemented());
+                        }
+                        return match method {
+                            "__eq__" => self.values_user_eq(&receiver, &other).map(Value::bool_),
+                            "__ne__" => self
+                                .values_user_eq(&receiver, &other)
+                                .map(|equal| Value::bool_(!equal)),
+                            _ => {
+                                let op = match method {
+                                    "__lt__" => crate::ast::BinaryOp::Lt,
+                                    "__le__" => crate::ast::BinaryOp::Le,
+                                    "__gt__" => crate::ast::BinaryOp::Gt,
+                                    _ => crate::ast::BinaryOp::Ge,
+                                };
+                                match set_subset_cmp(self, &receiver, &other, op) {
+                                    Some(result) => result,
+                                    None => Ok(Value::not_implemented()),
+                                }
+                            }
+                        };
+                    }
+                    None => {}
+                }
                 return self.primitive_richcmp_dunder(method, &receiver, &other);
             }
             _ => {}
@@ -403,6 +462,48 @@ impl Interpreter {
                 let mut regs = unsafe { RegSlice::from_raw(scratch.as_mut_ptr(), scratch.len()) };
                 self.exec_delete_item(&mut regs, 0, 0, 1)?;
                 Ok(Value::none())
+            }
+            "__or__" | "__and__" | "__sub__" | "__xor__"
+                if matches!(
+                    pyrust_builtins::dict_views::view_kind(&receiver),
+                    Some(
+                        pyrust_builtins::dict_views::DictViewKind::Keys
+                            | pyrust_builtins::dict_views::DictViewKind::Items
+                    )
+                ) =>
+            {
+                let other = args.pop().unwrap();
+                let (op, symbol) = match method {
+                    "__or__" => (SetOp::Or, "|"),
+                    "__and__" => (SetOp::And, "&"),
+                    "__sub__" => (SetOp::Sub, "-"),
+                    _ => (SetOp::Xor, "^"),
+                };
+                match set_binary_op(self, &receiver, &other, op, symbol) {
+                    Some(result) => result,
+                    None => Ok(Value::not_implemented()),
+                }
+            }
+            "__ror__" | "__rand__" | "__rsub__" | "__rxor__"
+                if matches!(
+                    pyrust_builtins::dict_views::view_kind(&receiver),
+                    Some(
+                        pyrust_builtins::dict_views::DictViewKind::Keys
+                            | pyrust_builtins::dict_views::DictViewKind::Items
+                    )
+                ) =>
+            {
+                let other = args.pop().unwrap();
+                let (op, symbol) = match method {
+                    "__ror__" => (SetOp::Or, "|"),
+                    "__rand__" => (SetOp::And, "&"),
+                    "__rsub__" => (SetOp::Sub, "-"),
+                    _ => (SetOp::Xor, "^"),
+                };
+                match set_binary_op(self, &other, &receiver, op, symbol) {
+                    Some(result) => result,
+                    None => Ok(Value::not_implemented()),
+                }
             }
             // list/bytearray in-place dunders (#2119): identical semantics to
             // the `+=`/`*=` operators — mutate the receiver in place and return
