@@ -1522,13 +1522,41 @@ impl Interpreter {
                     let st = if step.is_none() { None } else { Some(step) };
                     regs[*dst as usize] = make_slice_value(lo, hi, st);
                 }
-                Insn::BuildDict(dst, base, n) => {
+                Insn::BuildDict(dst, base, n, key_kind_hint) => {
+                    // CPython's `_PyDict_FromItems` scans the already evaluated
+                    // keys before inserting, but it does not allocate another
+                    // pair vector. Inspect only the key registers here and let
+                    // the existing iterator consume each key/value once below.
+                    let unicode_only = match key_kind_hint {
+                        crate::bytecode::DictKeyKindHint::Unicode => true,
+                        crate::bytecode::DictKeyKindHint::General => false,
+                        crate::bytecode::DictKeyKindHint::Unknown => {
+                            let mut unicode_only = true;
+                            for offset in 0..*n {
+                                let key_reg = *base + offset * 2;
+                                let key = &regs[key_reg as usize];
+                                if key.is_unset() {
+                                    // Preserve vm_read's NameError/internal
+                                    // diagnostic on malformed or uninitialized
+                                    // register input.
+                                    let _ = vm_try!(vm_read(&regs, key_reg, num_locals));
+                                    unreachable!("vm_read returned an unset register");
+                                }
+                                if !key.is_str() {
+                                    unicode_only = false;
+                                    break;
+                                }
+                            }
+                            unicode_only
+                        }
+                    };
                     let pairs = (0..*n).map(|offset| {
                         let key = vm_read(&regs, *base + offset * 2, num_locals)?;
                         let value = vm_read(&regs, *base + offset * 2 + 1, num_locals)?;
                         Ok((key, value))
                     });
-                    regs[*dst as usize] = vm_try!(self.dict_from_value_pairs(*n as usize, pairs));
+                    regs[*dst as usize] =
+                        vm_try!(self.dict_from_value_pairs(*n as usize, unicode_only, pairs,));
                 }
                 Insn::SetAdd(set_reg, val_reg) => {
                     let set = vm_try!(vm_read(&regs, *set_reg, num_locals));

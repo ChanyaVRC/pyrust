@@ -20,7 +20,7 @@ pub(crate) use cache::{
 pub use code::FnCode;
 pub(crate) use code::{EXC_NO_HANDLER, MAX_FRAME_REGS};
 pub use function::{CellVar, FnParamSpec, FnProto, compute_param_binds, compute_self_bind};
-pub use instruction::{Insn, IntRangeExactGuard, KwCallName, NO_KWARGS, Reg};
+pub use instruction::{DictKeyKindHint, Insn, IntRangeExactGuard, KwCallName, NO_KWARGS, Reg};
 
 #[cfg(test)]
 mod ownership_tests {

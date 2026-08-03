@@ -245,6 +245,39 @@ impl Compiler {
     /// Fast path (no `**` splats) uses `BuildDict` with pre-staged key/value
     /// slots, identical to the pre-PEP-448 shape.  Slow path builds an empty
     /// dict and emits `SetItem` for pairs / `DictUpdate` for splats.
+    fn dict_key_kind_hint(items: &[DictItem]) -> DictKeyKindHint {
+        let mut saw_dynamic = false;
+        for item in items {
+            let DictItem::Pair(key, _) = item else {
+                return DictKeyKindHint::Unknown;
+            };
+            match key {
+                // Both forms always produce an exact string Value.
+                Expr::Str(_) | Expr::FString(_) => {}
+                // These literal forms are statically exact non-strings. One is
+                // enough for `_PyDict_FromItems` to choose a General table.
+                Expr::Int(_)
+                | Expr::BigInt(_)
+                | Expr::Float(_)
+                | Expr::Complex(_, _)
+                | Expr::Bytes(_)
+                | Expr::Bool(_)
+                | Expr::None
+                | Expr::Ellipsis
+                | Expr::List(_)
+                | Expr::Tuple(_)
+                | Expr::Dict(_)
+                | Expr::Set(_) => return DictKeyKindHint::General,
+                _ => saw_dynamic = true,
+            }
+        }
+        if saw_dynamic {
+            DictKeyKindHint::Unknown
+        } else {
+            DictKeyKindHint::Unicode
+        }
+    }
+
     fn compile_dict_literal(&mut self, items: &[DictItem]) -> Reg {
         let has_splat = items.iter().any(|i| matches!(i, DictItem::DoubleSplat(_)));
         if !has_splat {
@@ -296,7 +329,12 @@ impl Compiler {
                 }
                 self.next_temp = saved;
             }
-            self.emit(Insn::BuildDict(base, base, n));
+            self.emit(Insn::BuildDict(
+                base,
+                base,
+                n,
+                Self::dict_key_kind_hint(items),
+            ));
             self.next_temp = base + 1;
             return base;
         }
@@ -308,7 +346,12 @@ impl Compiler {
         if empty_base > self.max_reg {
             self.max_reg = empty_base;
         }
-        self.emit(Insn::BuildDict(dst, empty_base, 0));
+        self.emit(Insn::BuildDict(
+            dst,
+            empty_base,
+            0,
+            DictKeyKindHint::Unicode,
+        ));
         for item in items {
             match item {
                 DictItem::Pair(k, v) => {

@@ -886,7 +886,7 @@ fn const_fold_invalidates_named_locals_across_all_reentrant_effect_classes() {
         Insn::GetIter(0, 8),
         Insn::FormatValue(10, 8),
         Insn::SetItem(8, 9, 10),
-        Insn::BuildDict(10, 8, 1),
+        Insn::BuildDict(10, 8, 1, crate::bytecode::DictKeyKindHint::Unknown),
         Insn::ImportModule(10, 0),
         Insn::StoreGlobal(0, 8),
         Insn::DeleteName(0),

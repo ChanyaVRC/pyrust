@@ -1,4 +1,24 @@
 impl Interpreter {
+    /// Equality membership for frozensets containing a dynamic key. Keep the
+    /// hash-index allocation and collision walk out of `values_user_eq`'s hot
+    /// primitive/container dispatcher; ordinary primitive frozensets return
+    /// before this cold path.
+    #[cold]
+    #[inline(never)]
+    fn frozenset_keys_user_eq(&mut self, lhs: &PySet, rhs: &PySet) -> Result<bool> {
+        let lhs_probe_table = lhs.python_hash_snapshot();
+        let rhs_probe_table = rhs.python_hash_snapshot();
+        let mut candidates = Vec::new();
+        for key in lhs_probe_table.active_keys(lhs) {
+            let hash = pyrust_core::py_hash_pykey(key) as u64;
+            rhs_probe_table.collect_candidate_keys(rhs, hash, &mut candidates);
+            if !self.set_lookup_candidates_in_python_eq(key, &candidates)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Compare two values via `__eq__`, used by the dict/set runtime when
     /// resolving `PyKey::Object` collisions and by `BinaryOp::Eq`/`Ne`'s
     /// container fall-through path (issue #436).
@@ -230,8 +250,8 @@ impl Interpreter {
         }
 
         // Frozenset — same membership logic as Set above, but the items
-        // live inside a BuiltinObject.  `set_lookup_in` handles
-        // `PyKey::Object` elements by dispatching user `__eq__`, so
+        // live inside a BuiltinObject.  `set_lookup_in_python_eq` handles
+        // cross-representation elements by dispatching user `__eq__`, so
         // `frozenset({a}) == frozenset({b})` works correctly when
         // `a.__eq__(b)` returns True.  Non-frozenset BuiltinObject pairs
         // fall through to `try_dunder_binary` (the PyInstance path); if
@@ -247,16 +267,13 @@ impl Interpreter {
             if self.eq_cycle_enter(a, b) {
                 return Ok(true);
             }
-            let lhs_keys: Vec<PyKey> = lhs_rc.iter().cloned().collect();
-            let rhs_snap: PySet = rhs_rc.iter().cloned().collect();
-            let result = (|| -> Result<bool> {
-                for pk in lhs_keys {
-                    if self.set_lookup_in(&rhs_snap, &pk)?.is_none() {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            })();
+            let lhs_has_dynamic_key = lhs_rc.iter().any(key_contains_object);
+            let rhs_has_dynamic_key = rhs_rc.iter().any(key_contains_object);
+            if !lhs_has_dynamic_key && !rhs_has_dynamic_key {
+                self.eq_cycle_exit(a, b);
+                return Ok(false);
+            }
+            let result = self.frozenset_keys_user_eq(&lhs_rc, &rhs_rc);
             self.eq_cycle_exit(a, b);
             return result;
         }

@@ -352,9 +352,9 @@ fn copy_prop_kills_alias_on_binop_write() {
 #[test]
 fn copy_prop_does_not_substitute_dict_update_receiver() {
     let insns = vec![
-        Insn::BuildDict(2, 3, 0),
+        Insn::BuildDict(2, 3, 0, crate::bytecode::DictKeyKindHint::Unicode),
         Insn::Move(5, 2),
-        Insn::BuildDict(4, 3, 0),
+        Insn::BuildDict(4, 3, 0, crate::bytecode::DictKeyKindHint::Unicode),
         Insn::Move(6, 4),
         Insn::DictUpdate(5, 6),
         Insn::Return(5),

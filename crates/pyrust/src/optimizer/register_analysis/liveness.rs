@@ -377,7 +377,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         GetSlice(_, obj, base) => *obj == r || (r >= *base && r < *base + 3),
         // BuildDict stores n key-value PAIRS — each pair occupies 2 registers,
         // so the live range is base .. base + 2*n (not base + n).
-        BuildDict(_, base, n) => r >= *base && r < *base + 2 * *n,
+        BuildDict(_, base, n, _) => r >= *base && r < *base + 2 * *n,
 
         CallMethod {
             obj,
@@ -618,7 +618,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
                 reads.insert(r);
             }
         }
-        BuildDict(_, base, n) => {
+        BuildDict(_, base, n, _) => {
             for r in *base..*base + 2 * *n {
                 reads.insert(r);
             }

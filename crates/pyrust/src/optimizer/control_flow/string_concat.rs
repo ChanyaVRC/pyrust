@@ -582,7 +582,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
                 f(r);
             }
         }
-        BuildDict(_, base, n) => {
+        BuildDict(_, base, n, _) => {
             for r in *base..*base + 2 * *n {
                 f(r);
             }

@@ -485,7 +485,12 @@ impl Compiler {
             if empty_dict_base > self.max_reg {
                 self.max_reg = empty_dict_base;
             }
-            self.emit(Insn::BuildDict(kw_dict_reg, empty_dict_base, 0));
+            self.emit(Insn::BuildDict(
+                kw_dict_reg,
+                empty_dict_base,
+                0,
+                DictKeyKindHint::Unicode,
+            ));
 
             let has_kw_splat = args.iter().any(|a| a.double_splat);
             for arg in args {
@@ -587,7 +592,12 @@ impl Compiler {
         if empty_dict_base > self.max_reg {
             self.max_reg = empty_dict_base;
         }
-        self.emit(Insn::BuildDict(kw_dict_reg, empty_dict_base, 0));
+        self.emit(Insn::BuildDict(
+            kw_dict_reg,
+            empty_dict_base,
+            0,
+            DictKeyKindHint::Unicode,
+        ));
 
         // When the call mixes a `**d` splat with other keyword sources, a key
         // present in two of them is a `TypeError` in CPython (DICT_MERGE), not a

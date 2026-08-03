@@ -55,6 +55,22 @@ fn compile_source_error(src: &str) -> String {
 }
 
 #[test]
+fn dict_literals_encode_static_key_kind_without_runtime_scans() {
+    for (source, expected) in [
+        ("d = {'a': 1, f'b': 2}\n", DictKeyKindHint::Unicode),
+        ("d = {name: 1}\n", DictKeyKindHint::Unknown),
+        ("d = {name: 1, 2: 2}\n", DictKeyKindHint::General),
+    ] {
+        let code = compile_source(source);
+        let hint = code.insns.iter().find_map(|insn| match insn {
+            Insn::BuildDict(_, _, _, hint) => Some(*hint),
+            _ => None,
+        });
+        assert_eq!(hint, Some(expected), "source: {source}");
+    }
+}
+
+#[test]
 fn shared_module_namespace_mode_does_not_replace_script_fastlocals() {
     use crate::{lexer::Lexer, parser::Parser};
 

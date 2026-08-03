@@ -117,7 +117,7 @@ mod classes {
 mod builtin_methods {
     use super::collection_ops::{
         dict_entries_from_value, set_has_object_key, set_items_from_value, set_subset_cmp,
-        set_subtract_in_place, value_iterable_needs_runtime_key_semantics,
+        value_iterable_needs_runtime_key_semantics,
     };
     use super::{
         BUILTIN_DATA_ATTR, BinaryOp, ExpandedArgBuf, ExpandedCallArg, GeneratorKind, IndexMap,
@@ -159,13 +159,13 @@ mod collection_keys {
     include!("runtime/collection_keys.rs");
 }
 pub(crate) use collection_keys::hash_value_with_interp;
-use collection_keys::{key_contains_object, nested_object_tuple_key, value_needs_slow_hash};
+use collection_keys::{key_contains_object, value_needs_slow_hash};
 
 mod collection_ops {
     use super::{
-        BinaryOp, Interpreter, PyKey, PySet, Result, Value, ValueKind, builtin_data_backing,
-        key_contains_object, mapping_pairs_via_protocol, value_needs_slow_hash,
-        value_type_name_str,
+        BinaryOp, Interpreter, PyDict, PyKey, PySet, Result, Value, ValueKind,
+        builtin_data_backing, key_contains_object, mapping_pairs_via_protocol,
+        value_needs_slow_hash, value_type_name_str,
     };
     include!("runtime/collection_ops.rs");
 }
@@ -190,9 +190,9 @@ mod fast_path {
 mod expressions {
     use super::builtin_methods::i64_range_contains;
     use super::collection_ops::{
-        SetOp, bitor_operand_type_name, dict_entries_from_value, intersection_scan_order,
-        is_mapping_proxy, set_binary_op, set_has_object_key, set_items_from_value, set_subset_cmp,
-        set_subtract_in_place,
+        SetOp, bitor_operand_type_name, dict_clone_from_value, dict_entries_from_value,
+        intersection_scan_order, is_mapping_proxy, set_binary_op, set_has_object_key,
+        set_items_from_value, set_subset_cmp, set_subtract_in_place,
     };
     use super::fast_path::try_tagged_int_unary;
     use super::{
@@ -204,9 +204,9 @@ mod expressions {
         is_async_generator_value, is_builtin_class_getitem_sentinel, is_coroutine_value,
         is_not_implemented, is_stop_iteration_error, is_type_alias_class, key_contains_object,
         lookup_class_attr, make_builtin_generic_alias, make_slice_value, metaclass_dunder,
-        metaclass_dunder_for_call, nested_object_tuple_key, normalize_index, normalize_index_write,
-        py_mod_i64, range_len, slot_is_dispatchable, type_class_singleton, value_type_name_str,
-        values_are_identical, vm_read,
+        metaclass_dunder_for_call, normalize_index, normalize_index_write, py_mod_i64, range_len,
+        slot_is_dispatchable, type_class_singleton, value_type_name_str, values_are_identical,
+        vm_read,
     };
     include!("runtime/expr.rs");
 }
