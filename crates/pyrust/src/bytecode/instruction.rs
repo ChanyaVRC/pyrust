@@ -4,6 +4,11 @@ use crate::ast::{BinaryOp, UnaryOp};
 
 pub type Reg = u32;
 
+/// Sentinel `Reg` used by [`Insn::LoadClassName`] when a class-body LOAD_NAME
+/// has no compiler-allocated fastlocal slot. No real register can have this
+/// value.
+pub const NO_CLASS_LOCAL: Reg = Reg::MAX;
+
 /// Sentinel `Reg` marking an absent operand — currently the missing `**kw`
 /// mapping of an [`Insn::CallExArgs`] with no double-splat.  No real register is
 /// ever allocated at `u32::MAX`, so it can never collide with a live operand.
@@ -51,6 +56,11 @@ pub enum Insn {
     LoadConst(Reg, u16),
     /// R[dst] = lookup name through env chain
     LoadGlobal(Reg, u16),
+    /// Class-body LOAD_NAME. Before `f_locals` escapes this clones the
+    /// compiler-known fastlocal `R[local]`, or goes directly to module/builtins
+    /// when `local == NO_CLASS_LOCAL`; afterwards it first reads the live class
+    /// namespace dict. A missing binding falls through to module/builtins.
+    LoadClassName(Reg, Reg, u16),
     /// names[name_idx] = R[src]  (write to module / enclosing env)
     StoreGlobal(u16, Reg),
     /// R[dst] = read a **function-scope cell variable** (a name captured by a
@@ -703,14 +713,14 @@ pub enum Insn {
     /// insertion order.  Emitted **only** inside a class body, immediately after
     /// any instruction that stores into a top-level class-body local.  The VM
     /// appends slot to the active class-store-order list (if not already
-    /// present), so MakeClass can later materialise vars(C) in the order
-    /// stores actually executed — matching CPython __dict__ ordering.
+    /// present), and mirrors the value into any materialized class-frame
+    /// namespace, so both final attrs and later LOAD_NAME reads stay coherent.
     RecordClassStore(Reg),
     /// Record a runtime del C.name for class-namespace insertion order.
     /// Emitted only inside a class body, immediately after DeleteLocal(slot).
     /// The VM removes slot from the active class-store-order list so that the
-    /// dict produced by MakeClass drops the entry while preserving the order
-    /// of the remaining entries.
+    /// final attrs drop the entry while preserving remaining order. DeleteLocal
+    /// itself removes the binding from a materialized live namespace.
     RecordClassDel(Reg),
     /// R[dst] = R[base] + R[base+1] + ... + R[base+count-1]  (string concat, one allocation)
     ///

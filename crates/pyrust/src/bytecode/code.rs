@@ -70,9 +70,11 @@ pub struct FnCode {
     /// functions with four or fewer captured variables.
     pub(crate) cell_vars: SmallVec<[CellVar; 4]>,
     /// Memoized result of [`FnCode::free_var_candidates`] — the sorted, distinct
-    /// names this body reads through the environment chain.  Filled on first
-    /// use (`__closure__` / `co_freevars` / `locals()`), never on the dispatch
-    /// path.
+    /// names this body may read through the environment chain. Besides direct
+    /// global/cell loads, class LOAD_NAME instructions without a lexical local
+    /// slot are candidates because a class-namespace miss falls back to that
+    /// chain. Filled on first use (`__closure__` / `co_freevars` / `locals()`),
+    /// never on the dispatch path.
     pub(crate) free_var_candidates: std::cell::OnceCell<Vec<String>>,
     /// True if this function body contains at least one `Yield` instruction.
     /// The VM creates a generator object instead of executing immediately.
@@ -194,9 +196,11 @@ impl FnCode {
     /// The distinct names this body reads through the environment chain, sorted.
     ///
     /// A read that is not a fastlocal compiles to `LoadGlobal` (a true module
-    /// global or a module-scope capture) or `LoadCell` (a function-scope cell /
-    /// `nonlocal`, issue #2339), so both opcodes feed the set.  A free variable
-    /// referenced *only* inside a nested code object — a comprehension /
+    /// global or a module-scope capture), `LoadCell` (a function-scope cell /
+    /// `nonlocal`, issue #2339), or a no-fastlocal `LoadClassName` (whose
+    /// class-namespace miss falls back to the environment), so all three forms
+    /// feed the set. A free variable referenced *only* inside a nested code
+    /// object — a comprehension /
     /// genexpr, `lambda`, or nested `def` — compiles its read into that nested
     /// `FnCode`, yet CPython still reports it as a free variable of this one, so
     /// every nested prototype contributes too.
@@ -224,6 +228,7 @@ fn collect_env_read_names(fncode: &FnCode, seen: &mut HashSet<String>, out: &mut
     for insn in &fncode.insns {
         let name_idx = match insn {
             Insn::LoadGlobal(_, idx) | Insn::LoadCell(_, idx) => *idx,
+            Insn::LoadClassName(_, local, idx) if *local == crate::bytecode::NO_CLASS_LOCAL => *idx,
             _ => continue,
         };
         if let Some(name) = fncode.names.get(name_idx as usize)

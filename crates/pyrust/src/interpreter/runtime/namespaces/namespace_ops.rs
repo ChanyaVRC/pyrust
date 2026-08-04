@@ -76,19 +76,41 @@ impl Interpreter {
         register: crate::bytecode::Reg,
         name_index: u16,
     ) -> Result<()> {
-        let is_module_scope = self
-            .vm_frame_views
-            .last()
-            .map(|view| view.kind == FrameKind::Script)
-            .unwrap_or(false);
-        if name_index != u16::MAX && regs[register as usize].is_unset() {
-            let name = code.names.get(name_index as usize).ok_or_else(|| {
+        let frame_kind = self.vm_frame_views.last().map(|view| view.kind);
+        let is_module_scope = frame_kind == Some(FrameKind::Script);
+        let name = if name_index == u16::MAX {
+            None
+        } else {
+            Some(code.names.get(name_index as usize).ok_or_else(|| {
                 PyError::Runtime(format!(
                     "bytecode error: name index {name_index} out of range (pool size {})",
                     code.names.len()
                 ))
-            })?;
-            return if is_module_scope {
+            })?)
+        };
+
+        // A materialized class namespace is the Python-visible source of truth.
+        // Delete from it before clearing the implementation register, accepting
+        // mapping-only bindings and rejecting stale register-only bindings.
+        if frame_kind == Some(FrameKind::Class)
+            && let (Some(name), Some(namespace)) = (name, active_live_class_namespace(self))
+        {
+            let Some(deleted) = namespace.dict_shift_remove(&PyKey::str_from(name))? else {
+                return Err(PyError::name_error(
+                    "NameError",
+                    format!("name '{name}' is not defined"),
+                    Some(name.to_string()),
+                ));
+            };
+            regs[register as usize] = Value::unset();
+            call_del_if_last_binding(self, deleted, regs, code.num_locals as usize);
+            return Ok(());
+        }
+
+        if let Some(name) = name
+            && regs[register as usize].is_unset()
+        {
+            return if is_module_scope || frame_kind == Some(FrameKind::Class) {
                 Err(PyError::name_error(
                     "NameError",
                     format!("name '{name}' is not defined"),

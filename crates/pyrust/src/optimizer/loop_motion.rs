@@ -324,6 +324,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
     match insn {
         LoadConst(r, _)
         | LoadGlobal(r, _)
+        | LoadClassName(r, _, _)
         | LoadCell(r, _)
         | LoadNone(r)
         | LoadExc(r)
@@ -641,6 +642,7 @@ fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
             return false;
         }
         if matches!(insn, Insn::LoadConst(dst, _) | Insn::LoadNone(dst) | Insn::LoadGlobal(dst, _)
+                         | Insn::LoadClassName(dst, _, _)
                          | Insn::LoadCell(dst, _)
                          | Insn::Move(dst, _) | Insn::CopyReg(dst, _) if *dst == r)
         {

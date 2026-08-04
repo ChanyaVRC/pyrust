@@ -102,4 +102,46 @@ impl Interpreter {
         }
         Ok(resolution.value)
     }
+
+    /// Resolve one compiler-known class-body name without deoptimizing the
+    /// ordinary class path: a class whose namespace has not escaped performs
+    /// only the encoded register read. Once exposed, the dict is authoritative;
+    /// a missing key follows LOAD_NAME's module/builtins fallback.
+    pub(super) fn load_class_name(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &RegSlice,
+        local: crate::bytecode::Reg,
+        name_index: u16,
+    ) -> Result<Value> {
+        if let Some(namespace) = active_live_class_namespace(self) {
+            let name = code.names.get(name_index as usize).ok_or_else(|| {
+                PyError::Runtime(format!(
+                    "bytecode error: name index {name_index} out of range"
+                ))
+            })?;
+            if let Some(value) = namespace
+                .dict_with(|dict| dict.get(&StrKey(name)).cloned())
+                .flatten()
+            {
+                return Ok(value);
+            }
+            return self.load_global_cached(code, name_index);
+        }
+
+        if local == crate::bytecode::NO_CLASS_LOCAL {
+            return self.load_global_cached(code, name_index);
+        }
+
+        let value = regs.get(local as usize).ok_or_else(|| {
+            PyError::Runtime(format!(
+                "bytecode error: class local register {local} out of range"
+            ))
+        })?;
+        if value.is_unset() {
+            self.load_global_cached(code, name_index)
+        } else {
+            Ok(value.clone())
+        }
+    }
 }

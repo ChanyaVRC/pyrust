@@ -212,6 +212,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
     use Insn::*;
     match insn {
         LoadGlobal(r, _)
+        | LoadClassName(r, _, _)
         | LoadCell(r, _)
         | LoadNone(r)
         | DeleteLocal(r, _)

@@ -16,10 +16,12 @@ fn may_invalidate_named_locals(insn: &crate::bytecode::Insn) -> bool {
 
     !matches!(
         insn,
-        // Plain register/environment reads and copies. LoadGlobal/LoadCell read
-        // concrete runtime-owned namespaces; neither invokes mapping protocols.
+        // Plain register/environment reads and copies. LoadGlobal,
+        // LoadClassName, and LoadCell read concrete runtime-owned namespaces;
+        // none invokes mapping protocols.
         LoadConst(..)
             | LoadGlobal(..)
+            | LoadClassName(..)
             | LoadCell(..)
             | LoadNone(..)
             | LoadNoneRange { .. }

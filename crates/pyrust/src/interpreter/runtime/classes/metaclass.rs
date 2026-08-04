@@ -200,7 +200,12 @@ impl Interpreter {
             .insns
             .iter()
             .any(|insn| matches!(insn, crate::bytecode::Insn::MakeTypeAlias(..)));
-        self.push_class_annotation_scopes(local_index, num_class_regs, has_type_alias);
+        self.push_class_annotation_scopes(
+            local_index,
+            num_class_regs,
+            has_type_alias,
+            qualname_slot,
+        );
 
         // Push a class env so methods capture __class__ (zero-arg super), and a
         // Class frame view so locals() inside the body sees the namespace.
@@ -242,14 +247,32 @@ impl Interpreter {
             .class_store_order
             .pop()
             .expect("class_store_order stack popped to empty");
-        let annotation_scopes = self.pop_class_annotation_scopes();
+        let (annotation_scopes, live_namespace) = self.pop_class_annotation_scopes();
         body_result?;
 
-        let attrs = collect_class_attrs(local_index, &class_regs, store_order, num_class_regs);
+        let attrs = live_namespace.as_ref().map_or_else(
+            || collect_class_attrs(local_index, &class_regs, store_order, num_class_regs),
+            collect_live_class_attrs,
+        );
         Ok(ClassBodyExecution {
             attrs,
             class_env: class_env_rc,
             annotation_scopes,
         })
     }
+}
+
+/// Convert a materialized class-frame namespace into the runtime's string-keyed
+/// class attrs while preserving the live dict's insertion order.
+fn collect_live_class_attrs(namespace: &Value) -> IndexMap<String, Value> {
+    namespace
+        .dict_with(|dict| {
+            dict.iter()
+                .filter_map(|(key, value)| match key {
+                    PyKey::Str(name) => name.as_str().map(|name| (name.to_string(), value.clone())),
+                    _ => None,
+                })
+                .collect()
+        })
+        .expect("live class namespace is a dict")
 }

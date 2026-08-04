@@ -14,6 +14,7 @@ impl Compiler {
             local_index,
             cell_vars: cell_set,
             nonlocal_names: HashSet::new(),
+            class_direct_env_names: HashSet::new(),
             insns: Vec::new(),
             lineno_table: Vec::new(),
             col_table: Vec::new(),
@@ -69,7 +70,7 @@ impl Compiler {
 
     /// If this compiler is producing a class body and `reg` is one of the
     /// class-body's local slots, emit a `RecordClassStore(reg)` insn so the
-    /// VM can append the slot to the class-namespace store-order list.
+    /// VM can update class-namespace ordering and any materialized live dict.
     /// No-op outside class bodies and for temp / cell registers — keeping
     /// regular function compilation untouched.
     fn maybe_record_class_store(&mut self, reg: Reg) {

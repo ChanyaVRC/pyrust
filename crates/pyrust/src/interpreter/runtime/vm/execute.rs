@@ -615,6 +615,10 @@ impl Interpreter {
                 Insn::LoadGlobal(dst, name_idx) => {
                     regs[*dst as usize] = vm_try!(self.load_global_cached(code, *name_idx));
                 }
+                Insn::LoadClassName(dst, local, name_idx) => {
+                    regs[*dst as usize] =
+                        vm_try!(self.load_class_name(code, &regs, *local, *name_idx));
+                }
                 Insn::StoreGlobal(name_idx, src) => {
                     let name = pool_get!(code.names, *name_idx, "name");
                     let val = vm_try!(vm_read(&regs, *src, num_locals));

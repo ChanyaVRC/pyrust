@@ -248,7 +248,7 @@ impl Compiler {
 
         // Receiver / dst / args_base placement — identical to compile_method_call.
         let (obj_reg, dst_reg, args_base, need_copy) = if let Expr::Var(name, _) = target {
-            if let Some(local) = self.local_reg(name) {
+            if let Some(local) = self.local_reg(name).filter(|_| !self.is_class_body) {
                 let dst = self.next_temp;
                 let abase = dst.wrapping_add(1);
                 let frame_top = abase.wrapping_add(total_reg);
@@ -352,7 +352,7 @@ impl Compiler {
         // For all other receivers we fall back to copying the value into a temp and
         // using the same register for both obj and dst.
         let (obj_reg, dst_reg, args_base, need_copy) = if let Expr::Var(name, _) = target {
-            if let Some(local) = self.local_reg(name) {
+            if let Some(local) = self.local_reg(name).filter(|_| !self.is_class_body) {
                 let dst = self.next_temp;
                 let abase = dst.wrapping_add(1);
                 let frame_top = abase.wrapping_add(Reg::from(nargs));
@@ -455,7 +455,7 @@ impl Compiler {
             // shared backing of mutable receivers, so in-place mutations made
             // by the method remain visible through the original object.
             let (obj_reg, dst_reg) = if let Expr::Var(tname, _) = target.as_ref() {
-                if let Some(local) = self.local_reg(tname) {
+                if let Some(local) = self.local_reg(tname).filter(|_| !self.is_class_body) {
                     let obj = self.alloc_temp();
                     self.emit(Insn::Move(obj, local));
                     (obj, obj)
