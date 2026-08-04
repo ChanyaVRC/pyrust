@@ -8,7 +8,10 @@
 #   a is b      =>  id(a) == id(b)
 #   a is not b  =>  id(a) != id(b)     (while both objects are alive)
 #
-# so every check below prints a relation, never a raw id.
+# so every check below prints a relation, never a raw implementation-specific
+# id.
+
+import sys
 
 
 def consistent(a, b):
@@ -27,6 +30,7 @@ c2 = complex(3.0, 4.0)
 lst_a = [1]
 lst_b = [2]
 lst_alias = lst_a
+dict_a = {"key": "value"}
 
 
 class Obj:
@@ -126,6 +130,7 @@ objs = [
     NotImplemented,
     lst_a,
     lst_b,
+    dict_a,
     inst,
     inst_dict_a,
     other_inst_dict,
@@ -134,9 +139,13 @@ objs = [
     big_range,
     equal_big_range,
     "abc",
+    len,
 ]
 print("int-type", all(type(id(o)) is int for o in objs))
 print("non-negative", all(id(o) >= 0 for o in objs))
+# This row spans inline primitives/string/float, a counter-backed list, an
+# allocation-backed dict and user object, plus built-in function/object forms.
+print("bounded", all(id(o) <= sys.maxsize for o in objs))
 print("id-keyed", len({id(o): None for o in objs}) == len(objs))
 
 # A direct one-argument `id(x)` and an `id` reached through a variable, a
@@ -162,7 +171,7 @@ print("subnormal-vs-first-alloc", all(id(5e-324 * k) not in {id(o) for o in heap
 
 # Mixing the float bits with a bijective u64 finalizer still leaves every u64
 # reachable.  This is the exact finite float obtained by inverting the old
-# finalizer for `id(None)`; the two identities must occupy disjoint namespaces.
+# finalizer for `id(None)`; the two typed identities must receive distinct ids.
 old_fmix_collision = float.fromhex("-0x1.77077a6d0dbbbp+947")
 print(
     "fmix-inverse-vs-none",

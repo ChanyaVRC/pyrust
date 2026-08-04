@@ -415,7 +415,8 @@ mod object_id_tests {
             Value::float(f64::NAN),
             // The two smallest subnormals: their raw bit patterns are `1` and
             // `2`, which is the range the monotonic list/tuple/set counter
-            // hands out.  Their wide namespace keeps those numbers disjoint.
+            // hands out.  Their distinct typed keys keep them disjoint in the
+            // bounded-id table.
             Value::float(f64::from_bits(1)),
             Value::float(f64::from_bits(2)),
             // The float whose old fmix64 id was exactly `id(None)`.  A hash
@@ -486,12 +487,26 @@ mod object_id_tests {
 
     /// The old `id()` returned `0` for every kind it had not enumerated,
     /// which is what gave all floats and complexes one shared id.  Nothing
-    /// reaches `0` any more: the tagged kinds carry their tag, and the two
-    /// bit-derived kinds live in explicit non-zero namespaces.
+    /// reaches `0` any more: direct allocation ids are non-null and synthetic
+    /// ids are allocated from the positive odd integers.
     #[test]
     fn no_value_falls_back_to_a_zero_id() {
         for value in matrix() {
             assert_ne!(value.object_id(), Value::int(0), "unexpected zero id");
+        }
+    }
+
+    /// The numeric id is a presentation of the typed identity, not storage
+    /// for the identity itself.  Keep common ids in Value's signed 48-bit
+    /// inline-int range instead of allocating a BigInt for every call.
+    #[test]
+    fn common_object_ids_are_inline_integers() {
+        for (index, value) in matrix().into_iter().enumerate() {
+            let id = value.object_id();
+            let inline = id
+                .as_int()
+                .unwrap_or_else(|| panic!("matrix[{index}] produced a heap-allocated object id"));
+            assert!((0..=(1 << 47) - 1).contains(&inline));
         }
     }
 
@@ -501,7 +516,7 @@ mod object_id_tests {
     /// constructible finite float, which made `id(f) == id(None)` on the
     /// reviewed implementation.
     #[test]
-    fn float_id_namespace_rejects_the_inverted_fmix_collision() {
+    fn float_typed_identity_rejects_the_inverted_fmix_collision() {
         let float = Value::float(f64::from_bits(0xfb27_7077_a6d0_dbbb));
         let none = Value::none();
         assert!(!values_are_identical(&float, &none));
@@ -509,8 +524,9 @@ mod object_id_tests {
     }
 
     /// A pair of 64-bit components cannot be injected into one u64.  These
-    /// two complexes had the same previous murmur fold; retaining all 128
-    /// bits makes their ids distinct for the same reason `is` says they are.
+    /// two complexes had the same previous murmur fold; retaining all 128 bits
+    /// in the typed side-table key makes their ids distinct for the same reason
+    /// `is` says they are.
     #[test]
     fn complex_id_keeps_both_component_bit_patterns() {
         let zero = Value::complex(0.0, 0.0);

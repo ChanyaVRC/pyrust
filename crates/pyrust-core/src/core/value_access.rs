@@ -268,30 +268,30 @@ impl Value {
         match top16(self.0) {
             TAG_NONE | TAG_BOOL | TAG_INT => ObjectIdentity::RawValue(self.0),
             TAG_STR if str_is_inline_bits(self.0) => ObjectIdentity::RawValue(self.0),
-            TAG_STR => ObjectIdentity::Allocation(self.0 & PAYLOAD_MASK),
+            TAG_STR => ObjectIdentity::allocation_from_nanbox(self.0 & PAYLOAD_MASK),
             TAG_TUPLE => ObjectIdentity::Counter(unsafe { self.tuple_inner() }.obj_id),
             TAG_LIST => ObjectIdentity::Counter(unsafe { self.list_inner() }.obj_id),
             TAG_OPAQUE => match unsafe { &*self.opaque_ptr() } {
-                Opaque::PyBigInt(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
-                Opaque::Dict(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::PyBigInt(rc) => ObjectIdentity::allocation_from_ptr(Rc::as_ptr(rc)),
+                Opaque::Dict(rc) => ObjectIdentity::allocation_from_ptr(Rc::as_ptr(rc)),
                 Opaque::Set(rc) => ObjectIdentity::Counter(rc.obj_id),
                 // Range aliases share this refcounted opaque slot; separately
                 // constructed equal ranges have distinct slots.
                 Opaque::Range { .. } => {
-                    ObjectIdentity::Allocation(unsafe { self.opaque_slot_ptr() } as u64)
+                    ObjectIdentity::allocation_from_ptr(unsafe { self.opaque_slot_ptr() })
                 }
-                Opaque::BigRange(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
-                Opaque::UserFunction(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
-                Opaque::PyClass(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
-                Opaque::PyInstance(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
-                Opaque::PyModule(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::BigRange(rc) => ObjectIdentity::allocation_from_ptr(Rc::as_ptr(rc)),
+                Opaque::UserFunction(rc) => ObjectIdentity::allocation_from_ptr(Rc::as_ptr(rc)),
+                Opaque::PyClass(rc) => ObjectIdentity::allocation_from_ptr(Rc::as_ptr(rc)),
+                Opaque::PyInstance(rc) => ObjectIdentity::allocation_from_ptr(Rc::as_ptr(rc)),
+                Opaque::PyModule(rc) => ObjectIdentity::allocation_from_ptr(Rc::as_ptr(rc)),
                 Opaque::BoundMethod { obj_id, .. }
                 | Opaque::ClassBoundMethod { obj_id, .. }
                 | Opaque::SuperProxy { obj_id, .. }
                 | Opaque::SuperProxyClass { obj_id, .. }
                 | Opaque::SuperProxyUnbound { obj_id, .. } => ObjectIdentity::Counter(*obj_id),
-                Opaque::Generator(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
-                Opaque::Bytes(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::Generator(rc) => ObjectIdentity::allocation_from_ptr(Rc::as_ptr(rc)),
+                Opaque::Bytes(rc) => ObjectIdentity::allocation_from_ptr(Rc::as_ptr(rc)),
                 Opaque::Complex(re, im) => ObjectIdentity::Complex {
                     real: re.to_bits(),
                     imag: im.to_bits(),
@@ -304,7 +304,7 @@ impl Value {
                         type_id: (*ops).type_id(),
                         payload,
                     },
-                    None => ObjectIdentity::Allocation(Rc::as_ptr(state) as u64),
+                    None => ObjectIdentity::allocation_from_ptr(Rc::as_ptr(state)),
                 },
             },
             _ => unreachable!("invalid NaN-box tag in object identity"),
@@ -329,14 +329,11 @@ impl Value {
     /// a.is_identical_to(b) == (a.object_id() == b.object_id())
     /// ```
     ///
-    /// Allocation-backed values retain their existing `u64` address id.
-    /// Counter, raw-box, float, complex, and custom built-in identities occupy
-    /// disjoint arbitrary-precision namespaces; none relies on hashing.
+    /// Common allocation-backed values retain their existing address id.
+    /// Other typed identities receive stable, bounded ids from a collision-safe
+    /// side table; no identity payload is folded or truncated.
     pub fn object_id(&self) -> Value {
-        match self.object_identity().encode() {
-            EncodedObjectIdentity::Unsigned(id) => Value::uint(id),
-            EncodedObjectIdentity::Wide(id) => Value::bigint(id),
-        }
+        Value::int(self.object_identity().encode() as i64)
     }
 
     // ── Private unsafe helpers ───────────────────────────────────────────────
