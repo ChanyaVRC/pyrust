@@ -1,7 +1,8 @@
 use std::any::TypeId;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
-use num_bigint::{BigInt, Sign};
+use rustc_hash::FxBuildHasher;
 
 // Monotonic identity shared by the container/method representations that do
 // not carry a backing allocation address.  `None` is the exhausted state: the
@@ -27,10 +28,10 @@ pub(crate) fn next_obj_id() -> u64 {
 ///
 /// Variants are semantic namespaces, not presentation tags.  Equality is a
 /// cheap, allocation-free comparison used by `is`; [`Self::encode`] maps the
-/// same key injectively to a non-negative Python integer.  Keeping those two
-/// operations on one key makes their equivalence structural rather than a
-/// pair of implementations that tests merely sample.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// same key injectively to a bounded non-negative Python integer.  Keeping
+/// those two operations on one key makes their equivalence structural rather
+/// than a pair of implementations that tests merely sample.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ObjectIdentity {
     /// Address of the live allocation that is the Python object.
     Allocation(u64),
@@ -48,143 +49,184 @@ pub(crate) enum ObjectIdentity {
     Builtin { type_id: TypeId, payload: u64 },
 }
 
-pub(crate) enum EncodedObjectIdentity {
-    Unsigned(u64),
-    Wide(BigInt),
-}
+/// Largest positive integer that [`Value::int`](crate::Value::int) stores in
+/// the NaN-box itself.  Synthetic ids are odd numbers in this range; aligned
+/// allocation addresses are even, so the two presentations cannot collide.
+const MAX_INLINE_OBJECT_ID: u64 = (1 << 47) - 1;
+const FIRST_SYNTHETIC_OBJECT_ID: u64 = 1;
 
-// One collision-free numeric namespace per concrete BuiltinTypeOps type.
-// Values are thread-bound, so the append-only TLS registry is sufficient and
-// avoids hashing TypeId into a fixed word (which would reintroduce collisions).
-thread_local! {
-    static BUILTIN_ID_TYPES: RefCell<Vec<TypeId>> = const { RefCell::new(Vec::new()) };
-}
-
-fn builtin_type_namespace(type_id: TypeId) -> u64 {
-    BUILTIN_ID_TYPES.with(|types| {
-        let mut types = types.borrow_mut();
-        let index = match types.iter().position(|known| *known == type_id) {
-            Some(index) => index,
-            None => {
-                let index = types.len();
-                types.push(type_id);
-                index
-            }
-        };
-        u64::try_from(index).expect("built-in identity namespace exhausted")
-    })
-}
-
-/// Encode one 64-bit payload in a numbered 64-bit-wide chunk.
+/// Append-only per-thread assignment of typed identities to bounded ids.
 ///
-/// A single `u128 -> BigInt` conversion avoids the temporary BigInts produced
-/// by a shift followed by an addition on each `id()` call.
-fn chunk_id(namespace: u64, payload: u64) -> BigInt {
-    BigInt::from((u128::from(namespace) << 64) | u128::from(payload))
+/// Entries are deliberately never removed and an id is never reassigned to a
+/// different typed key.  This gives an identity a stable answer across aliases.
+/// If an allocation address is recycled after its old object dies, reusing that
+/// key and id is safe because the two objects cannot be observed simultaneously,
+/// just as for CPython's address ids.  The cost is O(n) retained metadata for
+/// the n distinct non-direct identities observed by `id()` on a thread.
+/// `Value` is `!Send + !Sync`, so a thread-local table matches its ownership and
+/// avoids synchronization on the call path.
+struct BoundedObjectIds {
+    ids: HashMap<ObjectIdentity, u64, FxBuildHasher>,
+    next: Option<u64>,
 }
 
-fn complex_id(real: u64, imag: u64) -> BigInt {
-    // 1 || real || imag: an exact 129-bit positive integer in
-    // [2^128, 2^129), built in one conversion.
-    let mut bytes = [0_u8; 17];
-    bytes[0] = 1;
-    bytes[1..9].copy_from_slice(&real.to_be_bytes());
-    bytes[9..17].copy_from_slice(&imag.to_be_bytes());
-    BigInt::from_bytes_be(Sign::Plus, &bytes)
+impl BoundedObjectIds {
+    fn new() -> Self {
+        Self {
+            ids: HashMap::with_hasher(FxBuildHasher),
+            next: Some(FIRST_SYNTHETIC_OBJECT_ID),
+        }
+    }
+
+    fn id_for(&mut self, identity: ObjectIdentity) -> u64 {
+        if let Some(id) = self.ids.get(&identity) {
+            return *id;
+        }
+
+        let id = self
+            .next
+            .expect("bounded object identity space exhausted without reuse");
+        self.next = id
+            .checked_add(2)
+            .filter(|next| *next <= MAX_INLINE_OBJECT_ID);
+        self.ids.insert(identity, id);
+        id
+    }
 }
 
-fn builtin_id(type_id: TypeId, payload: u64) -> BigInt {
-    // 1 at bit 192 || a collision-free 64-bit type namespace || payload.
-    // The gap above the complex namespace is intentional: the complete
-    // 128-bit typed payload remains visually and mechanically separate.
-    let namespace = builtin_type_namespace(type_id);
-    let mut bytes = [0_u8; 25];
-    bytes[0] = 1;
-    bytes[9..17].copy_from_slice(&namespace.to_be_bytes());
-    bytes[17..25].copy_from_slice(&payload.to_be_bytes());
-    BigInt::from_bytes_be(Sign::Plus, &bytes)
+thread_local! {
+    static BOUNDED_OBJECT_IDS: RefCell<BoundedObjectIds> =
+        RefCell::new(BoundedObjectIds::new());
+}
+
+fn synthetic_object_id(identity: ObjectIdentity) -> u64 {
+    BOUNDED_OBJECT_IDS.with(|ids| ids.borrow_mut().id_for(identity))
 }
 
 impl ObjectIdentity {
-    /// Inject this typed identity key into Python's non-negative integer space.
+    /// Build an allocation identity from a pointer whose pointee alignment
+    /// proves that every possible address is even.  The inline const assertion
+    /// is evaluated for every concrete `T`, adding no work to `is` or `id()`.
+    #[inline(always)]
+    pub(crate) fn allocation_from_ptr<T>(ptr: *const T) -> Self {
+        const {
+            assert!(
+                std::mem::align_of::<T>() >= 2,
+                "object identity allocation pointer must be even-aligned"
+            );
+        }
+        debug_assert!(!ptr.is_null());
+        Self::Allocation(ptr.addr() as u64)
+    }
+
+    /// Build an identity from a pointer already validated by the NaN-box
+    /// encoder.  That encoder rejects null, unaligned, and wider-than-48-bit
+    /// addresses in release builds before they can enter a `Value`.
+    #[inline(always)]
+    pub(crate) fn allocation_from_nanbox(address: u64) -> Self {
+        debug_assert!(address != 0 && address.is_multiple_of(2));
+        Self::Allocation(address)
+    }
+
+    /// Encode this typed key as a bounded Python object id.
     ///
-    /// ```text
-    /// allocation: [0*2^64, 1*2^64)
-    /// counter:    [1*2^64, 2*2^64)
-    /// raw value:  [2*2^64, 3*2^64)
-    /// float:      [3*2^64, 4*2^64)
-    /// complex:    [2^128,   2^129)
-    /// built-in:   2^192 | (type_namespace << 64) | payload
-    /// ```
-    pub(crate) fn encode(self) -> EncodedObjectIdentity {
-        match self {
-            Self::Allocation(address) => EncodedObjectIdentity::Unsigned(address),
-            Self::Counter(id) => EncodedObjectIdentity::Wide(chunk_id(1, id)),
-            Self::RawValue(bits) => EncodedObjectIdentity::Wide(chunk_id(2, bits)),
-            Self::Float(bits) => EncodedObjectIdentity::Wide(chunk_id(3, bits)),
-            Self::Complex { real, imag } => EncodedObjectIdentity::Wide(complex_id(real, imag)),
-            Self::Builtin { type_id, payload } => {
-                EncodedObjectIdentity::Wide(builtin_id(type_id, payload))
+    /// Common allocation-backed objects retain their exact address when it is
+    /// in the signed 48-bit inline-int range.  All other identities use the
+    /// append-only side table.  Allocation addresses are even by construction
+    /// while table ids are odd, so neither domain can collide with the other.
+    pub(crate) fn encode(self) -> u64 {
+        if let Self::Allocation(address) = self {
+            assert!(
+                address != 0 && address.is_multiple_of(2),
+                "object identity allocation address must be non-null and even-aligned"
+            );
+            if address <= MAX_INLINE_OBJECT_ID {
+                return address;
             }
         }
+        synthetic_object_id(self)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EncodedObjectIdentity, ObjectIdentity, take_next_obj_id};
-    use num_bigint::BigInt;
+    use super::{BoundedObjectIds, MAX_INLINE_OBJECT_ID, ObjectIdentity, take_next_obj_id};
     use std::any::TypeId;
     use std::cell::Cell;
 
-    fn as_bigint(identity: ObjectIdentity) -> BigInt {
-        match identity.encode() {
-            EncodedObjectIdentity::Unsigned(id) => BigInt::from(id),
-            EncodedObjectIdentity::Wide(id) => id,
+    #[test]
+    fn typed_identity_keys_receive_stable_distinct_odd_ids() {
+        let identities = [
+            ObjectIdentity::Counter(7),
+            ObjectIdentity::RawValue(7),
+            ObjectIdentity::Float(7),
+            ObjectIdentity::Complex { real: 7, imag: 0 },
+            ObjectIdentity::Builtin {
+                type_id: TypeId::of::<u8>(),
+                payload: 7,
+            },
+            ObjectIdentity::Builtin {
+                type_id: TypeId::of::<u16>(),
+                payload: 7,
+            },
+        ];
+        let mut registry = BoundedObjectIds::new();
+        let mut assigned = Vec::new();
+
+        for identity in identities {
+            let id = registry.id_for(identity);
+            assert_eq!(id % 2, 1);
+            assert!(id <= MAX_INLINE_OBJECT_ID);
+            assert_eq!(registry.id_for(identity), id);
+            assigned.push(id);
         }
+
+        assigned.sort_unstable();
+        assigned.dedup();
+        assert_eq!(assigned.len(), identities.len());
     }
 
     #[test]
-    fn exact_numeric_identity_namespaces_are_disjoint() {
-        let allocation_max = as_bigint(ObjectIdentity::Allocation(u64::MAX));
-        let counter_min = as_bigint(ObjectIdentity::Counter(0));
-        let counter_max = as_bigint(ObjectIdentity::Counter(u64::MAX));
-        let raw_min = as_bigint(ObjectIdentity::RawValue(0));
-        let raw_max = as_bigint(ObjectIdentity::RawValue(u64::MAX));
-        let float_min = as_bigint(ObjectIdentity::Float(0));
-        let float_max = as_bigint(ObjectIdentity::Float(u64::MAX));
-        let complex_min = as_bigint(ObjectIdentity::Complex { real: 0, imag: 0 });
-        let builtin_min = as_bigint(ObjectIdentity::Builtin {
-            type_id: TypeId::of::<u8>(),
-            payload: 0,
-        });
+    fn direct_and_side_table_ids_occupy_disjoint_ranges() {
+        let direct_address = 0x0000_1234_5678_9ab8;
+        let direct = ObjectIdentity::Allocation(direct_address).encode();
+        assert_eq!(direct, direct_address);
+        assert_eq!(direct % 2, 0);
 
-        assert!(allocation_max < counter_min);
-        assert!(counter_min < counter_max);
-        assert!(counter_max < raw_min);
-        assert!(raw_min < raw_max);
-        assert!(raw_max < float_min);
-        assert!(float_min < float_max);
-        assert!(float_max < complex_min);
-        assert!(complex_min < builtin_min);
+        let high_address = MAX_INLINE_OBJECT_ID + 1;
+        let bounded = ObjectIdentity::Allocation(high_address).encode();
+        assert_eq!(bounded % 2, 1);
+        assert!(bounded <= MAX_INLINE_OBJECT_ID);
+        assert_ne!(direct, bounded);
+        assert_eq!(ObjectIdentity::Allocation(high_address).encode(), bounded);
+
+        let largest_aligned_address = u64::MAX - 1;
+        let largest_bounded = ObjectIdentity::Allocation(largest_aligned_address).encode();
+        assert_eq!(largest_bounded % 2, 1);
+        assert!(largest_bounded <= MAX_INLINE_OBJECT_ID);
+        assert_ne!(bounded, largest_bounded);
     }
 
     #[test]
-    fn builtin_type_namespace_is_exact_not_a_type_hash() {
-        let first = as_bigint(ObjectIdentity::Builtin {
-            type_id: TypeId::of::<u8>(),
-            payload: 7,
-        });
-        let alias = as_bigint(ObjectIdentity::Builtin {
-            type_id: TypeId::of::<u8>(),
-            payload: 7,
-        });
-        let other_type = as_bigint(ObjectIdentity::Builtin {
-            type_id: TypeId::of::<u16>(),
-            payload: 7,
-        });
-        assert_eq!(first, alias);
-        assert_ne!(first, other_type);
+    #[should_panic(expected = "allocation address must be non-null and even-aligned")]
+    fn invalid_odd_allocation_address_is_rejected() {
+        ObjectIdentity::Allocation(u64::MAX).encode();
+    }
+
+    #[test]
+    fn bounded_identity_exhaustion_never_reuses_an_id() {
+        let identity = ObjectIdentity::Counter(1);
+        let mut registry = BoundedObjectIds::new();
+        registry.next = Some(MAX_INLINE_OBJECT_ID);
+
+        assert_eq!(registry.id_for(identity), MAX_INLINE_OBJECT_ID);
+        assert_eq!(registry.id_for(identity), MAX_INLINE_OBJECT_ID);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                registry.id_for(ObjectIdentity::Counter(2));
+            }))
+            .is_err()
+        );
     }
 
     #[test]

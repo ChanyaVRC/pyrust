@@ -72,8 +72,8 @@ pub trait BuiltinTypeOps: Any {
     /// cell and keep `None`.  A proxy whose Python identity belongs to another
     /// live target returns that target's exact pointer payload instead.  Core
     /// combines an override with this ops implementation's concrete `TypeId`
-    /// in a dedicated numeric namespace, so it cannot collide with the target
-    /// object itself or an override supplied by another built-in type.
+    /// in one typed side-table key, so it cannot collide with the target object
+    /// itself or an override supplied by another built-in type.
     fn identity_payload(&self, state: &BuiltinState) -> Option<u64> {
         let _ = state;
         None

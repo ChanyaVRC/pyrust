@@ -26,9 +26,8 @@ pyrust_module! {
     /// `is` is built on.  This body used to re-derive one per kind and fell
     /// back to `0` for everything it had not enumerated, which handed every
     /// float and complex the same id (#2956); deriving it in one place is
-    /// what keeps `id()` and `is` from disagreeing.  It returns the exact
-    /// non-negative Python integer directly, including the wide float and
-    /// complex namespaces.
+    /// what keeps `id()` and `is` from disagreeing.  It returns the bounded
+    /// non-negative Python integer assigned to that typed identity.
     ///
     /// `#[arity_style(takes_exactly_one)]` (#400/#2331) reproduces the
     /// METH_O wording `id() takes exactly one argument (N given)`.
