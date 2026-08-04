@@ -400,6 +400,67 @@ fn frame_cell_context(view: &VmFrameView) -> Option<FrameCellContext> {
     }
 }
 
+/// Enumerate names whose entries in a function frame's persistent `f_locals`
+/// mapping are owned by compiler state, even while their current value is
+/// unbound. Arbitrary mapping-only keys are deliberately excluded.
+pub(crate) fn compiler_owned_frame_local_keys(view: &VmFrameView) -> Vec<PyKey> {
+    let mut names: Vec<String> = view.local_index.keys().cloned().collect();
+    if let Some(nonlocal_names) = &view.nonlocal_names {
+        names.extend(nonlocal_names.iter().cloned());
+    }
+
+    if let Some((code, own_env, defining_env)) = frame_cell_context(view) {
+        names.extend(code.cell_vars.iter().cloned());
+
+        let declared_global = view
+            .function
+            .as_ref()
+            .map(|function| Rc::clone(&function.global_names))
+            .or_else(|| {
+                own_env
+                    .as_ref()
+                    .map(|env| Rc::clone(&env.borrow().global_names))
+            });
+        for candidate in code.free_var_candidates() {
+            if view.local_index.contains_key(candidate)
+                || declared_global
+                    .as_ref()
+                    .is_some_and(|globals| globals.contains(candidate))
+            {
+                continue;
+            }
+
+            // A candidate is a real free variable when lexical scope metadata
+            // in an enclosing non-root environment owns the name. Consult the
+            // declaration set rather than the value map: an empty cell after
+            // `del` is still compiler-owned and must clear a same-named key
+            // inserted through `f_locals`.
+            let mut current = Some(Rc::clone(&defining_env));
+            while let Some(env) = current {
+                let bindings = env.borrow();
+                let parent = bindings.parent.clone();
+                if parent.is_none() {
+                    break;
+                }
+                let owns_name = bindings.local_names.contains(candidate);
+                drop(bindings);
+                if owns_name {
+                    names.push(candidate.clone());
+                    break;
+                }
+                current = parent;
+            }
+        }
+    }
+
+    names.sort_unstable();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|name| PyKey::str_from(&name))
+        .collect()
+}
+
 /// Merge a function frame's **cell** and **free** variables into `dict`.
 ///
 /// CPython's `locals()` for a function frame is `co_varnames` + `co_cellvars` +

@@ -246,7 +246,7 @@ impl Compiler {
             None
         };
         sub.compile_block(&fn_body);
-        let inner_code = match sub.finish() {
+        let mut inner_code = match sub.finish() {
             Ok(c) => c,
             Err(e) => {
                 self.failed = true;
@@ -262,6 +262,12 @@ impl Compiler {
                 return 0;
             }
         };
+        merge_lexical_free_var_candidates(
+            &mut inner_code,
+            &fn_body,
+            &inner_index_rc,
+            &inner_global_rc,
+        );
 
         if self.fn_protos.len() >= u16::MAX as usize {
             self.failed = true;
@@ -676,7 +682,7 @@ impl Compiler {
         // NOT awaited here, unlike a collection comprehension.
         sub.is_async_function = is_async;
         sub.compile_block(&body);
-        let inner_code = match sub.finish() {
+        let mut inner_code = match sub.finish() {
             Ok(c) => c,
             Err(e) => {
                 self.failed = true;
@@ -692,6 +698,12 @@ impl Compiler {
                 return 0;
             }
         };
+        merge_lexical_free_var_candidates(
+            &mut inner_code,
+            &body,
+            &inner_index_rc,
+            &inner_global_rc,
+        );
 
         if self.fn_protos.len() >= u16::MAX as usize {
             self.failed = true;

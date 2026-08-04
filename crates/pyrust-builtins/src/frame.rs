@@ -3,13 +3,13 @@
 //! CPython exposes live frame objects via `sys._getframe()`, generator
 //! `gi_frame`, and traceback `tb_frame`.  pyrust's VM keeps its frames in
 //! register files that are not directly addressable from Python, so this is a
-//! lightweight read-only *snapshot* `BuiltinObject` capturing the attributes
-//! `inspect` / `logging` / `traceback` most commonly read: `f_code`,
+//! lightweight read-only `BuiltinObject` exposing the attributes `inspect` /
+//! `logging` / `traceback` most commonly read: `f_code`,
 //! `f_lineno`, `f_back`, `f_globals`, `f_locals`, `f_builtins` (issue #2171).
 //!
-//! Because the snapshot is taken at construction time it does not track later
-//! mutation of the underlying frame; this is sufficient for the introspection
-//! use cases (debuggers/loggers read the frame at the moment they obtain it).
+//! The interpreter weak-caches one object per live activation and refreshes
+//! function `f_locals` when that attribute is read. Other captured values are
+//! updated at their relevant introspection boundaries.
 
 use std::any::Any;
 

@@ -240,7 +240,7 @@ impl Interpreter {
             unsafe { RegSlice::from_raw(class_regs_ptr.as_ptr(), class_regs_len) };
         let body_result = self.run_bytecode(class_code, class_regs_slice);
         // Always pop both stacks, even on error, to keep them balanced.
-        self.vm_frame_views.pop();
+        self.pop_vm_frame_view();
         self.env = previous_env;
         self.free_env(class_env_rc.clone());
         let store_order = self

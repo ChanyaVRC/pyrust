@@ -207,7 +207,7 @@ impl Compiler {
         // FnCode (issue #2185).
         sub.first_lineno = def_lineno;
         sub.compile_block_with_linenos(body, body_linenos);
-        let inner_code = match sub.finish() {
+        let mut inner_code = match sub.finish() {
             Ok(c) => c,
             Err(e) => {
                 self.failed = true;
@@ -223,6 +223,7 @@ impl Compiler {
                 return None;
             }
         };
+        merge_lexical_free_var_candidates(&mut inner_code, body, &inner_index_rc, &inner_global_rc);
 
         if self.fn_protos.len() >= u16::MAX as usize {
             self.failed = true;

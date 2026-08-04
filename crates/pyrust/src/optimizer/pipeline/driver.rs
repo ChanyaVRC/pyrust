@@ -143,7 +143,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         num_locals,
         fn_protos,
         cell_vars: code.cell_vars,
-        free_var_candidates: std::cell::OnceCell::new(),
+        free_var_candidates: code.free_var_candidates,
         is_generator: code.is_generator,
         is_coroutine: code.is_coroutine,
         is_class_method: code.is_class_method,
