@@ -90,6 +90,13 @@ pub(crate) struct GeneratorFrame {
     /// suspend/resume machinery but report `type(coro).__name__ == "coroutine"`,
     /// render a `<coroutine object …>` repr, and are NOT iterable with `for`.
     pub(crate) is_coroutine: bool,
+    /// Frame identity belongs to the generator activation, not to one resume.
+    /// The box remains absent until code inside the generator introspects its
+    /// frame, so generators that never do so allocate nothing for this cache.
+    /// Interior mutability lets an active `VmFrameView` reach the persistent
+    /// cache through its shared generator pointer without moving it through
+    /// the ordinary resume/yield hot path.
+    pub(crate) frame_cache: std::cell::RefCell<Option<Box<VmFrameCache>>>,
 }
 
 impl GeneratorFrame {

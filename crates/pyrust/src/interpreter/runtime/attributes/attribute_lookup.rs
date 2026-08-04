@@ -349,7 +349,22 @@ impl Interpreter {
             ValueKind::BuiltinFunction(function_name) => {
                 self.get_builtin_function_attribute(target, function_name, name)
             }
-            ValueKind::BuiltinObject { .. } => self.get_builtin_object_attribute(target, name),
+            ValueKind::BuiltinObject { .. } => {
+                if matches!(name, "f_locals" | "f_back") && pyrust_builtins::frame::is_frame(target)
+                {
+                    match name {
+                        "f_locals" => self.refresh_live_frame_locals_for_attribute(target),
+                        "f_back" => {
+                            if let Some(back) = self.live_generator_frame_back_for_attribute(target)
+                            {
+                                return Ok(back);
+                            }
+                        }
+                        _ => unreachable!("matched frame attribute above"),
+                    }
+                }
+                self.get_builtin_object_attribute(target, name)
+            }
             ValueKind::Generator(state) => self.get_generator_attribute(target, state, name),
             _ => {
                 if let Some(result) = self.try_get_bound_method_attribute(target, name) {

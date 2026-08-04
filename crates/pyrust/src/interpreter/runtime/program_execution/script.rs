@@ -705,7 +705,7 @@ impl Interpreter {
             None
         };
         drop(namespace_mirror_guard);
-        self.vm_frame_views.pop();
+        self.pop_vm_frame_view();
         // Write fastlocal registers back to the module env so that imported
         // modules and post-run inspection can find all names.
         // StoreGlobal from nested scopes already updated the register via

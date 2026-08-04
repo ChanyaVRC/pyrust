@@ -178,7 +178,7 @@ impl Interpreter {
                         gen_drive_return!(__v);
                     }
                     if let Some(__saved) = tramp_stack.pop() {
-                        self.vm_frame_views.pop();
+                        self.pop_vm_frame_view();
                         let __memo_key = __saved.memo_key;
                         tramp_arena.truncate(tramp_active_base);
                         tramp_active_base = __saved.saved_base;

@@ -95,7 +95,7 @@ impl Interpreter {
                     self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
                 let vm_result = self.run_bytecode(&code, regs_slice);
                 drop(namespace_mirror_guard);
-                self.vm_frame_views.pop();
+                self.pop_vm_frame_view();
                 record_exec_string_frame(self, &vm_result, &code.filename);
                 // Write fastlocals back to module env so names are visible
                 // after exec() returns, matching top-level assignment semantics.
@@ -172,7 +172,7 @@ impl Interpreter {
             self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
         let vm_result = self.run_bytecode(code, regs_slice);
         drop(namespace_mirror_guard);
-        self.vm_frame_views.pop();
+        self.pop_vm_frame_view();
         record_exec_string_frame(self, &vm_result, &code.filename);
         vm_result
     }

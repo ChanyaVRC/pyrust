@@ -202,6 +202,8 @@ impl Interpreter {
             // the view is popped before that borrow ends, so the pointer stays
             // valid for the view's lifetime.
             gen_frame: Some(std::ptr::NonNull::from(&*frame)),
+            // Generator frame identity is cached persistently inside `frame`;
+            // the view reaches it through `gen_frame` only on introspection.
         });
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
         // frame.regs (which outlives this call).  No &mut [Value] referencing
@@ -450,6 +452,8 @@ impl Interpreter {
             // `GenDriveFrame::gframe` below (only the box pointer moves), so the
             // pointer remains valid while this view is on the stack.
             gen_frame: Some(std::ptr::NonNull::from(&*gframe)),
+            // See the native resume site above: no cache moves through this
+            // trampoline's ordinary enter/yield path.
         });
         let gen_code_rc = Rc::clone(&gframe.code);
         let gen_code_ptr: *const crate::bytecode::FnCode = Rc::as_ptr(&gen_code_rc);
@@ -548,7 +552,7 @@ impl Interpreter {
                         .copied()
                         .filter(|&s| s != (0, 0, 0, 0))
                 };
-                if let Some(view) = self.vm_frame_views.pop()
+                if let Some(view) = self.pop_vm_frame_view()
                     && let Some(func) = view.function
                 {
                     let frame_col = innermost_col;

@@ -351,8 +351,8 @@ mod execution {
     use super::{
         CallDepthGuard, EnvRef, FrameKind, GeneratorCell, HashMap, Interpreter, IterCacheBuf,
         IterState, ItersBuf, KwCallMappingMerge, LoopIteratorAdvance, MemoKey, PyError, Rc,
-        RegSlice, Result, Value, ValueKind, VmFrameView, bump_global_struct_version, call_depth,
-        callable_error_name, duplicate_keyword_error, extract_stop_iteration_value,
+        RegSlice, Result, Value, ValueKind, VmFrameCache, VmFrameView, bump_global_struct_version,
+        call_depth, callable_error_name, duplicate_keyword_error, extract_stop_iteration_value,
         initialize_typevar_attr, intern_string_value, is_stop_iteration_error,
         keyword_mapping_operand_error, lookup_class_attr, make_slice_value,
         make_type_alias_from_syntax, make_typevar_from_syntax, max_call_depth,
@@ -383,8 +383,9 @@ pub(crate) use generator_protocols::{
 
 mod introspection {
     use super::{
-        FrameKind, GeneratorFrame, Interpreter, Rc, UserFunction, Value, ValueKind,
-        class_frame_locals_value, lookup_enclosing_function_value, snapshot_view_locals,
+        FrameKind, GeneratorFrame, Interpreter, PyDict, PyKey, Rc, UserFunction, Value, ValueKind,
+        VmFrameCache, VmFrameView, class_frame_locals_value, compiler_owned_frame_local_keys,
+        lookup_enclosing_function_value, snapshot_view_locals, values_are_identical,
     };
     include!("runtime/introspection.rs");
 }

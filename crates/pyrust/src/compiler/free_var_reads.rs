@@ -320,3 +320,30 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
         Expr::Await(e) => collect_free_var_reads_in_expr(e, uses),
     }
 }
+
+/// Preserve source-level free reads that bytecode dead-branch elimination may
+/// erase. The bytecode-derived candidates remain authoritative for implicit
+/// compiler reads such as `__class__`; this only merges lexical additions that
+/// are neither locals nor explicit globals in the synthesized function scope.
+fn merge_lexical_free_var_candidates(
+    code: &mut FnCode,
+    body: &[Stmt],
+    local_index: &HashMap<String, Reg>,
+    global_names: &HashSet<String>,
+) {
+    let mut lexical_free_names = HashSet::new();
+    collect_free_var_reads_in_stmts(body, &mut lexical_free_names);
+    collect_transitive_free_vars_in_stmts(body, &mut lexical_free_names);
+    lexical_free_names.retain(|candidate| {
+        !local_index.contains_key(candidate) && !global_names.contains(candidate)
+    });
+
+    code.free_var_candidates();
+    let free_var_candidates = code
+        .free_var_candidates
+        .get_mut()
+        .expect("free-variable candidates initialized above");
+    free_var_candidates.extend(lexical_free_names);
+    free_var_candidates.sort_unstable();
+    free_var_candidates.dedup();
+}

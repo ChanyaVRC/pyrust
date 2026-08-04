@@ -291,6 +291,13 @@ pub struct Interpreter {
     /// so that `locals()` inside a class body returns the partially-built
     /// class attrs dict (issue #487).
     pub(crate) vm_frame_views: Vec<VmFrameView>,
+    /// Lazily allocated frame-object caches parallel to `vm_frame_views` for
+    /// non-generator activations that have actually been introspected. The
+    /// vector ends at its highest materialized slot; generator activations own
+    /// their persistent cache in `GeneratorFrame` instead and never add a slot.
+    /// The extra box intentionally keeps this cold field to one word.
+    #[allow(clippy::box_collection)]
+    pub(crate) vm_frame_caches: Option<Box<Vec<Option<Box<VmFrameCache>>>>>,
     /// Recursion stack for `values_user_eq` cycle detection (issue
     /// #436).  Each entry is the ordered `(value_id(lhs), value_id(rhs))`
     /// of a container pair currently being compared element-wise.
@@ -452,10 +459,23 @@ pub(crate) struct VmFrameView {
     /// `Box<GeneratorFrame>` (held in `GenDriveFrame::gframe`) or a
     /// `&mut GeneratorFrame` borrowed for the whole duration of
     /// `resume_generator_with_exc` — and the view is popped before that box /
-    /// borrow ends.  Read only on the cold traceback path while the generator
-    /// frame is suspended inside the dispatch loop, so no `&mut GeneratorFrame`
-    /// to the same allocation is live concurrently.
+    /// borrow can be used again. While the dispatch loop is running, cold-path
+    /// consumers reconstruct shared references only; they never reconstruct a
+    /// raw-derived mutable reference. The frame cache alone uses interior
+    /// mutability, with each `RefCell` borrow confined to one cold helper call.
     pub(crate) gen_frame: Option<std::ptr::NonNull<GeneratorFrame>>,
+}
+
+pub(crate) struct VmFrameCache {
+    pub(crate) object: pyrust_core::WeakValueCache,
+    /// Weak handle to this activation's function-locals mapping. Retaining
+    /// only `frame.f_locals` must make later frame lookups reuse and refresh
+    /// that dict without making the activation cache a new owner itself.
+    pub(crate) function_locals: Option<std::rc::Weak<RefCell<PyDict>>>,
+    /// Compiler-owned function-local keys synchronized into the persistent
+    /// `f_locals` dict. Mapping-only keys inserted through `f_locals` are not
+    /// recorded here and therefore survive later fastlocals refreshes.
+    pub(crate) function_local_names: Vec<PyKey>,
 }
 
 /// Thin wrapper around `iter_values` matching pyrust-core's `IterValuesFn`
@@ -514,6 +534,7 @@ impl Default for Interpreter {
             class_store_order: Vec::new(),
             class_annotation_scopes: Vec::new(),
             vm_frame_views: Vec::new(),
+            vm_frame_caches: None,
             eq_in_progress: Vec::new(),
             exc_classes: ExcClasses::uninitialized(),
             push_exc_ctx_depth: 0,
