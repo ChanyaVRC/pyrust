@@ -63,7 +63,10 @@ enum ExceptAsVarDel {
     /// been mirrored into the live globals dict after `globals()` exposure.
     Local {
         register: Reg,
-        module_name: Option<u16>,
+        /// Real index into `FnCode::names`, used by `DeleteLocal` to remove the
+        /// binding from a materialized class-frame namespace.
+        name_index: u16,
+        delete_module_global: bool,
     },
     /// Variable lives in env (no local slot); emit `DeleteName(name_idx)`.
     Name(u16),

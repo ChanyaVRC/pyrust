@@ -772,8 +772,14 @@ impl Interpreter {
                 Insn::PopTypeParamEnv => {
                     self.pop_type_parameter_scope();
                 }
-                Insn::DeleteLocal(reg, name_idx) => {
-                    vm_try!(self.delete_local_binding(code, &mut regs, *reg, *name_idx));
+                Insn::DeleteLocal(reg, name_idx, raise_if_missing) => {
+                    vm_try!(self.delete_local_binding(
+                        code,
+                        &mut regs,
+                        *reg,
+                        *name_idx,
+                        *raise_if_missing,
+                    ));
                 }
                 Insn::SyncModuleGlobal(reg, name_idx) => {
                     vm_try!(self.sync_module_global_binding(code, &regs, *reg, *name_idx));

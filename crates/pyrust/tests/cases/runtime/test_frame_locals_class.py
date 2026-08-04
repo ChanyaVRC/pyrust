@@ -216,3 +216,92 @@ print(
     class_local_reader.__code__.co_freevars,
     class_local_raises,
 )
+
+
+class ClassContext:
+    def __enter__(self):
+        return "entered"
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+
+class WithBinder:
+    namespace = sys._getframe().f_locals
+    with ClassContext() as with_bound:
+        with_mapping_value = namespace.get("with_bound")
+    with_after_value = namespace.get("with_bound")
+
+
+print(
+    "class with binder:",
+    WithBinder.with_mapping_value,
+    WithBinder.with_after_value,
+    WithBinder.with_bound,
+)
+
+
+class ExceptBinder:
+    namespace = sys._getframe().f_locals
+    try:
+        raise ValueError("ordinary")
+    except ValueError as caught:
+        caught_mapping_type = type(namespace.get("caught")).__name__
+    caught_deleted = "caught" not in namespace
+    caught = "ordinary rebound"
+    caught_order = [
+        name
+        for name in namespace
+        if name in ("caught_mapping_type", "caught_deleted", "caught")
+    ]
+
+
+print(
+    "class except binder:",
+    ExceptBinder.caught_mapping_type,
+    ExceptBinder.caught_deleted,
+    ExceptBinder.caught,
+    ExceptBinder.caught_order,
+)
+
+
+class ExceptBreakBinder:
+    namespace = sys._getframe().f_locals
+    for attempt in range(1):
+        try:
+            raise KeyError("early")
+        except KeyError as early:
+            early_mapping_type = type(namespace.get("early")).__name__
+            break
+    early_deleted = "early" not in namespace
+
+
+print(
+    "class except break binder:",
+    ExceptBreakBinder.early_mapping_type,
+    ExceptBreakBinder.early_deleted,
+)
+
+
+class ExceptStarBinder:
+    namespace = sys._getframe().f_locals
+    try:
+        raise ExceptionGroup("group", [ValueError("star")])
+    except* ValueError as grouped:
+        grouped_mapping_type = type(namespace.get("grouped")).__name__
+    grouped_deleted = "grouped" not in namespace
+    grouped = "star rebound"
+    grouped_order = [
+        name
+        for name in namespace
+        if name in ("grouped_mapping_type", "grouped_deleted", "grouped")
+    ]
+
+
+print(
+    "class except-star binder:",
+    ExceptStarBinder.grouped_mapping_type,
+    ExceptStarBinder.grouped_deleted,
+    ExceptStarBinder.grouped,
+    ExceptStarBinder.grouped_order,
+)

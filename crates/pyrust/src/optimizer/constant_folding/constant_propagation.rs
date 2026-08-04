@@ -215,7 +215,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | LoadClassName(r, _, _)
         | LoadCell(r, _)
         | LoadNone(r)
-        | DeleteLocal(r, _)
+        | DeleteLocal(r, _, _)
         | BinOp(r, _, _, _)
         | BinOpConst(r, _, _, _, _)
         | BinOpImm(r, _, _, _, _)

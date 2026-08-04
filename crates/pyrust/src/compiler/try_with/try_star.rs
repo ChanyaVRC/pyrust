@@ -96,18 +96,16 @@ impl Compiler {
                     if let Some(reg) = self.local_reg(var_name) {
                         self.emit(Insn::Move(reg, subgroup_reg));
                         self.mark_def(reg);
+                        self.maybe_record_class_store(reg);
                         if self.is_module_scope {
                             let name_idx = self.intern_name(var_name);
                             self.emit(Insn::SyncModuleGlobal(reg, name_idx));
                         }
-                        let module_name = if self.is_module_scope {
-                            Some(self.intern_name(var_name))
-                        } else {
-                            None
-                        };
+                        let name_index = self.intern_name(var_name);
                         Some(ExceptAsVarDel::Local {
                             register: reg,
-                            module_name,
+                            name_index,
+                            delete_module_global: self.is_module_scope,
                         })
                     } else {
                         let name_idx = self.intern_name(var_name);

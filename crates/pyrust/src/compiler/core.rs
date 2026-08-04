@@ -354,18 +354,20 @@ impl Compiler {
 
     /// Emit the complete PEP 3110 cleanup for one `except E as name` binding.
     ///
-    /// `DeleteLocal` clears the fast-local register. At module scope the
-    /// binding may also have been mirrored into the live globals dictionary,
-    /// so `DeleteModuleGlobal` must remove that second representation before
-    /// later global lookup can observe it.
+    /// `DeleteLocal` clears the fast-local register and, for an exposed class
+    /// frame, the live namespace key. `RecordClassDel` updates the class-store
+    /// order so a later rebind is appended in CPython order. At module scope
+    /// `DeleteModuleGlobal` also removes the mirrored globals entry.
     fn emit_except_as_delete(&mut self, cleanup: Option<ExceptAsVarDel>) {
         match cleanup {
             Some(ExceptAsVarDel::Local {
                 register,
-                module_name,
+                name_index,
+                delete_module_global,
             }) => {
-                self.emit(Insn::DeleteLocal(register, u16::MAX));
-                if let Some(name_index) = module_name {
+                self.emit(Insn::DeleteLocal(register, name_index, false));
+                self.maybe_record_class_del(register);
+                if delete_module_global {
                     self.emit(Insn::DeleteModuleGlobal(name_index));
                 }
                 if (register as usize) < 64 {

@@ -45,6 +45,7 @@ impl Compiler {
                     if let Some(reg) = self.local_reg(name) {
                         self.emit(Insn::Move(reg, val_reg));
                         self.mark_def(reg);
+                        self.maybe_record_class_store(reg);
                         // Issue #820: sync into module_globals_dict at module scope.
                         if self.is_module_scope {
                             let name_idx = self.intern_name(name);

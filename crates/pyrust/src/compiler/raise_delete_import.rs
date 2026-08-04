@@ -202,7 +202,7 @@ impl Compiler {
                     // Pass the name index so the VM can raise NameError /
                     // UnboundLocalError when the register was never assigned.
                     let name_idx = self.intern_name(name);
-                    self.emit(Insn::DeleteLocal(reg, name_idx));
+                    self.emit(Insn::DeleteLocal(reg, name_idx, true));
                     // Clear the definitely-bound bit so that any subsequent
                     // read of this name emits CheckLocal and raises the correct
                     // exception (UnboundLocalError at function scope, NameError

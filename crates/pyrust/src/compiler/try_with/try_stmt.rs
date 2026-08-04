@@ -137,6 +137,7 @@ impl Compiler {
                     if let Some(reg) = self.local_reg(var_name) {
                         self.emit(Insn::Move(reg, exc_tmp));
                         self.mark_def(reg);
+                        self.maybe_record_class_store(reg);
                         // Issue #820: sync into module_globals_dict at module scope.
                         if self.is_module_scope {
                             let name_idx = self.intern_name(var_name);
@@ -159,14 +160,11 @@ impl Compiler {
                 // deletion, EndExcept, and the inlined finally block before jumping.
                 let as_var_delete = if let Some(var_name) = &handler.name {
                     if let Some(reg) = self.local_reg(var_name) {
-                        let module_name = if self.is_module_scope {
-                            Some(self.intern_name(var_name))
-                        } else {
-                            None
-                        };
+                        let name_index = self.intern_name(var_name);
                         Some(ExceptAsVarDel::Local {
                             register: reg,
-                            module_name,
+                            name_index,
+                            delete_module_global: self.is_module_scope,
                         })
                     } else {
                         let name_idx = self.intern_name(var_name);
@@ -190,9 +188,8 @@ impl Compiler {
                 }
                 // PEP 3110: delete the `as VAR` binding when the handler exits
                 // (breaks reference cycles and matches CPython behaviour).
-                // Use u16::MAX as the name_idx sentinel: the variable is
-                // always bound at this point (the except clause only runs
-                // when the exception matched), so no NameError check needed.
+                // The real name index lets class-frame cleanup remove the same
+                // key from an already-materialized live namespace.
                 self.emit_except_as_delete(as_var_delete);
                 self.emit(Insn::EndExcept);
 

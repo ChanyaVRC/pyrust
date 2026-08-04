@@ -368,7 +368,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | CallExArgs { func: r, .. }
         | Move(r, _)
         | CopyReg(r, _)
-        | DeleteLocal(r, _) => {
+        | DeleteLocal(r, _, _) => {
             written.insert(*r);
         }
         MatchExceptStar(_, src, dst, _) => {
