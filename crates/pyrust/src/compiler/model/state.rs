@@ -63,7 +63,10 @@ enum ExceptAsVarDel {
     /// been mirrored into the live globals dict after `globals()` exposure.
     Local {
         register: Reg,
-        module_name: Option<u16>,
+        /// Real index into `FnCode::names`, used by `DeleteLocal` to remove the
+        /// binding from a materialized class-frame namespace.
+        name_index: u16,
+        delete_module_global: bool,
     },
     /// Variable lives in env (no local slot); emit `DeleteName(name_idx)`.
     Name(u16),
@@ -78,6 +81,11 @@ struct Compiler {
     /// opcodes that skip the global inline-cache / module-dict path.  Empty for
     /// module and class scopes (`nonlocal` is invalid there).
     nonlocal_names: HashSet<String>,
+    /// Names declared `global` or `nonlocal` in a class body. Unlike ordinary
+    /// unresolved class names, these must bypass the class namespace and keep
+    /// true environment lookup semantics even after `f_locals` is exposed.
+    /// Empty outside class-body compilers.
+    class_direct_env_names: HashSet<String>,
     insns: Vec<Insn>,
     /// Per-instruction 1-based source line numbers, parallel to `insns`.
     /// Filled by `emit()` from `current_lineno`.  0 = unknown.

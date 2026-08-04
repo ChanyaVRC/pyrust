@@ -51,11 +51,12 @@ impl Interpreter {
         // A module frame does not get a snapshot at all: CPython's module
         // f_locals IS the live module dict, so it must come from the same
         // provider `globals()` uses or the `f_locals is f_globals` identity
-        // (and mutation-through-f_locals) would not hold.  Function and class
-        // bodies do snapshot, matching `locals()`.
+        // (and mutation-through-f_locals) would not hold. Class frames likewise
+        // expose their live namespace; only function frames retain snapshots.
         let locals = match view.kind {
             FrameKind::Script => self.frame_locals_for_module_environment(env),
-            FrameKind::Function | FrameKind::Class => Value::dict(snapshot_view_locals(self, view)),
+            FrameKind::Class => class_frame_locals_value(self, view),
+            FrameKind::Function => Value::dict(snapshot_view_locals(self, view)),
         };
 
         frame_obj::frame(code, lineno, back, globals, locals)

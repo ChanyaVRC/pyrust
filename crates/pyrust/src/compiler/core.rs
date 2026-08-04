@@ -14,6 +14,7 @@ impl Compiler {
             local_index,
             cell_vars: cell_set,
             nonlocal_names: HashSet::new(),
+            class_direct_env_names: HashSet::new(),
             insns: Vec::new(),
             lineno_table: Vec::new(),
             col_table: Vec::new(),
@@ -69,7 +70,7 @@ impl Compiler {
 
     /// If this compiler is producing a class body and `reg` is one of the
     /// class-body's local slots, emit a `RecordClassStore(reg)` insn so the
-    /// VM can append the slot to the class-namespace store-order list.
+    /// VM can update class-namespace ordering and any materialized live dict.
     /// No-op outside class bodies and for temp / cell registers — keeping
     /// regular function compilation untouched.
     fn maybe_record_class_store(&mut self, reg: Reg) {
@@ -353,18 +354,20 @@ impl Compiler {
 
     /// Emit the complete PEP 3110 cleanup for one `except E as name` binding.
     ///
-    /// `DeleteLocal` clears the fast-local register. At module scope the
-    /// binding may also have been mirrored into the live globals dictionary,
-    /// so `DeleteModuleGlobal` must remove that second representation before
-    /// later global lookup can observe it.
+    /// `DeleteLocal` clears the fast-local register and, for an exposed class
+    /// frame, the live namespace key. `RecordClassDel` updates the class-store
+    /// order so a later rebind is appended in CPython order. At module scope
+    /// `DeleteModuleGlobal` also removes the mirrored globals entry.
     fn emit_except_as_delete(&mut self, cleanup: Option<ExceptAsVarDel>) {
         match cleanup {
             Some(ExceptAsVarDel::Local {
                 register,
-                module_name,
+                name_index,
+                delete_module_global,
             }) => {
-                self.emit(Insn::DeleteLocal(register, u16::MAX));
-                if let Some(name_index) = module_name {
+                self.emit(Insn::DeleteLocal(register, name_index, false));
+                self.maybe_record_class_del(register);
+                if delete_module_global {
                     self.emit(Insn::DeleteModuleGlobal(name_index));
                 }
                 if (register as usize) < 64 {

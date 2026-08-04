@@ -425,6 +425,12 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | RaiseAssertNoMsg
         | ForIter(..) => {}
 
+        LoadClassName(_, local, _) => {
+            if *local != crate::bytecode::NO_CLASS_LOCAL {
+                f(*local);
+            }
+        }
+
         BinOpImm(_, a, _, _, _) | SyncModuleGlobal(a, _) => f(*a),
 
         StoreGlobal(_, s)

@@ -185,10 +185,11 @@ mod fast_path {
         BigRangeState, BinaryOp, CallBuiltinCacheEntry, ExpandedCallArg, GlobalCacheEntry,
         GlobalResolutionCache, Interpreter, IterState, LiveDictViewItem, MemoKey,
         NativeClassMethodCachePlan, OrderedIterationWatch, PyDict, PyError, PyKey, Rc,
-        ReadAttributeCachePlan, ReadMethodCachePlan, RegSlice, Result, UserFunction, Value,
-        ValueKind, bind_builtin_attribute, bind_cached_native_class_method, comp_read_is_free,
-        float_divmod, indexed_sequence_item, invoke_class_method, live_collection_len,
-        live_dict_view_item, ordered_mapping_guard_outcome, py_mod_i64, read_attribute_cache_plan,
+        ReadAttributeCachePlan, ReadMethodCachePlan, RegSlice, Result, StrKey, UserFunction, Value,
+        ValueKind, active_live_class_namespace, bind_builtin_attribute,
+        bind_cached_native_class_method, comp_read_is_free, float_divmod, indexed_sequence_item,
+        invoke_class_method, live_collection_len, live_dict_view_item,
+        ordered_mapping_guard_outcome, py_mod_i64, read_attribute_cache_plan,
         read_method_cache_plan, value_from_bigint, write_attribute_cache_class,
     };
     include!("runtime/fast_path.rs");
@@ -252,12 +253,12 @@ mod namespaces {
         EnvRef, Environment, ExpandedCallArg, FrameKind, HashMap, InstanceAttrs, Interpreter,
         MODULE_CLASS_CACHE_SLOT_COUNT, ModuleClassCache, ModuleClassCacheSlot, ModuleMutationState,
         PathBuf, PyClass, PyDict, PyError, PyInstance, PyKey, PyModule, Rc, RefCell, RegSlice,
-        Result, StrKey, Value, ValueKind, cached_builtins_module, call_del_if_last_binding,
-        env_assign_local, find_enclosing_local_env_for_name, get_int_max_str_digits,
-        invoke_class_method, is_cached_builtins_module, lookup_name_in_enclosing_local_env,
-        lookup_name_in_env, lookup_name_in_env_as_free, lookup_name_in_module,
-        lookup_value_special_method, module_env, object_class_singleton, set_int_max_str_digits,
-        value_type_name_str, values_are_identical, vm_read,
+        Result, StrKey, Value, ValueKind, active_live_class_namespace, cached_builtins_module,
+        call_del_if_last_binding, env_assign_local, find_enclosing_local_env_for_name,
+        get_int_max_str_digits, invoke_class_method, is_cached_builtins_module,
+        lookup_name_in_enclosing_local_env, lookup_name_in_env, lookup_name_in_env_as_free,
+        lookup_name_in_module, lookup_value_special_method, module_env, object_class_singleton,
+        set_int_max_str_digits, value_type_name_str, values_are_identical, vm_read,
     };
     include!("runtime/namespaces.rs");
 }
@@ -383,7 +384,7 @@ pub(crate) use generator_protocols::{
 mod introspection {
     use super::{
         FrameKind, GeneratorFrame, Interpreter, Rc, UserFunction, Value, ValueKind,
-        lookup_enclosing_function_value, snapshot_view_locals,
+        class_frame_locals_value, lookup_enclosing_function_value, snapshot_view_locals,
     };
     include!("runtime/introspection.rs");
 }

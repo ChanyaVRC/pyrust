@@ -615,6 +615,10 @@ impl Interpreter {
                 Insn::LoadGlobal(dst, name_idx) => {
                     regs[*dst as usize] = vm_try!(self.load_global_cached(code, *name_idx));
                 }
+                Insn::LoadClassName(dst, local, name_idx) => {
+                    regs[*dst as usize] =
+                        vm_try!(self.load_class_name(code, &regs, *local, *name_idx));
+                }
                 Insn::StoreGlobal(name_idx, src) => {
                     let name = pool_get!(code.names, *name_idx, "name");
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
@@ -768,8 +772,14 @@ impl Interpreter {
                 Insn::PopTypeParamEnv => {
                     self.pop_type_parameter_scope();
                 }
-                Insn::DeleteLocal(reg, name_idx) => {
-                    vm_try!(self.delete_local_binding(code, &mut regs, *reg, *name_idx));
+                Insn::DeleteLocal(reg, name_idx, raise_if_missing) => {
+                    vm_try!(self.delete_local_binding(
+                        code,
+                        &mut regs,
+                        *reg,
+                        *name_idx,
+                        *raise_if_missing,
+                    ));
                 }
                 Insn::SyncModuleGlobal(reg, name_idx) => {
                     vm_try!(self.sync_module_global_binding(code, &regs, *reg, *name_idx));

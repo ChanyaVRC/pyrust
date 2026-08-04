@@ -226,6 +226,146 @@ fn merge_frame_view_into_dict(view: &VmFrameView, dict: &mut PyDict) {
     }
 }
 
+/// Locate the class-state stack entry corresponding to `view`. Function frames
+/// may sit between nested class frames, so the VM-frame index itself is not the
+/// class-stack index; count only Class views below the target.
+fn active_class_index_for_view(interp: &Interpreter, view: &VmFrameView) -> Option<usize> {
+    let mut class_index = 0;
+    for candidate in &interp.vm_frame_views {
+        if std::ptr::eq(candidate, view) {
+            return (candidate.kind == FrameKind::Class).then_some(class_index);
+        }
+        if candidate.kind == FrameKind::Class {
+            class_index += 1;
+        }
+    }
+    None
+}
+
+fn merge_class_frame_view_into_dict(
+    view: &VmFrameView,
+    store_order: &[crate::bytecode::Reg],
+    qualname_was_deleted: bool,
+    dict: &mut PyDict,
+) -> Vec<Option<String>> {
+    let mut slot_names = vec![None; view.regs_len];
+    for (name, &slot) in view.local_index.iter() {
+        if let Some(target) = slot_names.get_mut(slot as usize) {
+            *target = Some(name.clone());
+        }
+    }
+
+    let insert_slot = |dict: &mut PyDict, slot: crate::bytecode::Reg| {
+        let slot = slot as usize;
+        let Some(name) = slot_names.get(slot).and_then(Option::as_deref) else {
+            return;
+        };
+        if slot >= view.regs_len {
+            return;
+        }
+        // SAFETY: identical to merge_frame_view_into_dict: this Class view is
+        // live for the duration of its run_bytecode invocation, and RegSlice
+        // carries no exclusive-reference aliasing promise.
+        let value = unsafe { view.regs_ptr.add(slot).as_ref() };
+        if !value.is_unset() {
+            dict.insert(PyKey::str_from(name), value.clone());
+        }
+    };
+
+    // __qualname__ is pre-injected second but intentionally absent from the
+    // final-attrs store-order trace. Materialize it immediately after the
+    // still-live __module__ seed (or first if __module__ was deleted), then
+    // replay the runtime store order for every other key.
+    let module_slot = view.local_index.get("__module__").copied();
+    let qualname_slot = view.local_index.get("__qualname__").copied();
+    if qualname_was_deleted {
+        for &slot in store_order {
+            insert_slot(dict, slot);
+        }
+        return slot_names;
+    }
+    let mut qualname_inserted = false;
+    if store_order.first().copied() != module_slot {
+        if let Some(slot) = qualname_slot {
+            insert_slot(dict, slot);
+        }
+        qualname_inserted = true;
+    }
+    for &slot in store_order {
+        insert_slot(dict, slot);
+        if Some(slot) == module_slot && !qualname_inserted {
+            if let Some(slot) = qualname_slot {
+                insert_slot(dict, slot);
+            }
+            qualname_inserted = true;
+        }
+    }
+    if !qualname_inserted && let Some(slot) = qualname_slot {
+        insert_slot(dict, slot);
+    }
+    slot_names
+}
+
+/// Return the persistent live dict for one active class frame, materializing
+/// it from fastlocals only on the first introspection. Later stores synchronize
+/// through RecordClassStore; syntactic deletes operate on this dict directly.
+pub(crate) fn class_frame_locals_value(interp: &Interpreter, view: &VmFrameView) -> Value {
+    let class_index = active_class_index_for_view(interp, view)
+        .expect("Class VmFrameView missing from the active frame stack");
+    let active = interp
+        .class_annotation_scopes
+        .get(class_index)
+        .expect("class frame/state stacks out of sync");
+    let mut live_namespace = active.live_namespace.borrow_mut();
+    if live_namespace.is_none() {
+        let mut dict = PyDict::default();
+        let slot_names = merge_class_frame_view_into_dict(
+            view,
+            interp
+                .class_store_order
+                .get(class_index)
+                .expect("class frame/store-order stacks out of sync"),
+            active.qualname_was_deleted,
+            &mut dict,
+        );
+        *live_namespace = Some(LiveClassNamespace {
+            value: Value::dict(dict),
+            slot_names,
+        });
+    }
+    live_namespace.as_ref().unwrap().value.clone()
+}
+
+/// Return the Python object backing the innermost non-module frame's locals.
+/// Class frames have a persistent live dict; function frames retain snapshot
+/// semantics. Module callers keep their existing synchronized provider path.
+pub(crate) fn current_locals_value(interp: &Interpreter) -> Value {
+    match interp.vm_frame_views.last() {
+        Some(view) if view.kind == FrameKind::Class => class_frame_locals_value(interp, view),
+        _ => Value::dict(snapshot_current_locals(interp)),
+    }
+}
+
+/// Return the active class body's materialized namespace, if introspection has
+/// exposed it. A helper function called by the class body must not inherit the
+/// caller's mapping, so this is gated by the innermost VM frame kind.
+pub(crate) fn active_live_class_namespace(interp: &Interpreter) -> Option<Value> {
+    if !interp
+        .vm_frame_views
+        .last()
+        .is_some_and(|view| view.kind == FrameKind::Class)
+    {
+        return None;
+    }
+    interp
+        .class_annotation_scopes
+        .last()?
+        .live_namespace
+        .borrow()
+        .as_ref()
+        .map(|namespace| namespace.value.clone())
+}
+
 /// `(code, own_env, defining_env)` — see [`frame_cell_context`].
 type FrameCellContext = (Rc<crate::bytecode::FnCode>, Option<EnvRef>, EnvRef);
 
@@ -401,13 +541,10 @@ fn merge_frame_cells_into_dict_slow(view: &VmFrameView, dict: &mut PyDict) {
     }
 }
 
-/// Take a snapshot of the innermost VM frame's local namespace
-/// (issue #389: backing for `locals()`).  Reads the top of
-/// `Interpreter::vm_frame_views` regardless of kind — at module scope
-/// the top entry IS the `Script` frame (so `locals()` == `globals()`,
-/// matching CPython parity), and inside a function it's the
-/// `Function` frame.  Falls back to the current env's `values` map
-/// when no frame is published (e.g. evaluating in a non-VM context).
+/// Take a snapshot of the innermost VM frame's local namespace. Python-visible
+/// class-frame callers use [`current_locals_value`] instead so they receive the
+/// persistent live dict. Falls back to the current env's `values` map when no
+/// frame is published (e.g. evaluating in a non-VM context).
 pub(crate) fn snapshot_current_locals(interp: &Interpreter) -> PyDict {
     match interp.vm_frame_views.last() {
         Some(view) => snapshot_view_locals(interp, view),
@@ -424,10 +561,9 @@ pub(crate) fn snapshot_current_locals(interp: &Interpreter) -> PyDict {
 
 /// Take a snapshot of one frame view's local namespace.
 ///
-/// Frame introspection (`sys._getframe(n).f_locals`) needs the same namespace
-/// walk `locals()` performs, but for a suspended *outer* frame — reading a
-/// caller's register file is exactly the "case (a)" the safety note on
-/// [`merge_frame_view_into_dict`] covers (issue #2926).
+/// Function-frame introspection needs the same namespace walk `locals()`
+/// performs for a suspended *outer* frame. Module and class frames route to
+/// their persistent live namespace providers instead.
 ///
 /// `#[inline]` so `locals()` keeps the single-call shape it had before the walk
 /// was split out of [`snapshot_current_locals`].
@@ -452,13 +588,9 @@ pub(crate) fn snapshot_view_locals(interp: &Interpreter, view: &VmFrameView) -> 
             }
         }
         FrameKind::Class => {
-            // Class-body scope (issue #487): return the partially-built class
-            // attrs dict — i.e. the fastlocal registers of the class body,
-            // filtered to names that have been assigned so far.  CPython
-            // returns the class namespace dict (which becomes `__dict__`).
-            // We do NOT include the module env here, matching CPython:
-            // `locals()` inside a class body is the class namespace, not
-            // the module globals.
+            // Snapshot-only fallback for internal callers that explicitly ask
+            // for one. Python-visible class locals use class_frame_locals_value
+            // and therefore preserve identity and mutation.
             merge_frame_view_into_dict(view, &mut dict);
         }
         FrameKind::Function => {

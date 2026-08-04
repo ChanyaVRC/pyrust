@@ -307,9 +307,9 @@ pyrust_module! {
             ));
         }
         if args.is_empty() {
-            // vars() with no args == locals(): return a snapshot of the current
-            // frame's local namespace.  At module scope that is module globals
-            // (CPython parity: vars() is locals() is globals() at top level).
+            // vars() with no args == locals(). Module frames return their live
+            // globals, class frames their persistent live namespace, and only
+            // function frames return a snapshot.
             let is_module_scope = _interp
                 .vm_frame_views
                 .last()
@@ -319,7 +319,7 @@ pyrust_module! {
                 sync_module_env_to_globals_dict(_interp);
                 return Ok(_interp.active_locals_dict());
             }
-            return Ok(Value::dict(snapshot_current_locals(_interp)));
+            return Ok(current_locals_value(_interp));
         }
         match args[0].value.kind() {
             ValueKind::PyInstance(instance) => {
@@ -382,14 +382,15 @@ pyrust_module! {
         Ok(_interp.active_globals_dict())
     }
 
-    /// CPython: locals() — dict snapshot of the current local namespace.
+    /// CPython: locals() — mapping for the current local namespace.
     /// <https://docs.python.org/3/library/functions.html#locals>
     ///
     /// At module scope, `locals()` returns the same live dict as `globals()`
     /// (CPython parity: at module level the two namespaces are the same object).
-    /// Inside a function body it returns a snapshot of the function's locals —
-    /// CPython also snapshots and its docs warn that mutations to the returned
-    /// dict aren't guaranteed to propagate.
+    /// Inside a class body it returns the persistent live class namespace.
+    /// Inside a function it returns a snapshot — CPython also snapshots and its
+    /// docs warn that mutations to the returned dict aren't guaranteed to
+    /// propagate.
     fn locals(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if !args.is_empty() {
@@ -410,7 +411,7 @@ pyrust_module! {
             sync_module_env_to_globals_dict(_interp);
             return Ok(_interp.active_locals_dict());
         }
-        Ok(Value::dict(snapshot_current_locals(_interp)))
+        Ok(current_locals_value(_interp))
     }
 
     /// CPython: exec(source[, globals[, locals]]) — execute Python source code.

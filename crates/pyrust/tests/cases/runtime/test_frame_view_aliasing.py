@@ -49,10 +49,9 @@ increment_global()
 print(counter)
 
 # --- locals() inside a class body (class frame view read) ---
-# Note: we check membership for names assigned *before* the locals() call
-# only, avoiding the CPython-vs-pyrust live-dict divergence documented in
-# PR #543 (CPython returns the live class namespace dict; pyrust returns a
-# snapshot of the register file at call time).
+# Both CPython and pyrust return the persistent live class namespace.  This
+# fixture keeps the original basic membership checks; mutation and identity
+# coverage lives in test_frame_locals_class.py.
 
 class C:
     x = 1

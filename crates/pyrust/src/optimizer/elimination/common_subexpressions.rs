@@ -156,6 +156,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::LoadConst(r, _)
             | Insn::LoadNone(r)
             | Insn::LoadGlobal(r, _)
+            | Insn::LoadClassName(r, _, _)
             | Insn::LoadCell(r, _) => Some(*r),
             // Move writes its destination register; must evict stale CSE entries
             // that recorded `prev_dst == dst` from an earlier computation.

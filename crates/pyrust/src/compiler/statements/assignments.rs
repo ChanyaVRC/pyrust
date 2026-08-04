@@ -314,9 +314,17 @@ impl Compiler {
         self.emit(Insn::LoadConst(key_reg, key_idx));
         // 5. Load (or locate) the __annotations__ dict.
         let ann_dict_name = "__annotations__";
-        let (dict_reg, is_temp) = if let Some(reg) = self.local_reg(ann_dict_name) {
-            // Class body: __annotations__ is a fastlocal register.
-            self.maybe_record_class_store(reg);
+        let (dict_reg, is_temp) = if self.is_class_body {
+            // Class bodies use LOAD_NAME semantics. Once f_locals has escaped,
+            // its __annotations__ entry is authoritative over the seed register.
+            let local = self
+                .local_reg(ann_dict_name)
+                .unwrap_or(crate::bytecode::NO_CLASS_LOCAL);
+            let name_idx = self.intern_name(ann_dict_name);
+            let r = self.alloc_temp();
+            self.emit(Insn::LoadClassName(r, local, name_idx));
+            (r, true)
+        } else if let Some(reg) = self.local_reg(ann_dict_name) {
             (reg, false)
         } else {
             // Module scope: load via LoadGlobal.
@@ -471,7 +479,15 @@ impl Compiler {
             AssignTarget::Name(name) => {
                 if let Some(reg) = self.local_reg(name) {
                     let definitely_bound = (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
-                    if self.is_module_scope && !definitely_bound {
+                    if self.is_class_body {
+                        let name_idx = self.intern_name(name);
+                        let lhs = self.alloc_temp();
+                        self.emit(Insn::LoadClassName(lhs, reg, name_idx));
+                        self.emit_aug_binop(lhs, op, expr);
+                        self.emit(Insn::Move(reg, lhs));
+                        self.maybe_record_class_store(reg);
+                        self.free_temp(lhs);
+                    } else if self.is_module_scope && !definitely_bound {
                         // Issue #1411: at module scope a name that is not yet
                         // definitely bound must be read through the global →
                         // builtins chain, not from the unset fastlocal register.

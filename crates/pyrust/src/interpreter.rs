@@ -61,7 +61,7 @@ struct ModuleClassCache {
     entries: [Option<CachedModuleClass>; MODULE_CLASS_CACHE_SLOT_COUNT],
 }
 
-/// Per-active-class bookkeeping for PEP 695 type-alias annotation scopes.
+/// Per-active-class namespace and PEP 695 type-alias bookkeeping.
 ///
 /// `slot_names` makes `RecordClassStore`/`RecordClassDel` an O(1) name lookup,
 /// and `scopes` contains only weak references so an abandoned alias cannot be
@@ -69,6 +69,20 @@ struct ModuleClassCache {
 pub(crate) struct ActiveClassAnnotationScopes {
     slot_names: Vec<Option<String>>,
     scopes: Vec<Weak<RefCell<Environment>>>,
+    /// The seed is normally second in class-namespace order, but deleting it
+    /// before first introspection means a later rebind must move to the tail.
+    qualname_slot: Option<crate::bytecode::Reg>,
+    qualname_was_deleted: bool,
+    /// Lazily materialized class-frame namespace.  Keeping the Python dict in
+    /// the class-state stack makes every inner/outer frame view return the same
+    /// mapping without allocating anything for classes that are never
+    /// introspected.
+    live_namespace: RefCell<Option<LiveClassNamespace>>,
+}
+
+pub(crate) struct LiveClassNamespace {
+    value: Value,
+    slot_names: Vec<Option<String>>,
 }
 
 /// Non-owning fast path for the Python-visible import registry.
@@ -243,15 +257,16 @@ pub struct Interpreter {
     /// runtime — CPython's `__dict__` ordering rule.  A stack (not a single Vec)
     /// supports nested `class A: class B: ...` bodies cleanly.
     pub(crate) class_store_order: Vec<Vec<u32>>,
-    /// PEP 695 annotation-scope providers parallel to `class_store_order`.
-    /// Each active class owns one entry; class-store opcodes mirror only into
-    /// alias evaluators registered for that exact body.
+    /// Per-active-class state parallel to `class_store_order`: PEP 695 alias
+    /// evaluators plus the lazily materialized live class-frame namespace.
+    /// Class-store opcodes update only the state for their exact body.
     pub(crate) class_annotation_scopes: Vec<ActiveClassAnnotationScopes>,
     /// Stack of active VM frame views (issue #389).  Pushed before each
     /// `run_bytecode` invocation and popped immediately afterwards by:
     ///   * `try_exec_vm_script_with_index` (kind = `Script`), and
     ///   * `call_user_function_expanded`'s register-VM tier (kind =
-    ///     `Function`).
+    ///     `Function`), and
+    ///   * `run_class_body` (kind = `Class`).
     ///
     /// Each entry holds a raw pointer to the active frame's register
     /// file plus the name -> slot mapping the compiler emitted.
@@ -259,7 +274,7 @@ pub struct Interpreter {
     /// surface names that would otherwise live only in registers:
     ///   * `globals()` walks down to the BOTTOM-most `Script` entry to
     ///     find the module's fastlocals (e.g. top-level `x = 5`).
-    ///   * `locals()` reads the TOP entry — innermost function frame,
+    ///   * `locals()` reads the TOP entry — the innermost function/class frame,
     ///     or the script frame at module scope.
     ///
     /// Safety: each raw pointer is only dereferenced while the frame

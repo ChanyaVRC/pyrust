@@ -16,6 +16,7 @@ impl Compiler {
             | Insn::LoadConst(d, ..)
             | Insn::LoadNone(d)
             | Insn::LoadGlobal(d, ..)
+            | Insn::LoadClassName(d, ..)
             | Insn::Move(d, ..)
             | Insn::GetAttr(d, ..)
             | Insn::GetAttrForWith(d, ..)
@@ -201,6 +202,14 @@ impl Compiler {
                     self.set_lineno(ln);
                 }
                 let result = if let Some(reg) = self.local_reg(name) {
+                    if self.is_class_body {
+                        let name_idx = self.intern_name(name);
+                        let dst = self.alloc_temp();
+                        self.set_col_span_for_next(span);
+                        self.emit(Insn::LoadClassName(dst, reg, name_idx));
+                        self.set_lineno(saved_lineno);
+                        return dst;
+                    }
                     let definitely_bound = (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
                     if !definitely_bound {
                         // Issue #1411: at module scope, a name that is not yet
@@ -233,7 +242,13 @@ impl Compiler {
                     // -dict path (issue #2339).  Everything else (true globals,
                     // builtins, module/class-scope free vars) keeps LoadGlobal.
                     self.set_col_span_for_next(span);
-                    if self.is_function_cell(name) {
+                    if self.is_class_body && !self.class_direct_env_names.contains(name) {
+                        self.emit(Insn::LoadClassName(
+                            dst,
+                            crate::bytecode::NO_CLASS_LOCAL,
+                            name_idx,
+                        ));
+                    } else if self.is_function_cell(name) {
                         self.emit(Insn::LoadCell(dst, name_idx));
                     } else {
                         self.emit(Insn::LoadGlobal(dst, name_idx));
@@ -420,6 +435,7 @@ impl Compiler {
                     if val_reg != reg {
                         self.emit(Insn::Move(reg, val_reg));
                     }
+                    self.maybe_record_class_store(reg);
                     self.mark_def(reg);
                 } else {
                     let name_idx = self.intern_name(target);

@@ -136,6 +136,10 @@ impl Compiler {
 
         let mut sub = Compiler::new(Rc::clone(&body_index_rc), 0, cell_vars);
         sub.is_class_body = true;
+        sub.class_direct_env_names
+            .extend(body_global.iter().cloned());
+        sub.class_direct_env_names
+            .extend(body_nonlocal.iter().cloned());
         // Threaded source file (#2438): methods defined in this class body inherit
         // the enclosing scope's `co_filename`.
         sub.filename = self.filename.clone();

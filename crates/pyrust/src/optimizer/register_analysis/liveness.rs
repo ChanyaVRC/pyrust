@@ -272,6 +272,8 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | ForIter(..)
         | DeleteModuleGlobal(..) => false,
 
+        LoadClassName(_, local, _) => *local != crate::bytecode::NO_CLASS_LOCAL && r == *local,
+
         // One source register.
         StoreGlobal(_, s)
         | StoreCell(_, s)
@@ -468,6 +470,12 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | RaiseAssertNoMsg
         | ForIter(..)
         | DeleteModuleGlobal(..) => {}
+
+        LoadClassName(_, local, _) => {
+            if *local != crate::bytecode::NO_CLASS_LOCAL {
+                reads.insert(*local);
+            }
+        }
 
         StoreGlobal(_, s)
         | StoreCell(_, s)

@@ -8,12 +8,16 @@ impl Interpreter {
         local_index: &HashMap<String, crate::bytecode::Reg>,
         num_class_regs: usize,
         has_type_alias: bool,
+        qualname_slot: Option<crate::bytecode::Reg>,
     ) {
         if !has_type_alias {
             self.class_annotation_scopes
                 .push(ActiveClassAnnotationScopes {
                     slot_names: Vec::new(),
                     scopes: Vec::new(),
+                    qualname_slot,
+                    qualname_was_deleted: false,
+                    live_namespace: RefCell::new(None),
                 });
             return;
         }
@@ -27,6 +31,9 @@ impl Interpreter {
             .push(ActiveClassAnnotationScopes {
                 slot_names,
                 scopes: Vec::new(),
+                qualname_slot,
+                qualname_was_deleted: false,
+                live_namespace: RefCell::new(None),
             });
     }
 
@@ -89,6 +96,18 @@ impl Interpreter {
         let Some(active) = self.class_annotation_scopes.last_mut() else {
             return;
         };
+        if let Some(namespace) = active.live_namespace.get_mut().as_ref()
+            && let Some(name) = namespace
+                .slot_names
+                .get(slot as usize)
+                .and_then(Option::as_deref)
+            && let Some(value) = regs.get(slot as usize).filter(|value| !value.is_unset())
+        {
+            namespace
+                .value
+                .dict_insert(PyKey::str_from(name), value.clone())
+                .expect("live class namespace is a dict");
+        }
         let Some(name) = active
             .slot_names
             .get(slot as usize)
@@ -110,8 +129,8 @@ impl Interpreter {
         });
     }
 
-    /// Record one class-body deletion and remove it from every active
-    /// type-alias annotation namespace.
+    /// Record one class-body deletion in ordering/type-alias state. DeleteLocal
+    /// already removed an exposed binding from the live class dict.
     pub(crate) fn record_class_namespace_delete(&mut self, slot: crate::bytecode::Reg) {
         if let Some(order) = self.class_store_order.last_mut() {
             order.retain(|stored| *stored != slot);
@@ -119,6 +138,9 @@ impl Interpreter {
         let Some(active) = self.class_annotation_scopes.last_mut() else {
             return;
         };
+        if active.qualname_slot == Some(slot) {
+            active.qualname_was_deleted = true;
+        }
         let Some(name) = active
             .slot_names
             .get(slot as usize)
@@ -135,11 +157,16 @@ impl Interpreter {
         });
     }
 
-    fn pop_class_annotation_scopes(&mut self) -> Vec<Weak<RefCell<Environment>>> {
-        self.class_annotation_scopes
+    fn pop_class_annotation_scopes(&mut self) -> (Vec<Weak<RefCell<Environment>>>, Option<Value>) {
+        let active = self
+            .class_annotation_scopes
             .pop()
-            .expect("class annotation-scope stack popped to empty")
-            .scopes
+            .expect("class annotation-scope stack popped to empty");
+        let live_namespace = active
+            .live_namespace
+            .into_inner()
+            .map(|namespace| namespace.value);
+        (active.scopes, live_namespace)
     }
 
     /// During a plain-dict metaclass call, annotation scopes retain the actual

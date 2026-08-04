@@ -4,6 +4,11 @@ use crate::ast::{BinaryOp, UnaryOp};
 
 pub type Reg = u32;
 
+/// Sentinel `Reg` used by [`Insn::LoadClassName`] when a class-body LOAD_NAME
+/// has no compiler-allocated fastlocal slot. No real register can have this
+/// value.
+pub const NO_CLASS_LOCAL: Reg = Reg::MAX;
+
 /// Sentinel `Reg` marking an absent operand — currently the missing `**kw`
 /// mapping of an [`Insn::CallExArgs`] with no double-splat.  No real register is
 /// ever allocated at `u32::MAX`, so it can never collide with a live operand.
@@ -51,6 +56,11 @@ pub enum Insn {
     LoadConst(Reg, u16),
     /// R[dst] = lookup name through env chain
     LoadGlobal(Reg, u16),
+    /// Class-body LOAD_NAME. Before `f_locals` escapes this clones the
+    /// compiler-known fastlocal `R[local]`, or goes directly to module/builtins
+    /// when `local == NO_CLASS_LOCAL`; afterwards it first reads the live class
+    /// namespace dict. A missing binding falls through to module/builtins.
+    LoadClassName(Reg, Reg, u16),
     /// names[name_idx] = R[src]  (write to module / enclosing env)
     StoreGlobal(u16, Reg),
     /// R[dst] = read a **function-scope cell variable** (a name captured by a
@@ -187,13 +197,12 @@ pub enum Insn {
     PopTypeParamEnv,
     /// Clear local register (del for a fastlocal).
     ///
-    /// If `name_idx` is not `u16::MAX`, the VM checks whether the register
-    /// was already unset before the delete and raises `NameError` (module
-    /// scope) or `UnboundLocalError` (function scope) with the variable name
-    /// `names[name_idx]`.  Pass `u16::MAX` for compiler-guaranteed-bound
-    /// deletions (e.g. PEP 3110 `except E as var:` cleanup) where the check
-    /// is unnecessary and should be skipped.
-    DeleteLocal(Reg, u16),
+    /// `name_idx` is the real index into `FnCode::names`, including for
+    /// compiler-generated PEP 3110 cleanup so an exposed class namespace can
+    /// remove the corresponding key. `raise_if_missing` is true for a source
+    /// `del name`; it is false for except-as cleanup, which is idempotent when
+    /// nested handlers reuse the same local slot.
+    DeleteLocal(Reg, u16, bool),
     /// pc += offset  (offset 0 = next instruction)
     Jump(i32),
     /// Jump when Python's canonical truth-value protocol reports false.
@@ -703,14 +712,14 @@ pub enum Insn {
     /// insertion order.  Emitted **only** inside a class body, immediately after
     /// any instruction that stores into a top-level class-body local.  The VM
     /// appends slot to the active class-store-order list (if not already
-    /// present), so MakeClass can later materialise vars(C) in the order
-    /// stores actually executed — matching CPython __dict__ ordering.
+    /// present), and mirrors the value into any materialized class-frame
+    /// namespace, so both final attrs and later LOAD_NAME reads stay coherent.
     RecordClassStore(Reg),
     /// Record a runtime del C.name for class-namespace insertion order.
     /// Emitted only inside a class body, immediately after DeleteLocal(slot).
     /// The VM removes slot from the active class-store-order list so that the
-    /// dict produced by MakeClass drops the entry while preserving the order
-    /// of the remaining entries.
+    /// final attrs drop the entry while preserving remaining order. DeleteLocal
+    /// itself removes the binding from a materialized live namespace.
     RecordClassDel(Reg),
     /// R[dst] = R[base] + R[base+1] + ... + R[base+count-1]  (string concat, one allocation)
     ///
