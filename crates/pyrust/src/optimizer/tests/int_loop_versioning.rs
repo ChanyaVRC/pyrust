@@ -932,6 +932,179 @@ fn has_closed_form_guard(result: &IntLoopVersioningResult) -> bool {
 }
 
 #[test]
+fn nested_constant_range_inner_loop_reaches_closed_form_after_licm() {
+    let optimized = optimize(compile_fn(
+        "total = 0\nfor outer in range(3):\n    for inner in range(5):\n        total += 1\n",
+    ));
+
+    assert!(
+        optimized.insns.iter().any(|insn| matches!(
+            insn,
+            Insn::JumpIfIterNotIntRangeExact(guard, _)
+                if (guard.start, guard.stop, guard.step) == (0, 5, 1)
+        )),
+        "LICM-hoisted inner range bound must still reach the closed form: {:?}",
+        optimized.insns
+    );
+}
+
+#[test]
+fn closed_form_traces_a_constant_bound_hoisted_before_the_call_setup() {
+    // LICM hoists the inner loop's constant argument out of the outer loop,
+    // ahead of the inner `LoadGlobal range`. The scratch register was used for
+    // the outer bound too, but the later constant dominates this call and is
+    // not overwritten around the enclosing loop's back edge.
+    let insns = vec![
+        Insn::LoadConst(3, 1),
+        Insn::LoadConst(3, 0),
+        Insn::LoadGlobal(2, 0),
+        Insn::Call(2, 1),
+        Insn::GetIter(0, 2),
+        Insn::ForIter(1, 0, 4),
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(0, 1),
+        Insn::Jump(-5),
+    ];
+
+    let result = versioned_with_names(insns, &[Value::int(1000), Value::int(3)], &range_names());
+
+    let guard = result
+        .insns
+        .iter()
+        .find_map(|insn| match insn {
+            Insn::JumpIfIterNotIntRangeExact(guard, _) => Some(guard),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "a dominating hoisted constant must seed the range trace: {:?}",
+                result.insns
+            )
+        });
+    assert_eq!(
+        (guard.start, guard.stop, guard.step),
+        (0, 1000, 1),
+        "the later producer must replace the outer bound"
+    );
+}
+
+#[test]
+fn closed_form_declines_a_hoisted_bound_overwritten_before_the_call() {
+    let insns = vec![
+        Insn::LoadConst(3, 0),
+        Insn::Move(3, 7),
+        Insn::LoadGlobal(2, 0),
+        Insn::Call(2, 1),
+        Insn::GetIter(0, 2),
+        Insn::ForIter(1, 0, 4),
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(0, 1),
+        Insn::Jump(-5),
+    ];
+
+    let result = versioned_with_names(insns, &[Value::int(1000)], &range_names());
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "an overwritten producer must not seed the range trace: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn closed_form_declines_branch_ambiguous_hoisted_bound_definitions() {
+    let insns = vec![
+        Insn::JumpIfTrue(7, 2),
+        Insn::LoadConst(3, 0),
+        Insn::Jump(1),
+        Insn::LoadConst(3, 1),
+        Insn::LoadGlobal(2, 0),
+        Insn::Call(2, 1),
+        Insn::GetIter(0, 2),
+        Insn::ForIter(1, 0, 4),
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(0, 1),
+        Insn::Jump(-5),
+    ];
+
+    let result = versioned_with_names(insns, &[Value::int(1000), Value::int(5)], &range_names());
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a join with two reaching definitions must remain ambiguous: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn closed_form_declines_a_loop_carried_overwrite_of_a_hoisted_bound() {
+    let insns = vec![
+        Insn::LoadConst(4, 0),
+        Insn::LoadGlobal(3, 0),
+        Insn::Call(3, 1),
+        Insn::GetIter(0, 3),
+        Insn::LoadConst(4, 1),
+        Insn::ForIter(1, 0, 10),
+        Insn::LoadGlobal(3, 0),
+        Insn::Call(3, 1),
+        Insn::GetIter(1, 3),
+        Insn::ForIter(2, 1, 4),
+        Insn::SyncModuleGlobal(2, 2),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(0, 1),
+        Insn::Jump(-5),
+        Insn::Move(4, 7),
+        Insn::Jump(-11),
+    ];
+
+    let result = versioned_with_names(insns, &[Value::int(3), Value::int(1000)], &range_names());
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a later write carried back past the call must invalidate the producer: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn closed_form_declines_an_overwrite_carried_through_chained_backedges() {
+    // Neither back edge spans both the inner call at pc 7 and the overwrite at
+    // pc 16. Together, however, 17 -> 15 -> 5 carries the overwrite back to
+    // that call without re-running the producer at pc 4.
+    let insns = vec![
+        Insn::LoadConst(4, 0),
+        Insn::LoadGlobal(3, 0),
+        Insn::Call(3, 1),
+        Insn::GetIter(0, 3),
+        Insn::LoadConst(4, 1),
+        Insn::ForIter(1, 0, 12),
+        Insn::LoadGlobal(3, 0),
+        Insn::Call(3, 1),
+        Insn::GetIter(1, 3),
+        Insn::ForIter(2, 1, 4),
+        Insn::SyncModuleGlobal(2, 2),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(0, 1),
+        Insn::Jump(-5),
+        Insn::Jump(1),
+        Insn::Jump(-11),
+        Insn::Move(4, 7),
+        Insn::Jump(-3),
+    ];
+
+    let result = versioned_with_names(insns, &[Value::int(3), Value::int(1000)], &range_names());
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a write carried through chained back edges must invalidate the producer: {:?}",
+        result.insns
+    );
+}
+
+#[test]
 fn closed_form_folds_a_constant_counted_loop_into_a_straight_line_copy() {
     // `for v in range(1000): total += 1`
     let result = versioned_with_names(counted_loop(&[0]), &[Value::int(1000)], &range_names());
