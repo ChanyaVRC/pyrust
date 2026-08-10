@@ -89,6 +89,11 @@ impl Interpreter {
                     });
                 }
                 let args_vec: Vec<Value> = std::mem::take(pos);
+                if is_mutable_builtin_inplace_dunder(method) {
+                    return self.dispatch_builtin_subclass_protocol_dunder(
+                        method, receiver, backing, args_vec,
+                    );
+                }
                 return self.dispatch_builtin_protocol_dunder(method, backing, args_vec);
             }
             enum BkKind {

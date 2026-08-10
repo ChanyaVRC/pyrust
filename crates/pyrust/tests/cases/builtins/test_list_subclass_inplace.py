@@ -250,6 +250,174 @@ except MemoryError as e:
     print(type(e).__name__, p)
 
 
+# --- explicit inherited in-place dunders mutate and return the subclass ---
+class SSub(set):
+    pass
+
+
+class DSub(dict):
+    pass
+
+
+class BSub(bytearray):
+    pass
+
+
+p = LSub([1])
+r = p.__iadd__([2])
+print("list bound iadd", r is p, type(r).__name__, list(p))
+
+p = LSub([1, 2])
+r = p.__imul__(2)
+print("list bound imul", r is p, type(r).__name__, list(p))
+
+p = LSub([1])
+r = list.__iadd__(p, [2])
+print("list unbound iadd", r is p, type(r).__name__, list(p))
+
+p = LSub([1, 2])
+r = list.__imul__(p, 2)
+print("list unbound imul", r is p, type(r).__name__, list(p))
+
+p = LSub([1])
+method = p.__iadd__
+r = method([2])
+print("list captured bound iadd", r is p, type(r).__name__, list(p))
+
+
+def cached_iadd(receiver):
+    return receiver.__iadd__([2])
+
+
+p = LSub([1])
+cached_iadd(p)
+p = LSub([1])
+r = cached_iadd(p)
+print("list cached bound iadd", r is p, type(r).__name__, list(p))
+
+
+class LSuper(list):
+    def inherited_iadd(self, other):
+        return super().__iadd__(other)
+
+
+p = LSuper([1])
+r = p.inherited_iadd([2])
+print("list super iadd", r is p, type(r).__name__, list(p))
+
+p = SSub({1, 2})
+r = p.__ior__({2, 3})
+print("set bound ior", r is p, type(r).__name__, sorted(p))
+
+p = SSub({1, 2})
+r = set.__ior__(p, {2, 3})
+print("set unbound ior", r is p, type(r).__name__, sorted(p))
+
+p = SSub({1, 2})
+r = p.__iand__({2, 3})
+print("set bound iand", r is p, type(r).__name__, sorted(p))
+
+p = SSub({1, 2})
+r = set.__iand__(p, {2, 3})
+print("set unbound iand", r is p, type(r).__name__, sorted(p))
+
+p = SSub({1, 2})
+r = p.__isub__({2})
+print("set bound isub", r is p, type(r).__name__, sorted(p))
+
+p = SSub({1, 2})
+r = set.__isub__(p, {2})
+print("set unbound isub", r is p, type(r).__name__, sorted(p))
+
+p = SSub({1, 2})
+r = p.__ixor__({2, 3})
+print("set bound ixor", r is p, type(r).__name__, sorted(p))
+
+p = SSub({1, 2})
+r = set.__ixor__(p, {2, 3})
+print("set unbound ixor", r is p, type(r).__name__, sorted(p))
+
+p = DSub({"a": 1})
+r = p.__ior__({"b": 2})
+print("dict bound ior", r is p, type(r).__name__, sorted(p.items()))
+
+p = DSub({"a": 1})
+r = dict.__ior__(p, {"b": 2})
+print("dict unbound ior", r is p, type(r).__name__, sorted(p.items()))
+
+p = BSub(b"a")
+r = p.__iadd__(b"b")
+print("bytearray bound iadd", r is p, type(r).__name__, list(p))
+
+p = BSub(b"ab")
+r = p.__imul__(2)
+print("bytearray bound imul", r is p, type(r).__name__, list(p))
+
+p = BSub(b"a")
+r = bytearray.__iadd__(p, b"b")
+print("bytearray unbound iadd", r is p, type(r).__name__, list(p))
+
+p = BSub(b"ab")
+r = bytearray.__imul__(p, 2)
+print("bytearray unbound imul", r is p, type(r).__name__, list(p))
+
+
+# --- explicit-call controls stay distinct from inherited in-place wrappers ---
+class ExplicitOverride(list):
+    def __iadd__(self, other):
+        return "override-result"
+
+
+p = ExplicitOverride([1])
+r = p.__iadd__([2])
+print("explicit override", r, list(p), type(p).__name__)
+
+
+class ExplicitNotImplemented(list):
+    def __iadd__(self, other):
+        return NotImplemented
+
+
+p = ExplicitNotImplemented([1])
+r = p.__iadd__([2])
+print("explicit NotImplemented", r is NotImplemented, list(p), type(p).__name__)
+
+p = LSub([1])
+r = p.__add__([2])
+print("binary bound", r is p, type(r).__name__, r, list(p))
+
+p = LSub([1])
+r = list.__add__(p, [2])
+print("binary unbound", r is p, type(r).__name__, r, list(p))
+
+for owner, method, receiver, rhs in [
+    (list, "__iadd__", DSub(), []),
+    (set, "__ior__", DSub(), set()),
+    (dict, "__ior__", LSub(), {}),
+    (bytearray, "__iadd__", LSub(), b""),
+]:
+    try:
+        getattr(owner, method)(receiver, rhs)
+    except TypeError as e:
+        print("invalid receiver", owner.__name__, method, type(e).__name__)
+
+p = [1]
+r = list.__iadd__(p, [2])
+print("exact list", r is p, type(r).__name__, p)
+
+p = {1}
+r = set.__ior__(p, {2})
+print("exact set", r is p, type(r).__name__, sorted(p))
+
+p = {"a": 1}
+r = dict.__ior__(p, {"b": 2})
+print("exact dict", r is p, type(r).__name__, sorted(p.items()))
+
+p = bytearray(b"a")
+r = bytearray.__iadd__(p, b"b")
+print("exact bytearray", r is p, type(r).__name__, list(p))
+
+
 # --- plain lists keep their existing behaviour ---
 p = [1]
 q = p

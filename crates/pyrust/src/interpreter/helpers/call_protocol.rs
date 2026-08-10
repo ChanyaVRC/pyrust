@@ -468,21 +468,25 @@ pub(crate) fn invoke_class_method(
                 .map(std::borrow::Cow::into_owned)
                 .or(legacy_protocol)
             {
-                // Resolve the receiver to its backing primitive when the
-                // instance is a builtin-subclass PyInstance; a plain
-                // primitive (super() from a non-subclass) is used directly.
-                let receiver = match instance.kind() {
-                    ValueKind::PyInstance(inst) => {
-                        instance_builtin_data(inst).unwrap_or_else(|| instance.clone())
-                    }
-                    _ => instance.clone(),
-                };
                 let rest: Vec<Value> = args
                     .iter()
                     .filter(|a| a.name.is_none())
                     .map(|a| a.value.clone())
                     .collect();
-                return interp.dispatch_builtin_protocol_dunder(&method, receiver, rest);
+                // Resolve a builtin subclass to its backing for the protocol
+                // body, but keep the Python-visible receiver available for the
+                // return-self contract of mutable in-place wrappers (#2990).
+                if let ValueKind::PyInstance(inst) = instance.kind()
+                    && let Some(backing) = instance_builtin_data(inst)
+                {
+                    if builtin_methods::is_mutable_builtin_inplace_dunder(&method) {
+                        return interp.dispatch_builtin_subclass_protocol_dunder(
+                            &method, &instance, backing, rest,
+                        );
+                    }
+                    return interp.dispatch_builtin_protocol_dunder(&method, backing, rest);
+                }
+                return interp.dispatch_builtin_protocol_dunder(&method, instance.clone(), rest);
             }
             // PEP 654: BaseExceptionGroup.derive / subgroup / split are not
             // registry builtins (they need interpreter access for predicates and

@@ -716,6 +716,16 @@ impl Interpreter {
                             pyrust_core::type_err!("wrapper {method}() takes no keyword arguments")
                         });
                     }
+                    if is_mutable_builtin_inplace_dunder(method)
+                        && matches!(self_arg.value.kind(), ValueKind::PyInstance(_))
+                    {
+                        return self.dispatch_builtin_subclass_protocol_dunder(
+                            method,
+                            &self_arg.value,
+                            self_val,
+                            pos,
+                        );
+                    }
                     return self.dispatch_builtin_protocol_dunder(method, self_val, pos);
                 }
 

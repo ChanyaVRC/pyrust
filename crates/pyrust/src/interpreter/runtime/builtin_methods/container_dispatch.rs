@@ -75,6 +75,24 @@ impl Interpreter {
             .filter(|(type_name, _)| matches!(*type_name, "dict" | "list" | "set"))?;
         let backing = instance_builtin_data(instance)?;
         let ordered = is_ordered_dict_class_or_subclass(&instance.borrow().class);
+        if primitive_method.starts_with("__")
+            && is_protocol_dunder(primitive_type, primitive_method)
+        {
+            if is_mutable_builtin_inplace_dunder(primitive_method) {
+                let receiver = Value::py_instance(Rc::clone(instance));
+                return Some(self.dispatch_builtin_subclass_protocol_dunder(
+                    primitive_method,
+                    &receiver,
+                    backing,
+                    args.to_vec(),
+                ));
+            }
+            return Some(self.dispatch_builtin_protocol_dunder(
+                primitive_method,
+                backing,
+                args.to_vec(),
+            ));
+        }
         Some(self.dispatch_backing_primitive_method(
             primitive_type,
             primitive_method,
@@ -593,14 +611,6 @@ impl Interpreter {
         ordered: bool,
         args: Vec<Value>,
     ) -> Result<Value> {
-        // Issue #1909: container protocol dunders on a `list`/`dict`/`set`
-        // *subclass* instance (`MyList().__len__()`) operate on the backing
-        // primitive — route through the shared dispatcher so they match the
-        // plain-primitive form rather than leaking a `RuntimeError` from the
-        // per-type `call`.
-        if prim_method.starts_with("__") && is_protocol_dunder(prim_type, prim_method) {
-            return self.dispatch_builtin_protocol_dunder(prim_method, backing, args);
-        }
         let kind = BuiltinContainerKind::from_type_name(prim_type)
             .unwrap_or_else(|| unreachable!("bad backing primitive type {prim_type}"));
         self.dispatch_builtin_container_method(
