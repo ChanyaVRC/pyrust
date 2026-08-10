@@ -159,3 +159,63 @@ g = one_item()
 awaitable = g.athrow(ValueError("seed"))
 show_call("closed athrow first", awaitable.close)
 show_call("closed athrow throw", lambda: awaitable.throw(ValueError("boom")))
+
+
+def show_advance(label, call):
+    try:
+        result = call()
+        print(label, "return", result)
+    except StopIteration as exc:
+        print(
+            label,
+            "raise",
+            type(exc).__name__,
+            exc.value,
+            exc.args,
+            repr(str(exc)),
+        )
+    except Exception as exc:
+        print(label, "raise", type(exc).__name__, str(exc))
+
+
+def exercise_next(label, make_awaitable, use_dunder):
+    generator = one_item()
+    awaitable = make_awaitable(generator)
+    if use_dunder:
+        show_advance(label + " first", awaitable.__next__)
+    else:
+        show_advance(label + " first", lambda: next(awaitable))
+    show_call(label + " send reuse", lambda: awaitable.send(None))
+    show_call(
+        label + " underlying",
+        lambda: generator.__anext__().send(None),
+    )
+    show_advance(label + " cleanup", lambda: generator.aclose().send(None))
+
+
+exercise_next("anext next", lambda generator: generator.__anext__(), False)
+exercise_next("anext dunder", lambda generator: generator.__anext__(), True)
+exercise_next("asend next", lambda generator: generator.asend(None), False)
+exercise_next("asend dunder", lambda generator: generator.asend(None), True)
+
+g = one_item()
+awaitable = g.__anext__()
+show_advance("anext send cross first", lambda: awaitable.send(None))
+show_call("anext send cross next reuse", lambda: next(awaitable))
+show_advance("anext send cross cleanup", lambda: g.aclose().send(None))
+
+g = one_item()
+awaitable = g.asend(None)
+show_advance("asend send cross first", lambda: awaitable.send(None))
+show_call("asend send cross next reuse", lambda: next(awaitable))
+show_advance("asend send cross cleanup", lambda: g.aclose().send(None))
+
+g = one_item()
+awaitable = g.aclose()
+show_advance("aclose next first", lambda: next(awaitable))
+show_call("aclose next reuse", lambda: next(awaitable))
+
+g = one_item()
+awaitable = g.athrow(ValueError("boom"))
+show_advance("athrow next first", lambda: next(awaitable))
+show_call("athrow next reuse", lambda: next(awaitable))

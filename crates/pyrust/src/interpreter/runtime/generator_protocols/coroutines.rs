@@ -268,7 +268,7 @@ impl Interpreter {
     ///   the scheduling point upward so the outer event loop steps it and the
     ///   awaitable is re-driven.
     /// - async-gen returned / exhausted → `StopAsyncIteration` (no value).
-    fn step_async_gen_asend(
+    pub(crate) fn step_async_gen_asend(
         &mut self,
         asend_rc: &Rc<GeneratorCell>,
         sent_val: Value,
