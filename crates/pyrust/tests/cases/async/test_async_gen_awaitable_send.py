@@ -82,3 +82,60 @@ try:
     throw_awaitable.send(None)
 except Exception as exc:
     print("throw awaitable reuse:", type(exc).__name__, str(exc))
+
+
+def show_call(label, call):
+    try:
+        result = call()
+        print(label, "return", result)
+    except Exception as exc:
+        print(label, "raise", type(exc).__name__, str(exc))
+
+
+g = one_item()
+awaitable = g.__anext__()
+show_call("fresh close", awaitable.close)
+show_call("fresh close reuse", lambda: awaitable.send(None))
+
+g = one_item()
+awaitable = g.__anext__()
+show_call("fresh throw", lambda: awaitable.throw(ValueError("boom")))
+show_call("fresh throw reuse", lambda: awaitable.send(None))
+
+g = await_then_yield()
+awaitable = g.__anext__()
+print("started close first:", awaitable.send(None))
+show_call("started close", awaitable.close)
+show_call("started close reuse", lambda: awaitable.send(None))
+
+g = await_then_yield()
+awaitable = g.__anext__()
+print("started throw first:", awaitable.send(None))
+show_call("started throw", lambda: awaitable.throw(ValueError("boom")))
+show_call("started throw reuse", lambda: awaitable.send(None))
+
+
+class CatchPause:
+    def __await__(self):
+        try:
+            yield "pause"
+        except ValueError:
+            return "caught-inner"
+
+
+async def catch_inner_throw():
+    result = await CatchPause()
+    yield result
+
+
+g = catch_inner_throw()
+awaitable = g.__anext__()
+print("catching throw first:", awaitable.send(None))
+show_call("catching throw", lambda: awaitable.throw(ValueError("boom")))
+show_call("catching throw underlying", lambda: g.__anext__().send(None))
+
+g = one_item()
+awaitable = g.__anext__()
+show_call("done first", lambda: awaitable.send(None))
+show_call("done close", awaitable.close)
+show_call("done throw", lambda: awaitable.throw(ValueError("boom")))

@@ -299,11 +299,7 @@ impl Interpreter {
                     _ => Some(sent_val),
                 }
             };
-            let throw_exc = if asend.started {
-                None
-            } else {
-                asend.throw_exc.take()
-            };
+            let throw_exc = asend.throw_exc.take();
             asend.started = true;
             (
                 Rc::clone(&asend.agen),

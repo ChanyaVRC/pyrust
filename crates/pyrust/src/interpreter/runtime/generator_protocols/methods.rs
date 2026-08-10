@@ -246,6 +246,13 @@ impl Interpreter {
                 it.exhausted = true;
                 return Ok(Value::none());
             }
+            // `__anext__`/`asend` objects are coroutine-style one-shot
+            // awaitables. Closing one only exhausts that wrapper; it does not
+            // close the underlying async generator.
+            if let Some(asend) = borrow.downcast_mut::<AsyncGenASend>() {
+                asend.done = true;
+                return Ok(Value::none());
+            }
         }
 
         let mut borrow = match state_rc.try_borrow_mut() {
@@ -326,6 +333,19 @@ impl Interpreter {
             // into.  Propagate the thrown exception.
             if borrow.downcast_mut::<GetItemIter>().is_some() {
                 return Err(PyError::Raised(exc_val));
+            }
+            // Throw through the one-shot wrapper into the async generator's
+            // current suspension point. The step driver handles either a
+            // caught exception or propagation and completes the wrapper.
+            if let Some(asend) = borrow.downcast_mut::<AsyncGenASend>() {
+                if asend.done {
+                    return Err(pyrust_core::runtime_err!(
+                        "cannot reuse already awaited __anext__()/asend()"
+                    ));
+                }
+                asend.throw_exc = Some(PyError::Raised(exc_val));
+                drop(borrow);
+                return self.step_async_gen_asend(&state_rc, Value::none());
             }
         }
 
