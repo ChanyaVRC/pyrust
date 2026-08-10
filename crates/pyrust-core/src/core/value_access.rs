@@ -124,6 +124,15 @@ impl Value {
         ) || matches!(top16(self.0), TAG_NONE | TAG_BOOL | TAG_INT | TAG_STR)
     }
 
+    /// Fast equality for two scalar NaN-box values with identical bits.
+    /// This includes the identity case for a boxed NaN and the common exact
+    /// int/bool/str/float pair, while conservatively rejecting every opaque or
+    /// container representation.
+    #[inline]
+    pub fn scalar_bits_equal(&self, other: &Self) -> bool {
+        self.0 == other.0 && self.cannot_user_eq()
+    }
+
     /// Identity short-circuit for sequence searches (`x in [x]`, `.index`,
     /// `.count`, list/tuple `==`).  CPython's `PyObject_RichCompareBool` treats
     /// `a is b` as equal *before* calling `__eq__`, which is observable only for

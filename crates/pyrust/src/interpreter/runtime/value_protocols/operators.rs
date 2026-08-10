@@ -1,3 +1,58 @@
+fn sequence_order_len(value: &Value) -> Option<usize> {
+    match value.kind() {
+        ValueKind::List(items) => Some(items.len()),
+        ValueKind::Tuple(items) => Some(items.len()),
+        _ => None,
+    }
+}
+
+fn sequence_order_item(value: &Value, index: usize) -> Option<Value> {
+    match value.kind() {
+        ValueKind::List(items) => items.get(index).cloned(),
+        ValueKind::Tuple(items) => items.get(index).cloned(),
+        _ => None,
+    }
+}
+
+fn sequence_order_length_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
+    sequence_order_len(a)
+        .expect("sequence comparison left operand must remain a sequence")
+        .cmp(
+            &sequence_order_len(b)
+                .expect("sequence comparison right operand must remain a sequence"),
+        )
+}
+
+/// Classify a comparison slot by the Python call headroom it consumes beyond
+/// a directly resolved user function.
+#[cold]
+fn comparison_slot_user_call_cost(slot: &Value) -> Option<usize> {
+    match slot.kind() {
+        ValueKind::UserFunction(_) => Some(0),
+        ValueKind::BuiltinFunction(registry_key) => {
+            let registration = crate::builtin_registry::lookup_registration(registry_key);
+            if crate::interpreter::canonical_builtin_descriptor_owner_tag(slot, registration)
+                .is_some()
+            {
+                return None;
+            }
+            registration
+                .filter(|entry| {
+                    entry.metadata.kind
+                        == crate::builtin_registry::BuiltinCallableKind::ModuleFunction
+                        && entry.metadata.python_module() == Some("builtins")
+                })
+                .map(|_| 1)
+        }
+        ValueKind::BoundMethod { .. }
+        | ValueKind::ClassBoundMethod { .. }
+        | ValueKind::PyClass(_)
+        | ValueKind::PyInstance(_)
+        | ValueKind::BuiltinObject { .. } => Some(1),
+        _ => None,
+    }
+}
+
 impl Interpreter {
     /// Try to call a binary dunder method on `left` (named `method`), then on
     /// `right` (named `rmethod`).  Returns `Some(result)` if a dunder was found
@@ -14,6 +69,28 @@ impl Interpreter {
         right: &Value,
         method: &str,
         rmethod: &str,
+    ) -> Option<Result<Value>> {
+        self.try_dunder_binary_inner(left, right, method, rmethod, false)
+    }
+
+    /// Comparison-only dispatch used by callback-capable container scans.
+    pub(super) fn try_comparison_dunder_binary(
+        &mut self,
+        left: &Value,
+        right: &Value,
+        method: &str,
+        rmethod: &str,
+    ) -> Option<Result<Value>> {
+        self.try_dunder_binary_inner(left, right, method, rmethod, true)
+    }
+
+    fn try_dunder_binary_inner(
+        &mut self,
+        left: &Value,
+        right: &Value,
+        method: &str,
+        rmethod: &str,
+        comparison_callback: bool,
     ) -> Option<Result<Value>> {
         // Subtype priority mirrors two CPython dispatch paths:
         //
@@ -60,7 +137,7 @@ impl Interpreter {
         if right_has_subtype_priority && let ValueKind::PyInstance(inst) = right.kind() {
             let class = Rc::clone(&inst.borrow().class);
             if let Some(m) = lookup_class_attr(&class, rmethod) {
-                match self.dispatch_binary_slot(m, right, inst, left) {
+                match self.dispatch_binary_slot(m, right, inst, left, comparison_callback) {
                     Some(Ok(v)) if is_not_implemented(&v) => {}
                     Some(result) => return Some(result),
                     None => {}
@@ -71,7 +148,7 @@ impl Interpreter {
         if let ValueKind::PyInstance(inst) = left.kind() {
             let class = Rc::clone(&inst.borrow().class);
             if let Some(m) = lookup_class_attr(&class, method) {
-                match self.dispatch_binary_slot(m, left, inst, right) {
+                match self.dispatch_binary_slot(m, left, inst, right, comparison_callback) {
                     Some(Ok(v)) if is_not_implemented(&v) => {}
                     Some(result) => return Some(result),
                     None => {}
@@ -100,7 +177,7 @@ impl Interpreter {
         {
             let class = Rc::clone(&inst.borrow().class);
             if let Some(m) = lookup_class_attr(&class, rmethod) {
-                match self.dispatch_binary_slot(m, right, inst, left) {
+                match self.dispatch_binary_slot(m, right, inst, left, comparison_callback) {
                     Some(Ok(v)) if is_not_implemented(&v) => {}
                     Some(result) => return Some(result),
                     None => {}
@@ -145,14 +222,14 @@ impl Interpreter {
             })
         {
             let m = lookup_class_attr(&class, "__ne__")?;
-            return match self.dispatch_binary_slot(m, owner, inst, other) {
+            return match self.dispatch_binary_slot(m, owner, inst, other, false) {
                 Some(Ok(v)) if is_not_implemented(&v) => None,
                 other => other,
             };
         }
         // Default `object.__ne__`: negate `owner.__eq__(other)` single-sided.
         let eq = lookup_class_attr(&class, "__eq__")?;
-        match self.dispatch_binary_slot(eq, owner, inst, other) {
+        match self.dispatch_binary_slot(eq, owner, inst, other, false) {
             Some(Ok(v)) if is_not_implemented(&v) => None,
             Some(Ok(v)) => Some(
                 self.truthy_value(&v)
@@ -180,6 +257,7 @@ impl Interpreter {
         owner: &Value,
         inst: &Rc<RefCell<PyInstance>>,
         other: &Value,
+        comparison_callback: bool,
     ) -> Option<Result<Value>> {
         if !slot_is_dispatchable(&m) {
             return Some(Err(PyError::named(
@@ -203,6 +281,12 @@ impl Interpreter {
             name: None,
             value: other.clone(),
         };
+        if comparison_callback && let Some(additional_cost) = comparison_slot_user_call_cost(&m) {
+            if let Err(error) = self.guard_comparison_user_call(additional_cost) {
+                return Some(Err(error));
+            }
+            self.note_comparison_dispatch();
+        }
         Some(invoke_class_method(self, m, self_val, &[arg]))
     }
 
@@ -263,6 +347,9 @@ impl Interpreter {
         if !matches!(a.kind(), ValueKind::PyInstance(_))
             && !matches!(b.kind(), ValueKind::PyInstance(_))
         {
+            if let Some(sequence_result) = self.richcmp_sequence_order(a, b, false) {
+                return sequence_result;
+            }
             let primitive_result = compare_values(a, b);
             if primitive_result.is_ok() {
                 return primitive_result;
@@ -344,6 +431,9 @@ impl Interpreter {
         if !matches!(a.kind(), ValueKind::PyInstance(_))
             && !matches!(b.kind(), ValueKind::PyInstance(_))
         {
+            if let Some(sequence_result) = self.richcmp_sequence_order(a, b, true) {
+                return sequence_result;
+            }
             let primitive_result = compare_values_with_op(a, b, ">");
             if primitive_result.is_ok() {
                 return primitive_result;
@@ -407,43 +497,39 @@ impl Interpreter {
 
     /// Interpreter-aware lexicographic ordering for concrete list/tuple pairs.
     ///
-    /// This is a slow-path companion to the interpreter-free `compare_values`:
-    /// callers reach it only after the primitive comparator failed.  CPython
-    /// tests each pair for equality before applying the requested ordering op
-    /// to the first unequal pair, so the prefix uses `values_user_eq` and the
-    /// differing pair recursively re-enters the appropriate rich comparison.
-    ///
-    /// Values are snapshotted before user code runs.  Besides avoiding a
-    /// `RefCell` borrow across `__eq__`/`__lt__`/`__gt__`, this matches the
-    /// ownership boundary used by the other interpreter-aware container
-    /// protocols.
+    /// CPython tests each pair for identity-aware equality before applying the
+    /// requested ordering op to the first unequal pair. Current elements are
+    /// cloned one at a time so callback replacement of a later edge is live.
     fn richcmp_sequence_order(
         &mut self,
         a: &Value,
         b: &Value,
         greater_primary: bool,
     ) -> Option<Result<std::cmp::Ordering>> {
-        let (left, right): (Vec<Value>, Vec<Value>) = match (a.kind(), b.kind()) {
-            (ValueKind::List(left), ValueKind::List(right)) => (
-                left.iter().cloned().collect(),
-                right.iter().cloned().collect(),
-            ),
-            (ValueKind::Tuple(left), ValueKind::Tuple(right)) => (left.to_vec(), right.to_vec()),
+        let (left_len, right_len) = match (a.kind(), b.kind()) {
+            (ValueKind::List(left), ValueKind::List(right)) => (left.len(), right.len()),
+            (ValueKind::Tuple(left), ValueKind::Tuple(right)) => (left.len(), right.len()),
             _ => return None,
         };
 
-        Some((|| {
-            for (left_item, right_item) in left.iter().zip(right.iter()) {
-                if self.values_user_eq(left_item, right_item)? {
+        Some(self.with_comparison_order_pair(a, b, |interp| {
+            for index in 0..left_len.min(right_len) {
+                let Some(left_item) = sequence_order_item(a, index) else {
+                    return Ok(sequence_order_length_cmp(a, b));
+                };
+                let Some(right_item) = sequence_order_item(b, index) else {
+                    return Ok(sequence_order_length_cmp(a, b));
+                };
+                if interp.values_richcompare_eq(&left_item, &right_item)? {
                     continue;
                 }
                 return if greater_primary {
-                    self.richcmp_order_gt(left_item, right_item)
+                    interp.richcmp_order_gt(&left_item, &right_item)
                 } else {
-                    self.richcmp_order(left_item, right_item)
+                    interp.richcmp_order(&left_item, &right_item)
                 };
             }
-            Ok(left.len().cmp(&right.len()))
-        })())
+            Ok(sequence_order_length_cmp(a, b))
+        }))
     }
 }

@@ -1636,6 +1636,23 @@ mod tests {
     }
 
     #[test]
+    fn scalar_bits_equal_is_safe_for_richcompare_fast_paths() {
+        let one = Value::int(1);
+        let one_float = Value::float(1.0);
+        assert!(one.scalar_bits_equal(&one.clone()));
+        assert!(!one.scalar_bits_equal(&one_float));
+        assert_eq!(one, one_float);
+
+        let nan = Value::float(f64::NAN);
+        let other_nan = Value::float(f64::NAN);
+        assert!(nan.scalar_bits_equal(&nan.clone()));
+        assert!(!nan.scalar_bits_equal(&other_nan));
+
+        let list = Value::list(vec![one]);
+        assert!(!list.scalar_bits_equal(&list.clone()));
+    }
+
+    #[test]
     fn minted_nans_never_alias_the_reserved_sentinels() {
         // The sentinels live at payloads 0xBAD0/0xBAD2/0xBAD4 in the same
         // positive-NaN family.  A collision would be silent and severe: a

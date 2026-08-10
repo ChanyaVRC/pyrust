@@ -1671,24 +1671,59 @@ pyrust_module! {
                 }
                 _ => return Ok(Value::not_implemented()),
             };
-            let (self_items, self_state, self_version) =
-                deque_items_snapshot_guarded(&inst)?;
+            let (self_items, self_state, self_version) = deque_items_guarded_live(&inst)?;
             let (other_items, other_state, other_version) =
-                deque_items_snapshot_guarded(&other_inst)?;
-            if self_items.len() != other_items.len() {
+                deque_items_guarded_live(&other_inst)?;
+            let len = self_items.borrow().len();
+            if len != other_items.borrow().len() {
                 return Ok(Value::bool_(false));
             }
-            for (a, b) in self_items.iter().zip(other_items.iter()) {
-                let equal = _interp.values_richcompare_eq(a, b)?;
-                if !equal {
-                    // CPython returns immediately on a mismatch; a mutation
-                    // performed by that final false comparison is not checked.
-                    return Ok(Value::bool_(false));
+            let scalar_result = if _interp.has_active_comparison() {
+                None
+            } else {
+                let self_items = self_items.borrow();
+                let other_items = other_items.borrow();
+                let mut resolved = Some(true);
+                for (a, b) in self_items.iter().zip(other_items.iter()) {
+                    match Interpreter::try_scalar_richcompare_eq(a, b) {
+                        Some(true) => {}
+                        Some(false) => {
+                            resolved = Some(false);
+                            break;
+                        }
+                        None => {
+                            resolved = None;
+                            break;
+                        }
+                    }
                 }
-                deque_require_unmutated(&self_state, self_version, "RuntimeError")?;
-                deque_require_unmutated(&other_state, other_version, "RuntimeError")?;
+                resolved
+            };
+            if let Some(equal) = scalar_result {
+                return Ok(Value::bool_(equal));
             }
-            Ok(Value::bool_(true))
+            _interp.with_comparison_pair(&args[0].value, other, |interp| {
+                for index in 0..len {
+                    let a = self_items
+                        .borrow()
+                        .get(index)
+                        .cloned()
+                        .expect("deque length is guarded during comparison");
+                    let b = other_items
+                        .borrow()
+                        .get(index)
+                        .cloned()
+                        .expect("deque length is guarded during comparison");
+                    if !interp.values_richcompare_eq(&a, &b)? {
+                        // CPython returns immediately on a mismatch; a mutation
+                        // performed by that final false comparison is not checked.
+                        return Ok(Value::bool_(false));
+                    }
+                    deque_require_unmutated(&self_state, self_version, "RuntimeError")?;
+                    deque_require_unmutated(&other_state, other_version, "RuntimeError")?;
+                }
+                Ok(Value::bool_(true))
+            })
         }
 
         /// Lexicographic deque ordering, matching CPython's sequence

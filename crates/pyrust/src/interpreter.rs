@@ -20,6 +20,10 @@ use pyrust_core::CollectionMutationState;
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
 type MemoKey = (u64, smallvec::SmallVec<[i64; 3]>);
+type ComparisonPair = (i64, i64);
+type ComparisonContext = (usize, u64);
+type ComparisonFrame = (i64, i64, usize, u64);
+type ActiveComparisonContexts = HashMap<ComparisonPair, smallvec::SmallVec<[ComparisonContext; 1]>>;
 
 const DEFAULT_RECURSION_LIMIT: usize = 1000;
 const ENV_POOL_MAX: usize = 64;
@@ -298,27 +302,21 @@ pub struct Interpreter {
     /// The extra box intentionally keeps this cold field to one word.
     #[allow(clippy::box_collection)]
     pub(crate) vm_frame_caches: Option<Box<Vec<Option<Box<VmFrameCache>>>>>,
-    /// Recursion stack for `values_user_eq` cycle detection (issue
-    /// #436).  Each entry is the ordered `(value_id(lhs), value_id(rhs))`
-    /// of a container pair currently being compared element-wise.
-    /// Encountering the same pair again means the recursion has hit a
-    /// cycle (e.g. `a.append(a); b.append(b); a == b`); the recursion
-    /// short-circuits to `true` instead of blowing the stack.
-    ///
-    /// **Intentional divergence from CPython:** CPython raises
-    /// `RecursionError` when the prefix is all-equal and the back-edge
-    /// is reached.  pyrust instead returns `true` (the same policy as
-    /// `Value::eq`'s `EqGuard`).  The parity fixture
-    /// `test_container_eq_dispatches_eq.py` documents and tests only
-    /// the prefix-differs case (which is deterministic in both
-    /// implementations); the all-equal-cycle case is explicitly excluded
-    /// from parity testing because CPython's behaviour there is
-    /// `RecursionError`, not `True` or `False`.
-    ///
-    /// Lives on the interpreter (rather than a `thread_local!`) because
-    /// the helper is only reachable through `&mut self`; the field
-    /// avoids the per-recursive-call thread-local borrow.
+    /// Legacy recursion stack for aggregate set/view comparisons. Direct
+    /// list, dict, and deque comparisons use the exception-capable pair stack
+    /// below so a structural back-edge raises `RecursionError`.
     pub(crate) eq_in_progress: Vec<(i64, i64)>,
+    /// Ordered container pairs active under CPython's exception-capable rich
+    /// comparison policy. Call depth plus a comparison-dispatch epoch lets a
+    /// user callback make finite progress without hiding a pure structural
+    /// cycle.
+    pub(crate) comparison_pair_stack: Vec<ComparisonFrame>,
+    pub(crate) comparison_active_contexts: ActiveComparisonContexts,
+    pub(crate) comparison_dispatch_epoch: u64,
+    /// Number of retained native container-comparison frames.
+    pub(crate) comparison_recursion_cost: usize,
+    /// Structural-only root cost not charged to Python callback entry.
+    pub(crate) comparison_structural_cost_bias: usize,
     /// Pre-resolved table of built-in exception classes, populated once
     /// at interpreter startup by [`Interpreter::default`] after
     /// `install_exception_builtins` registers the classes into `env`.
@@ -536,6 +534,11 @@ impl Default for Interpreter {
             vm_frame_views: Vec::new(),
             vm_frame_caches: None,
             eq_in_progress: Vec::new(),
+            comparison_pair_stack: Vec::new(),
+            comparison_active_contexts: HashMap::new(),
+            comparison_dispatch_epoch: 0,
+            comparison_recursion_cost: 0,
+            comparison_structural_cost_bias: 0,
             exc_classes: ExcClasses::uninitialized(),
             push_exc_ctx_depth: 0,
             reraise_is_bare: false,

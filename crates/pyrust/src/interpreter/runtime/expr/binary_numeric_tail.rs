@@ -83,6 +83,9 @@ impl Interpreter {
         {
             return Ok(Value::bool_(false));
         }
+        if let Some(sequence_result) = self.richcmp_sequence_binary(&left, &right, op) {
+            return sequence_result;
+        }
         match compare_values_with_op(&left, &right, op_name) {
             Ok(ordering) => Ok(Value::bool_(cmp(ordering))),
             Err(error) => {
@@ -95,8 +98,7 @@ impl Interpreter {
         }
     }
 
-    /// Interpreter-aware fallback for list/tuple ordering whose primitive
-    /// comparison reached a user instance (issue #2817).
+    /// Interpreter-aware list/tuple ordering path (issue #2817 / #3014).
     ///
     /// CPython scans an equality prefix, then returns the exact requested rich
     /// comparison for the first unequal pair.  Returning that value directly
@@ -115,7 +117,7 @@ impl Interpreter {
             return None;
         }
 
-        Some((|| {
+        Some(self.with_comparison_order_pair(left, right, |interp| {
             let mut index = 0;
             loop {
                 // Clone only the current pair, then drop the list borrow before
@@ -150,7 +152,7 @@ impl Interpreter {
                     _ => unreachable!("sequence kinds changed during comparison"),
                 };
 
-                if self.values_user_eq(&left_item, &right_item)? {
+                if interp.values_richcompare_eq(&left_item, &right_item)? {
                     index += 1;
                 } else {
                     // CPython fetches the differing pair again after `__eq__`
@@ -176,7 +178,7 @@ impl Interpreter {
                         _ => unreachable!("sequence kinds changed during comparison"),
                     };
                     if let Some((left_item, right_item)) = live_items {
-                        return self.eval_binary(left_item, op, right_item);
+                        return interp.eval_binary(left_item, op, right_item);
                     }
                     return Ok(Value::bool_(match op {
                         BinaryOp::Lt => left_len < right_len,
@@ -187,6 +189,6 @@ impl Interpreter {
                     }));
                 }
             }
-        })())
+        }))
     }
 }

@@ -182,6 +182,26 @@ fn deque_items_snapshot_guarded(
     Ok((items, mutation_state, version))
 }
 
+/// Borrowable live deque storage plus the structural-mutation version at the
+/// start of a callback-capable equality comparison.
+fn deque_items_guarded_live(
+    inst: &Rc<RefCell<PyInstance>>,
+) -> Result<(
+    pyrust_builtins::deque_storage::DequeData,
+    pyrust_builtins::deque_storage::DequeMutationState,
+    i64,
+)> {
+    let storage = deque_storage_value(inst)?;
+    let mutation_state =
+        pyrust_builtins::deque_storage::mutation_state(&storage).ok_or_else(|| {
+            PyError::Runtime("internal: deque storage lost its mutation state".to_string())
+        })?;
+    let version = mutation_state.get();
+    let items = pyrust_builtins::deque_storage::data(&storage)
+        .ok_or_else(|| PyError::Runtime("internal: deque storage lost its buffer".to_string()))?;
+    Ok((items, mutation_state, version))
+}
+
 /// User equality may run arbitrary Python and mutate the deque.  CPython
 /// checks its opaque state after every successful comparison instead of
 /// continuing over stale elements.
@@ -263,25 +283,40 @@ fn deque_ordering_compare(
         _ => return Ok(Value::not_implemented()),
     };
 
-    let (self_items, self_state, self_version) = deque_items_snapshot_guarded(&inst)?;
-    let (other_items, other_state, other_version) = deque_items_snapshot_guarded(other_inst)?;
-    for (left, right) in self_items.iter().zip(other_items.iter()) {
-        if !interp.values_richcompare_eq(left, right)? {
-            let compared = interp.eval_binary(left.clone(), op, right.clone())?;
-            return Ok(Value::bool_(interp.truthy_value(&compared)?));
+    let (self_items, self_state, self_version) = deque_items_guarded_live(&inst)?;
+    let (other_items, other_state, other_version) = deque_items_guarded_live(other_inst)?;
+    let self_len = self_items.borrow().len();
+    let other_len = other_items.borrow().len();
+    let common_len = self_len.min(other_len);
+    interp.with_comparison_pair(&receiver.value, &args[1].value, |interp| {
+        for index in 0..common_len {
+            let left = self_items
+                .borrow()
+                .get(index)
+                .cloned()
+                .expect("deque length is guarded during comparison");
+            let right = other_items
+                .borrow()
+                .get(index)
+                .cloned()
+                .expect("deque length is guarded during comparison");
+            if !interp.values_richcompare_eq(&left, &right)? {
+                let compared = interp.eval_binary(left, op, right)?;
+                return Ok(Value::bool_(interp.truthy_value(&compared)?));
+            }
+            deque_require_unmutated(&self_state, self_version, "RuntimeError")?;
+            deque_require_unmutated(&other_state, other_version, "RuntimeError")?;
         }
-        deque_require_unmutated(&self_state, self_version, "RuntimeError")?;
-        deque_require_unmutated(&other_state, other_version, "RuntimeError")?;
-    }
 
-    let ordered = match op {
-        BinaryOp::Lt => self_items.len() < other_items.len(),
-        BinaryOp::Le => self_items.len() <= other_items.len(),
-        BinaryOp::Gt => self_items.len() > other_items.len(),
-        BinaryOp::Ge => self_items.len() >= other_items.len(),
-        _ => unreachable!("deque ordering helper received a non-ordering operation"),
-    };
-    Ok(Value::bool_(ordered))
+        let ordered = match op {
+            BinaryOp::Lt => self_len < other_len,
+            BinaryOp::Le => self_len <= other_len,
+            BinaryOp::Gt => self_len > other_len,
+            BinaryOp::Ge => self_len >= other_len,
+            _ => unreachable!("deque ordering helper received a non-ordering operation"),
+        };
+        Ok(Value::bool_(ordered))
+    })
 }
 
 /// Read the maxlen from `self.maxlen` — returns `None` for unbounded.
