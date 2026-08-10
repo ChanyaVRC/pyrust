@@ -219,3 +219,48 @@ g = one_item()
 awaitable = g.athrow(ValueError("boom"))
 show_advance("athrow next first", lambda: next(awaitable))
 show_call("athrow next reuse", lambda: next(awaitable))
+
+
+def make_done_wrapper(kind, close_only):
+    generator = one_item()
+    if kind == "anext":
+        awaitable = generator.__anext__()
+    elif kind == "asend":
+        awaitable = generator.asend(None)
+    elif kind == "aclose":
+        awaitable = generator.aclose()
+    else:
+        awaitable = generator.athrow(ValueError("seed"))
+    if close_only:
+        awaitable.close()
+    else:
+        try:
+            awaitable.send(None)
+        except Exception:
+            pass
+    return awaitable
+
+
+for lifecycle in ("driven", "closed"):
+    for kind in ("anext", "asend", "aclose", "athrow"):
+        awaitable = make_done_wrapper(kind, lifecycle == "closed")
+        show_call(
+            lifecycle + " " + kind + " invalid throw",
+            lambda awaitable=awaitable: awaitable.throw(42),
+        )
+
+for kind in ("anext", "aclose"):
+    awaitable = make_done_wrapper(kind, True)
+    show_call(kind + " done throw zero", lambda: awaitable.throw())
+    show_call(
+        kind + " done throw two",
+        lambda: awaitable.throw(ValueError("x"), "y"),
+    )
+    show_call(
+        kind + " done throw three",
+        lambda: awaitable.throw(42, None, None),
+    )
+    show_call(
+        kind + " done throw four",
+        lambda: awaitable.throw(42, None, None, None),
+    )

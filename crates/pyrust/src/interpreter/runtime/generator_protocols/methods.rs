@@ -120,6 +120,9 @@ impl Interpreter {
                 self.generator_close(receiver)
             }
             "throw" => {
+                if let Some(err) = Self::async_gen_asend_reuse_error(&receiver) {
+                    return Err(err);
+                }
                 if args.is_empty() || args.len() > 3 {
                     return Err(pyrust_core::type_err!(
                         "generator.throw() takes 1 to 3 arguments"
@@ -292,6 +295,26 @@ impl Interpreter {
         }
     }
 
+    /// Return the family-specific reuse error for a completed async-generator
+    /// awaitable, before `throw()` validates its argument list or exception.
+    fn async_gen_asend_reuse_error(receiver: &Value) -> Option<PyError> {
+        let ValueKind::Generator(state_rc) = receiver.kind() else {
+            return None;
+        };
+        let Ok(borrow) = state_rc.try_borrow() else {
+            return None;
+        };
+        let asend = borrow.downcast_ref::<AsyncGenASend>()?;
+        if !asend.done {
+            return None;
+        }
+        Some(if asend.is_close_or_throw {
+            pyrust_core::runtime_err!("cannot reuse already awaited aclose()/athrow()")
+        } else {
+            pyrust_core::runtime_err!("cannot reuse already awaited __anext__()/asend()")
+        })
+    }
+
     /// Implementation of `generator.throw(exc)`.
     ///
     /// Injects `exc` at the current yield point.  If the generator catches it
@@ -338,16 +361,6 @@ impl Interpreter {
             // current suspension point. The step driver handles either a
             // caught exception or propagation and completes the wrapper.
             if let Some(asend) = borrow.downcast_mut::<AsyncGenASend>() {
-                if asend.done {
-                    if asend.is_close_or_throw {
-                        return Err(pyrust_core::runtime_err!(
-                            "cannot reuse already awaited aclose()/athrow()"
-                        ));
-                    }
-                    return Err(pyrust_core::runtime_err!(
-                        "cannot reuse already awaited __anext__()/asend()"
-                    ));
-                }
                 asend.throw_exc = Some(PyError::Raised(exc_val));
                 drop(borrow);
                 return self.step_async_gen_asend(&state_rc, Value::none());
