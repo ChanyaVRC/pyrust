@@ -390,6 +390,15 @@ impl Interpreter {
             }
         };
 
+        // Async-generator `__anext__`/`asend` awaitables expose the same
+        // synchronous `send()` entry point that `await` drives. Route it to
+        // the existing one-step async-generator driver instead of treating its
+        // state cell as a plain GeneratorFrame.
+        if borrow.is::<AsyncGenASend>() {
+            drop(borrow);
+            return self.step_async_gen_asend(&state_rc, sent_value);
+        }
+
         // NativeIterFrame and GetItemIter do not support send().
         if borrow.downcast_mut::<NativeIterFrame>().is_some()
             || borrow.downcast_mut::<GetItemIter>().is_some()
@@ -457,11 +466,14 @@ impl Interpreter {
                 ));
             }
         };
+        let is_close_or_throw = throw_exc.is_some();
         let asend = AsyncGenASend {
             agen,
             send_value,
             throw_exc,
             started: false,
+            done: false,
+            is_close_or_throw,
             is_aclose,
         };
         Ok(Value::generator(Box::new(asend)))

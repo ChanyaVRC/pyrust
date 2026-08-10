@@ -271,20 +271,33 @@ impl Interpreter {
     fn step_async_gen_asend(
         &mut self,
         asend_rc: &Rc<GeneratorCell>,
-        _sent_val: Value,
+        sent_val: Value,
     ) -> Result<Value> {
         // Take the per-step injection state out of the AsyncGenASend.  Only the
         // *first* step delivers the original `asend(v)` value / `athrow` exc;
-        // subsequent re-drives (after an inner-await suspension) send None.
+        // subsequent re-drives forward the value sent into this awaitable.
         let (agen_rc, send_value, throw_exc, is_aclose) = {
             let mut b = asend_rc.borrow_mut();
             let asend = b.downcast_mut::<AsyncGenASend>().ok_or_else(|| {
                 PyError::Runtime("invalid async-generator asend state".to_string())
             })?;
+            if asend.done {
+                if asend.is_close_or_throw {
+                    return Err(pyrust_core::runtime_err!(
+                        "cannot reuse already awaited aclose()/athrow()"
+                    ));
+                }
+                return Err(pyrust_core::runtime_err!(
+                    "cannot reuse already awaited __anext__()/asend()"
+                ));
+            }
             let send_value = if asend.started {
-                None
+                Some(sent_val)
             } else {
-                asend.send_value.take()
+                match asend.send_value.take() {
+                    Some(value) if !value.is_none() => Some(value),
+                    _ => Some(sent_val),
+                }
             };
             let throw_exc = if asend.started {
                 None
@@ -314,10 +327,18 @@ impl Interpreter {
             // `aclose()` on an already-finished async generator is a silent
             // no-op (the awaitable completes with None); `__anext__`/`asend`
             // raise StopAsyncIteration.
-            if is_aclose {
-                return Err(self.make_stop_iteration_with_value(Value::none()));
-            }
-            return Err(self.make_stop_async_iteration());
+            let result = if is_aclose {
+                Err(self.make_stop_iteration_with_value(Value::none()))
+            } else {
+                Err(self.make_stop_async_iteration())
+            };
+            drop(borrow);
+            let mut asend_state = asend_rc.borrow_mut();
+            asend_state
+                .downcast_mut::<AsyncGenASend>()
+                .expect("checked async-generator asend state")
+                .done = true;
+            return result;
         }
         // CPython: sending a non-None value into a *just-started* async
         // generator (one never resumed, `pc == 0`) via `asend(v)` is a
@@ -326,6 +347,12 @@ impl Interpreter {
         // `__anext__`/`asend(None)` are exempt.
         if frame.pc == 0 && throw_exc.is_none() && send_value.as_ref().is_some_and(|v| !v.is_none())
         {
+            drop(borrow);
+            let mut asend_state = asend_rc.borrow_mut();
+            asend_state
+                .downcast_mut::<AsyncGenASend>()
+                .expect("checked async-generator asend state")
+                .done = true;
             return Err(pyrust_core::type_err!(
                 "can't send non-None value to a just-started async generator"
             ));
@@ -335,7 +362,7 @@ impl Interpreter {
             throw_exc,
             send_value.unwrap_or_else(Value::none),
         );
-        match resume {
+        let result = match resume {
             Ok(value) => {
                 // Suspended.  Distinguish a bare `yield v` from an inner-`await`
                 // suspension by inspecting the instruction the frame is now
@@ -383,7 +410,16 @@ impl Interpreter {
                 Err(self.make_stop_iteration_with_value(Value::none()))
             }
             Err(e) => Err(e),
+        };
+        if result.is_err() {
+            drop(borrow);
+            let mut asend_state = asend_rc.borrow_mut();
+            asend_state
+                .downcast_mut::<AsyncGenASend>()
+                .expect("checked async-generator asend state")
+                .done = true;
         }
+        result
     }
 
     /// Build a `StopAsyncIteration` error (async-generator exhaustion, #2280).

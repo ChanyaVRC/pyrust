@@ -101,7 +101,9 @@ fn with_frame_cache_mut<R>(
 
 fn cached_frame_object(interp: &Interpreter, view_index: usize) -> Option<Value> {
     with_frame_cache(interp, view_index, |cache| {
-        cache.and_then(|cache| cache.object.upgrade())
+        cache
+            .and_then(|cache| cache.object.as_ref())
+            .and_then(pyrust_core::WeakValueCache::upgrade)
     })
 }
 
@@ -110,9 +112,14 @@ fn cached_function_locals(
     view_index: usize,
 ) -> Option<Rc<std::cell::RefCell<PyDict>>> {
     with_frame_cache(interp, view_index, |cache| {
-        cache
-            .and_then(|cache| cache.function_locals.as_ref())
-            .and_then(std::rc::Weak::upgrade)
+        cache.and_then(|cache| {
+            cache.persistent_function_locals.clone().or_else(|| {
+                cache
+                    .function_locals
+                    .as_ref()
+                    .and_then(std::rc::Weak::upgrade)
+            })
+        })
     })
 }
 
@@ -125,7 +132,7 @@ fn install_materialized_frame_cache(
 ) {
     with_frame_cache_mut(interp, view_index, |slot| {
         if let Some(cache) = slot.as_deref_mut() {
-            cache.object = object;
+            cache.object = Some(object);
             if cache
                 .function_locals
                 .as_ref()
@@ -137,8 +144,9 @@ fn install_materialized_frame_cache(
             }
         } else {
             *slot = Some(Box::new(VmFrameCache {
-                object,
+                object: Some(object),
                 function_locals,
+                persistent_function_locals: None,
                 function_local_names,
             }));
         }
@@ -223,6 +231,55 @@ impl Interpreter {
             }
             sync_function_frame_locals(&locals, fresh, &mut cache.function_local_names);
         });
+    }
+
+    /// Return the persistent locals mapping exposed by `locals()` and used by
+    /// argument-omitted `exec()` in the innermost function frame. It outlives
+    /// each builtin call so exec-created keys remain visible to every alias in
+    /// the same activation.
+    pub(crate) fn retain_current_function_locals(&mut self) -> Value {
+        let view_index = self
+            .vm_frame_views
+            .len()
+            .checked_sub(1)
+            .expect("implicit function exec requires an active frame");
+        debug_assert_eq!(self.vm_frame_views[view_index].kind, FrameKind::Function);
+
+        if let Some(locals) = cached_function_locals(self, view_index) {
+            self.sync_cached_function_locals_at(view_index);
+            with_frame_cache_mut(self, view_index, |slot| {
+                slot.as_deref_mut()
+                    .expect("cached function locals require a frame cache")
+                    .persistent_function_locals = Some(Rc::clone(&locals));
+            });
+            return Value::dict_shared(locals);
+        }
+
+        let snapshot = snapshot_view_locals(self, &self.vm_frame_views[view_index]);
+        let function_local_names =
+            initial_function_local_names(&self.vm_frame_views[view_index], &snapshot);
+        let locals_value = Value::dict(snapshot);
+        let locals = Rc::clone(
+            locals_value
+                .get_dict_rc()
+                .expect("function exec locals must be a dict"),
+        );
+        let weak_locals = Rc::downgrade(&locals);
+        with_frame_cache_mut(self, view_index, |slot| {
+            if let Some(cache) = slot.as_deref_mut() {
+                cache.function_locals = Some(weak_locals);
+                cache.persistent_function_locals = Some(locals);
+                cache.function_local_names = function_local_names;
+            } else {
+                *slot = Some(Box::new(VmFrameCache {
+                    object: None,
+                    function_locals: Some(weak_locals),
+                    persistent_function_locals: Some(locals),
+                    function_local_names,
+                }));
+            }
+        });
+        locals_value
     }
 
     /// Refresh a live function frame's persistent locals mapping when Python
@@ -406,10 +463,17 @@ impl Interpreter {
             let cache = frame.frame_cache.borrow();
             let cache = cache.as_deref();
             (
-                cache.and_then(|cache| cache.object.upgrade()),
                 cache
-                    .and_then(|cache| cache.function_locals.as_ref())
-                    .and_then(std::rc::Weak::upgrade),
+                    .and_then(|cache| cache.object.as_ref())
+                    .and_then(pyrust_core::WeakValueCache::upgrade),
+                cache.and_then(|cache| {
+                    cache.persistent_function_locals.clone().or_else(|| {
+                        cache
+                            .function_locals
+                            .as_ref()
+                            .and_then(std::rc::Weak::upgrade)
+                    })
+                }),
             )
         };
         if let Some(cached_frame) = cached_frame {
@@ -436,7 +500,7 @@ impl Interpreter {
         let function_locals = Rc::downgrade(&locals);
         let mut cache = frame.frame_cache.borrow_mut();
         if let Some(cache) = cache.as_deref_mut() {
-            cache.object = object;
+            cache.object = Some(object);
             if cache
                 .function_locals
                 .as_ref()
@@ -447,8 +511,9 @@ impl Interpreter {
             }
         } else {
             *cache = Some(Box::new(VmFrameCache {
-                object,
+                object: Some(object),
                 function_locals: Some(function_locals),
+                persistent_function_locals: None,
                 function_local_names: Vec::new(),
             }));
         }
