@@ -339,6 +339,11 @@ impl Interpreter {
             // caught exception or propagation and completes the wrapper.
             if let Some(asend) = borrow.downcast_mut::<AsyncGenASend>() {
                 if asend.done {
+                    if asend.is_close_or_throw {
+                        return Err(pyrust_core::runtime_err!(
+                            "cannot reuse already awaited aclose()/athrow()"
+                        ));
+                    }
                     return Err(pyrust_core::runtime_err!(
                         "cannot reuse already awaited __anext__()/asend()"
                     ));

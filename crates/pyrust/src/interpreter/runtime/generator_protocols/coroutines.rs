@@ -324,7 +324,7 @@ impl Interpreter {
             // no-op (the awaitable completes with None); `__anext__`/`asend`
             // raise StopAsyncIteration.
             let result = if is_aclose {
-                Err(self.make_stop_iteration_with_value(Value::none()))
+                Err(self.make_stop_iteration())
             } else {
                 Err(self.make_stop_async_iteration())
             };
@@ -394,7 +394,7 @@ impl Interpreter {
                 if is_aclose {
                     // aclose: a clean StopAsyncIteration/return means the close
                     // succeeded — complete the await with None.
-                    Err(self.make_stop_iteration_with_value(Value::none()))
+                    Err(self.make_stop_iteration())
                 } else {
                     Err(self.make_stop_async_iteration())
                 }
@@ -403,7 +403,7 @@ impl Interpreter {
             // (the normal, well-behaved case) — the close succeeded, so the
             // awaitable completes with None rather than re-raising.
             Err(ref e) if is_aclose && e.class_name_is("GeneratorExit") => {
-                Err(self.make_stop_iteration_with_value(Value::none()))
+                Err(self.make_stop_iteration())
             }
             Err(e) => Err(e),
         };
@@ -424,6 +424,15 @@ impl Interpreter {
             PyError::Raised(instantiate_exception(cls, vec![]))
         } else {
             pyrust_core::py_err!("StopAsyncIteration", String::new())
+        }
+    }
+
+    /// Build the argument-less `StopIteration` used when `aclose()` completes.
+    fn make_stop_iteration(&self) -> PyError {
+        if let Some(cls) = self.exc_classes.get("StopIteration") {
+            PyError::Raised(instantiate_exception(cls, vec![]))
+        } else {
+            pyrust_core::py_err!("StopIteration", String::new())
         }
     }
 

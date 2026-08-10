@@ -31,7 +31,7 @@ def drive(label, generator, awaitable, sent):
     try:
         generator.aclose().send(None)
     except StopIteration as exc:
-        print(label, "close", exc.value)
+        print(label, "close", exc.value, exc.args, repr(str(exc)))
     except Exception as exc:
         print(label, "close", type(exc).__name__)
 
@@ -59,14 +59,14 @@ except Exception as exc:
 try:
     g.aclose().send(None)
 except StopIteration as exc:
-    print("inner await close:", exc.value)
+    print("inner await close:", exc.value, exc.args, repr(str(exc)))
 
 g = one_item()
 close_awaitable = g.aclose()
 try:
     close_awaitable.send(None)
 except StopIteration as exc:
-    print("close awaitable first:", exc.value)
+    print("close awaitable first:", exc.value, exc.args, repr(str(exc)))
 try:
     close_awaitable.send(None)
 except Exception as exc:
@@ -139,3 +139,23 @@ awaitable = g.__anext__()
 show_call("done first", lambda: awaitable.send(None))
 show_call("done close", awaitable.close)
 show_call("done throw", lambda: awaitable.throw(ValueError("boom")))
+
+g = one_item()
+awaitable = g.aclose()
+show_call("driven aclose first", lambda: awaitable.send(None))
+show_call("driven aclose throw", lambda: awaitable.throw(ValueError("boom")))
+
+g = one_item()
+awaitable = g.athrow(ValueError("seed"))
+show_call("driven athrow first", lambda: awaitable.send(None))
+show_call("driven athrow throw", lambda: awaitable.throw(ValueError("boom")))
+
+g = one_item()
+awaitable = g.aclose()
+show_call("closed aclose first", awaitable.close)
+show_call("closed aclose throw", lambda: awaitable.throw(ValueError("boom")))
+
+g = one_item()
+awaitable = g.athrow(ValueError("seed"))
+show_call("closed athrow first", awaitable.close)
+show_call("closed athrow throw", lambda: awaitable.throw(ValueError("boom")))
