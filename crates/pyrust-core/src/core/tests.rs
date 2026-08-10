@@ -1369,6 +1369,82 @@ mod tests {
     }
 
     #[test]
+    fn retained_collection_mutation_state_restarts_with_fresh_dict_layout() {
+        // Moving from five to six entries while idle distinguishes the retained
+        // pre-resize layout from one seeded from the current dictionary.
+        let dict_with_len = |len| {
+            Value::dict(
+                (0..len)
+                    .map(|value| (PyKey::Int(value), Value::int(value)))
+                    .collect(),
+            )
+        };
+        let idle_len = 5;
+        let watched = PyKey::Int(idle_len);
+        let retained_dict = dict_with_len(idle_len);
+
+        let initial = retained_dict.dict_iteration_mutation_state().unwrap();
+        drop(initial);
+        ACTIVE_COLLECTION_MUTATION_STATES.with(|active| assert_eq!(active.get(), 0));
+        COLLECTION_MUTATION_STATES.with(|states| assert_eq!(states.borrow().len(), 1));
+
+        retained_dict
+            .dict_insert(watched.clone(), Value::int(idle_len))
+            .unwrap();
+        let restarted = retained_dict.dict_iteration_mutation_state().unwrap();
+        let concurrent = retained_dict.dict_iteration_mutation_state().unwrap();
+        assert!(restarted.same_backing(&concurrent));
+
+        let fresh_dict = dict_with_len(idle_len + 1);
+        let fresh = fresh_dict.dict_iteration_mutation_state().unwrap();
+
+        let restarted_cursor = restarted.watch_key_reinsertion(&watched);
+        let concurrent_cursor = concurrent.watch_key_reinsertion(&watched);
+        let fresh_cursor = fresh.watch_key_reinsertion(&watched);
+        assert_eq!(restarted_cursor, fresh_cursor);
+        assert_eq!(concurrent_cursor, fresh_cursor);
+
+        let restarted_before = restarted.version();
+        retained_dict.dict_shift_remove(&watched).unwrap();
+        retained_dict
+            .dict_insert(watched.clone(), Value::none())
+            .unwrap();
+        let fresh_before = fresh.version();
+        fresh_dict.dict_shift_remove(&watched).unwrap();
+        fresh_dict
+            .dict_insert(watched.clone(), Value::none())
+            .unwrap();
+
+        let fresh_reinserted =
+            fresh.key_reinserted_at_or_after_since(&watched, fresh_before, fresh_cursor);
+        assert!(fresh_reinserted);
+        assert_eq!(
+            restarted.key_reinserted_at_or_after_since(
+                &watched,
+                restarted_before,
+                restarted_cursor,
+            ),
+            fresh_reinserted
+        );
+        assert_eq!(
+            concurrent.key_reinserted_at_or_after_since(
+                &watched,
+                restarted_before,
+                concurrent_cursor,
+            ),
+            fresh_reinserted
+        );
+
+        restarted.unwatch_key_reinsertion(&watched);
+        concurrent.unwatch_key_reinsertion(&watched);
+        fresh.unwatch_key_reinsertion(&watched);
+        drop(restarted);
+        drop(concurrent);
+        drop(fresh);
+        ACTIVE_COLLECTION_MUTATION_STATES.with(|active| assert_eq!(active.get(), 0));
+    }
+
+    #[test]
     fn collection_mutation_state_tracks_dict_value_replacements() {
         let key = PyKey::str_from("key");
         let mut items = PyDict::default();
