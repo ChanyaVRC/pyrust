@@ -37,11 +37,13 @@ fn parse_source(src: &str) -> Result<Vec<ast::Stmt>> {
 // with zero effect on normal programs (the stack is committed lazily, so a
 // non-recursing script still resides in ~5 MB).
 //
-// Debug builds keep 256 MB: `-Copt-level=0` frames are 80–100 KB each, so a
-// 1000-deep recursion needs ~100 MB, and CI's debug parity suite exercises
-// recursion fixtures.
+// Debug builds reserve 512 MB: recursive Python dunder dispatch traverses
+// enough unoptimised VM and slot frames to exhaust 256 MB before the
+// `CallDepthGuard` reaches the default limit of 1000.  Doubling the reservation
+// lets the semantic guard fire with headroom for CI's debug parity suite.  The
+// stack is committed lazily, so normal non-recursing resident memory stays low.
 #[cfg(debug_assertions)]
-const INTERPRETER_STACK_SIZE: usize = 256 * 1024 * 1024;
+const INTERPRETER_STACK_SIZE: usize = 512 * 1024 * 1024;
 #[cfg(not(debug_assertions))]
 const INTERPRETER_STACK_SIZE: usize = 128 * 1024 * 1024;
 

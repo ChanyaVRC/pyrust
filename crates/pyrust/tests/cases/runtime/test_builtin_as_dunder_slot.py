@@ -586,12 +586,17 @@ class Generic1(typing.Generic[typing.TypeVar("T")]):
 show("Generic1[int].__origin__", lambda: Generic1[int].__origin__ is Generic1)
 
 
-# NOTE: a genuinely self-recursive *Python* dunder (`def __len__(self): return
-# len(self)`) is a separate concern and is deliberately not exercised here.  It
-# takes the `UserFunction` slot path, not the builtin path this fixture covers,
-# and it still overflows the native stack in an unoptimised build — pyrust's
-# recursion budget does not bound it before the real stack runs out.  Asserting it
-# would make this fixture abort under the debug builds CI uses; tracked separately.
+# A recursive Python dunder must reach the interpreter's semantic recursion
+# limit before exhausting the native stack, so its RecursionError stays catchable.
+class RecursiveLen:
+    def __len__(self):
+        return len(self)
+
+
+try:
+    len(RecursiveLen())
+except RecursionError:
+    print("recursive Python dunder RecursionError")
 
 
 # Reaching this line is the point of the fixture: the interpreter survived.

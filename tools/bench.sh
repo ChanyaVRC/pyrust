@@ -87,12 +87,13 @@ BENCH_TIMEOUT_S="${PYRUST_BENCH_TIMEOUT_S:-300}"
 
 # `ulimit -v` caps ADDRESS SPACE, not resident memory, and a pyrust child
 # reserves its interpreter thread stack up front (main.rs::INTERPRETER_STACK_SIZE
-# — 128 MiB release, 256 MiB debug).  Measured on this box: VmPeak ~275 MB
-# release / ~415 MB debug against a peak RSS of only ~10-15 MB.  Sizing this cap
-# from RSS is therefore the trap: below ~184 MiB (release) / ~320 MiB (debug,
-# which is bench.sh's default target) every child aborts before it runs a line of
-# Python, and the only symptom is "hyperfine failed for <case> (exit 1)".
-BENCH_MEM_FLOOR_MB=512
+# — 128 MiB release, 512 MiB debug).  On this box the debug binary idles at
+# VmPeak 678692 kB / VmSize 613168 kB while its RSS is only 23864 kB.  Sizing
+# this cap from RSS is therefore the trap: 512 MiB cannot even spawn the debug
+# interpreter thread, and 640 MiB is only the smallest sampled passing cap.
+# Keep margin for loader and platform variance so a low cap does not surface
+# merely as "hyperfine failed for <case> (exit 1)".
+BENCH_MEM_FLOOR_MB=768
 
 # Reject junk loudly: a typo'd override must not silently leave children
 # uncapped, which is the exact failure these limits exist to prevent.  The digit
@@ -110,8 +111,9 @@ BENCH_MEM_FLOOR_MB=512
 
 if [[ "$BENCH_MEM_MB" -gt 0 ]] && [[ "$BENCH_MEM_MB" -lt "$BENCH_MEM_FLOOR_MB" ]]; then
   echo "warning: PYRUST_BENCH_MEM_MB=$BENCH_MEM_MB is below the ${BENCH_MEM_FLOOR_MB} MiB floor;" >&2
-  echo "         pyrust reserves a 128-256 MiB interpreter stack, so cases may abort at" >&2
-  echo "         startup and be reported as ordinary benchmark failures" >&2
+  echo "         debug pyrust reserves a 512 MiB interpreter stack (128 MiB in release)," >&2
+  echo "         so low address-space caps may prevent thread startup and be reported" >&2
+  echo "         as ordinary benchmark failures" >&2
 fi
 
 CAP_DESC="disabled"
