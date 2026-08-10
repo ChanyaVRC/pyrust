@@ -254,11 +254,12 @@ mod namespaces {
         MODULE_CLASS_CACHE_SLOT_COUNT, ModuleClassCache, ModuleClassCacheSlot, ModuleMutationState,
         PathBuf, PyClass, PyDict, PyError, PyInstance, PyKey, PyModule, Rc, RefCell, RegSlice,
         Result, StrKey, Value, ValueKind, active_live_class_namespace, cached_builtins_module,
-        call_del_if_last_binding, env_assign_local, find_enclosing_local_env_for_name,
-        get_int_max_str_digits, invoke_class_method, is_cached_builtins_module,
-        lookup_name_in_enclosing_local_env, lookup_name_in_env, lookup_name_in_env_as_free,
-        lookup_name_in_module, lookup_value_special_method, module_env, object_class_singleton,
-        set_int_max_str_digits, value_type_name_str, values_are_identical, vm_read,
+        call_del_if_last_binding, call_del_if_last_binding_in_env, env_assign_local,
+        find_enclosing_local_env_for_name, get_int_max_str_digits, invoke_class_method,
+        is_cached_builtins_module, lookup_name_in_enclosing_local_env, lookup_name_in_env,
+        lookup_name_in_env_as_free, lookup_name_in_module, lookup_value_special_method, module_env,
+        object_class_singleton, set_int_max_str_digits, value_type_name_str, values_are_identical,
+        vm_read,
     };
     include!("runtime/namespaces.rs");
 }

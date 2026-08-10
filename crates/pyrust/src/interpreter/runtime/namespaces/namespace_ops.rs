@@ -382,7 +382,13 @@ impl Interpreter {
                     ),
                 ));
             };
-            call_del_if_last_binding(self, deleted, regs, code.num_locals as usize);
+            call_del_if_last_binding_in_env(
+                self,
+                deleted,
+                &target_env,
+                regs,
+                code.num_locals as usize,
+            );
             return Ok(());
         }
         if is_global {

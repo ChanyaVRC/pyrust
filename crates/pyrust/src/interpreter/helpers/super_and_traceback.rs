@@ -386,3 +386,62 @@ pub(crate) fn call_del_if_last_binding(
         }
     }
 }
+
+/// Call `__del__` after deleting a binding from an enclosing function cell.
+///
+/// Unlike [`call_del_if_last_binding`], the active `regs` belong to the inner
+/// function executing `nonlocal del`, not to the activation that owns the
+/// deleted cell.  Check the owning environment and the named registers of its
+/// corresponding live frame instead.  A closed-over environment has no live
+/// frame, so its remaining cell bindings are the complete owning namespace.
+pub(crate) fn call_del_if_last_binding_in_env(
+    interp: &mut Interpreter,
+    val: Value,
+    target_env: &EnvRef,
+    regs: &RegSlice,
+    num_locals: usize,
+) {
+    if val.is_unset() {
+        return;
+    }
+    let del_rc = match val.as_py_instance_rc() {
+        Some(rc) => rc,
+        None => return,
+    };
+    for value in target_env.borrow().values.values() {
+        if let Some(other_rc) = value.as_py_instance_rc()
+            && Rc::ptr_eq(other_rc, del_rc)
+        {
+            return;
+        }
+    }
+
+    for view in &interp.vm_frame_views {
+        let Some(view_env) = view.env.as_ref() else {
+            continue;
+        };
+        if !Rc::ptr_eq(view_env, target_env) {
+            continue;
+        }
+        for register in view.local_index.values() {
+            let index = *register as usize;
+            if index >= view.regs_len {
+                continue;
+            }
+            // SAFETY: a live VmFrameView owns a pointer valid for `regs_len`
+            // slots until the view is popped.  This helper only reads the
+            // suspended outer frame while the inner call is executing.
+            let value = unsafe { &*view.regs_ptr.as_ptr().add(index) };
+            if let Some(other_rc) = value.as_py_instance_rc()
+                && Rc::ptr_eq(other_rc, del_rc)
+            {
+                return;
+            }
+        }
+    }
+
+    // The deleting inner frame may itself hold another binding (for example a
+    // parameter alias).  Preserve the established current-frame/env scan and
+    // the single shared finalizer invocation after the owner-specific checks.
+    call_del_if_last_binding(interp, val, regs, num_locals);
+}
