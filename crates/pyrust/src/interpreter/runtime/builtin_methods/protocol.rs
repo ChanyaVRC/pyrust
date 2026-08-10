@@ -1,4 +1,35 @@
 // Python protocol-slot dispatch for built-in values.
+
+#[inline]
+pub(super) fn is_mutable_builtin_inplace_dunder(method: &str) -> bool {
+    matches!(
+        method,
+        "__iadd__" | "__imul__" | "__ior__" | "__iand__" | "__isub__" | "__ixor__"
+    )
+}
+
+/// Restore the Python-visible receiver after an inherited mutable builtin
+/// in-place wrapper returned its raw backing value.
+///
+/// Callers invoke this only after builtin protocol dispatch. The method and
+/// identity guards keep user results, `NotImplemented`, ordinary binary
+/// dunders, and fresh base-type results untouched.
+fn restore_builtin_subclass_inplace_result(
+    method: &str,
+    receiver: &Value,
+    backing: &Value,
+    result: Value,
+) -> Value {
+    if matches!(receiver.kind(), ValueKind::PyInstance(_))
+        && is_mutable_builtin_inplace_dunder(method)
+        && values_are_identical(&result, backing)
+    {
+        receiver.clone()
+    } else {
+        result
+    }
+}
+
 impl Interpreter {
     /// Dispatch an unbound type-qualified object-level dunder
     /// (`str.__hash__(x)`, `int.__format__(5, 'x')`, …) whose owner is the
@@ -105,6 +136,26 @@ impl Interpreter {
         let dispatch = crate::builtin_registry::lookup(object_fn)
             .unwrap_or_else(|| panic!("{object_fn} must be in the registry"));
         dispatch(self, args)
+    }
+
+    /// Dispatch an inherited protocol dunder on a builtin-subclass backing.
+    /// Mutable in-place wrappers return that backing value; expose the original
+    /// Python receiver when (and only when) the wrapper returned the backing
+    /// itself, matching CPython's `return self` contract.
+    pub(crate) fn dispatch_builtin_subclass_protocol_dunder(
+        &mut self,
+        method: &str,
+        receiver: &Value,
+        backing: Value,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        if !is_mutable_builtin_inplace_dunder(method) {
+            return self.dispatch_builtin_protocol_dunder(method, backing, args);
+        }
+        let result = self.dispatch_builtin_protocol_dunder(method, backing.clone(), args)?;
+        Ok(restore_builtin_subclass_inplace_result(
+            method, receiver, &backing, result,
+        ))
     }
 
     /// Issue #1909: execute a container/sequence protocol dunder on a built-in

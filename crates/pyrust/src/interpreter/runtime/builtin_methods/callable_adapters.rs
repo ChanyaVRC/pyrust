@@ -299,6 +299,19 @@ impl Interpreter {
                 return dispatch(self, &combined).map(Some);
             }
             if let Some(method_name) = fn_name.split_once('.').map(|(_, method)| method) {
+                if is_mutable_builtin_inplace_dunder(method_name)
+                    && let Some(backing) = builtin_data_backing(&instance)
+                {
+                    let bound =
+                        pyrust_builtins::bound_method::bound_method(method_name, backing.clone());
+                    let result = self.call_function_expanded(bound, args)?;
+                    return Ok(Some(restore_builtin_subclass_inplace_result(
+                        method_name,
+                        &instance,
+                        &backing,
+                        result,
+                    )));
+                }
                 let receiver = builtin_data_backing(&instance).unwrap_or(instance);
                 let bound = pyrust_builtins::bound_method::bound_method(method_name, receiver);
                 return self.call_function_expanded(bound, args).map(Some);
