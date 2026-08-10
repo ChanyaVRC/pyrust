@@ -167,3 +167,58 @@ def delete_rebind_and_delete_again():
 
 
 delete_rebind_and_delete_again()
+
+
+generator_owner_events = []
+
+
+class GeneratorOwnerTracked:
+    def __del__(self):
+        generator_owner_events.append("finalized")
+
+
+def generator_owner():
+    value = GeneratorOwnerTracked()
+    alias = value
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    delete_value()
+    print("generator owner after nonlocal delete:", generator_owner_events)
+    del alias
+    print("generator owner after alias drop:", generator_owner_events)
+    yield None
+
+
+list(generator_owner())
+
+
+coroutine_owner_events = []
+
+
+class CoroutineOwnerTracked:
+    def __del__(self):
+        coroutine_owner_events.append("finalized")
+
+
+async def coroutine_owner():
+    value = CoroutineOwnerTracked()
+    alias = value
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    delete_value()
+    print("coroutine owner after nonlocal delete:", coroutine_owner_events)
+    del alias
+    print("coroutine owner after alias drop:", coroutine_owner_events)
+
+
+coroutine = coroutine_owner()
+try:
+    coroutine.send(None)
+except StopIteration:
+    pass

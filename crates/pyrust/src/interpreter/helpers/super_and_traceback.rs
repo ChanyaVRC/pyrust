@@ -417,10 +417,19 @@ pub(crate) fn call_del_if_last_binding_in_env(
     }
 
     for view in &interp.vm_frame_views {
-        let Some(view_env) = view.env.as_ref() else {
-            continue;
-        };
-        if !Rc::ptr_eq(view_env, target_env) {
+        let owns_target_env = view
+            .env
+            .as_ref()
+            .is_some_and(|view_env| Rc::ptr_eq(view_env, target_env))
+            || view.gen_frame.is_some_and(|gen_frame| {
+                // SAFETY: this is the same shared-reference reconstruction
+                // used by `with_frame_cache`.  `VmFrameView::gen_frame` is
+                // heap-stable while the live view remains on the stack and is
+                // popped before the GeneratorFrame can move or be dropped.
+                let gen_frame = unsafe { gen_frame.as_ref() };
+                Rc::ptr_eq(&gen_frame.saved_env, target_env)
+            });
+        if !owns_target_env {
             continue;
         }
         for register in view.local_index.values() {
