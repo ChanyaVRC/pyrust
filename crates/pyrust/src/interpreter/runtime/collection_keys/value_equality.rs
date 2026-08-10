@@ -1,3 +1,42 @@
+/// CPython 3.12's platform C-recursion ceiling for native comparisons.
+#[cfg(target_os = "windows")]
+const CPYTHON_C_RECURSION_LIMIT: usize = 3000;
+#[cfg(all(not(target_os = "windows"), target_arch = "s390x"))]
+const CPYTHON_C_RECURSION_LIMIT: usize = 800;
+#[cfg(all(
+    not(target_os = "windows"),
+    not(target_arch = "s390x"),
+    target_os = "wasi"
+))]
+const CPYTHON_C_RECURSION_LIMIT: usize = 500;
+#[cfg(all(
+    not(target_os = "windows"),
+    not(target_arch = "s390x"),
+    not(target_os = "wasi")
+))]
+const CPYTHON_C_RECURSION_LIMIT: usize = 10_000;
+
+const MAX_ACTIVE_COMPARISON_COST: usize = CPYTHON_C_RECURSION_LIMIT - 2;
+const MAX_COMPARISON_COST_BEFORE_USER_EQ: usize = CPYTHON_C_RECURSION_LIMIT - 4;
+const COMPARISON_STACK_GROW_START_COST: usize = 64;
+const COMPARISON_STACK_RED_ZONE: usize = 2 * 1024 * 1024;
+const COMPARISON_STACK_SEGMENT: usize = 32 * 1024 * 1024;
+
+fn comparison_recursion_error() -> PyError {
+    PyError::named(
+        "RecursionError",
+        "maximum recursion depth exceeded in comparison".to_string(),
+    )
+}
+
+fn sequence_item_at(value: &Value, index: usize) -> Option<Value> {
+    match value.kind() {
+        ValueKind::List(items) => items.get(index).cloned(),
+        ValueKind::Tuple(items) => items.get(index).cloned(),
+        _ => None,
+    }
+}
+
 impl Interpreter {
     fn dict_items_backing_value(view: &Value) -> Option<Value> {
         if !matches!(
@@ -366,7 +405,7 @@ impl Interpreter {
     ///    `Value::eq`.  This avoids the double-walk an upfront
     ///    `a == b` would cause and matches pre-#436 perf for primitive
     ///    sequences.  When a pair could need dispatch (`PyInstance` or
-    ///    nested container), snapshot both sides and recurse.
+    ///    nested container), clone only the current live pair and recurse.
     /// 2. Primitive / identity fast path: `a == b` for the non-sequence
     ///    cases (`Int`/`Float`/`Bool`/`Str`/`Bytes`/`Complex`/`None`
     ///    and identity-equal `Dict`/`Set`).
@@ -379,10 +418,11 @@ impl Interpreter {
     /// 5. `PyInstance` on either side: `try_dunder_binary` for
     ///    `__eq__`/reflected `__eq__`.
     ///
-    /// Cycle detection mirrors `Value::eq`'s `EqGuard`: a recursive call
-    /// for the same `(value_id(a), value_id(b))` pair returns true (the
-    /// recursion bottoms out as "we've already proven the prefix equal"),
-    /// so `a.append(a); b.append(b); a == b` doesn't blow the stack.
+    /// List/dict recursion uses an exception-capable ordered-pair context:
+    /// a pure structural re-entry raises comparison `RecursionError`, while a
+    /// user callback advances the dispatch epoch and may replace a later edge
+    /// before the platform comparison budget is exhausted. Legacy set/view
+    /// paths retain `eq_in_progress` below.
     pub(crate) fn values_user_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
         // Same-kind sequence containers come first.  For `List`/`Tuple`
         // pairs an upfront `Value::eq` would double-walk: `Vec::eq`
@@ -414,51 +454,51 @@ impl Interpreter {
             _ => false,
         };
         if needs_seq_dispatch {
-            // Slow path: snapshot both sides to drop the borrow before
-            // recursing into user code, then walk element-wise through
-            // `values_richcompare_eq` so aliases compare equal by identity
-            // before iterator/instance elements dispatch `__eq__`.  Element
-            // clones are cheap (Rc/NaN-box copy).
+            // Slow path: clone only the current pair before invoking user
+            // code. Reading subsequent positions live lets a finite callback
+            // replace a later recursive edge and terminate the comparison.
             let list_pair = a.is_list() && b.is_list();
-            let (av, bv): (Vec<Value>, Vec<Value>) = match (a.kind(), b.kind()) {
-                (ValueKind::List(la), ValueKind::List(lb)) => {
-                    (la.iter().cloned().collect(), lb.iter().cloned().collect())
-                }
-                (ValueKind::Tuple(la), ValueKind::Tuple(lb)) => (la.to_vec(), lb.to_vec()),
+            let expected_len = match (a.kind(), b.kind()) {
+                (ValueKind::List(left), ValueKind::List(_)) => left.len(),
+                (ValueKind::Tuple(left), ValueKind::Tuple(_)) => left.len(),
                 _ => unreachable!("needs_seq_dispatch implies a sequence pair"),
             };
-            if self.eq_cycle_enter(a, b) {
-                // Already comparing this pair further up the stack —
-                // treat as equal to terminate the recursion (matching
-                // `Value::eq`'s `EqGuard` policy).
-                return Ok(true);
-            }
-            let mut result = (|| -> Result<bool> {
-                for (x, y) in av.iter().zip(bv.iter()) {
-                    if !self.values_richcompare_eq(x, y)? {
+            let structural_bias = usize::from(self.comparison_recursion_cost == 0);
+            return self.with_comparison_pair_cost(a, b, 1, structural_bias, |interp| {
+                for index in 0..expected_len {
+                    let Some(x) = sequence_item_at(a, index) else {
+                        return Ok(false);
+                    };
+                    let Some(y) = sequence_item_at(b, index) else {
+                        return Ok(false);
+                    };
+                    if !interp.values_richcompare_eq(&x, &y)? {
                         return Ok(false);
                     }
                 }
+                if list_pair
+                    && (a.list_len() != Some(expected_len) || b.list_len() != Some(expected_len))
+                {
+                    return Ok(false);
+                }
                 Ok(true)
-            })();
-            // CPython's list comparison notices a size change caused by an
-            // element __eq__ even after the snapshotted prefix compared equal.
-            if list_pair
-                && result.as_ref().is_ok_and(|equal| *equal)
-                && (a.list_len() != Some(av.len()) || b.list_len() != Some(bv.len()))
-            {
-                result = Ok(false);
-            }
-            self.eq_cycle_exit(a, b);
-            return result;
+            });
         }
 
-        // Primitive / identity fast path: `Value::eq` handles
-        // Int/Float/Bool/Str/Bytes/Complex/None and identity-equal
-        // Dict/Set without dunder dispatch.  (List/Tuple were already
-        // handled above to avoid the double-walk.)
-        if a == b {
-            return Ok(true);
+        // Primitive / identity fast path. Core dictionary equality has a
+        // bool-only cycle guard, so only exact scalar dictionaries may use it;
+        // recursive or callback-capable values must reach the guarded path.
+        match (a.kind(), b.kind()) {
+            (ValueKind::Dict(left), ValueKind::Dict(right)) => {
+                if values_are_identical(a, b) {
+                    return Ok(true);
+                }
+                if let Some(equal) = try_dict_fast_eq(&left, &right) {
+                    return Ok(equal);
+                }
+            }
+            _ if a == b => return Ok(true),
+            _ => {}
         }
 
         // A slice is a hashable aggregate on Python 3.12.  `SliceOps::eq`
@@ -487,7 +527,6 @@ impl Interpreter {
 
         enum ContainerSnapshot {
             Dict {
-                entries: Vec<(PyKey, Value)>,
                 expected_len: usize,
             },
             Set {
@@ -505,7 +544,6 @@ impl Interpreter {
                     return Ok(false);
                 }
                 ContainerSnapshot::Dict {
-                    entries: da.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
                     expected_len: da.len(),
                 }
             }
@@ -522,43 +560,36 @@ impl Interpreter {
         };
 
         match container_snapshot {
-            ContainerSnapshot::Dict {
-                entries,
-                expected_len,
-            } => {
-                if self.eq_cycle_enter(a, b) {
-                    return Ok(true);
-                }
-                // Snapshot (PyKey, Value) pairs from `a` so user `__eq__`
-                // (run while looking up in `b`) can't invalidate the dict
-                // borrow.  We pass the snapshotted `PyKey` straight to
-                // `dict_lookup` so `__hash__` / `__eq__` dispatch on
-                // `PyKey::Object` keys still works (issue #368).
-                let mut result = (|| -> Result<bool> {
-                    for (pk, v_lhs) in entries {
-                        match self.dict_lookup(b, &pk)? {
-                            Some((_, v_rhs)) => {
-                                if v_lhs == v_rhs || v_lhs.is_identical_nan(&v_rhs) {
-                                    // same object or NaN-identity: treat as equal
-                                    // (mirrors CPython PyObject_RichCompareBool)
-                                    continue;
-                                }
-                                if !self.values_user_eq(&v_lhs, &v_rhs)? {
-                                    return Ok(false);
-                                }
+            ContainerSnapshot::Dict { expected_len } => {
+                let structural_bias = usize::from(self.comparison_recursion_cost == 0);
+                let result =
+                    self.with_comparison_pair_cost(a, b, 1, structural_bias, |interp| {
+                        for index in 0..expected_len {
+                            // Clone only the current key. This keeps recursive
+                            // callback frames O(depth), while values and later
+                            // positions remain live for finite edge replacement.
+                            let Some(pk) = a
+                                .dict_with(|dict| dict.get_index(index).map(|(key, _)| key.clone()))
+                                .flatten()
+                            else {
+                                return Ok(false);
+                            };
+                            let Some(v_lhs) = a.dict_with(|dict| dict.get(&pk).cloned()).flatten()
+                            else {
+                                return Ok(false);
+                            };
+                            let Some((_, v_rhs)) = interp.dict_lookup(b, &pk)? else {
+                                return Ok(false);
+                            };
+                            if !interp.values_richcompare_eq(&v_lhs, &v_rhs)? {
+                                return Ok(false);
                             }
-                            None => return Ok(false),
                         }
-                    }
-                    Ok(true)
-                })();
-                if result.as_ref().is_ok_and(|equal| *equal)
-                    && (a.dict_len() != Some(expected_len) || b.dict_len() != Some(expected_len))
-                {
-                    result = Ok(false);
-                }
-                self.eq_cycle_exit(a, b);
-                return result;
+                        Ok(true)
+                    })?;
+                return Ok(result
+                    && a.dict_len() == Some(expected_len)
+                    && b.dict_len() == Some(expected_len));
             }
             ContainerSnapshot::Set { keys, expected_len } => {
                 if self.eq_cycle_enter(a, b) {
@@ -699,7 +730,7 @@ impl Interpreter {
 
         // PyInstance (either side) — dispatch `__eq__`/reflected
         // `__eq__`.  This is the original `values_user_eq` body.
-        if let Some(r) = self.try_dunder_binary(a, b, "__eq__", "__eq__") {
+        if let Some(r) = self.try_comparison_dunder_binary(a, b, "__eq__", "__eq__") {
             let result = r?;
             return self.truthy_value(&result);
         }
@@ -715,6 +746,132 @@ impl Interpreter {
             return Ok(a_cmp == b_cmp);
         }
         Ok(false)
+    }
+
+    /// Reject a Python equality callback once the retained native comparison
+    /// frames have consumed CPython's remaining callback-entry headroom.
+    pub(crate) fn guard_comparison_user_call(&self, additional_cost: usize) -> Result<()> {
+        if self
+            .comparison_recursion_cost
+            .saturating_add(additional_cost)
+            >= MAX_COMPARISON_COST_BEFORE_USER_EQ
+        {
+            return Err(self.recursion_limit_error()?);
+        }
+        Ok(())
+    }
+
+    /// Record observable progress made by a user comparison slot. A callback
+    /// may return to the same Python depth after replacing a later recursive
+    /// edge, so the marker is monotonic for the lifetime of the interpreter.
+    pub(crate) fn note_comparison_dispatch(&mut self) {
+        if !self.comparison_pair_stack.is_empty() {
+            self.comparison_dispatch_epoch = self.comparison_dispatch_epoch.wrapping_add(1);
+        }
+    }
+
+    /// Run one recursive container comparison under an ordered-pair guard.
+    /// Re-entering the pair at the same call depth and dispatch epoch is a pure
+    /// structural cycle; callback progress receives another bounded pass.
+    pub(crate) fn with_comparison_pair<T>(
+        &mut self,
+        a: &Value,
+        b: &Value,
+        compare: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        self.with_comparison_pair_cost(a, b, 1, 0, compare)
+    }
+
+    /// Sequence ordering retains one native ordering frame in addition to its
+    /// equality-prefix walk. The structural bias accounts for the innermost
+    /// scalar sequence, which resolves without installing another pair frame.
+    pub(crate) fn with_comparison_order_pair<T>(
+        &mut self,
+        a: &Value,
+        b: &Value,
+        compare: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        self.with_comparison_pair_cost(a, b, 1, 1, compare)
+    }
+
+    pub(crate) fn has_active_comparison(&self) -> bool {
+        self.comparison_recursion_cost != 0
+    }
+
+    fn with_comparison_pair_cost<T>(
+        &mut self,
+        a: &Value,
+        b: &Value,
+        cost: usize,
+        structural_bias: usize,
+        compare: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let active_structural_cost = self
+            .comparison_recursion_cost
+            .saturating_add(self.comparison_structural_cost_bias);
+        if cost.saturating_add(structural_bias)
+            > MAX_ACTIVE_COMPARISON_COST.saturating_sub(active_structural_cost)
+        {
+            return Err(comparison_recursion_error());
+        }
+
+        let pair = match (a.value_id(), b.value_id()) {
+            (Some(a_id), Some(b_id)) => Some((a_id, b_id)),
+            _ => None,
+        };
+        let call_depth = super::get_call_depth();
+        let context = (call_depth, self.comparison_dispatch_epoch);
+        if pair.is_some_and(|pair| {
+            self.comparison_active_contexts
+                .get(&pair)
+                .is_some_and(|contexts| contexts.contains(&context))
+        }) {
+            return Err(comparison_recursion_error());
+        }
+
+        if let Some(pair) = pair {
+            self.comparison_pair_stack
+                .push((pair.0, pair.1, context.0, context.1));
+            self.comparison_active_contexts
+                .entry(pair)
+                .or_default()
+                .push(context);
+        }
+        let grow_stack = active_structural_cost >= COMPARISON_STACK_GROW_START_COST;
+        self.comparison_recursion_cost += cost;
+        self.comparison_structural_cost_bias += structural_bias;
+        let result = if grow_stack {
+            stacker::maybe_grow(COMPARISON_STACK_RED_ZONE, COMPARISON_STACK_SEGMENT, || {
+                compare(self)
+            })
+        } else {
+            compare(self)
+        };
+        self.comparison_recursion_cost -= cost;
+        self.comparison_structural_cost_bias -= structural_bias;
+
+        if let Some(pair) = pair {
+            let popped = self
+                .comparison_pair_stack
+                .pop()
+                .expect("comparison pair stack must contain the active pair");
+            debug_assert_eq!(popped, (pair.0, pair.1, context.0, context.1));
+            let remove_pair = {
+                let contexts = self
+                    .comparison_active_contexts
+                    .get_mut(&pair)
+                    .expect("comparison pair index must contain the active pair");
+                let popped = contexts
+                    .pop()
+                    .expect("comparison pair index must contain the active context");
+                debug_assert_eq!(popped, context);
+                contexts.is_empty()
+            };
+            if remove_pair {
+                self.comparison_active_contexts.remove(&pair);
+            }
+        }
+        result
     }
 
     /// CPython's `PyObject_RichCompareBool(a, b, Py_EQ)`: identity implies
@@ -735,18 +892,19 @@ impl Interpreter {
     /// borrow-only primitive fast path, then delegate only the slow branch
     /// here.
     pub(crate) fn values_richcompare_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
-        if a.cannot_user_eq() {
-            // Scalar NaN-box tag (`Float`/`None`/`Bool`/`Int`/`Str`): NaN is the
-            // only value of these whose identity is not already implied by `==`,
-            // so the inlined bit test is the whole rule and the general
-            // (kind-matching) predicate would be dead weight on int/str scans.
-            if a.is_identical_nan(b) {
-                return Ok(true);
-            }
-        } else if values_are_identical(a, b) {
+        if let Some(equal) = scalar_pair_fast_eq(a, b) {
+            return Ok(equal);
+        }
+        if values_are_identical(a, b) {
             return Ok(true);
         }
         self.values_user_eq(a, b)
+    }
+
+    /// Borrow-only scalar equality used by native sequence containers before
+    /// they install the callback-capable comparison guard.
+    pub(crate) fn try_scalar_richcompare_eq(a: &Value, b: &Value) -> Option<bool> {
+        scalar_pair_fast_eq(a, b)
     }
 
     /// Enter equality recursion for the `(value_id(a), value_id(b))`
