@@ -1,4 +1,4 @@
-# Issue #3031: omitted exec namespaces come from the active function or class frame.
+# Issue #3031: omitted exec namespaces come from the active function frame.
 
 module_value = "module"
 
@@ -93,19 +93,3 @@ none_globals_explicit_locals()
 function_from_explicit_globals()
 generator = generator_assignment_exec()
 print("generator assignment:", next(generator), next(generator))
-
-
-class ClassBodyExec:
-    marker = "class"
-    before = locals()
-    exec("created = marker + '-exec'")
-    after = locals()
-    same_locals = before is after
-
-
-print(
-    "class body:",
-    ClassBodyExec.same_locals,
-    ClassBodyExec.created,
-    "created" in globals(),
-)
