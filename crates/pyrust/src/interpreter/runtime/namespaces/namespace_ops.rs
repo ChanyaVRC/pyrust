@@ -360,7 +360,37 @@ impl Interpreter {
                 code.names.len()
             ))
         })?;
-        let is_global = self.env.borrow().global_names.contains(name.as_str());
+        let (is_global, is_nonlocal) = {
+            let env = self.env.borrow();
+            (
+                env.global_names.contains(name.as_str()),
+                env.nonlocal_names.contains(name.as_str()),
+            )
+        };
+        if is_nonlocal {
+            let target_env =
+                find_enclosing_local_env_for_name(&self.env, name).ok_or_else(|| {
+                    PyError::Runtime(format!("no binding for nonlocal '{}' found", name))
+                })?;
+            let deleted = target_env.borrow_mut().values.remove(name.as_str());
+            let Some(deleted) = deleted else {
+                return Err(PyError::named(
+                    "NameError",
+                    format!(
+                        "cannot access free variable '{}' where it is not associated with a value in enclosing scope",
+                        name
+                    ),
+                ));
+            };
+            call_del_if_last_binding_in_env(
+                self,
+                deleted,
+                &target_env,
+                regs,
+                code.num_locals as usize,
+            );
+            return Ok(());
+        }
         if is_global {
             let me = module_env(&self.env);
             let from_env = me.borrow_mut().values.remove(name.as_str());

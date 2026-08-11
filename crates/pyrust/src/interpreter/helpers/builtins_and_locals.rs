@@ -339,9 +339,12 @@ pub(crate) fn class_frame_locals_value(interp: &Interpreter, view: &VmFrameView)
 /// Return the Python object backing the innermost non-module frame's locals.
 /// Class frames have a persistent live dict; function frames retain snapshot
 /// semantics. Module callers keep their existing synchronized provider path.
-pub(crate) fn current_locals_value(interp: &Interpreter) -> Value {
-    match interp.vm_frame_views.last() {
-        Some(view) if view.kind == FrameKind::Class => class_frame_locals_value(interp, view),
+pub(crate) fn current_locals_value(interp: &mut Interpreter) -> Value {
+    match interp.vm_frame_views.last().map(|view| view.kind) {
+        Some(FrameKind::Class) => {
+            class_frame_locals_value(interp, interp.vm_frame_views.last().unwrap())
+        }
+        Some(FrameKind::Function) => interp.retain_current_function_locals(),
         _ => Value::dict(snapshot_current_locals(interp)),
     }
 }

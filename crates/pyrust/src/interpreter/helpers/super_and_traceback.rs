@@ -386,3 +386,215 @@ pub(crate) fn call_del_if_last_binding(
         }
     }
 }
+
+/// Call `__del__` after deleting a binding from an enclosing function cell.
+///
+/// Unlike [`call_del_if_last_binding`], the active `regs` belong to the inner
+/// function executing `nonlocal del`, not to the activation that owns the
+/// deleted cell. Check the target environment and every live frame's named
+/// registers and environment chain: a caller outside the cell-owning frame may
+/// still hold the same instance. A closed-over environment has no live frame,
+/// so the target environment must also be checked directly.
+pub(crate) fn call_del_if_last_binding_in_env(
+    interp: &mut Interpreter,
+    val: Value,
+    target_env: &EnvRef,
+    regs: &RegSlice,
+    num_locals: usize,
+) {
+    if val.is_unset() {
+        return;
+    }
+    let del_rc = match val.as_py_instance_rc() {
+        Some(rc) => rc,
+        None => return,
+    };
+
+    fn observe_direct_binding(
+        value: &Value,
+        del_rc: &Rc<RefCell<PyInstance>>,
+        target_alias_is_visible: &mut bool,
+        visible_owner_worklist: &mut Vec<Rc<GeneratorCell>>,
+        discovered_owner_ids: &mut HashSet<*const GeneratorCell>,
+    ) {
+        if value.is_unset() {
+            return;
+        }
+        if value
+            .as_py_instance_rc()
+            .is_some_and(|other_rc| Rc::ptr_eq(other_rc, del_rc))
+        {
+            *target_alias_is_visible = true;
+        }
+        if let ValueKind::Generator(owner) = value.kind()
+            && discovered_owner_ids.insert(Rc::as_ptr(owner))
+        {
+            visible_owner_worklist.push(Rc::clone(owner));
+        }
+    }
+
+    fn scan_environment_chain(
+        root: &EnvRef,
+        del_rc: &Rc<RefCell<PyInstance>>,
+        target_alias_is_visible: &mut bool,
+        visible_owner_worklist: &mut Vec<Rc<GeneratorCell>>,
+        discovered_owner_ids: &mut HashSet<*const GeneratorCell>,
+        visited_environments: &mut HashSet<*const RefCell<Environment>>,
+    ) {
+        let mut current = Some(Rc::clone(root));
+        while let Some(env) = current {
+            if !visited_environments.insert(Rc::as_ptr(&env)) {
+                // This environment and its complete parent chain were already
+                // visited from another root.
+                break;
+            }
+            let bindings = env.borrow();
+            for value in bindings.values.values() {
+                observe_direct_binding(
+                    value,
+                    del_rc,
+                    target_alias_is_visible,
+                    visible_owner_worklist,
+                    discovered_owner_ids,
+                );
+            }
+            current = bindings.parent.clone();
+        }
+    }
+
+    // Collect the direct Python binding roots once. PyRust can retain a
+    // generator Rc in unnamed compiler temporaries after `del generator`; that
+    // implementation-only reference must not make its suspended registers
+    // visible. Generator/coroutine objects found in direct named bindings form
+    // a bounded work queue: each visible suspended frame contributes its own
+    // named registers and environment cells, which may reveal another frame.
+    // Container/item reachability remains outside this binding-based model.
+    let mut target_alias_is_visible = false;
+    let mut visible_owner_worklist = Vec::new();
+    let mut discovered_owner_ids = HashSet::new();
+    let mut visited_environments = HashSet::new();
+
+    scan_environment_chain(
+        target_env,
+        del_rc,
+        &mut target_alias_is_visible,
+        &mut visible_owner_worklist,
+        &mut discovered_owner_ids,
+        &mut visited_environments,
+    );
+    scan_environment_chain(
+        &interp.env,
+        del_rc,
+        &mut target_alias_is_visible,
+        &mut visible_owner_worklist,
+        &mut discovered_owner_ids,
+        &mut visited_environments,
+    );
+    for view in &interp.vm_frame_views {
+        if let Some(env) = view.env.as_ref() {
+            scan_environment_chain(
+                env,
+                del_rc,
+                &mut target_alias_is_visible,
+                &mut visible_owner_worklist,
+                &mut discovered_owner_ids,
+                &mut visited_environments,
+            );
+        }
+        if let Some(gen_frame) = view.gen_frame {
+            // SAFETY: this is the same shared-reference reconstruction used by
+            // `with_frame_cache`. `VmFrameView::gen_frame` is heap-stable while
+            // the live view remains on the stack and is popped before the
+            // GeneratorFrame can move or be dropped.
+            let gen_frame = unsafe { gen_frame.as_ref() };
+            scan_environment_chain(
+                &gen_frame.saved_env,
+                del_rc,
+                &mut target_alias_is_visible,
+                &mut visible_owner_worklist,
+                &mut discovered_owner_ids,
+                &mut visited_environments,
+            );
+        }
+    }
+
+    let scan_limit = num_locals.min(regs.len());
+    for value in regs.iter().take(scan_limit) {
+        observe_direct_binding(
+            value,
+            del_rc,
+            &mut target_alias_is_visible,
+            &mut visible_owner_worklist,
+            &mut discovered_owner_ids,
+        );
+    }
+    for view in &interp.vm_frame_views {
+        for register in view.local_index.values() {
+            let index = *register as usize;
+            if index >= view.regs_len {
+                continue;
+            }
+            // SAFETY: a live VmFrameView owns a pointer valid for `regs_len`
+            // slots until the view is popped. This helper only reads named
+            // registers while the corresponding frame is active.
+            observe_direct_binding(
+                unsafe { &*view.regs_ptr.as_ptr().add(index) },
+                del_rc,
+                &mut target_alias_is_visible,
+                &mut visible_owner_worklist,
+                &mut discovered_owner_ids,
+            );
+        }
+    }
+
+    if target_alias_is_visible {
+        return;
+    }
+    while let Some(owner) = visible_owner_worklist.pop() {
+        let Ok(state) = owner.try_borrow() else {
+            // Active frames are represented by VmFrameView and were scanned
+            // above; the checked-out cell itself has no frame to inspect.
+            continue;
+        };
+        if let Some(asend) = state.downcast_ref::<AsyncGenASend>() {
+            if discovered_owner_ids.insert(Rc::as_ptr(&asend.agen)) {
+                visible_owner_worklist.push(Rc::clone(&asend.agen));
+            }
+            continue;
+        }
+        let Some(frame) = state.downcast_ref::<GeneratorFrame>() else {
+            continue;
+        };
+        if frame.done {
+            continue;
+        }
+
+        scan_environment_chain(
+            &frame.saved_env,
+            del_rc,
+            &mut target_alias_is_visible,
+            &mut visible_owner_worklist,
+            &mut discovered_owner_ids,
+            &mut visited_environments,
+        );
+        for register in frame.local_index.values() {
+            if let Some(value) = frame.regs.get(*register as usize) {
+                observe_direct_binding(
+                    value,
+                    del_rc,
+                    &mut target_alias_is_visible,
+                    &mut visible_owner_worklist,
+                    &mut discovered_owner_ids,
+                );
+            }
+        }
+        if target_alias_is_visible {
+            return;
+        }
+    }
+
+    // The deleting inner frame may itself hold another binding (for example a
+    // parameter alias).  Preserve the established current-frame/env scan and
+    // the single shared finalizer invocation after the live-frame checks.
+    call_del_if_last_binding(interp, val, regs, num_locals);
+}

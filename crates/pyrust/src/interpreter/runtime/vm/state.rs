@@ -90,6 +90,11 @@ pub(crate) struct GeneratorFrame {
     /// suspend/resume machinery but report `type(coro).__name__ == "coroutine"`,
     /// render a `<coroutine object …>` repr, and are NOT iterable with `for`.
     pub(crate) is_coroutine: bool,
+    /// The one async-generator awaitable allowed to resume this frame while it
+    /// is parked inside an inner `await`. `Some` remains occupied even after
+    /// the weak pointer expires: CPython does not release running ownership
+    /// when that awaitable is closed or dropped.
+    pub(crate) async_gen_running_owner: Option<std::rc::Weak<GeneratorCell>>,
     /// Frame identity belongs to the generator activation, not to one resume.
     /// The box remains absent until code inside the generator introspects its
     /// frame, so generators that never do so allocate nothing for this cache.
@@ -161,9 +166,15 @@ pub(crate) struct AsyncGenASend {
     /// Exception to inject on the first drive step (`athrow`/`aclose`).
     pub(crate) throw_exc: Option<PyError>,
     /// True once the first drive step has run, so subsequent steps (when the
-    /// inner `await` re-enters) send `None` rather than re-sending the original
-    /// argument / re-injecting the exception.
+    /// inner `await` re-enters) forward their caller-sent value rather than
+    /// re-sending the original argument / re-injecting the exception.
     pub(crate) started: bool,
+    /// True once this one-shot awaitable has completed or raised. Further
+    /// `send()` attempts raise CPython's reuse RuntimeError.
+    pub(crate) done: bool,
+    /// Selects CPython's `aclose()/athrow()` reuse diagnostic instead of the
+    /// `__anext__()/asend()` spelling after the injection value is consumed.
+    pub(crate) is_close_or_throw: bool,
     /// True for the `aclose()` awaitable: a `GeneratorExit` injection whose
     /// `GeneratorExit` / `StopAsyncIteration` / `StopIteration` outcome completes
     /// the await with `None` (rather than propagating), and whose *yield* is a

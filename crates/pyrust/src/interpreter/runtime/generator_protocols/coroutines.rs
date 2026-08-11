@@ -147,7 +147,7 @@ impl Interpreter {
                     .map(|b| b.downcast_ref::<AsyncGenASend>().is_some())
                     .unwrap_or(false);
                 if is_asend {
-                    return self.step_async_gen_asend(&state_rc, sent_val);
+                    return self.step_async_gen_asend(&state_rc, sent_val, true);
                 }
 
                 // All non-frame iterator states (range, map, enumerate, native
@@ -268,56 +268,143 @@ impl Interpreter {
     ///   the scheduling point upward so the outer event loop steps it and the
     ///   awaitable is re-driven.
     /// - async-gen returned / exhausted → `StopAsyncIteration` (no value).
-    fn step_async_gen_asend(
+    pub(crate) fn step_async_gen_asend(
         &mut self,
         asend_rc: &Rc<GeneratorCell>,
-        _sent_val: Value,
+        sent_val: Value,
+        enforce_running_owner: bool,
     ) -> Result<Value> {
-        // Take the per-step injection state out of the AsyncGenASend.  Only the
-        // *first* step delivers the original `asend(v)` value / `athrow` exc;
-        // subsequent re-drives (after an inner-await suspension) send None.
-        let (agen_rc, send_value, throw_exc, is_aclose) = {
+        fn reject_running(
+            asend_rc: &Rc<GeneratorCell>,
+            is_close_or_throw: bool,
+            is_aclose: bool,
+        ) -> PyError {
+            // CPython exhausts failed aclose/athrow awaitables, while a failed
+            // __anext__/asend remains retryable after the current owner exits.
+            if is_close_or_throw
+                && let Ok(mut state) = asend_rc.try_borrow_mut()
+                && let Some(asend) = state.downcast_mut::<AsyncGenASend>()
+            {
+                asend.done = true;
+            }
+            let family = if is_aclose {
+                "aclose"
+            } else if is_close_or_throw {
+                "athrow"
+            } else {
+                "anext"
+            };
+            pyrust_core::runtime_err!("{family}(): asynchronous generator is already running")
+        }
+
+        fn clear_running_owner(
+            frame: &mut GeneratorFrame,
+            asend_rc: &Rc<GeneratorCell>,
+            clear_any_owner: bool,
+        ) {
+            if clear_any_owner
+                || frame
+                    .async_gen_running_owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.as_ptr() == Rc::as_ptr(asend_rc))
+            {
+                frame.async_gen_running_owner = None;
+            }
+        }
+
+        // Inspect the wrapper without consuming its first-step state. A
+        // competing awaitable must fail before `send_value` / `throw_exc` or
+        // `started` changes, so __anext__/asend can be retried later.
+        let (agen_rc, is_close_or_throw, is_aclose) = {
+            let b = asend_rc.borrow();
+            let asend = b.downcast_ref::<AsyncGenASend>().ok_or_else(|| {
+                PyError::Runtime("invalid async-generator asend state".to_string())
+            })?;
+            if asend.done {
+                if asend.is_close_or_throw {
+                    return Err(pyrust_core::runtime_err!(
+                        "cannot reuse already awaited aclose()/athrow()"
+                    ));
+                }
+                return Err(pyrust_core::runtime_err!(
+                    "cannot reuse already awaited __anext__()/asend()"
+                ));
+            }
+            (
+                Rc::clone(&asend.agen),
+                asend.is_close_or_throw,
+                asend.is_aclose,
+            )
+        };
+
+        // The transient borrow/GenDriving guards cover re-entrancy while the
+        // body is executing. Persistent ownership below covers an inner-await
+        // suspension, when the frame is available but only the same wrapper
+        // may resume it.
+        let mut borrow = match agen_rc.try_borrow_mut() {
+            Ok(borrow) => borrow,
+            Err(_) => {
+                return Err(reject_running(asend_rc, is_close_or_throw, is_aclose));
+            }
+        };
+        if borrow.is::<GenDriving>() {
+            drop(borrow);
+            return Err(reject_running(asend_rc, is_close_or_throw, is_aclose));
+        }
+        let frame = borrow
+            .downcast_mut::<GeneratorFrame>()
+            .ok_or_else(|| PyError::Runtime("invalid async-generator state".to_string()))?;
+
+        if enforce_running_owner {
+            match frame.async_gen_running_owner.as_ref() {
+                Some(owner) if owner.as_ptr() != Rc::as_ptr(asend_rc) => {
+                    drop(borrow);
+                    return Err(reject_running(asend_rc, is_close_or_throw, is_aclose));
+                }
+                Some(_) => {}
+                None => {
+                    frame.async_gen_running_owner = Some(Rc::downgrade(asend_rc));
+                }
+            }
+        }
+
+        // The owner is established before the first-step payload is consumed.
+        // Direct awaitable.throw() deliberately bypasses the claim for that
+        // one step, matching CPython's generator-throw adapter.
+        let (send_value, throw_exc) = {
             let mut b = asend_rc.borrow_mut();
             let asend = b.downcast_mut::<AsyncGenASend>().ok_or_else(|| {
                 PyError::Runtime("invalid async-generator asend state".to_string())
             })?;
             let send_value = if asend.started {
-                None
+                Some(sent_val)
             } else {
-                asend.send_value.take()
+                match asend.send_value.take() {
+                    Some(value) if !value.is_none() => Some(value),
+                    _ => Some(sent_val),
+                }
             };
-            let throw_exc = if asend.started {
-                None
-            } else {
-                asend.throw_exc.take()
-            };
+            let throw_exc = asend.throw_exc.take();
             asend.started = true;
-            (
-                Rc::clone(&asend.agen),
-                send_value,
-                throw_exc,
-                asend.is_aclose,
-            )
+            (send_value, throw_exc)
         };
-
-        // Resume the async generator's frame once.  Re-entrant stepping (the
-        // agen's own body driving another `__anext__`/`asend` on itself) is a
-        // RuntimeError in CPython 3.12 — with the `anext():` prefix even for
-        // `asend()` (issue #2285).
-        let mut borrow = agen_rc.try_borrow_mut().map_err(|_| {
-            pyrust_core::runtime_err!("anext(): asynchronous generator is already running")
-        })?;
-        let frame = borrow
-            .downcast_mut::<GeneratorFrame>()
-            .ok_or_else(|| PyError::Runtime("invalid async-generator state".to_string()))?;
         if frame.done {
             // `aclose()` on an already-finished async generator is a silent
             // no-op (the awaitable completes with None); `__anext__`/`asend`
             // raise StopAsyncIteration.
-            if is_aclose {
-                return Err(self.make_stop_iteration_with_value(Value::none()));
-            }
-            return Err(self.make_stop_async_iteration());
+            let result = if is_aclose {
+                Err(self.make_stop_iteration())
+            } else {
+                Err(self.make_stop_async_iteration())
+            };
+            clear_running_owner(frame, asend_rc, !enforce_running_owner);
+            drop(borrow);
+            let mut asend_state = asend_rc.borrow_mut();
+            asend_state
+                .downcast_mut::<AsyncGenASend>()
+                .expect("checked async-generator asend state")
+                .done = true;
+            return result;
         }
         // CPython: sending a non-None value into a *just-started* async
         // generator (one never resumed, `pc == 0`) via `asend(v)` is a
@@ -326,6 +413,13 @@ impl Interpreter {
         // `__anext__`/`asend(None)` are exempt.
         if frame.pc == 0 && throw_exc.is_none() && send_value.as_ref().is_some_and(|v| !v.is_none())
         {
+            clear_running_owner(frame, asend_rc, !enforce_running_owner);
+            drop(borrow);
+            let mut asend_state = asend_rc.borrow_mut();
+            asend_state
+                .downcast_mut::<AsyncGenASend>()
+                .expect("checked async-generator asend state")
+                .done = true;
             return Err(pyrust_core::type_err!(
                 "can't send non-None value to a just-started async generator"
             ));
@@ -335,7 +429,7 @@ impl Interpreter {
             throw_exc,
             send_value.unwrap_or_else(Value::none),
         );
-        match resume {
+        let result = match resume {
             Ok(value) => {
                 // Suspended.  Distinguish a bare `yield v` from an inner-`await`
                 // suspension by inspecting the instruction the frame is now
@@ -371,7 +465,7 @@ impl Interpreter {
                 if is_aclose {
                     // aclose: a clean StopAsyncIteration/return means the close
                     // succeeded — complete the await with None.
-                    Err(self.make_stop_iteration_with_value(Value::none()))
+                    Err(self.make_stop_iteration())
                 } else {
                     Err(self.make_stop_async_iteration())
                 }
@@ -380,10 +474,24 @@ impl Interpreter {
             // (the normal, well-behaved case) — the close succeeded, so the
             // awaitable completes with None rather than re-raising.
             Err(ref e) if is_aclose && e.class_name_is("GeneratorExit") => {
-                Err(self.make_stop_iteration_with_value(Value::none()))
+                Err(self.make_stop_iteration())
             }
             Err(e) => Err(e),
+        };
+        if result.is_err() {
+            // A direct awaitable.throw() bypasses ownership for its one step.
+            // If that step terminates at a bare yield or error, CPython also
+            // releases a distinct pre-existing owner.  An inner-await `Ok`
+            // remains suspended and deliberately preserves that owner.
+            clear_running_owner(frame, asend_rc, !enforce_running_owner);
+            drop(borrow);
+            let mut asend_state = asend_rc.borrow_mut();
+            asend_state
+                .downcast_mut::<AsyncGenASend>()
+                .expect("checked async-generator asend state")
+                .done = true;
         }
+        result
     }
 
     /// Build a `StopAsyncIteration` error (async-generator exhaustion, #2280).
@@ -392,6 +500,15 @@ impl Interpreter {
             PyError::Raised(instantiate_exception(cls, vec![]))
         } else {
             pyrust_core::py_err!("StopAsyncIteration", String::new())
+        }
+    }
+
+    /// Build the argument-less `StopIteration` used when `aclose()` completes.
+    fn make_stop_iteration(&self) -> PyError {
+        if let Some(cls) = self.exc_classes.get("StopIteration") {
+            PyError::Raised(instantiate_exception(cls, vec![]))
+        } else {
+            pyrust_core::py_err!("StopIteration", String::new())
         }
     }
 

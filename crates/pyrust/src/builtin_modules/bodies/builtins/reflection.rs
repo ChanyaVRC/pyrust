@@ -418,12 +418,25 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/functions.html#exec>
     ///
     /// `source` may be a string or a code object returned by `compile()`.
-    /// When `globals` and `locals` are omitted the code runs in the current
-    /// interpreter's module namespace (assignments become module globals).
+    /// When `globals` and `locals` are omitted the code uses the current
+    /// frame's globals and locals namespaces.
     /// When an explicit `globals` dict is supplied the code runs in that
     /// namespace.  Returns `None`.
     fn exec(args) -> Result<Value> {
-        let (source_val, globals_opt, locals_opt) = parse_exec_eval_args(FN_NAME, args)?;
+        let (source_val, mut globals_opt, mut locals_opt) =
+            parse_exec_eval_args(FN_NAME, args)?;
+        if globals_opt.is_none()
+            && _interp
+                .vm_frame_views
+                .last()
+                .is_some_and(|view| view.kind == crate::interpreter::FrameKind::Function)
+        {
+            let active_env = Rc::clone(&_interp.env);
+            globals_opt = Some(_interp.globals_for_environment(&active_env));
+            if locals_opt.is_none() {
+                locals_opt = Some(_interp.retain_current_function_locals());
+            }
+        }
         // Inject `__builtins__` into a caller-supplied globals dict, matching
         // CPython's PyEval_EvalCode behaviour.
         if let Some(g) = &globals_opt {

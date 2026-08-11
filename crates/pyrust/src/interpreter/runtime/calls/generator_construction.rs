@@ -36,6 +36,7 @@ impl Interpreter {
             last_return_value: None,
             fn_name: std::sync::Arc::clone(&fn_name),
             is_coroutine,
+            async_gen_running_owner: None,
             frame_cache: std::cell::RefCell::new(None),
         };
         // The frame keeps the name as its *compile-time* identity, behind

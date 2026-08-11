@@ -150,6 +150,13 @@ impl Interpreter {
             // The step_* helpers below re-borrow the state internally.
             drop(borrow);
 
+            // Async-generator `__anext__`/`asend` awaitables implement the
+            // iterator protocol used by `next(aw)` and `aw.__next__()`. Drive
+            // the same one-step state machine as `.send(None)`.
+            if tid == TypeId::of::<AsyncGenASend>() {
+                return self.step_async_gen_asend(&state_rc, Value::none(), true);
+            }
+
             // GetItemIter path: drive one `__getitem__(i)` call lazily.
             // Borrow released by step_getitem_iter before invoking the
             // method (it would otherwise re-entrantly re-borrow).

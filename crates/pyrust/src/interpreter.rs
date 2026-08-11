@@ -465,11 +465,16 @@ pub(crate) struct VmFrameView {
 }
 
 pub(crate) struct VmFrameCache {
-    pub(crate) object: pyrust_core::WeakValueCache,
+    pub(crate) object: Option<pyrust_core::WeakValueCache>,
     /// Weak handle to this activation's function-locals mapping. Retaining
     /// only `frame.f_locals` must make later frame lookups reuse and refresh
     /// that dict without making the activation cache a new owner itself.
     pub(crate) function_locals: Option<std::rc::Weak<RefCell<PyDict>>>,
+    /// Strong owner installed when `locals()` or argument-omitted `exec()`
+    /// exposes this activation's function-locals mapping. The activation drops
+    /// this cold cache on exit; generator activations retain it with the
+    /// suspended frame.
+    pub(crate) persistent_function_locals: Option<Rc<RefCell<PyDict>>>,
     /// Compiler-owned function-local keys synchronized into the persistent
     /// `f_locals` dict. Mapping-only keys inserted through `f_locals` are not
     /// recorded here and therefore survive later fastlocals refreshes.

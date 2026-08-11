@@ -120,16 +120,29 @@ impl Interpreter {
                 self.generator_close(receiver)
             }
             "throw" => {
+                if let Some(err) = Self::async_gen_asend_reuse_error(&receiver) {
+                    return Err(err);
+                }
                 if args.is_empty() || args.len() > 3 {
                     return Err(pyrust_core::type_err!(
                         "generator.throw() takes 1 to 3 arguments"
+                    ));
+                }
+                if args.len() == 3
+                    && !args[2].is_none()
+                    && !pyrust_builtins::traceback::is_traceback(&args[2])
+                {
+                    self.cleanup_invalid_throw_traceback(&receiver);
+                    return Err(pyrust_core::type_err!(
+                        "throw() third argument must be a traceback object"
                     ));
                 }
                 // CPython's throw(typ, val=None, tb=None) semantics (3.12):
                 //   - 1 arg:  pass through to generator_throw (handles both
                 //             class and instance via coerce_to_exception).
                 //   - 2+ args: typ=args[0], val=args[1]; traceback (args[2])
-                //             is ignored (PEP 3109; deprecated since 3.12).
+                //             is validated above, then ignored (PEP 3109;
+                //             deprecated since 3.12).
                 //     * val is None          → raise typ() with no message.
                 //     * val is instance of typ → use val directly.
                 //     * otherwise            → raise typ(val).
@@ -246,6 +259,13 @@ impl Interpreter {
                 it.exhausted = true;
                 return Ok(Value::none());
             }
+            // `__anext__`/`asend` objects are coroutine-style one-shot
+            // awaitables. Closing one only exhausts that wrapper; it does not
+            // close the underlying async generator.
+            if let Some(asend) = borrow.downcast_mut::<AsyncGenASend>() {
+                asend.done = true;
+                return Ok(Value::none());
+            }
         }
 
         let mut borrow = match state_rc.try_borrow_mut() {
@@ -263,6 +283,12 @@ impl Interpreter {
         let frame = borrow
             .downcast_mut::<GeneratorFrame>()
             .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+        self.close_generator_frame(frame)
+    }
+
+    /// Close one already-borrowed Python generator/coroutine frame by
+    /// injecting `GeneratorExit` at its current suspension point.
+    fn close_generator_frame(&mut self, frame: &mut GeneratorFrame) -> Result<Value> {
         if frame.done {
             return Ok(Value::none());
         }
@@ -282,6 +308,74 @@ impl Interpreter {
             // behaviour, swallow it.  Subclasses are equally valid.
             Err(ref e) if e.class_name_is("GeneratorExit") => Ok(Value::none()),
             Err(e) => Err(e),
+        }
+    }
+
+    /// Return the family-specific reuse error for a completed async-generator
+    /// awaitable, before `throw()` validates its argument list or exception.
+    fn async_gen_asend_reuse_error(receiver: &Value) -> Option<PyError> {
+        let ValueKind::Generator(state_rc) = receiver.kind() else {
+            return None;
+        };
+        let Ok(borrow) = state_rc.try_borrow() else {
+            return None;
+        };
+        let asend = borrow.downcast_ref::<AsyncGenASend>()?;
+        if !asend.done {
+            return None;
+        }
+        Some(if asend.is_close_or_throw {
+            pyrust_core::runtime_err!("cannot reuse already awaited aclose()/athrow()")
+        } else {
+            pyrust_core::runtime_err!("cannot reuse already awaited __anext__()/asend()")
+        })
+    }
+
+    /// Apply CPython's receiver-specific terminal state when legacy
+    /// `throw(type, value, traceback)` rejects a non-traceback third argument.
+    /// The original TypeError remains the visible result; this cold helper
+    /// only performs the cleanup that CPython does before returning it.
+    fn cleanup_invalid_throw_traceback(&mut self, receiver: &Value) {
+        let ValueKind::Generator(state_rc) = receiver.kind() else {
+            return;
+        };
+        let Ok(mut state) = state_rc.try_borrow_mut() else {
+            return;
+        };
+
+        if let Some(asend) = state.downcast_mut::<AsyncGenASend>() {
+            // Fresh aclose/athrow wrappers retain their pending injected
+            // exception after validation fails.  Ordinary __anext__/asend
+            // wrappers instead become one-shot exhausted awaitables.
+            if asend.is_close_or_throw {
+                return;
+            }
+            let agen = asend.started.then(|| Rc::clone(&asend.agen));
+            asend.done = true;
+            drop(state);
+
+            // A started wrapper is the coroutine currently driving the async
+            // generator.  Closing it injects GeneratorExit through the
+            // suspended frame so Python finally blocks run synchronously.
+            if let Some(agen) = agen
+                && let Ok(mut agen_state) = agen.try_borrow_mut()
+                && let Some(frame) = agen_state.downcast_mut::<GeneratorFrame>()
+            {
+                let _ = self.close_generator_frame(frame);
+                frame.async_gen_running_owner = None;
+            }
+            return;
+        }
+
+        // A validation failure closes an already-started coroutine receiver,
+        // but leaves a plain generator (and a fresh coroutine) resumable.
+        if let Some(frame) = state.downcast_mut::<GeneratorFrame>()
+            && frame.is_coroutine
+            && !frame.is_async_generator()
+            && frame.pc != 0
+            && !frame.done
+        {
+            let _ = self.close_generator_frame(frame);
         }
     }
 
@@ -327,6 +421,14 @@ impl Interpreter {
             if borrow.downcast_mut::<GetItemIter>().is_some() {
                 return Err(PyError::Raised(exc_val));
             }
+            // Throw through the one-shot wrapper into the async generator's
+            // current suspension point. The step driver handles either a
+            // caught exception or propagation and completes the wrapper.
+            if let Some(asend) = borrow.downcast_mut::<AsyncGenASend>() {
+                asend.throw_exc = Some(PyError::Raised(exc_val));
+                drop(borrow);
+                return self.step_async_gen_asend(&state_rc, Value::none(), false);
+            }
         }
 
         let mut borrow = match state_rc.try_borrow_mut() {
@@ -345,6 +447,11 @@ impl Interpreter {
             .downcast_mut::<GeneratorFrame>()
             .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
         if frame.done {
+            if frame.is_coroutine && !frame.is_async_generator() {
+                return Err(pyrust_core::runtime_err!(
+                    "cannot reuse already awaited coroutine"
+                ));
+            }
             // throw() on an exhausted generator re-raises the exception
             // immediately (CPython behaviour).
             return Err(PyError::Raised(exc_val));
@@ -390,6 +497,15 @@ impl Interpreter {
             }
         };
 
+        // Async-generator `__anext__`/`asend` awaitables expose the same
+        // synchronous `send()` entry point that `await` drives. Route it to
+        // the existing one-step async-generator driver instead of treating its
+        // state cell as a plain GeneratorFrame.
+        if borrow.is::<AsyncGenASend>() {
+            drop(borrow);
+            return self.step_async_gen_asend(&state_rc, sent_value, true);
+        }
+
         // NativeIterFrame and GetItemIter do not support send().
         if borrow.downcast_mut::<NativeIterFrame>().is_some()
             || borrow.downcast_mut::<GetItemIter>().is_some()
@@ -412,6 +528,11 @@ impl Interpreter {
             .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
 
         if frame.done {
+            if frame.is_coroutine && !frame.is_async_generator() {
+                return Err(pyrust_core::runtime_err!(
+                    "cannot reuse already awaited coroutine"
+                ));
+            }
             // Exhausted generator: StopIteration() with no args → .value is None.
             let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
                 PyError::Raised(instantiate_exception(cls, vec![]))
@@ -457,11 +578,14 @@ impl Interpreter {
                 ));
             }
         };
+        let is_close_or_throw = throw_exc.is_some();
         let asend = AsyncGenASend {
             agen,
             send_value,
             throw_exc,
             started: false,
+            done: false,
+            is_close_or_throw,
             is_aclose,
         };
         Ok(Value::generator(Box::new(asend)))
