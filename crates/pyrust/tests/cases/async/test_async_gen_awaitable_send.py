@@ -264,3 +264,120 @@ for kind in ("anext", "aclose"):
         kind + " done throw four",
         lambda: awaitable.throw(42, None, None, None),
     )
+
+
+# A three-argument throw must validate the traceback before driving a fresh
+# async-generator awaitable.  Suppress CPython 3.12's deprecation warning for
+# this legacy signature so the fixture compares only protocol behaviour.
+import warnings
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+
+try:
+    raise RuntimeError("traceback control")
+except RuntimeError as exc:
+    throw_traceback = exc.__traceback__
+
+
+async def traceback_throw_target():
+    try:
+        yield 0
+    except ValueError:
+        yield 1
+    else:
+        yield 1
+
+
+def make_traceback_throw_wrapper(kind):
+    generator = traceback_throw_target()
+    try:
+        generator.__anext__().send(None)
+    except StopIteration:
+        pass
+    if kind == "anext":
+        awaitable = generator.__anext__()
+    elif kind == "asend":
+        awaitable = generator.asend(None)
+    elif kind == "aclose":
+        awaitable = generator.aclose()
+    else:
+        awaitable = generator.athrow(KeyError("seed"))
+    return generator, awaitable
+
+
+for kind in ("anext", "asend", "aclose", "athrow"):
+    generator, awaitable = make_traceback_throw_wrapper(kind)
+    show_call(
+        kind + " invalid traceback",
+        lambda awaitable=awaitable: awaitable.throw(ValueError, "x", 42),
+    )
+    show_advance(
+        kind + " invalid traceback underlying",
+        lambda generator=generator: generator.__anext__().send(None),
+    )
+
+    generator, awaitable = make_traceback_throw_wrapper(kind)
+    show_advance(
+        kind + " None traceback",
+        lambda awaitable=awaitable: awaitable.throw(ValueError, "x", None),
+    )
+
+    generator, awaitable = make_traceback_throw_wrapper(kind)
+    show_advance(
+        kind + " real traceback",
+        lambda awaitable=awaitable: awaitable.throw(
+            ValueError,
+            "x",
+            throw_traceback,
+        ),
+    )
+
+
+def traceback_throw_generator():
+    try:
+        yield 0
+    except ValueError:
+        yield 1
+    else:
+        yield 1
+
+
+generator = traceback_throw_generator()
+next(generator)
+show_call(
+    "generator invalid traceback",
+    lambda: generator.throw(ValueError, "x", 42),
+)
+show_advance("generator invalid traceback post", lambda: next(generator))
+
+generator = traceback_throw_generator()
+next(generator)
+show_advance(
+    "generator None traceback",
+    lambda: generator.throw(ValueError, "x", None),
+)
+
+
+async def traceback_throw_coroutine():
+    try:
+        await Pause()
+    except ValueError:
+        return 1
+    return 1
+
+
+coroutine = traceback_throw_coroutine()
+coroutine.send(None)
+show_call(
+    "coroutine invalid traceback",
+    lambda: coroutine.throw(ValueError, "x", 42),
+)
+coroutine.close()
+
+coroutine = traceback_throw_coroutine()
+coroutine.send(None)
+show_advance(
+    "coroutine None traceback",
+    lambda: coroutine.throw(ValueError, "x", None),
+)

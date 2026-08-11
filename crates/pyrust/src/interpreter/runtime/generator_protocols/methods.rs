@@ -128,11 +128,20 @@ impl Interpreter {
                         "generator.throw() takes 1 to 3 arguments"
                     ));
                 }
+                if args.len() == 3
+                    && !args[2].is_none()
+                    && !pyrust_builtins::traceback::is_traceback(&args[2])
+                {
+                    return Err(pyrust_core::type_err!(
+                        "throw() third argument must be a traceback object"
+                    ));
+                }
                 // CPython's throw(typ, val=None, tb=None) semantics (3.12):
                 //   - 1 arg:  pass through to generator_throw (handles both
                 //             class and instance via coerce_to_exception).
                 //   - 2+ args: typ=args[0], val=args[1]; traceback (args[2])
-                //             is ignored (PEP 3109; deprecated since 3.12).
+                //             is validated above, then ignored (PEP 3109;
+                //             deprecated since 3.12).
                 //     * val is None          → raise typ() with no message.
                 //     * val is instance of typ → use val directly.
                 //     * otherwise            → raise typ(val).
