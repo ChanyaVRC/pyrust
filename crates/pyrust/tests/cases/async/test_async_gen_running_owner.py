@@ -118,6 +118,28 @@ show("direct distinct send", lambda: second.send(None))
 show("direct existing owner finish", lambda: first.send(7))
 
 
+# A distinct direct throw that reaches a bare yield terminates that one-shot
+# wrapper and releases the generator-wide owner, even though the thrower was
+# not the owner.  The next wrapper may consume the following yield; the old
+# owner then observes the async generator's completion.
+async def direct_throw_terminal():
+    try:
+        await Pause()
+    except ValueError:
+        yield "caught"
+    yield "after"
+
+
+generator = direct_throw_terminal()
+first = generator.__anext__()
+show("direct terminal owner pause", lambda: first.send(None))
+second = generator.__anext__()
+show("direct terminal throw", lambda: second.throw(ValueError("injected")))
+third = generator.__anext__()
+show("direct terminal third", lambda: third.send(None))
+show("direct terminal original", lambda: first.send(None))
+
+
 async def direct_throw_without_owner():
     try:
         yield "seed"

@@ -312,6 +312,10 @@ for kind in ("anext", "asend", "aclose", "athrow"):
         kind + " invalid traceback",
         lambda awaitable=awaitable: awaitable.throw(ValueError, "x", 42),
     )
+    show_call(
+        kind + " invalid traceback reuse",
+        lambda awaitable=awaitable: awaitable.send(None),
+    )
     show_advance(
         kind + " invalid traceback underlying",
         lambda generator=generator: generator.__anext__().send(None),
@@ -373,11 +377,40 @@ show_call(
     "coroutine invalid traceback",
     lambda: coroutine.throw(ValueError, "x", 42),
 )
-coroutine.close()
+show_call("coroutine invalid traceback post", lambda: coroutine.send(None))
 
 coroutine = traceback_throw_coroutine()
 coroutine.send(None)
 show_advance(
     "coroutine None traceback",
     lambda: coroutine.throw(ValueError, "x", None),
+)
+
+
+# Invalid traceback validation on an already-started __anext__ owner closes
+# the underlying async generator (running its finally block), exhausts that
+# owner, and releases generator-wide running ownership.
+started_traceback_events = []
+
+
+async def started_traceback_target():
+    try:
+        value = await Pause()
+        yield value
+    finally:
+        started_traceback_events.append("closed")
+
+
+generator = started_traceback_target()
+owner = generator.__anext__()
+show_call("started traceback owner pause", lambda: owner.send(None))
+show_call(
+    "started traceback invalid",
+    lambda: owner.throw(ValueError, "x", 42),
+)
+print("started traceback events", started_traceback_events)
+show_call("started traceback owner reuse", lambda: owner.send(None))
+show_call(
+    "started traceback fresh",
+    lambda: generator.__anext__().send(None),
 )

@@ -297,11 +297,16 @@ impl Interpreter {
             pyrust_core::runtime_err!("{family}(): asynchronous generator is already running")
         }
 
-        fn clear_running_owner(frame: &mut GeneratorFrame, asend_rc: &Rc<GeneratorCell>) {
-            if frame
-                .async_gen_running_owner
-                .as_ref()
-                .is_some_and(|owner| owner.as_ptr() == Rc::as_ptr(asend_rc))
+        fn clear_running_owner(
+            frame: &mut GeneratorFrame,
+            asend_rc: &Rc<GeneratorCell>,
+            clear_any_owner: bool,
+        ) {
+            if clear_any_owner
+                || frame
+                    .async_gen_running_owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.as_ptr() == Rc::as_ptr(asend_rc))
             {
                 frame.async_gen_running_owner = None;
             }
@@ -392,7 +397,7 @@ impl Interpreter {
             } else {
                 Err(self.make_stop_async_iteration())
             };
-            clear_running_owner(frame, asend_rc);
+            clear_running_owner(frame, asend_rc, !enforce_running_owner);
             drop(borrow);
             let mut asend_state = asend_rc.borrow_mut();
             asend_state
@@ -408,7 +413,7 @@ impl Interpreter {
         // `__anext__`/`asend(None)` are exempt.
         if frame.pc == 0 && throw_exc.is_none() && send_value.as_ref().is_some_and(|v| !v.is_none())
         {
-            clear_running_owner(frame, asend_rc);
+            clear_running_owner(frame, asend_rc, !enforce_running_owner);
             drop(borrow);
             let mut asend_state = asend_rc.borrow_mut();
             asend_state
@@ -474,7 +479,11 @@ impl Interpreter {
             Err(e) => Err(e),
         };
         if result.is_err() {
-            clear_running_owner(frame, asend_rc);
+            // A direct awaitable.throw() bypasses ownership for its one step.
+            // If that step terminates at a bare yield or error, CPython also
+            // releases a distinct pre-existing owner.  An inner-await `Ok`
+            // remains suspended and deliberately preserves that owner.
+            clear_running_owner(frame, asend_rc, !enforce_running_owner);
             drop(borrow);
             let mut asend_state = asend_rc.borrow_mut();
             asend_state
