@@ -25,6 +25,29 @@ enum ClassAnnotationProvider {
     Owner(Rc<RefCell<PyClass>>),
 }
 
+/// Boxed cold extension shared by uncommon environment owners.
+///
+/// Keeping these fields behind the class-annotation slot's existing
+/// pointer-sized box preserves `Environment`'s inline size for ordinary
+/// closures. Generator frames hold their environment strongly, so the reverse
+/// edge must stay weak.
+#[derive(Debug, Default)]
+struct EnvironmentAux {
+    class_annotation: Option<ClassAnnotationProvider>,
+    generator_frame_owner: Option<Weak<GeneratorCell>>,
+}
+
+impl Clone for EnvironmentAux {
+    fn clone(&self) -> Self {
+        Self {
+            class_annotation: self.class_annotation.clone(),
+            // Frame ownership belongs to one activation environment and must
+            // not leak into a structural Environment clone.
+            generator_frame_owner: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Environment {
     /// Identity, mutation generations, and globals provider shared by every
@@ -44,7 +67,7 @@ pub struct Environment {
     /// Keeping this provider on the dedicated annotation environment (rather
     /// than the shared class environment) prevents bare names in methods from
     /// incorrectly seeing class attributes.
-    class_annotation: Option<Box<ClassAnnotationProvider>>,
+    auxiliary: Option<Box<EnvironmentAux>>,
 }
 
 pub type EnvRef = Rc<RefCell<Environment>>;
@@ -66,7 +89,7 @@ impl Environment {
             global_names: Rc::new(HashSet::new()),
             nonlocal_names: Rc::new(HashSet::new()),
             parent,
-            class_annotation: None,
+            auxiliary: None,
         }))
     }
 
@@ -80,27 +103,37 @@ impl Environment {
         self.local_names = Rc::new(HashSet::new());
         self.global_names = Rc::new(HashSet::new());
         self.nonlocal_names = Rc::new(HashSet::new());
-        self.class_annotation = None;
+        self.auxiliary = None;
+    }
+
+    fn auxiliary_mut(&mut self) -> &mut EnvironmentAux {
+        self.auxiliary
+            .get_or_insert_with(|| Box::new(EnvironmentAux::default()))
     }
 
     /// Mark this lexical environment as a PEP 695 class annotation scope.
     pub fn initialize_class_annotation_scope(&mut self) {
-        self.class_annotation = Some(Box::new(ClassAnnotationProvider::Active(EnvValues::new())));
+        self.auxiliary_mut().class_annotation =
+            Some(ClassAnnotationProvider::Active(EnvValues::new()));
     }
 
     /// Mirror a class-body fast-local store while the class is still running.
     pub fn set_class_annotation_binding(&mut self, name: &str, value: Value) {
         let provider = self
+            .auxiliary_mut()
             .class_annotation
-            .get_or_insert_with(|| Box::new(ClassAnnotationProvider::Active(EnvValues::new())));
-        if let ClassAnnotationProvider::Active(values) = provider.as_mut() {
+            .get_or_insert_with(|| ClassAnnotationProvider::Active(EnvValues::new()));
+        if let ClassAnnotationProvider::Active(values) = provider {
             values.insert(name, value);
         }
     }
 
     /// Mirror a class-body fast-local deletion while the class is still running.
     pub fn remove_class_annotation_binding(&mut self, name: &str) {
-        if let Some(ClassAnnotationProvider::Active(values)) = self.class_annotation.as_deref_mut()
+        if let Some(ClassAnnotationProvider::Active(values)) = self
+            .auxiliary
+            .as_deref_mut()
+            .and_then(|auxiliary| auxiliary.class_annotation.as_mut())
         {
             values.remove(name);
         }
@@ -111,7 +144,7 @@ impl Environment {
     /// register provider because consulting `__getitem__` requires interpreter
     /// dispatch and cannot live in the core lexical environment.
     pub fn bind_class_annotation_mapping(&mut self, namespace: Value) {
-        self.class_annotation = Some(Box::new(ClassAnnotationProvider::Mapping(namespace)));
+        self.auxiliary_mut().class_annotation = Some(ClassAnnotationProvider::Mapping(namespace));
     }
 
     /// Switch from the temporary class-body provider to the finished class's
@@ -119,7 +152,8 @@ impl Environment {
     /// from a short-lived class must still be able to evaluate against that
     /// class namespace later.
     pub fn bind_class_annotation_owner(&mut self, class: &Rc<RefCell<PyClass>>) {
-        self.class_annotation = Some(Box::new(ClassAnnotationProvider::Owner(Rc::clone(class))));
+        self.auxiliary_mut().class_annotation =
+            Some(ClassAnnotationProvider::Owner(Rc::clone(class)));
     }
 
     /// Resolve one name from this environment's class-annotation provider.
@@ -130,13 +164,34 @@ impl Environment {
     /// type parameter used only when the class namespace has no such key.
     #[inline]
     pub fn class_annotation_binding(&self, name: &str) -> Option<Value> {
-        match self.class_annotation.as_deref()? {
+        match self.auxiliary.as_deref()?.class_annotation.as_ref()? {
             ClassAnnotationProvider::Owner(owner) => owner.borrow().attrs.get(name).cloned(),
             ClassAnnotationProvider::Mapping(namespace) => namespace
                 .dict_with(|dict| dict.get(&StrKey(name)).cloned())
                 .flatten(),
             ClassAnnotationProvider::Active(values) => values.get(name).cloned(),
         }
+    }
+
+    /// Attach the unique generator/coroutine frame that owns this activation.
+    /// The caller must only use this for a fresh cell-bearing activation env;
+    /// no-cell generator calls may share their defining function environment.
+    pub fn bind_generator_frame_owner(&mut self, owner: &Rc<GeneratorCell>) {
+        let slot = &mut self.auxiliary_mut().generator_frame_owner;
+        assert!(
+            slot.as_ref().and_then(Weak::upgrade).is_none(),
+            "generator activation environment already has a live owner"
+        );
+        *slot = Some(Rc::downgrade(owner));
+    }
+
+    /// Upgrade this activation's generator/coroutine frame owner, if it lives.
+    pub fn generator_frame_owner(&self) -> Option<Rc<GeneratorCell>> {
+        self.auxiliary
+            .as_deref()?
+            .generator_frame_owner
+            .as_ref()?
+            .upgrade()
     }
 
     /// Stable identity of the root namespace. `u64::MAX` is an uncacheable

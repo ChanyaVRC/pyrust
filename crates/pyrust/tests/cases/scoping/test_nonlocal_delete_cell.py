@@ -79,6 +79,65 @@ def delete_with_live_outer_alias():
 delete_with_live_outer_alias()
 
 
+caller_fastlocal_events = []
+
+
+class CallerFastlocalTracked:
+    def __del__(self):
+        caller_fastlocal_events.append("finalized")
+
+
+def delete_with_caller_fastlocal_alias():
+    alias = CallerFastlocalTracked()
+
+    def owner(seed):
+        value = seed
+        del seed
+
+        def delete_value():
+            nonlocal value
+            del value
+
+        delete_value()
+
+    owner(alias)
+    print("caller fastlocal after nonlocal delete:", caller_fastlocal_events)
+    del alias
+    print("caller fastlocal after alias drop:", caller_fastlocal_events)
+
+
+delete_with_caller_fastlocal_alias()
+
+
+caller_cell_events = []
+
+
+class CallerCellTracked:
+    def __del__(self):
+        caller_cell_events.append("finalized")
+
+
+def delete_with_caller_cell_alias():
+    alias = CallerCellTracked()
+
+    def owner():
+        value = alias
+
+        def delete_value():
+            nonlocal value
+            del value
+
+        delete_value()
+
+    owner()
+    print("caller cell after nonlocal delete:", caller_cell_events)
+    del alias
+    print("caller cell after alias drop:", caller_cell_events)
+
+
+delete_with_caller_cell_alias()
+
+
 inner_alias_events = []
 
 
@@ -220,5 +279,77 @@ async def coroutine_owner():
 coroutine = coroutine_owner()
 try:
     coroutine.send(None)
+except StopIteration:
+    pass
+
+
+suspended_generator_events = []
+
+
+class SuspendedGeneratorTracked:
+    def __del__(self):
+        suspended_generator_events.append("finalized")
+
+
+def suspended_generator_owner():
+    value = SuspendedGeneratorTracked()
+    alias = value
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    yield delete_value
+    print("suspended generator after resume:", suspended_generator_events)
+    del alias
+    print("suspended generator after alias drop:", suspended_generator_events)
+
+
+suspended_generator = suspended_generator_owner()
+delete_suspended_generator_value = next(suspended_generator)
+delete_suspended_generator_value()
+print("suspended generator after nonlocal delete:", suspended_generator_events)
+try:
+    next(suspended_generator)
+except StopIteration:
+    pass
+
+
+suspended_coroutine_events = []
+suspended_coroutine_deleters = []
+
+
+class SuspendedCoroutineTracked:
+    def __del__(self):
+        suspended_coroutine_events.append("finalized")
+
+
+class SuspendCoroutine:
+    def __await__(self):
+        yield None
+
+
+async def suspended_coroutine_owner():
+    value = SuspendedCoroutineTracked()
+    alias = value
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    suspended_coroutine_deleters.append(delete_value)
+    await SuspendCoroutine()
+    print("suspended coroutine after resume:", suspended_coroutine_events)
+    del alias
+    print("suspended coroutine after alias drop:", suspended_coroutine_events)
+
+
+suspended_coroutine = suspended_coroutine_owner()
+suspended_coroutine.send(None)
+delete_suspended_coroutine_value = suspended_coroutine_deleters.pop()
+delete_suspended_coroutine_value()
+print("suspended coroutine after nonlocal delete:", suspended_coroutine_events)
+try:
+    suspended_coroutine.send(None)
 except StopIteration:
     pass

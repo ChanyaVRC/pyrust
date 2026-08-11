@@ -391,9 +391,10 @@ pub(crate) fn call_del_if_last_binding(
 ///
 /// Unlike [`call_del_if_last_binding`], the active `regs` belong to the inner
 /// function executing `nonlocal del`, not to the activation that owns the
-/// deleted cell.  Check the owning environment and the named registers of its
-/// corresponding live frame instead.  A closed-over environment has no live
-/// frame, so its remaining cell bindings are the complete owning namespace.
+/// deleted cell. Check the target environment and every live frame's named
+/// registers and environment chain: a caller outside the cell-owning frame may
+/// still hold the same instance. A closed-over environment has no live frame,
+/// so the target environment must also be checked directly.
 pub(crate) fn call_del_if_last_binding_in_env(
     interp: &mut Interpreter,
     val: Value,
@@ -408,29 +409,68 @@ pub(crate) fn call_del_if_last_binding_in_env(
         Some(rc) => rc,
         None => return,
     };
-    for value in target_env.borrow().values.values() {
-        if let Some(other_rc) = value.as_py_instance_rc()
-            && Rc::ptr_eq(other_rc, del_rc)
-        {
-            return;
+
+    let suspended_frame_holds_value = |owner: &Rc<GeneratorCell>| {
+        let Ok(state) = owner.try_borrow() else {
+            // An actively-driven frame is checked out of the cell and has a
+            // live VmFrameView, which the scan below covers directly.
+            return false;
+        };
+        let Some(frame) = state.downcast_ref::<GeneratorFrame>() else {
+            return false;
+        };
+        if frame.done {
+            return false;
         }
+        frame.local_index.values().any(|register| {
+            frame
+                .regs
+                .get(*register as usize)
+                .and_then(Value::as_py_instance_rc)
+                .is_some_and(|other_rc| Rc::ptr_eq(other_rc, del_rc))
+        })
+    };
+    let environment_holds_value = |root: &EnvRef| {
+        let mut current = Some(Rc::clone(root));
+        while let Some(env) = current {
+            let bindings = env.borrow();
+            if bindings.values.values().any(|value| {
+                value
+                    .as_py_instance_rc()
+                    .is_some_and(|other_rc| Rc::ptr_eq(other_rc, del_rc))
+            }) {
+                return true;
+            }
+            let frame_owner = bindings.generator_frame_owner();
+            let parent = bindings.parent.clone();
+            drop(bindings);
+            if frame_owner
+                .as_ref()
+                .is_some_and(&suspended_frame_holds_value)
+            {
+                return true;
+            }
+            current = parent;
+        }
+        false
+    };
+    if environment_holds_value(target_env) {
+        return;
     }
 
     for view in &interp.vm_frame_views {
-        let owns_target_env = view
-            .env
-            .as_ref()
-            .is_some_and(|view_env| Rc::ptr_eq(view_env, target_env))
-            || view.gen_frame.is_some_and(|gen_frame| {
-                // SAFETY: this is the same shared-reference reconstruction
-                // used by `with_frame_cache`.  `VmFrameView::gen_frame` is
-                // heap-stable while the live view remains on the stack and is
-                // popped before the GeneratorFrame can move or be dropped.
-                let gen_frame = unsafe { gen_frame.as_ref() };
-                Rc::ptr_eq(&gen_frame.saved_env, target_env)
-            });
-        if !owns_target_env {
-            continue;
+        if view.env.as_ref().is_some_and(&environment_holds_value) {
+            return;
+        }
+        if let Some(gen_frame) = view.gen_frame {
+            // SAFETY: this is the same shared-reference reconstruction used by
+            // `with_frame_cache`. `VmFrameView::gen_frame` is heap-stable while
+            // the live view remains on the stack and is popped before the
+            // GeneratorFrame can move or be dropped.
+            let gen_frame = unsafe { gen_frame.as_ref() };
+            if environment_holds_value(&gen_frame.saved_env) {
+                return;
+            }
         }
         for register in view.local_index.values() {
             let index = *register as usize;
@@ -451,6 +491,6 @@ pub(crate) fn call_del_if_last_binding_in_env(
 
     // The deleting inner frame may itself hold another binding (for example a
     // parameter alias).  Preserve the established current-frame/env scan and
-    // the single shared finalizer invocation after the owner-specific checks.
+    // the single shared finalizer invocation after the live-frame checks.
     call_del_if_last_binding(interp, val, regs, num_locals);
 }
