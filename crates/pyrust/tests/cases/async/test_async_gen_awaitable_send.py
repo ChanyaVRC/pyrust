@@ -378,6 +378,10 @@ show_call(
     lambda: coroutine.throw(ValueError, "x", 42),
 )
 show_call("coroutine invalid traceback post", lambda: coroutine.send(None))
+show_call(
+    "coroutine invalid traceback throw post",
+    lambda: coroutine.throw(LookupError("later")),
+)
 
 coroutine = traceback_throw_coroutine()
 coroutine.send(None)

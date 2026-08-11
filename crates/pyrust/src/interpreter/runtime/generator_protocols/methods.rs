@@ -447,6 +447,11 @@ impl Interpreter {
             .downcast_mut::<GeneratorFrame>()
             .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
         if frame.done {
+            if frame.is_coroutine && !frame.is_async_generator() {
+                return Err(pyrust_core::runtime_err!(
+                    "cannot reuse already awaited coroutine"
+                ));
+            }
             // throw() on an exhausted generator re-raises the exception
             // immediately (CPython behaviour).
             return Err(PyError::Raised(exc_val));
