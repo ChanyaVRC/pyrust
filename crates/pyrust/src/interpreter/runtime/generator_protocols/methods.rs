@@ -372,7 +372,7 @@ impl Interpreter {
             if let Some(asend) = borrow.downcast_mut::<AsyncGenASend>() {
                 asend.throw_exc = Some(PyError::Raised(exc_val));
                 drop(borrow);
-                return self.step_async_gen_asend(&state_rc, Value::none());
+                return self.step_async_gen_asend(&state_rc, Value::none(), false);
             }
         }
 
@@ -443,7 +443,7 @@ impl Interpreter {
         // state cell as a plain GeneratorFrame.
         if borrow.is::<AsyncGenASend>() {
             drop(borrow);
-            return self.step_async_gen_asend(&state_rc, sent_value);
+            return self.step_async_gen_asend(&state_rc, sent_value, true);
         }
 
         // NativeIterFrame and GetItemIter do not support send().
