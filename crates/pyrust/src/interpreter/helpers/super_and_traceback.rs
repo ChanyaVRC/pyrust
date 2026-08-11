@@ -417,6 +417,9 @@ pub(crate) fn call_del_if_last_binding_in_env(
         visible_owner_worklist: &mut Vec<Rc<GeneratorCell>>,
         discovered_owner_ids: &mut HashSet<*const GeneratorCell>,
     ) {
+        if value.is_unset() {
+            return;
+        }
         if value
             .as_py_instance_rc()
             .is_some_and(|other_rc| Rc::ptr_eq(other_rc, del_rc))
