@@ -26,7 +26,7 @@ impl Interpreter {
             exc_handlers: ExcHandlersBuf::new(),
             pc: 0,
             done: false,
-            saved_env: Rc::clone(&saved_env),
+            saved_env,
             handled_exc_slice: HandledExcBuf::new(),
             active_exception: None,
             exc_saved_active_slice: Vec::new(),
@@ -42,16 +42,6 @@ impl Interpreter {
         // tracebacks and `co_name`; the cell owns the writable `__name__` /
         // `__qualname__` pair, which CPython likewise lets a user reassign
         // without disturbing the code object.
-        let value = Value::generator_frame(Box::new(frame), kind, fn_name, qualname);
-        if !code.cell_vars.is_empty() {
-            // Every binding path allocates a fresh local env when the code owns
-            // cells. No-cell generator calls may reuse `function.env`, so they
-            // must never install this single-owner backpointer.
-            let ValueKind::Generator(owner) = value.kind() else {
-                unreachable!("generator frame constructor returned a non-generator value")
-            };
-            saved_env.borrow_mut().bind_generator_frame_owner(owner);
-        }
-        value
+        Value::generator_frame(Box::new(frame), kind, fn_name, qualname)
     }
 }

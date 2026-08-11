@@ -6,40 +6,7 @@ mod tests {
 
     use super::{Environment, namespace_alias_tracking_active};
     use crate::ModuleAttrs;
-    use crate::object_model::{PyDict, PyKey, PyModule, Value, ValueKind};
-
-    #[cfg(target_pointer_width = "64")]
-    #[test]
-    fn environment_inline_size_stays_compact() {
-        assert_eq!(std::mem::size_of::<Environment>(), 112);
-    }
-
-    #[test]
-    fn generator_frame_environment_owner_is_weak_and_resettable() {
-        let env = Environment::new(None);
-        let value = Value::generator(Box::new(()));
-        let owner = match value.kind() {
-            ValueKind::Generator(owner) => Rc::clone(owner),
-            _ => unreachable!("generator constructor returned another value kind"),
-        };
-        let strong_before = Rc::strong_count(&owner);
-
-        env.borrow_mut().bind_generator_frame_owner(&owner);
-        assert_eq!(Rc::strong_count(&owner), strong_before);
-        assert!(Rc::ptr_eq(
-            &env.borrow().generator_frame_owner().unwrap(),
-            &owner
-        ));
-        assert!(env.borrow().clone().generator_frame_owner().is_none());
-
-        env.borrow_mut().reset_for_reuse(None);
-        assert!(env.borrow().generator_frame_owner().is_none());
-
-        env.borrow_mut().bind_generator_frame_owner(&owner);
-        drop(value);
-        drop(owner);
-        assert!(env.borrow().generator_frame_owner().is_none());
-    }
+    use crate::object_model::{PyDict, PyKey, PyModule, Value};
 
     #[test]
     fn root_namespace_ids_are_distinct_and_children_inherit() {

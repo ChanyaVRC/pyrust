@@ -15,7 +15,7 @@ use std::rc::{Rc, Weak};
 use indexmap::IndexMap;
 use rustc_hash::FxBuildHasher;
 
-use crate::object_model::{GeneratorCell, ModuleMutationState, PyClass, PyDict, StrKey, Value};
+use crate::object_model::{ModuleMutationState, PyClass, PyDict, StrKey, Value};
 
 // Include order preserves the original declaration order and private access
 // between the four mechanically extracted sections.

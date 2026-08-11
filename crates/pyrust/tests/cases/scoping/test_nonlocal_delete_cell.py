@@ -353,3 +353,251 @@ try:
     suspended_coroutine.send(None)
 except StopIteration:
     pass
+
+
+shared_generator_events = []
+
+
+class SharedGeneratorTracked:
+    def __del__(self):
+        shared_generator_events.append("finalized")
+
+
+def delete_with_shared_generator_alias():
+    value = SharedGeneratorTracked()
+
+    def holder():
+        alias = value
+        yield None
+        print("shared generator after resume:", shared_generator_events)
+        del alias
+        print("shared generator after alias drop:", shared_generator_events)
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    generator = holder()
+    next(generator)
+    delete_value()
+    print("shared generator after nonlocal delete:", shared_generator_events)
+    try:
+        next(generator)
+    except StopIteration:
+        pass
+
+
+delete_with_shared_generator_alias()
+
+
+shared_coroutine_events = []
+
+
+class SharedCoroutineTracked:
+    def __del__(self):
+        shared_coroutine_events.append("finalized")
+
+
+def delete_with_shared_coroutine_alias():
+    value = SharedCoroutineTracked()
+
+    async def holder():
+        alias = value
+        await SuspendCoroutine()
+        print("shared coroutine after resume:", shared_coroutine_events)
+        del alias
+        print("shared coroutine after alias drop:", shared_coroutine_events)
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    coroutine = holder()
+    coroutine.send(None)
+    delete_value()
+    print("shared coroutine after nonlocal delete:", shared_coroutine_events)
+    try:
+        coroutine.send(None)
+    except StopIteration:
+        pass
+
+
+delete_with_shared_coroutine_alias()
+
+
+shared_multi_owner_events = []
+
+
+class SharedMultiOwnerTracked:
+    def __del__(self):
+        shared_multi_owner_events.append("finalized")
+
+
+def delete_with_multiple_shared_holders():
+    value = SharedMultiOwnerTracked()
+
+    def holder(keep_alias):
+        alias = value if keep_alias else None
+        yield None
+        if alias is not None:
+            del alias
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    holding_generator = holder(True)
+    empty_generator = holder(False)
+    next(holding_generator)
+    next(empty_generator)
+    delete_value()
+    print("multiple shared holders after nonlocal delete:", shared_multi_owner_events)
+    try:
+        next(holding_generator)
+    except StopIteration:
+        pass
+    print("multiple shared holders after alias drop:", shared_multi_owner_events)
+    try:
+        next(empty_generator)
+    except StopIteration:
+        pass
+
+
+delete_with_multiple_shared_holders()
+
+
+done_holder_events = []
+
+
+class DoneHolderTracked:
+    def __del__(self):
+        done_holder_events.append("finalized")
+
+
+def delete_after_holder_finishes():
+    value = DoneHolderTracked()
+
+    def holder():
+        alias = value
+        yield None
+        return alias is not None
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    generator = holder()
+    next(generator)
+    try:
+        next(generator)
+    except StopIteration:
+        pass
+    delete_value()
+    print("done shared holder after nonlocal delete:", done_holder_events)
+
+
+delete_after_holder_finishes()
+
+
+dropped_holder_events = []
+
+
+class DroppedHolderTracked:
+    def __del__(self):
+        dropped_holder_events.append("finalized")
+
+
+def delete_after_holder_is_dropped():
+    value = DroppedHolderTracked()
+
+    def holder():
+        alias = value
+        yield None
+        return alias is not None
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    generator = holder()
+    next(generator)
+    del generator
+    delete_value()
+    print("dropped shared holder after nonlocal delete:", dropped_holder_events)
+
+
+delete_after_holder_is_dropped()
+
+
+expired_holder_events = []
+
+
+class ExpiredHolderTracked:
+    def __del__(self):
+        expired_holder_events.append("finalized")
+
+
+def make_deleter_after_holder_expires():
+    value = ExpiredHolderTracked()
+
+    def holder():
+        alias = value
+        yield None
+        return alias is not None
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    generator = holder()
+    next(generator)
+    return delete_value
+
+
+delete_expired_holder_value = make_deleter_after_holder_expires()
+delete_expired_holder_value()
+print("expired shared holder after nonlocal delete:", expired_holder_events)
+
+
+nested_suspended_events = []
+
+
+class NestedSuspendedTracked:
+    def __del__(self):
+        nested_suspended_events.append("finalized")
+
+
+def delete_with_nested_suspended_alias():
+    value = NestedSuspendedTracked()
+
+    def leaf():
+        alias = value
+        yield None
+        print("nested suspended leaf after resume:", nested_suspended_events)
+        del alias
+
+    def holder():
+        nested = leaf()
+        next(nested)
+        yield None
+        try:
+            next(nested)
+        except StopIteration:
+            pass
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    root = holder()
+    next(root)
+    delete_value()
+    print("nested suspended after nonlocal delete:", nested_suspended_events)
+    try:
+        next(root)
+    except StopIteration:
+        pass
+    print("nested suspended after root resume:", nested_suspended_events)
+
+
+delete_with_nested_suspended_alias()
