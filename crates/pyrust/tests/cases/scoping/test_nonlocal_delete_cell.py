@@ -601,3 +601,45 @@ def delete_with_nested_suspended_alias():
 
 
 delete_with_nested_suspended_alias()
+
+
+async_wrapper_owner_events = []
+
+
+class AsyncWrapperOwnerTracked:
+    def __del__(self):
+        async_wrapper_owner_events.append("finalized")
+
+
+def delete_with_async_wrapper_owner():
+    value = AsyncWrapperOwnerTracked()
+
+    async def holder():
+        alias = value
+        yield None
+        print("async wrapper owner after resume:", async_wrapper_owner_events)
+        del alias
+
+    def delete_value():
+        nonlocal value
+        del value
+
+    generator = holder()
+    first = generator.__anext__()
+    try:
+        first.send(None)
+    except StopIteration:
+        pass
+    del first
+    awaitable = generator.__anext__()
+    del generator
+    delete_value()
+    print("async wrapper owner after nonlocal delete:", async_wrapper_owner_events)
+    try:
+        awaitable.send(None)
+    except StopAsyncIteration:
+        pass
+    print("async wrapper owner after wrapper resume:", async_wrapper_owner_events)
+
+
+delete_with_async_wrapper_owner()

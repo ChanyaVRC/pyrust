@@ -553,6 +553,12 @@ pub(crate) fn call_del_if_last_binding_in_env(
             // above; the checked-out cell itself has no frame to inspect.
             continue;
         };
+        if let Some(asend) = state.downcast_ref::<AsyncGenASend>() {
+            if discovered_owner_ids.insert(Rc::as_ptr(&asend.agen)) {
+                visible_owner_worklist.push(Rc::clone(&asend.agen));
+            }
+            continue;
+        }
         let Some(frame) = state.downcast_ref::<GeneratorFrame>() else {
             continue;
         };
