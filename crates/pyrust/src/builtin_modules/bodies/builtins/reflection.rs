@@ -437,6 +437,18 @@ pyrust_module! {
                 locals_opt = Some(_interp.retain_current_function_locals());
             }
         }
+        if globals_opt.is_none()
+            && _interp
+                .vm_frame_views
+                .last()
+                .is_some_and(|view| view.kind == crate::interpreter::FrameKind::Class)
+        {
+            let active_env = Rc::clone(&_interp.env);
+            globals_opt = Some(_interp.globals_for_environment(&active_env));
+            if locals_opt.is_none() {
+                locals_opt = Some(current_locals_value(_interp));
+            }
+        }
         // Inject `__builtins__` into a caller-supplied globals dict, matching
         // CPython's PyEval_EvalCode behaviour.
         if let Some(g) = &globals_opt {
