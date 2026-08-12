@@ -1,5 +1,21 @@
 use pyrust_derive::pyrust_module;
 
+fn builtin_subclass_bytes_snapshot(value: &Value) -> Option<Vec<u8>> {
+    let backing = effective_builtin_receiver(value, &[])?;
+    match backing.kind() {
+        ValueKind::Bytes(bytes) => Some((**bytes).clone()),
+        _ => pyrust_builtins::bytearray::as_bytearray_snapshot(&backing),
+    }
+}
+
+fn builtin_subclass_immutable_bytes_snapshot(value: &Value) -> Option<Vec<u8>> {
+    let backing = effective_builtin_receiver(value, &[])?;
+    match backing.kind() {
+        ValueKind::Bytes(bytes) => Some((**bytes).clone()),
+        _ => None,
+    }
+}
+
 pyrust_module! {
     /// CPython: bytes() — bytes constructor.
     /// <https://docs.python.org/3/library/functions.html#func-bytes>
@@ -68,14 +84,6 @@ pyrust_module! {
                     // CPython 3.12: check __bytes__ before falling through to the
                     // iterable path. __bytes__ takes priority over __iter__.
                     let self_val = args[0].value.clone();
-                    // Issue #1204: if the instance is a bytes subclass extract the
-                    // backing value first. `bytes(MyBytes(b"x"))` must return b'x'.
-                    if let ValueKind::PyInstance(instance) = self_val.kind()
-                        && let Some(backing) = instance_builtin_data(instance)
-                        && matches!(backing.kind(), ValueKind::Bytes(_))
-                    {
-                        return Ok(backing);
-                    }
                     if let Some(method) =
                         lookup_value_special_method(&self_val, "__bytes__").transpose()?
                     {
@@ -93,10 +101,25 @@ pyrust_module! {
                             ))
                         };
                     }
-                    // No __bytes__: CPython next honors __index__ as the count
-                    // form (`bytes(obj)` -> N zero bytes) before __iter__ (#1908).
+                    // CPython reads a bytes subclass's immutable backing before
+                    // consulting a subclass-defined __index__.  PyRust does not
+                    // expose bytes.__bytes__ in the primitive slot table, so
+                    // preserve that inherited-buffer priority explicitly.
+                    if let Some(snapshot) = builtin_subclass_immutable_bytes_snapshot(&self_val) {
+                        return Ok(Value::bytes(snapshot));
+                    }
+                    // For every other object (including bytearray subclasses),
+                    // __index__ is the count form (`bytes(obj)` -> N zero bytes)
+                    // and precedes the buffer/iterable fallback (#1908).
                     if let Some(count) = bytes_count_via_index(_interp, &args[0].value)? {
                         return Ok(Value::bytes(vec![0u8; count]));
+                    }
+                    // A bytearray subclass exports its backing buffer to bytes(),
+                    // even when it overrides __iter__.  Keep __bytes__ and
+                    // __index__ ahead of this dunder-free extraction, matching
+                    // CPython's constructor protocol priority.
+                    if let Some(snapshot) = builtin_subclass_bytes_snapshot(&self_val) {
+                        return Ok(Value::bytes(snapshot));
                     }
                     // Otherwise fall through to the iterable path.
                     let type_name = value_type_name_str(&args[0].value).to_string();
@@ -247,6 +270,13 @@ pyrust_module! {
                     // before falling back to __iter__ (#1908).
                     if let Some(count) = bytes_count_via_index(_interp, &args[0].value)? {
                         return Ok(pyrust_builtins::bytearray::bytearray(vec![0u8; count]));
+                    }
+                    // Builtin bytes/bytearray subclasses contribute their
+                    // backing buffer here, before an overridden __iter__ can
+                    // change the constructor input.  __index__ retains the
+                    // count-form priority above.
+                    if let Some(snapshot) = builtin_subclass_bytes_snapshot(&args[0].value) {
+                        return Ok(pyrust_builtins::bytearray::bytearray(snapshot));
                     }
                     let type_name = pyrust_core::builtin_type_name(&args[0].value).into_owned();
                     let items = _interp.collect_iterable(&args[0].value).map_err(|e| {
