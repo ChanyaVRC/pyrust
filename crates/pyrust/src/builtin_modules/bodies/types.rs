@@ -31,11 +31,18 @@ use crate::interpreter::{function_type_singleton, method_type_singleton, primiti
 use crate::value::{PyKey, Value};
 use pyrust_derive::pyrust_module;
 
-/// Python-source members (`SimpleNamespace`) injected at first import.
+/// Python-source helpers and `SimpleNamespace`, injected at first import.
 const TYPES_PY_SOURCE: &str = include_str!("types_py.py");
 
 /// Public names defined by `TYPES_PY_SOURCE` to copy onto the module.
-const TYPES_PY_EXPORTS: &[&str] = &["SimpleNamespace"];
+const TYPES_PY_EXPORTS: &[&str] = &[
+    "SimpleNamespace",
+    "new_class",
+    "resolve_bases",
+    "prepare_class",
+    "get_original_bases",
+    "DynamicClassAttribute",
+];
 
 /// `Value` for the `function` type singleton (`type(lambda: 0)`).  Used for
 /// both `FunctionType` and `LambdaType` (CPython aliases them to the same
@@ -92,8 +99,31 @@ pyrust_module! {
         "FunctionType"        => function_type_value(),
         // CPython: types.LambdaType — alias of FunctionType (same object).
         "LambdaType"          => function_type_value(),
+        // CPython runtime-object types already modelled by pyrust's built-in
+        // type-name tokens.  These aliases must be the exact objects returned
+        // by `type()` for representative runtime values.
+        "CodeType"            => Value::builtin_function(pyrust_builtins::code::TYPE_NAME),
+        "CellType"            => Value::builtin_function(pyrust_builtins::cell::TYPE_NAME),
+        "WrapperDescriptorType" => Value::builtin_function("wrapper_descriptor"),
+        "MethodWrapperType"   => Value::builtin_function(
+            pyrust_builtins::type_call_wrapper::TYPE_NAME,
+        ),
+        "MethodDescriptorType" => Value::builtin_function(
+            pyrust_builtins::unbound_method_descriptor::TYPE_NAME,
+        ),
+        "ClassMethodDescriptorType" => Value::builtin_function(
+            pyrust_builtins::classmethod::NATIVE_CLASS_METHOD_DESCRIPTOR_TYPE_NAME,
+        ),
         // CPython: types.ModuleType — `type(sys)`.
         "ModuleType"          => Value::builtin_function("module"),
+        "TracebackType"       => Value::builtin_function(pyrust_builtins::traceback::TYPE_NAME),
+        "FrameType"           => Value::builtin_function(pyrust_builtins::frame::TYPE_NAME),
+        "GetSetDescriptorType" => Value::builtin_function(
+            pyrust_builtins::numeric_attrs_descriptor::GETSET_TYPE_NAME,
+        ),
+        "MemberDescriptorType" => Value::builtin_function(
+            pyrust_builtins::member_descriptor::MEMBER_DESCRIPTOR_TYPE_NAME,
+        ),
         // CPython: types.BuiltinFunctionType — `type(len)`.  Built-in
         // functions and methods share this type; `BuiltinMethodType` is the
         // same object.
@@ -152,7 +182,11 @@ pub(crate) fn inject_python_members(
     for name in TYPES_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             if let crate::value::ValueKind::PyClass(class) = val.kind() {
-                class.borrow_mut().error_name = Some("types.SimpleNamespace");
+                class.borrow_mut().error_name = Some(match *name {
+                    "SimpleNamespace" => "types.SimpleNamespace",
+                    "DynamicClassAttribute" => "types.DynamicClassAttribute",
+                    _ => unreachable!("only Python class exports have error names"),
+                });
             }
             module
                 .borrow_mut()
