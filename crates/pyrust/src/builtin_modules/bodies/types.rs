@@ -215,7 +215,7 @@ pyrust_module! {
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     // The Python implementation deliberately delays its imports until the
     // decorator is called. Seed only the native types/bridges it closes over;
@@ -257,9 +257,11 @@ pub(crate) fn inject_python_members(
                 .insert(name.to_string(), val.clone());
         }
     }
-    let mut module = module.borrow_mut();
-    module.attrs.shift_remove("_mark_iterable_coroutine");
-    module.attrs.shift_remove("_is_iterable_coroutine");
-    module.attrs.shift_remove("_is_generator_wrapper_candidate");
-    Ok(())
+    {
+        let mut module = module.borrow_mut();
+        module.attrs.shift_remove("_mark_iterable_coroutine");
+        module.attrs.shift_remove("_is_iterable_coroutine");
+        module.attrs.shift_remove("_is_generator_wrapper_candidate");
+    }
+    Ok(Some(ns.clone()))
 }

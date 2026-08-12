@@ -103,7 +103,7 @@ const OPERATOR_PY_EXPORTS: [&str; 53] = [
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     interp.exec_source(OPERATOR_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
@@ -126,7 +126,7 @@ pub(crate) fn inject_python_members(
             Some("Same as a.__index__()"),
         ),
     );
-    Ok(())
+    Ok(Some(ns.clone()))
 }
 
 pyrust_module! {

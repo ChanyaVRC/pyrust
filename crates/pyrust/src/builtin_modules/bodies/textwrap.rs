@@ -43,7 +43,7 @@ const TEXTWRAP_PY_EXPORTS: [&str; 6] =
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let ns = Value::dict(PyDict::default());
     interp.exec_source(TEXTWRAP_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
@@ -57,7 +57,7 @@ pub(crate) fn inject_python_members(
                 .insert(name.to_string(), val.clone());
         }
     }
-    Ok(())
+    Ok(Some(ns.clone()))
 }
 
 pyrust_module! {}

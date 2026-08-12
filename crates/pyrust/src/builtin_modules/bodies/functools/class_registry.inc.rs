@@ -258,7 +258,7 @@ fn make_instance_with_class(class: Rc<RefCell<PyClass>>, attrs: InstanceAttrs) -
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let _ = interp;
 
     let mut fallback = IndexMap::new();
@@ -316,5 +316,5 @@ pub(crate) fn inject_python_members(
     for (name, callable) in replacements {
         module.insert_attr(name, callable);
     }
-    Ok(())
+    Ok(None)
 }

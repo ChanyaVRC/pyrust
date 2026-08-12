@@ -98,7 +98,7 @@ const COLLECTION_CLASS_GETITEM_DISPATCH: [(&str, &str); 8] = [
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     // CPython's collections module captures `itertools.chain` as `_chain` at
     // import time. Load that provider before tagging Counter so this
     // collections generation can retain the matching chain class even if
@@ -138,7 +138,7 @@ pub(crate) fn inject_python_members(
         }
     }
     tag_public_classes(module, chain_class.as_ref());
-    Ok(())
+    Ok(Some(ns.clone()))
 }
 
 /// Tag each public `collections` class with `__module__ = "collections"` and a
