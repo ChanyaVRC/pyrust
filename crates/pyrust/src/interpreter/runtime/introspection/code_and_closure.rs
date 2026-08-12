@@ -65,8 +65,8 @@ impl Interpreter {
         let qualname = function.qualname.to_string();
 
         // co_flags: CPython sets CO_OPTIMIZED | CO_NEWLOCALS for every normal
-        // function, plus CO_VARARGS / CO_VARKEYWORDS / CO_GENERATOR as the
-        // signature/body warrant.
+        // function, plus the signature and generator/coroutine flags the
+        // function warrants.
         let mut flags = code_obj::CO_OPTIMIZED | code_obj::CO_NEWLOCALS;
         if function.params.iter().any(|p| p.is_args) {
             flags |= code_obj::CO_VARARGS;
@@ -78,7 +78,8 @@ impl Interpreter {
         // The remaining attributes come from the compiled `FnCode` when
         // available: co_firstlineno, co_consts, co_names, co_cellvars,
         // co_stacksize, the function-body locals appended to co_varnames, and
-        // the CO_GENERATOR flag.  Downcast once and derive them all together.
+        // the generator/coroutine flags. Downcast once and derive them all
+        // together.
         let fncode = function
             .precompiled_code
             .as_ref()
@@ -132,8 +133,11 @@ impl Interpreter {
         let mut names: Vec<Value> = Vec::new();
         let mut stacksize = 0i64;
         if let Some(fncode) = fncode.as_ref() {
-            if fncode.is_generator {
-                flags |= code_obj::CO_GENERATOR;
+            match (fncode.is_coroutine, fncode.is_generator) {
+                (true, true) => flags |= code_obj::CO_ASYNC_GENERATOR,
+                (true, false) => flags |= code_obj::CO_COROUTINE,
+                (false, true) => flags |= code_obj::CO_GENERATOR,
+                (false, false) => {}
             }
             // co_firstlineno: the `def`/`lambda` line recorded by the compiler
             // (NOT the first body statement, which may be one or more lines
@@ -158,6 +162,9 @@ impl Interpreter {
             // register VM with no operand stack, so report the register count —
             // a positive int of the right type.
             stacksize = fncode.num_regs as i64;
+        }
+        if function.iterable_coroutine.get() {
+            flags |= code_obj::CO_ITERABLE_COROUTINE;
         }
 
         // co_freevars: the names this function reads from an enclosing function

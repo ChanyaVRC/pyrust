@@ -11,6 +11,13 @@ impl Interpreter {
         // A coroutine drives itself: `await coro` resolves to the coroutine and
         // the following `YieldFrom` steps it.
         if let ValueKind::Generator(state_rc) = awaited.kind() {
+            // `types.coroutine` keeps the object a real generator while
+            // granting only this activation the legacy await capability.  The
+            // immutable tag is outside the borrowable frame so it is readable
+            // even while that frame is executing.
+            if state_rc.is_iterable_coroutine() {
+                return Ok(awaited.clone());
+            }
             // Borrow the cell to inspect the coroutine's state.  A busy cell
             // (`try_borrow` → `Err`) means the coroutine is *currently* being
             // awaited / executing — CPython raises `RuntimeError("coroutine is

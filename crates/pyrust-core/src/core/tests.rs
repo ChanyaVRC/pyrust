@@ -1927,6 +1927,7 @@ mod tests {
             nonlocal_names: Rc::new(HashSet::new()),
             env: Environment::new(None),
             is_memo_pure: false,
+            iterable_coroutine: std::cell::Cell::new(false),
             precompiled_code: None,
             wrapped_func: None,
         })

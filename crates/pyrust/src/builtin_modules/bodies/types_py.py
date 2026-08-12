@@ -12,6 +12,90 @@
 # interpreter's internal singletons.
 
 
+def coroutine(func):
+    """Convert a regular generator function to a coroutine."""
+    if not callable(func):
+        raise TypeError("types.coroutine() expects a callable")
+
+    if type(func) is FunctionType and type(getattr(func, "__code__", None)) is CodeType:
+        flags = func.__code__.co_flags
+        if flags & 0x180:
+            return func
+        if flags & 0x20:
+            _mark_iterable_coroutine(func)
+            return func
+
+    # Keep these imports off the module import path, matching CPython. They are
+    # needed only for callables whose result may require the protocol wrapper.
+    import functools
+    from collections.abc import Coroutine, Generator
+
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        coro = func(*args, **kwargs)
+        if type(coro) is CoroutineType or (
+            type(coro) is GeneratorType and _is_iterable_coroutine(coro)
+        ):
+            return coro
+        if (
+            isinstance(coro, Generator)
+            and not isinstance(coro, Coroutine)
+            and _is_generator_wrapper_candidate(coro)
+        ):
+            return _GeneratorWrapper(coro)
+        return coro
+
+    return wrapped
+
+
+class _GeneratorWrapper:
+    def __init__(self, gen):
+        self.__wrapped = gen
+        self.__isgen = type(gen) is GeneratorType
+        self.__name__ = getattr(gen, "__name__", None)
+        self.__qualname__ = getattr(gen, "__qualname__", None)
+
+    def send(self, val):
+        return self.__wrapped.send(val)
+
+    def throw(self, typ, *rest):
+        return self.__wrapped.throw(typ, *rest)
+
+    def close(self):
+        return self.__wrapped.close()
+
+    @property
+    def gi_code(self):
+        return self.__wrapped.gi_code
+
+    @property
+    def gi_frame(self):
+        return self.__wrapped.gi_frame
+
+    @property
+    def gi_running(self):
+        return self.__wrapped.gi_running
+
+    @property
+    def gi_yieldfrom(self):
+        return self.__wrapped.gi_yieldfrom
+
+    cr_code = gi_code
+    cr_frame = gi_frame
+    cr_running = gi_running
+    cr_await = gi_yieldfrom
+
+    def __next__(self):
+        return next(self.__wrapped)
+
+    def __iter__(self):
+        if self.__isgen:
+            return self.__wrapped
+        return self
+
+    __await__ = __iter__
+
+
 def new_class(name, bases=(), kwds=None, exec_body=None):
     """Create a class object dynamically using the appropriate metaclass."""
     resolved_bases = resolve_bases(bases)

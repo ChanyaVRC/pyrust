@@ -112,6 +112,7 @@ impl Interpreter {
             nonlocal_names: proto_nonlocal_names,
             env: Rc::clone(&self.env),
             is_memo_pure,
+            iterable_coroutine: std::cell::Cell::new(false),
             precompiled_code: Some(proto_code),
             wrapped_func: None,
         });

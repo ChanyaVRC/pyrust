@@ -521,6 +521,7 @@ impl Value {
                 nonlocal_names: Rc::new(HashSet::new()),
                 env: Environment::new(None),
                 is_memo_pure: false,
+                iterable_coroutine: std::cell::Cell::new(false),
                 precompiled_code: None,
                 wrapped_func: None,
             });
@@ -562,6 +563,7 @@ impl Value {
             nonlocal_names: Rc::clone(&template.nonlocal_names),
             env: Rc::clone(&template.env),
             is_memo_pure: false,
+            iterable_coroutine: std::cell::Cell::new(false),
             precompiled_code: None,
             wrapped_func: None,
         });
@@ -660,6 +662,7 @@ impl Value {
             nonlocal_names: Rc::clone(&f.nonlocal_names),
             env: Rc::clone(&f.env),
             is_memo_pure: f.is_memo_pure,
+            iterable_coroutine: std::cell::Cell::new(f.iterable_coroutine.get()),
             precompiled_code: f.precompiled_code.clone(),
             wrapped_func,
         };
@@ -713,6 +716,7 @@ impl Value {
     pub fn generator(state: Box<dyn std::any::Any>) -> Self {
         Value::opaque(Opaque::Generator(Rc::new(GeneratorCell {
             kind: GeneratorKind::Iterator,
+            iterable_coroutine: false,
             names: RefCell::new(None),
             state: RefCell::new(state),
         })))
@@ -728,9 +732,11 @@ impl Value {
         kind: GeneratorKind,
         name: std::sync::Arc<str>,
         qualname: std::sync::Arc<str>,
+        iterable_coroutine: bool,
     ) -> Self {
         Value::opaque(Opaque::Generator(Rc::new(GeneratorCell {
             kind,
+            iterable_coroutine,
             names: RefCell::new(Some(GeneratorNames { name, qualname })),
             state: RefCell::new(state),
         })))
