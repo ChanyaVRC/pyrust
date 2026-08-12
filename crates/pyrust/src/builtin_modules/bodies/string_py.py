@@ -16,6 +16,12 @@
 #   * The Formatter field-string grammar is ``{field_name!conversion:spec}``
 #     with ``{{`` / ``}}`` escapes and recursively-formatted specs.
 
+__all__ = [
+    'ascii_letters', 'ascii_lowercase', 'ascii_uppercase', 'capwords',
+    'digits', 'hexdigits', 'octdigits', 'printable', 'punctuation',
+    'whitespace', 'Formatter', 'Template'
+]
+
 _sentinel_dict = {}
 
 

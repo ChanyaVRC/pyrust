@@ -35,7 +35,7 @@ const STRING_PY_EXPORTS: [&str; 3] = ["capwords", "Template", "Formatter"];
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     interp.exec_source(STRING_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns.as_dict().ok_or_else(|| {
@@ -49,7 +49,7 @@ pub(crate) fn inject_python_members(
                 .insert(name.to_string(), val.clone());
         }
     }
-    Ok(())
+    Ok(Some(ns.clone()))
 }
 
 pyrust_module! {

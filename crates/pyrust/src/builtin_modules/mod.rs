@@ -35,6 +35,27 @@ pub(crate) fn make_module_exec_ns(
     Ok(ns)
 }
 
+/// Publish the `__all__` object created by an injected Python body, if any.
+///
+/// The value itself is shared with the exec namespace so its type, item order,
+/// and identity are preserved.
+fn publish_exec_dunder_all(
+    module: &std::rc::Rc<std::cell::RefCell<crate::value::PyModule>>,
+    exec_ns: &Value,
+) -> crate::error::Result<()> {
+    use pyrust_core::PyKey;
+    let dict = exec_ns.as_dict().ok_or_else(|| {
+        crate::error::PyError::Runtime("injected module exec namespace not a dict".into())
+    })?;
+    if let Some(all) = dict.get(&PyKey::str_from("__all__")) {
+        module
+            .borrow_mut()
+            .attrs
+            .insert("__all__".to_string(), all.clone());
+    }
+    Ok(())
+}
+
 /// Declares the set of built-in modules.
 ///
 /// Syntax:
@@ -180,9 +201,12 @@ macro_rules! pyrust_builtin_modules_internal {
             interp: &mut crate::interpreter::Interpreter,
             module: &std::rc::Rc<std::cell::RefCell<crate::value::PyModule>>,
         ) -> crate::error::Result<()> {
-            match name {
+            let exec_ns = match name {
                 $($inj_py_name => $inj_ident::inject_python_members(interp, module)?,)*
-                _ => {}
+                _ => None,
+            };
+            if let Some(exec_ns) = exec_ns {
+                publish_exec_dunder_all(module, &exec_ns)?;
             }
             Ok(())
         }

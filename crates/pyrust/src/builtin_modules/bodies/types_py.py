@@ -11,6 +11,17 @@
 # (`NoneType`, `FunctionType`, `MappingProxyType`, …) that need access to the
 # interpreter's internal singletons.
 
+__all__ = [
+    'FunctionType', 'LambdaType', 'CodeType', 'MappingProxyType',
+    'SimpleNamespace', 'CellType', 'GeneratorType', 'CoroutineType',
+    'AsyncGeneratorType', 'MethodType', 'BuiltinFunctionType',
+    'BuiltinMethodType', 'WrapperDescriptorType', 'MethodWrapperType',
+    'MethodDescriptorType', 'ClassMethodDescriptorType', 'ModuleType',
+    'TracebackType', 'FrameType', 'GetSetDescriptorType', 'MemberDescriptorType',
+    'new_class', 'resolve_bases', 'prepare_class', 'get_original_bases',
+    'DynamicClassAttribute', 'coroutine', 'GenericAlias', 'UnionType',
+    'EllipsisType', 'NoneType', 'NotImplementedType'
+]
 
 def coroutine(func):
     """Convert a regular generator function to a coroutine."""

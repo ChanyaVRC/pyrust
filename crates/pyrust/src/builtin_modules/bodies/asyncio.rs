@@ -65,7 +65,7 @@ static MONO_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     // Pre-seed the exec namespace with the native bridge helpers so the
     // Python source can call them by bare name (`_step`, `_monotonic`, …).
@@ -92,7 +92,7 @@ pub(crate) fn inject_python_members(
                 .insert(name.to_string(), val.clone());
         }
     }
-    Ok(())
+    Ok(Some(ns.clone()))
 }
 
 /// Coerce a numeric `Value` (the validated `delay` of `sleep`) to `f64`.

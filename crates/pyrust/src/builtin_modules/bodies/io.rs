@@ -64,7 +64,7 @@ const IO_PY_EXPORTS: [&str; 9] = [
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let ns = Value::dict(PyDict::default());
     interp.exec_source(IO_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
@@ -114,7 +114,7 @@ pub(crate) fn inject_python_members(
             }
         }
     }
-    Ok(())
+    Ok(Some(ns.clone()))
 }
 
 // ── sentinel error ────────────────────────────────────────────────────────────

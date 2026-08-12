@@ -50,7 +50,7 @@ static MONO_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let ns = Value::dict(PyDict::default());
     // Pre-seed `namedtuple` from `collections` so the Python source can use it
     // by bare name without a top-level `import` (whose binding does not survive
@@ -74,7 +74,7 @@ pub(crate) fn inject_python_members(
                 .insert(name.to_string(), val.clone());
         }
     }
-    Ok(())
+    Ok(Some(ns.clone()))
 }
 
 /// Fetch `collections.namedtuple` (importing `collections` if needed) so the

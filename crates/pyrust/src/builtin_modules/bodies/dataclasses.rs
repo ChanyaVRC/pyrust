@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::Interpreter;
-use crate::value::PyKey;
+use crate::value::{PyKey, Value};
 use pyrust_derive::pyrust_module;
 
 /// Python-source definitions for every public `dataclasses` member.  Exec'd
@@ -53,7 +53,7 @@ const DATACLASSES_PY_EXPORTS: [&str; 13] = [
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     interp.exec_source(DATACLASSES_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
@@ -67,7 +67,7 @@ pub(crate) fn inject_python_members(
                 .insert(name.to_string(), val.clone());
         }
     }
-    Ok(())
+    Ok(Some(ns.clone()))
 }
 
 pyrust_module! {}

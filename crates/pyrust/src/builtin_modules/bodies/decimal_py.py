@@ -112,41 +112,6 @@ NaN
 >>>
 """
 
-__all__ = [
-    # Two major classes
-    'Decimal', 'Context',
-
-    # Named tuple representation
-    'DecimalTuple',
-
-    # Contexts
-    'DefaultContext', 'BasicContext', 'ExtendedContext',
-
-    # Exceptions
-    'DecimalException', 'Clamped', 'InvalidOperation', 'DivisionByZero',
-    'Inexact', 'Rounded', 'Subnormal', 'Overflow', 'Underflow',
-    'FloatOperation',
-
-    # Exceptional conditions that trigger InvalidOperation
-    'DivisionImpossible', 'InvalidContext', 'ConversionSyntax', 'DivisionUndefined',
-
-    # Constants for use in setting up contexts
-    'ROUND_DOWN', 'ROUND_HALF_UP', 'ROUND_HALF_EVEN', 'ROUND_CEILING',
-    'ROUND_FLOOR', 'ROUND_UP', 'ROUND_HALF_DOWN', 'ROUND_05UP',
-
-    # Functions for manipulating contexts
-    'setcontext', 'getcontext', 'localcontext',
-
-    # Limits for the C version for compatibility
-    'MAX_PREC',  'MAX_EMAX', 'MIN_EMIN', 'MIN_ETINY',
-
-    # C version: compile time choice that enables the thread local context (deprecated, now always true)
-    'HAVE_THREADS',
-
-    # C version: compile time choice that enables the coroutine local context
-    'HAVE_CONTEXTVAR'
-]
-
 __xname__ = __name__    # sys.modules lookup (--without-threads)
 __name__ = 'decimal'    # For pickling
 __version__ = '1.70'    # Highest version of the spec this complies with

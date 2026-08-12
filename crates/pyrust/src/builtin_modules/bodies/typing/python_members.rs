@@ -44,7 +44,7 @@ const TYPING_PY_EXPORTS: &[&str] = &[
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     for name in [
         "Optional", "Union", "Type", "Callable", "ClassVar", "Final", "Literal",
@@ -95,5 +95,5 @@ pub(crate) fn inject_python_members(
                 .insert_attr(name.to_string(), value.clone());
         }
     }
-    Ok(())
+    Ok(Some(ns.clone()))
 }

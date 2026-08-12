@@ -237,7 +237,7 @@ const CONTEXTLIB_PY_EXPORTS: [&str; 7] = [
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let ns = Value::dict(PyDict::default());
     // Seed the exec namespace with the names the Python source references at
     // class-definition time (`ABC`, `abstractmethod`, `wraps`).  pyrust's
@@ -266,7 +266,7 @@ pub(crate) fn inject_python_members(
             }
         }
     }
-    Ok(())
+    Ok(Some(ns.clone()))
 }
 
 /// Import `module_name` and copy the requested attributes into the exec

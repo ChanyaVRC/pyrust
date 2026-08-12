@@ -112,7 +112,7 @@ const DECIMAL_PY_CLASS_NAMES: &[&str] = &[
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let ns = Value::dict(PyDict::default());
     // `decimal_py.py` reads `__name__` (it does `__xname__ = __name__` before
     // overriding `__name__ = 'decimal'`).  The exec namespace has no implicit
@@ -156,7 +156,7 @@ pub(crate) fn inject_python_members(
                 .insert(name.to_string(), val.clone());
         }
     }
-    Ok(())
+    Ok(Some(ns.clone()))
 }
 
 pyrust_module! {}
