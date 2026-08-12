@@ -126,6 +126,13 @@ pub enum BuiltinTypeClassTag {
 #[derive(Debug, Clone)]
 pub struct PyClass {
     pub name: String,
+    /// The exact Python string object last assigned through `type.__name__`.
+    ///
+    /// `name` remains the owned text used by internal diagnostics and runtime
+    /// identity.  This optional value preserves CPython's attribute identity
+    /// for an explicit assignment, including a `str` subclass, without adding
+    /// `__name__` to the class's Python-visible dictionary.
+    pub name_attr: Option<Value>,
     /// Qualified name (e.g. `Outer.Inner` for nested classes).  Exposed as
     /// `C.__qualname__` via the attribute lookup fast-path in `get_attr`; NOT
     /// stored in `attrs` — CPython keeps `__qualname__` as a type-level
@@ -230,6 +237,7 @@ impl Default for PyClass {
     fn default() -> Self {
         PyClass {
             name: String::new(),
+            name_attr: None,
             qualname: String::new(),
             base: None,
             extra_bases: Vec::new(),

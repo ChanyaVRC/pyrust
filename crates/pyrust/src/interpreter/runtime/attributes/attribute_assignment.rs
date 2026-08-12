@@ -370,7 +370,9 @@ impl Interpreter {
         // attrs would leak state across runs.  Match CPython,
         // which raises TypeError on `int.x = 1`.  Copilot
         // review on #463.
-        if crate::interpreter::is_primitive_class(class) {
+        if Rc::ptr_eq(class, &object_class_singleton())
+            || crate::interpreter::is_primitive_class(class)
+        {
             let n = class.borrow().name.clone();
             return Err(pyrust_core::type_err!(
                 "cannot set '{name}' attribute of immutable type '{n}'"
@@ -389,25 +391,18 @@ impl Interpreter {
         // __name__ getter and repr read), not the class attrs dict.
         // CPython requires a str; anything else raises TypeError.
         if name == "__name__" {
-            let as_str: Option<String> = if let ValueKind::Str(s) = value.kind() {
-                Some(s.to_string())
-            } else {
-                None
-            };
-            match as_str {
-                Some(s) => {
-                    class.borrow_mut().name = s;
-                    return Ok(());
-                }
-                None => {
-                    let type_name = pyrust_core::builtin_type_name(&value).into_owned();
-                    return Err(pyrust_core::type_err!(
-                        "can only assign string to {}.__name__, not '{}'",
-                        class.borrow().name,
-                        type_name,
-                    ));
-                }
+            if let Some(text) = class_name_assignment_text(&value) {
+                let mut borrowed = class.borrow_mut();
+                borrowed.name = text;
+                borrowed.name_attr = Some(value);
+                return Ok(());
             }
+            let type_name = pyrust_core::builtin_type_name(&value).into_owned();
+            return Err(pyrust_core::type_err!(
+                "can only assign string to {}.__name__, not '{}'",
+                class.borrow().name,
+                type_name,
+            ));
         }
         // Issue #553: __qualname__ is a type-level descriptor on `type`
         // in CPython — assigning it updates the descriptor slot, not the
@@ -610,4 +605,28 @@ impl Interpreter {
             }
         }
     }
+}
+
+/// Extract the raw Unicode text accepted by `type.__name__` while preserving
+/// provenance: a writable `__builtin_data__` attribute alone must not let an
+/// unrelated instance masquerade as a `str` subclass.
+fn class_name_assignment_text(value: &Value) -> Option<String> {
+    if let ValueKind::Str(text) = value.kind() {
+        return Some(text.to_string());
+    }
+    let instance = match value.kind() {
+        ValueKind::PyInstance(instance) => Rc::clone(instance),
+        _ => return None,
+    };
+    let class = Rc::clone(&instance.borrow().class);
+    let str_class = canonical_class_by_tag(pyrust_core::CanonicalClassTag::Str);
+    if !class_is_subclass_of(&class, &str_class) {
+        return None;
+    }
+    let backing = instance_builtin_data(&instance)?;
+    let text = match backing.kind() {
+        ValueKind::Str(text) => text.to_string(),
+        _ => return None,
+    };
+    Some(text)
 }

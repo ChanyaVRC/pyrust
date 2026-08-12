@@ -6,7 +6,11 @@ impl Interpreter {
     /// descriptors, and the AttributeError fallback.
     fn get_attr_class(&mut self, class: Rc<RefCell<PyClass>>, name: &str) -> Result<Value> {
         if name == "__name__" {
-            return Ok(Value::string(class.borrow().name.clone()));
+            let borrowed = class.borrow();
+            return Ok(borrowed
+                .name_attr
+                .clone()
+                .unwrap_or_else(|| Value::string(borrowed.name.clone())));
         }
         if name == "__qualname__" {
             // __qualname__ is a type-level descriptor on `type` in CPython,
@@ -99,6 +103,22 @@ impl Interpreter {
         }
         if let Some(bound) = bind_builtin_class_special(&class, name) {
             return Ok(bound);
+        }
+        // A metaclass data descriptor has precedence over the class's own
+        // `__module__`.  This must run before the virtual built-in/user-class
+        // metadata path below; non-data descriptors still lose to the class
+        // value and every other metadata attribute keeps its existing path.
+        if name == "__module__"
+            && let Some(meta_val) = metaclass_dunder(&class, name)
+            && is_data_descriptor(&meta_val)
+        {
+            return call_descriptor_get(
+                self,
+                &meta_val,
+                Value::py_class(Rc::clone(&class)),
+                Value::py_class(metaclass_of(&class)),
+                name,
+            );
         }
         // `__module__` and `__doc__` on built-in type objects are virtual
         // attributes supplied by `type`, not entries in the class dictionary.
