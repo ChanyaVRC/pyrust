@@ -29,17 +29,19 @@ pub(crate) enum CanonicalSlot {
     ObjectDir,
     ObjectReduce,
     ObjectReduceEx,
+    BaseExceptionReduceEx,
     TypeInit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CanonicalSlotOwner {
     Object,
+    BaseException,
     Type,
 }
 
 impl CanonicalSlot {
-    const ALL: [Self; 22] = [
+    const ALL: [Self; 23] = [
         Self::ObjectInitSubclass,
         Self::ObjectSubclassHook,
         Self::ObjectGetAttribute,
@@ -61,6 +63,7 @@ impl CanonicalSlot {
         Self::ObjectDir,
         Self::ObjectReduce,
         Self::ObjectReduceEx,
+        Self::BaseExceptionReduceEx,
         Self::TypeInit,
     ];
 
@@ -87,6 +90,7 @@ impl CanonicalSlot {
             | Self::ObjectDir
             | Self::ObjectReduce
             | Self::ObjectReduceEx => CanonicalSlotOwner::Object,
+            Self::BaseExceptionReduceEx => CanonicalSlotOwner::BaseException,
             Self::TypeInit => CanonicalSlotOwner::Type,
         }
     }
@@ -114,6 +118,7 @@ impl CanonicalSlot {
             Self::ObjectDir => "__dir__",
             Self::ObjectReduce => "__reduce__",
             Self::ObjectReduceEx => "__reduce_ex__",
+            Self::BaseExceptionReduceEx => "__reduce_ex__",
             Self::TypeInit => "__init__",
         }
     }
@@ -177,6 +182,19 @@ thread_local! {
         .get(CanonicalSlot::TypeInit.name())
         .cloned()
         .expect("canonical type.__init__ slot must exist");
+
+    /// PyRust supplies an exception-specialised `__reduce_ex__` sentinel on
+    /// `BaseException`; CPython reaches the same behavior through
+    /// `object.__reduce_ex__`. Keep its identity typed so protocol consumers
+    /// can recognise the canonical fallback without decoding a function name.
+    static CANONICAL_BASE_EXCEPTION_REDUCE_EX_VALUE: Value =
+        lookup_exc_class("BaseException")
+            .expect("canonical BaseException class must exist")
+            .borrow()
+            .attrs
+            .get(CanonicalSlot::BaseExceptionReduceEx.name())
+            .cloned()
+            .expect("canonical BaseException.__reduce_ex__ slot must exist");
 }
 
 /// Whether `value` is the callable stored in `slot`'s canonical owner's own
@@ -189,6 +207,8 @@ pub(crate) fn value_is_canonical_slot(value: &Value, slot: CanonicalSlot) -> boo
     match slot.owner() {
         CanonicalSlotOwner::Object => CANONICAL_OBJECT_SLOT_VALUES
             .with(|values| values_are_identical(&values[slot as usize], value)),
+        CanonicalSlotOwner::BaseException => CANONICAL_BASE_EXCEPTION_REDUCE_EX_VALUE
+            .with(|canonical| values_are_identical(canonical, value)),
         CanonicalSlotOwner::Type => {
             CANONICAL_TYPE_INIT_VALUE.with(|canonical| values_are_identical(canonical, value))
         }
@@ -210,6 +230,22 @@ mod canonical_slot_tests {
             .expect("object.__repr__");
         assert!(value_is_canonical_slot(&repr, CanonicalSlot::ObjectRepr));
         assert!(!value_is_canonical_slot(&repr, CanonicalSlot::ObjectStr));
+
+        let base_exception = lookup_exc_class("BaseException").expect("BaseException");
+        let reduce_ex = base_exception
+            .borrow()
+            .attrs
+            .get("__reduce_ex__")
+            .cloned()
+            .expect("BaseException.__reduce_ex__");
+        assert!(value_is_canonical_slot(
+            &reduce_ex,
+            CanonicalSlot::BaseExceptionReduceEx
+        ));
+        assert!(!value_is_canonical_slot(
+            &reduce_ex,
+            CanonicalSlot::ObjectReduceEx
+        ));
 
         let type_class = type_class_singleton();
         let init = type_class

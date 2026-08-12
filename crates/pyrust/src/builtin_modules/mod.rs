@@ -248,7 +248,10 @@ pyrust_builtin_modules! {
     io @inject,
     // `typing` Python-source members (issue #2516) injected via `@inject`.
     typing @inject,
-    copy,
+    // `copy.copy` keeps its native container fast paths. A private injected
+    // Python helper owns the rare staticmethod-reduction reconstruction path
+    // so its observable Python protocol operations match CPython (#2958).
+    copy @inject,
     pathlib,
     // `string`: ASCII character-class constants are native; `capwords`,
     // `Template`, and `Formatter` are injected from `string_py.py` by the

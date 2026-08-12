@@ -575,3 +575,320 @@ show("copy plain", lambda: _copy.copy(CopyPlain()))
 show("deepcopy static/1", lambda: _copy.deepcopy(DeepStatic1()))
 show("deepcopy static/2", lambda: _copy.deepcopy(DeepStatic2()))
 show("deepcopy cls", lambda: _copy.deepcopy(DeepCls()))
+
+
+# `type.__call__` supplies the constructed class explicitly to `__new__`.
+# A classmethod binds that class as well, so its body observes two class args.
+
+
+class NewRegular:
+    def __new__(cls, tag):
+        obj = object.__new__(cls)
+        obj.seen = (cls.__name__, tag)
+        return obj
+
+
+class NewStatic:
+    @staticmethod
+    def __new__(cls, tag):
+        obj = object.__new__(cls)
+        obj.seen = (cls.__name__, tag)
+        return obj
+
+
+class NewClass:
+    @classmethod
+    def __new__(bound_cls, explicit_cls, tag):
+        obj = object.__new__(explicit_cls)
+        obj.seen = (bound_cls.__name__, explicit_cls.__name__, tag)
+        return obj
+
+
+class NewClassChild(NewClass):
+    pass
+
+
+class NewClassArity:
+    @classmethod
+    def __new__(cls):
+        return object.__new__(cls)
+
+
+class NewClassException(Exception):
+    @classmethod
+    def __new__(bound_cls, explicit_cls, tag):
+        obj = super().__new__(explicit_cls, tag)
+        obj.seen = (bound_cls.__name__, explicit_cls.__name__, tag)
+        return obj
+
+
+show("regular __new__ cls", lambda: NewRegular("r").seen)
+show("static __new__ cls", lambda: NewStatic("s").seen)
+show("cls __new__ cls twice", lambda: NewClass("c").seen)
+show("inherited cls __new__ cls twice", lambda: NewClassChild("i").seen)
+show("cls __new__ arity", lambda: NewClassArity())
+show("exception cls __new__ cls twice", lambda: NewClassException("e").seen)
+
+
+# copy.copy reaches a class-level staticmethod __reduce__ through the inherited
+# object.__reduce_ex__(4) fallback. Keep custom __reduce_ex__ outside this
+# issue: the control below asserts only that the narrow shortcut does not steal
+# its precedence.
+
+
+class ReduceTarget:
+    def __init__(self, value):
+        self.value = value
+
+
+class ReduceStatic:
+    @staticmethod
+    def __reduce__():
+        return (ReduceTarget, (7,), {"extra": 8})
+
+
+class ReduceStaticChild(ReduceStatic):
+    pass
+
+
+class ReduceStaticException(Exception):
+    @staticmethod
+    def __reduce__():
+        return "identity"
+
+
+class ReduceIdentity:
+    @staticmethod
+    def __reduce__():
+        return "identity"
+
+
+class ReduceBad:
+    @staticmethod
+    def __reduce__():
+        return 1
+
+
+class RVSame:
+    def __iter__(self):
+        raise TypeError("'RVSame' object is not iterable")
+
+
+class ReduceIterError:
+    @staticmethod
+    def __reduce__():
+        return RVSame()
+
+
+class RVNoneIter:
+    __iter__ = None
+
+
+class ReduceNoneIter:
+    @staticmethod
+    def __reduce__():
+        return RVNoneIter()
+
+
+class ReduceTupleIterator:
+    @staticmethod
+    def __reduce__():
+        return iter((ReduceTarget, (11,), {"extra": 12}))
+
+
+class ReduceGenerator:
+    @staticmethod
+    def __reduce__():
+        return (item for item in (ReduceTarget, (13,), {"extra": 14}))
+
+
+class ReduceBuiltinFunction:
+    @staticmethod
+    def __reduce__():
+        return len
+
+
+async def reduction_coroutine_value():
+    return None
+
+
+async def reduction_async_generator_value():
+    yield None
+
+
+reduction_coroutines = []
+
+
+class ReduceCoroutine:
+    @staticmethod
+    def __reduce__():
+        value = reduction_coroutine_value()
+        reduction_coroutines.append(value)
+        return value
+
+
+class ReduceAsyncGenerator:
+    @staticmethod
+    def __reduce__():
+        return reduction_async_generator_value()
+
+
+class ReductionMeta(type):
+    def __getattribute__(cls, name):
+        if name in {"__mro__", "__dict__", "__name__"}:
+            raise AssertionError(f"metaclass lookup leaked: {name}")
+        return super().__getattribute__(name)
+
+
+class RVMeta(metaclass=ReductionMeta):
+    def __iter__(self):
+        yield from (ReduceTarget, (15,), {"extra": 16})
+
+
+class ReduceMetaIterable:
+    @staticmethod
+    def __reduce__():
+        return RVMeta()
+
+
+class CopyBeforeReduce:
+    @staticmethod
+    def __copy__(obj):
+        return "copy"
+
+    @staticmethod
+    def __reduce__():
+        return "reduce"
+
+
+class NoneCopyBeforeReduce:
+    __copy__ = None
+
+    @staticmethod
+    def __reduce__():
+        return "identity"
+
+
+class ReduceExNone:
+    __reduce_ex__ = None
+
+    @staticmethod
+    def __reduce__():
+        return "identity"
+
+
+class ReduceExStaticNone:
+    __reduce_ex__ = staticmethod(None)
+
+    @staticmethod
+    def __reduce__():
+        return "identity"
+
+
+reduce_precedence_events = []
+
+
+class ReduceExPrecedence:
+    def __reduce_ex__(self, protocol):
+        reduce_precedence_events.append("reduce_ex")
+        return "custom"
+
+    @staticmethod
+    def __reduce__():
+        reduce_precedence_events.append("static")
+        return "static"
+
+
+def copied_static_reduce(cls):
+    obj = _copy.copy(cls())
+    return (type(obj).__name__, obj.value, obj.extra)
+
+
+def static_reduce_identity():
+    obj = ReduceIdentity()
+    return _copy.copy(obj) is obj
+
+
+def exception_static_reduce_identity():
+    obj = ReduceStaticException("value")
+    return _copy.copy(obj) is obj
+
+
+def reduction_error_details(cls):
+    try:
+        _copy.copy(cls())
+    except TypeError as error:
+        return (str(error), error.__context__ is None)
+
+
+def custom_reduce_ex_keeps_precedence():
+    reduce_precedence_events.clear()
+    _copy.copy(ReduceExPrecedence())
+    return "static" not in reduce_precedence_events
+
+
+def none_copy_falls_through():
+    obj = NoneCopyBeforeReduce()
+    return _copy.copy(obj) is obj
+
+
+def reduce_ex_none_falls_through(cls):
+    obj = cls()
+    return _copy.copy(obj) is obj
+
+
+def explicit_static_reduce():
+    return (ReduceTarget, (9,), {"extra": 10})
+
+
+class ReduceStaticExplicit:
+    __reduce__ = staticmethod(explicit_static_reduce)
+
+
+show("copy static __reduce__ reconstruct", lambda: copied_static_reduce(ReduceStatic))
+show(
+    "copy inherited static __reduce__ reconstruct",
+    lambda: copied_static_reduce(ReduceStaticChild),
+)
+show(
+    "copy exception static __reduce__ identity",
+    exception_static_reduce_identity,
+)
+show("copy static __reduce__ identity", static_reduce_identity)
+show("copy static __reduce__ malformed", lambda: reduction_error_details(ReduceBad))
+show("copy static __reduce__ iterator error", lambda: reduction_error_details(ReduceIterError))
+show("copy static __reduce__ None iter", lambda: reduction_error_details(ReduceNoneIter))
+show("copy static __reduce__ tuple iterator", lambda: copied_static_reduce(ReduceTupleIterator))
+show("copy static __reduce__ generator", lambda: copied_static_reduce(ReduceGenerator))
+show(
+    "copy static __reduce__ builtin function",
+    lambda: reduction_error_details(ReduceBuiltinFunction),
+)
+show(
+    "copy static __reduce__ coroutine",
+    lambda: reduction_error_details(ReduceCoroutine),
+)
+reduction_coroutines.pop().close()
+show(
+    "copy static __reduce__ async generator",
+    lambda: reduction_error_details(ReduceAsyncGenerator),
+)
+show(
+    "copy static __reduce__ metaclass iterable",
+    lambda: copied_static_reduce(ReduceMetaIterable),
+)
+show("copy __copy__ before static __reduce__", lambda: _copy.copy(CopyBeforeReduce()))
+show("copy None __copy__ falls through", none_copy_falls_through)
+show(
+    "copy None __reduce_ex__ falls through",
+    lambda: reduce_ex_none_falls_through(ReduceExNone),
+)
+show(
+    "copy static None __reduce_ex__ falls through",
+    lambda: reduce_ex_none_falls_through(ReduceExStaticNone),
+)
+show("copy custom __reduce_ex__ precedence", custom_reduce_ex_keeps_precedence)
+show(
+    "copy explicit static __reduce__ reconstruct",
+    lambda: copied_static_reduce(ReduceStaticExplicit),
+)
