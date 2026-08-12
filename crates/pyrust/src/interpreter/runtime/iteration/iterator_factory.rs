@@ -243,12 +243,14 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                     &[],
                 )?;
                 validate_iterator_result(iter_obj)
-            } else if let Some(backing) = instance_builtin_data(&inst_rc) {
+            } else if let Some(backing) = effective_builtin_receiver(v, &[]) {
                 // Builtin subclasses inherit the primitive's iterator slot,
                 // but store that primitive in `__builtin_data__`.  Keep the
-                // classification here, beside the primitive path below, so
-                // every consumer of `make_iterator` gets the same lazy source,
-                // type name, and mutation guard as the `iter()` builtin.
+                // ancestry-validated classification here, beside the primitive
+                // path below, so every consumer of `make_iterator` gets the
+                // same lazy source, type name, and mutation guard as the
+                // `iter()` builtin.  Validation prevents a plain instance from
+                // forging this writable implementation detail (#2975).
                 let ordered_policy = backing
                     .is_dict()
                     .then(|| pyrust_builtins::ordered_mapping::class_policy(&class))

@@ -200,9 +200,11 @@ impl Interpreter {
                 .filter(|method| !is_inherited_builtin_iter_sentinel(&class, method));
 
             // A primitive subclass without a user override iterates its backing
-            // value. Preserve the carrier class name in not-iterable errors.
+            // value. Validate the class/backing relationship because
+            // `__builtin_data__` is writable by Python code (#2975). Preserve
+            // the carrier class name in not-iterable errors.
             if user_iter.is_none()
-                && let Some(backing) = builtin_data_backing(val)
+                && let Some(backing) = effective_builtin_receiver(val, &[])
             {
                 return self.collect_iterable(&backing).map_err(|error| {
                     if error.class_name_is("TypeError") {

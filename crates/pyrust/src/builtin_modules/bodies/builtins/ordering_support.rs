@@ -93,17 +93,53 @@ fn min_max_impl(
     {
         return output;
     }
+    if positional.len() > 1 && default_value.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            format!("Cannot specify a default for {fn_name}() with multiple positional arguments"),
+        ));
+    }
+    if let Some(key_fn) = key_fn.as_ref()
+        && positional.len() == 1
+    {
+        let mut iterator = ConsumerIterator::new(interp, &positional[0].value)?;
+        let Some(mut best_value) = iterator.next(interp)? else {
+            if let Some(default) = default_value {
+                return Ok(default);
+            }
+            return Err(PyError::named(
+                "ValueError",
+                format!("{fn_name}() iterable argument is empty"),
+            ));
+        };
+        let mut best_key = interp.call_function_expanded(
+            key_fn.clone(),
+            &[ExpandedCallArg {
+                name: None,
+                value: best_value.clone(),
+            }],
+        )?;
+        while let Some(candidate_value) = iterator.next(interp)? {
+            let candidate_key = interp.call_function_expanded(
+                key_fn.clone(),
+                &[ExpandedCallArg {
+                    name: None,
+                    value: candidate_value.clone(),
+                }],
+            )?;
+            let ordering = min_max_compare(interp, &candidate_key, &best_key, is_max)?;
+            if (is_max && ordering == std::cmp::Ordering::Greater)
+                || (!is_max && ordering == std::cmp::Ordering::Less)
+            {
+                best_key = candidate_key;
+                best_value = candidate_value;
+            }
+        }
+        return Ok(best_value);
+    }
     let items = if positional.len() == 1 {
         interp.collect_iterable(&positional[0].value)?
     } else {
-        if default_value.is_some() {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "Cannot specify a default for {fn_name}() with multiple positional arguments"
-                ),
-            ));
-        }
         positional.iter().map(|arg| arg.value.clone()).collect()
     };
     if items.is_empty() {
