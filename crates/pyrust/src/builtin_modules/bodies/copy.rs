@@ -36,9 +36,42 @@ use crate::error::{PyError, Result};
 use crate::interpreter::{
     ExpandedCallArg, invoke_class_method, is_exception_class, key_to_value, lookup_class_attr,
 };
-use crate::value::{InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, PySet, Value, ValueKind};
+use crate::value::{
+    InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, PyModule, PySet, Value, ValueKind,
+};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
+
+const COPY_PY_SOURCE: &str = include_str!("copy_py.py");
+
+/// Bind the native `copy` fast path to this import generation's private
+/// Python reconstruction helper. The helper stays out of the public module
+/// namespace and is supplied as a hidden receiver on each `copy()` call.
+pub(crate) fn inject_python_members(
+    interp: &mut crate::interpreter::Interpreter,
+    module: &Rc<RefCell<PyModule>>,
+) -> Result<Option<Value>> {
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
+    interp.exec_source(COPY_PY_SOURCE, Some(ns.clone()), None)?;
+    let helper = ns
+        .dict_with(|dict| dict.get(&PyKey::str_from("_reconstruct_shallow")).cloned())
+        .flatten()
+        .ok_or_else(|| PyError::Runtime("copy: reconstruction helper missing".into()))?;
+    let native_copy = module
+        .borrow()
+        .attrs
+        .get("copy")
+        .cloned()
+        .ok_or_else(|| PyError::Runtime("copy: native copy function missing".into()))?;
+    let copy = pyrust_builtins::native_builtin_callable::native_generation_builtin(
+        native_copy,
+        helper,
+        "copy",
+        "copy",
+    );
+    module.borrow_mut().insert_attr("copy".to_string(), copy);
+    Ok(Some(ns))
+}
 
 // ── copy.Error class generations ──────────────────────────────────────────────
 
@@ -101,14 +134,20 @@ pyrust_module! {
     /// (`__getstate__` / `__setstate__`).
     /// <https://docs.python.org/3/library/copy.html#copy.copy>
     fn copy(args) -> Result<Value> {
-        if args.len() != 1 {
+        // The injected public callable supplies its private reconstruction
+        // helper as args[0]; only the remaining arguments are user-visible.
+        if args.len() != 2 {
             return Err(PyError::named(
                 "TypeError",
-                format!("{FN_NAME}() takes exactly 1 argument ({} given)", args.len()),
+                format!(
+                    "{FN_NAME}() takes exactly 1 argument ({} given)",
+                    args.len().saturating_sub(1)
+                ),
             ));
         }
-        let obj = args[0].value.clone();
-        shallow_copy(obj, _interp)
+        let reconstruct = args[0].value.clone();
+        let obj = args[1].value.clone();
+        shallow_copy_with_reconstruct(obj, Some(&reconstruct), _interp)
     }
 
     /// CPython: copy.deepcopy(x, memo=None) — deep copy.
@@ -326,7 +365,11 @@ fn copy_exception(
 
 /// Produce a shallow copy of `obj`.  Immutable types are returned as-is;
 /// mutable containers get a new top-level allocation with shared elements.
-fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Result<Value> {
+fn shallow_copy_with_reconstruct(
+    obj: Value,
+    reconstruct: Option<&Value>,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<Value> {
     match obj.kind() {
         // Immutable scalars — return the same value.
         ValueKind::None
@@ -403,7 +446,11 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
                 drop(borrow);
                 lookup_class_attr(&class, "__copy__")
             };
-            if let Some(method) = copy_method {
+            if let Some(method) = copy_method.filter(|method| {
+                !method.is_none()
+                    && !pyrust_builtins::classmethod::as_static_method_any(method)
+                        .is_some_and(|wrapped| wrapped.is_none())
+            }) {
                 // Call `__copy__(self)` — use invoke_class_method so that
                 // UserFunction and BuiltinFunction are both handled and
                 // `self` is bound via the bound_prefix slot.
@@ -434,6 +481,24 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
                 } else {
                     invoke_class_method(interp, method, instance, &[])
                 }
+            } else if let Some(reconstruct) = reconstruct
+                && let Some(reduce_method) = static_reduce_method(&rc)
+            {
+                let instance = Value::py_instance(Rc::clone(&rc));
+                let reduction = invoke_class_method(interp, reduce_method, instance.clone(), &[])?;
+                interp.call_function_expanded(
+                    reconstruct.clone(),
+                    &[
+                        ExpandedCallArg {
+                            name: None,
+                            value: instance,
+                        },
+                        ExpandedCallArg {
+                            name: None,
+                            value: reduction,
+                        },
+                    ],
+                )
             } else if is_exception_class(&rc.borrow().class) {
                 // #2360 / #2361: exceptions copy via their `__reduce__` value —
                 // reconstruct `type(*args)` and re-apply the non-slot state.
@@ -453,6 +518,64 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
         // define __copy__ (they are returned unchanged).
         _ => Ok(obj.clone()),
     }
+}
+
+/// Preserve the pre-#2958 shallow-copy implementation for recursive storage
+/// detachment, which never needs the module-generation reconstruction helper.
+fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Result<Value> {
+    shallow_copy_with_reconstruct(obj, None, interp)
+}
+
+/// Return the class-level staticmethod `__reduce__` only when the inherited
+/// canonical object reducer is unquestionably the active `__reduce_ex__`.
+/// Custom instance hooks and `__getattribute__` stay on the pre-existing
+/// fallback path tracked by #2953.
+fn static_reduce_method(instance: &Rc<RefCell<PyInstance>>) -> Option<Value> {
+    let class = Rc::clone(&instance.borrow().class);
+    {
+        let instance = instance.borrow();
+        if instance.attrs.get("__reduce__").is_some() {
+            return None;
+        }
+        if instance
+            .attrs
+            .get("__reduce_ex__")
+            .is_some_and(|method| !method.is_none())
+        {
+            return None;
+        }
+    }
+    if lookup_class_attr(&class, "__getattribute__").is_some_and(|method| {
+        !crate::interpreter::value_is_canonical_slot(
+            &method,
+            crate::interpreter::CanonicalSlot::ObjectGetAttribute,
+        )
+    }) {
+        return None;
+    }
+    let reduce_ex_falls_through = lookup_class_attr(&class, "__reduce_ex__").is_none_or(|method| {
+        method.is_none()
+            || pyrust_builtins::classmethod::as_static_method_any(&method)
+                .is_some_and(|wrapped| wrapped.is_none())
+            || crate::interpreter::value_is_canonical_slot(
+                &method,
+                crate::interpreter::CanonicalSlot::ObjectReduceEx,
+            )
+            || crate::interpreter::value_is_canonical_slot(
+                &method,
+                crate::interpreter::CanonicalSlot::BaseExceptionReduceEx,
+            )
+    });
+    if !reduce_ex_falls_through {
+        return None;
+    }
+    lookup_class_attr(&class, "__reduce__").filter(|method| {
+        matches!(
+            method.kind(),
+            ValueKind::UserFunction(function)
+                if function.kind == pyrust_core::UserFunctionKind::StaticMethod
+        ) || pyrust_builtins::classmethod::as_static_method_any(method).is_some()
+    })
 }
 
 /// Default shallow-copy path for an instance: capture state, build a bare

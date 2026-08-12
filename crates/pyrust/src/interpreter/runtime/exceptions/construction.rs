@@ -30,15 +30,7 @@ impl Interpreter {
             None
         };
         if let Some(new_val) = user_new {
-            let func = match new_val.kind() {
-                ValueKind::UserFunction(f) => Rc::clone(f),
-                _ => unreachable!(),
-            };
-            let new_result = self.call_user_function_expanded(
-                func,
-                args,
-                &[Value::py_class(Rc::clone(&class))],
-            )?;
+            let new_result = self.call_user_new_expanded(&class, new_val, args)?;
             // After __new__, call __init__ only if the result is an instance
             // of cls (CPython parity).
             if let ValueKind::PyInstance(inst_rc) = new_result.kind() {

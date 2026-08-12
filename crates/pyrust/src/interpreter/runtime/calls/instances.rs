@@ -4,6 +4,33 @@
 // constructors and index/sequence protocols live in their own modules.
 
 impl Interpreter {
+    /// Invoke a Python-defined `__new__` with the explicit class supplied by
+    /// `type.__call__`. A classmethod additionally binds that same class, so
+    /// its underlying function receives the class twice (#2958).
+    pub(crate) fn call_user_new_expanded(
+        &mut self,
+        class: &Rc<RefCell<PyClass>>,
+        new_val: Value,
+        args: &[ExpandedCallArg],
+    ) -> Result<Value> {
+        let ValueKind::UserFunction(function) = new_val.kind() else {
+            unreachable!("call_user_new_expanded requires UserFunction")
+        };
+        let function = Rc::clone(function);
+        let class_value = Value::py_class(Rc::clone(class));
+        if function.kind == pyrust_core::UserFunctionKind::ClassMethod {
+            let mut explicit_args = ExpandedArgBuf::with_capacity(args.len() + 1);
+            explicit_args.push(ExpandedCallArg {
+                name: None,
+                value: class_value.clone(),
+            });
+            explicit_args.extend(args.iter().cloned());
+            invoke_class_method(self, new_val, class_value, &explicit_args)
+        } else {
+            self.call_user_function_expanded(function, args, &[class_value])
+        }
+    }
+
     pub(crate) fn call_class_expanded(
         &mut self,
         class: Rc<RefCell<PyClass>>,
@@ -111,14 +138,8 @@ impl Interpreter {
         if has_user_new {
             let new_val = mro_new.unwrap();
             let new_result = match new_val.kind() {
-                ValueKind::UserFunction(function) => {
-                    let func = Rc::clone(function);
-                    // Prepend `cls` as the first positional arg.
-                    self.call_user_function_expanded(
-                        func,
-                        args,
-                        &[Value::py_class(Rc::clone(&class))],
-                    )?
+                ValueKind::UserFunction(_) => {
+                    self.call_user_new_expanded(&class, new_val.clone(), args)?
                 }
                 ValueKind::BuiltinFunction(_) => {
                     let mut combined: ExpandedArgBuf =
