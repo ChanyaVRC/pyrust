@@ -378,7 +378,9 @@ impl Interpreter {
         {
             return Err(error);
         }
-        if crate::interpreter::is_primitive_class(class) {
+        if Rc::ptr_eq(class, &object_class_singleton())
+            || crate::interpreter::is_primitive_class(class)
+        {
             let class_name = class.borrow().name.clone();
             return Err(pyrust_core::type_err!(
                 "cannot set '{name}' attribute of immutable type '{class_name}'"
@@ -392,12 +394,12 @@ impl Interpreter {
                 "attribute '__dict__' of 'type' objects is not writable"
             ));
         }
-        // Issue #553: __qualname__ is a type-level descriptor on `type`
-        // in CPython — you cannot delete it.  CPython raises TypeError.
-        if name == "__qualname__" {
+        // Class metadata is implemented by type-level descriptors in CPython.
+        // None of these four slots can be deleted, even on a mutable heap type.
+        if matches!(name, "__module__" | "__name__" | "__qualname__" | "__doc__") {
             let n = class.borrow().name.clone();
             return Err(pyrust_core::type_err!(
-                "cannot delete '__qualname__' attribute of immutable type '{n}'"
+                "cannot delete '{name}' attribute of immutable type '{n}'"
             ));
         }
         // Issue #737: `del Cls.__annotations__` must raise
