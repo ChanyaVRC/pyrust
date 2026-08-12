@@ -7,6 +7,7 @@ impl Interpreter {
         local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
         fn_name: std::sync::Arc<str>,
         qualname: std::sync::Arc<str>,
+        is_iterable_coroutine: bool,
     ) -> Value {
         let num_iters = code.num_iters as usize;
         let is_coroutine = code.is_coroutine;
@@ -43,6 +44,12 @@ impl Interpreter {
         // tracebacks and `co_name`; the cell owns the writable `__name__` /
         // `__qualname__` pair, which CPython likewise lets a user reassign
         // without disturbing the code object.
-        Value::generator_frame(Box::new(frame), kind, fn_name, qualname)
+        Value::generator_frame(
+            Box::new(frame),
+            kind,
+            fn_name,
+            qualname,
+            is_iterable_coroutine,
+        )
     }
 }

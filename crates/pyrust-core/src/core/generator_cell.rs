@@ -64,6 +64,10 @@ pub struct GeneratorNames {
 pub struct GeneratorCell {
     state: RefCell<Box<dyn Any>>,
     kind: GeneratorKind,
+    /// Whether a plain generator may participate in the legacy await
+    /// protocol (`types.coroutine`).  Fixed when the activation is created,
+    /// just like `kind`, so it remains readable while the frame is running.
+    iterable_coroutine: bool,
     /// `None` for built-in iterators, which expose no `__name__`.
     names: RefCell<Option<GeneratorNames>>,
 }
@@ -72,6 +76,11 @@ impl GeneratorCell {
     /// The immutable Python type tag.
     pub fn kind(&self) -> GeneratorKind {
         self.kind
+    }
+
+    /// Whether this activation carries `CO_ITERABLE_COROUTINE` semantics.
+    pub fn is_iterable_coroutine(&self) -> bool {
+        self.iterable_coroutine
     }
 
     /// The Python-visible `__name__`, or `None` for a built-in iterator.

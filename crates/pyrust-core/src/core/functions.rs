@@ -186,6 +186,12 @@ pub struct UserFunction {
     /// for all-integer arguments and a scalar result (issue #2523).  Copied from
     /// the function's `FnProto::is_memo_pure`.
     pub is_memo_pure: bool,
+    /// `types.coroutine` marks a generator *function* in place while returning
+    /// that exact function object.  The marker belongs to this function
+    /// instance rather than its shared compiled code: CPython replaces only
+    /// the decorated function's `__code__`, so sibling closures compiled from
+    /// the same prototype must remain ordinary generators.
+    pub iterable_coroutine: std::cell::Cell<bool>,
     pub precompiled_code: Option<Rc<dyn Any>>,
     /// When `kind` is `StaticMethod` or `ClassMethod`, holds the original
     /// wrapped function `Rc` so that `sm.__func__` can return the exact same

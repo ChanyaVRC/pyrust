@@ -26,9 +26,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::Interpreter;
-use crate::interpreter::{function_type_singleton, method_type_singleton, primitive_class_by_name};
-use crate::value::{PyKey, Value};
+use crate::interpreter::builtin_args::PyValue;
+use crate::interpreter::{
+    ExpandedCallArg, Interpreter, function_type_singleton, method_type_singleton,
+    primitive_class_by_name,
+};
+use crate::value::{GeneratorKind, PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 /// Python-source helpers and `SimpleNamespace`, injected at first import.
@@ -42,6 +45,8 @@ const TYPES_PY_EXPORTS: &[&str] = &[
     "prepare_class",
     "get_original_bases",
     "DynamicClassAttribute",
+    "coroutine",
+    "_GeneratorWrapper",
 ];
 
 /// `Value` for the `function` type singleton (`type(lambda: 0)`).  Used for
@@ -165,6 +170,43 @@ pyrust_module! {
             Value::not_implemented(),
         ),
     }
+
+    /// Set the runtime equivalent of CPython's CO_ITERABLE_COROUTINE bit on
+    /// one exact user-function object. The Python `coroutine` helper performs
+    /// the public callable/code/generator validation before reaching here.
+    #[arity_style(takes_exactly_one)]
+    fn _mark_iterable_coroutine(#[positional_only] func: PyValue) -> Result<Value> {
+        if let ValueKind::UserFunction(function) = func.0.kind() {
+            function.iterable_coroutine.set(true);
+        }
+        Ok(func.0)
+    }
+
+    /// True only for a generator activation carrying the marker snapshotted
+    /// from its decorated function. Used by the Python wrapper path to return
+    /// already-marked generator results unchanged.
+    #[arity_style(takes_exactly_one)]
+    fn _is_iterable_coroutine(#[positional_only] value: PyValue) -> Result<Value> {
+        let marked = match value.0.kind() {
+            ValueKind::Generator(cell) => cell.is_iterable_coroutine(),
+            _ => false,
+        };
+        Ok(Value::bool_(marked))
+    }
+
+    /// Refine the broad `collections.abc.Generator` check used by the Python
+    /// helper. PyRust stores built-in iterators, generators, coroutines, and
+    /// async generators in `ValueKind::Generator`; only a real plain generator
+    /// belongs on CPython's `_GeneratorWrapper` path. User-defined protocol
+    /// objects remain eligible and are filtered by the ABC checks in Python.
+    #[arity_style(takes_exactly_one)]
+    fn _is_generator_wrapper_candidate(#[positional_only] value: PyValue) -> Result<Value> {
+        let candidate = match value.0.kind() {
+            ValueKind::Generator(cell) => cell.kind() == GeneratorKind::Generator,
+            _ => true,
+        };
+        Ok(Value::bool_(candidate))
+    }
 }
 
 /// Execute `TYPES_PY_SOURCE` once and copy its public names onto the module's
@@ -175,6 +217,26 @@ pub(crate) fn inject_python_members(
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<()> {
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
+    // The Python implementation deliberately delays its imports until the
+    // decorator is called. Seed only the native types/bridges it closes over;
+    // the helper builtins are removed from the public module after exec.
+    for name in [
+        "FunctionType",
+        "CodeType",
+        "GeneratorType",
+        "CoroutineType",
+        "_mark_iterable_coroutine",
+        "_is_iterable_coroutine",
+        "_is_generator_wrapper_candidate",
+    ] {
+        let value = module
+            .borrow()
+            .attrs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| PyError::Runtime(format!("types: missing seed {name}")))?;
+        ns.dict_insert(PyKey::str_from(name), value)?;
+    }
     interp.exec_source(TYPES_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
@@ -185,6 +247,7 @@ pub(crate) fn inject_python_members(
                 class.borrow_mut().error_name = Some(match *name {
                     "SimpleNamespace" => "types.SimpleNamespace",
                     "DynamicClassAttribute" => "types.DynamicClassAttribute",
+                    "_GeneratorWrapper" => "types._GeneratorWrapper",
                     _ => unreachable!("only Python class exports have error names"),
                 });
             }
@@ -194,5 +257,9 @@ pub(crate) fn inject_python_members(
                 .insert(name.to_string(), val.clone());
         }
     }
+    let mut module = module.borrow_mut();
+    module.attrs.shift_remove("_mark_iterable_coroutine");
+    module.attrs.shift_remove("_is_iterable_coroutine");
+    module.attrs.shift_remove("_is_generator_wrapper_candidate");
     Ok(())
 }

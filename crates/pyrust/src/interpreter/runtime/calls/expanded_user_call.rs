@@ -381,6 +381,7 @@ impl Interpreter {
                         Rc::clone(&function.local_index),
                         std::sync::Arc::from(&function.name[..]),
                         gen_qualname,
+                        function.iterable_coroutine.get(),
                     ));
                 }
 

@@ -19,6 +19,9 @@ pub const CO_NEWLOCALS: i64 = 0x0002;
 pub const CO_VARARGS: i64 = 0x0004;
 pub const CO_VARKEYWORDS: i64 = 0x0008;
 pub const CO_GENERATOR: i64 = 0x0020;
+pub const CO_COROUTINE: i64 = 0x0080;
+pub const CO_ITERABLE_COROUTINE: i64 = 0x0100;
+pub const CO_ASYNC_GENERATOR: i64 = 0x0200;
 
 /// Backing state for a `code` object.
 pub struct CodeState {
@@ -45,8 +48,8 @@ pub struct CodeState {
     /// are excluded (they appear in `co_cellvars`).
     pub varnames: Value,
     /// `co_flags` — the standard CPython flag bitmask (best-effort: the
-    /// `CO_OPTIMIZED`/`CO_NEWLOCALS`/`CO_VARARGS`/`CO_VARKEYWORDS`/`CO_GENERATOR`
-    /// bits pyrust can determine from the function signature/body).
+    /// `CO_OPTIMIZED`/`CO_NEWLOCALS`/`CO_VARARGS`/`CO_VARKEYWORDS` plus the
+    /// generator/coroutine bits pyrust can determine from the function body).
     pub flags: i64,
     /// `co_filename` — path to the source file the code was compiled from,
     /// or `"<unknown>"` when not available (e.g. REPL).
