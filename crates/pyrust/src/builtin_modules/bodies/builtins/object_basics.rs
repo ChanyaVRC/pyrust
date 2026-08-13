@@ -499,10 +499,12 @@ pyrust_module! {
         let has_extra_args = args.len() > 1 || args.iter().skip(1).any(|a| a.name.is_some());
         if has_extra_args {
             let new_val = lookup_class_attr(&class_rc, "__new__");
-            let has_custom_new = matches!(
-                new_val.as_ref().map(|v| v.kind()),
-                Some(ValueKind::UserFunction(_))
-            );
+            let has_custom_new = new_val.as_ref().is_some_and(|value| {
+                !crate::interpreter::value_is_canonical_slot(
+                    value,
+                    crate::interpreter::CanonicalSlot::ObjectNew,
+                )
+            });
             // Exception subclasses are special: CPython's BaseException.__new__
             // (BaseException_new in Objects/exceptions.c) accepts extra args and
             // stores them as .args.  In pyrust there is no separate

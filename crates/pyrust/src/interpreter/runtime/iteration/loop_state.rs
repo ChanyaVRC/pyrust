@@ -127,7 +127,7 @@ impl Interpreter {
             BigRange(PyBigInt, PyBigInt, PyBigInt),
             Generator,
             Instance(Rc<RefCell<PyInstance>>),
-            Metaclass(Value),
+            Metaclass(Rc<RefCell<PyClass>>),
             BuiltinIterator,
             IndexedValue,
             Other,
@@ -140,10 +140,12 @@ impl Interpreter {
             }
             ValueKind::Generator(_) => IterKind::Generator,
             ValueKind::PyInstance(instance) => IterKind::Instance(Rc::clone(instance)),
-            ValueKind::PyClass(class) => metaclass_dunder_for_call(class, "__iter__")
-                .transpose()?
-                .map(IterKind::Metaclass)
-                .unwrap_or(IterKind::Other),
+            ValueKind::PyClass(class)
+                if metaclass_dunder(class, "__iter__").is_some()
+                    || metaclass_dunder(class, "__getitem__").is_some() =>
+            {
+                IterKind::Metaclass(Rc::clone(class))
+            }
             ValueKind::BuiltinObject { ops, .. } if ops.is_iterator() => IterKind::BuiltinIterator,
             ValueKind::List(_) | ValueKind::Tuple(_) => IterKind::IndexedValue,
             _ => IterKind::Other,
@@ -184,10 +186,28 @@ impl Interpreter {
                 pos: 0,
             }),
             IterKind::Instance(instance) => self.make_instance_loop_state(source, instance),
-            IterKind::Metaclass(iter_fn) => {
-                let iterator = invoke_class_method(self, iter_fn, source, &[])?;
-                Ok(IterState::UserDefined(validate_iterator_result(iterator)?))
-            }
+            IterKind::Metaclass(class) => match resolve_metaclass_iter_slot(self, &class)? {
+                ResolvedIterSlot::Iterator(iterator) => {
+                    Ok(IterState::UserDefined(validate_iterator_result(iterator)?))
+                }
+                ResolvedIterSlot::LookupFailed | ResolvedIterSlot::Missing => {
+                    let getitem = metaclass_dunder_for_call(&class, "__getitem__").transpose()?;
+                    match resolve_iter_fallback(&source, getitem)? {
+                        IterFallback::GetItem(method) => Ok(IterState::UserDefined(
+                            make_getitem_iterator(source, method),
+                        )),
+                        IterFallback::Missing => Err(pyrust_core::type_err!(
+                            "'{}' object is not iterable",
+                            value_type_name_str(&source)
+                        )),
+                        IterFallback::NativeBacking(_) => unreachable!(),
+                    }
+                }
+                ResolvedIterSlot::NonIterable => Err(pyrust_core::type_err!(
+                    "'{}' object is not iterable",
+                    value_type_name_str(&source)
+                )),
+            },
             IterKind::BuiltinIterator => {
                 if pyrust_builtins::bytearray::iter_elements(&source).is_some() {
                     Ok(IterState::Materialized(iter_values(&source)?, 0))
@@ -205,18 +225,40 @@ impl Interpreter {
         instance: Rc<RefCell<PyInstance>>,
     ) -> Result<IterState> {
         let class = Rc::clone(&instance.borrow().class);
-        if let Some(iter_method) = effective_user_iter(&class, &instance) {
-            let iterator = invoke_class_method(
-                self,
-                iter_method,
-                Value::py_instance(Rc::clone(&instance)),
-                &[],
-            )?;
-            let iterator = validate_iterator_result(iterator)?;
-            return Ok(IterState::UserDefined(iterator));
-        }
+        let iter_method = effective_user_iter(&class, &instance);
+        let lookup_failed_backing = match resolve_instance_iter_slot(self, &instance, iter_method)?
+        {
+            ResolvedIterSlot::Iterator(iterator) => {
+                let iterator = validate_iterator_result(iterator)?;
+                return Ok(IterState::UserDefined(iterator));
+            }
+            ResolvedIterSlot::LookupFailed => {
+                let getitem = lookup_class_attr(&class, "__getitem__");
+                match resolve_iter_fallback(&source, getitem)? {
+                    IterFallback::GetItem(method) => {
+                        return Ok(IterState::UserDefined(make_getitem_iterator(
+                            source, method,
+                        )));
+                    }
+                    IterFallback::NativeBacking(backing) => Some(backing),
+                    IterFallback::Missing => {
+                        return Err(pyrust_core::type_err!(
+                            "'{}' object is not iterable",
+                            class.borrow().name
+                        ));
+                    }
+                }
+            }
+            ResolvedIterSlot::NonIterable => {
+                return Err(pyrust_core::type_err!(
+                    "'{}' object is not iterable",
+                    class.borrow().name
+                ));
+            }
+            ResolvedIterSlot::Missing => None,
+        };
 
-        if let Some(backing) = instance_builtin_data(&instance) {
+        if let Some(backing) = lookup_failed_backing.or_else(|| instance_builtin_data(&instance)) {
             if matches!(backing.kind(), ValueKind::List(_) | ValueKind::Tuple(_)) {
                 return Ok(IterState::ValueIndexed {
                     value: backing,

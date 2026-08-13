@@ -274,6 +274,42 @@ pub(crate) fn value_needs_slow_hash(v: &Value) -> bool {
     false
 }
 
+fn invoke_instance_hash_slot(
+    interp: &mut Interpreter,
+    hash_method: Value,
+    receiver: Value,
+    class: &Rc<RefCell<PyClass>>,
+) -> Result<Value> {
+    let unhashable = || {
+        let class_name = pyrust_core::error_type_name(&receiver);
+        pyrust_core::type_err!("unhashable type: '{class_name}'")
+    };
+    match bind_class_level_method_wrapper(&hash_method, class) {
+        Ok(Some(bound)) => {
+            if bound.is_none() {
+                return Err(unhashable());
+            }
+            return call_slot_value_unbound(interp, bound, &[]);
+        }
+        Ok(None) => {}
+        Err(_) => return Err(unhashable()),
+    }
+    if !slot_supports_descriptor_get(&hash_method) {
+        return invoke_class_method(interp, hash_method, receiver, &[]);
+    }
+
+    let owner = Value::py_class(Rc::clone(class));
+    let bound = match call_descriptor_get(interp, &hash_method, receiver.clone(), owner, "__hash__")
+    {
+        Ok(bound) => bound,
+        Err(_) => return Err(unhashable()),
+    };
+    if bound.is_none() {
+        return Err(unhashable());
+    }
+    call_slot_value_unbound(interp, bound, &[])
+}
+
 pub(crate) fn hash_value_with_interp(
     interp: &mut crate::Interpreter,
     value: &Value,
@@ -391,8 +427,12 @@ pub(crate) fn hash_value_with_interp(
                         format!("unhashable type: '{class_name}'"),
                     ));
                 }
-                let result =
-                    invoke_class_method(interp, hash_method, Value::py_instance(inst_rc), &[])?;
+                let result = invoke_instance_hash_slot(
+                    interp,
+                    hash_method,
+                    Value::py_instance(inst_rc),
+                    &class,
+                )?;
                 // CPython's slot_tp_hash semantics (issue #503):
                 // - Int: apply only the `-1 → -2` sentinel remap.
                 // - BigInt: apply Mersenne-prime reduction (long_hash).

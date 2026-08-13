@@ -67,6 +67,30 @@ pub(crate) fn slot_is_descriptor(v: &Value) -> bool {
     }
 }
 
+/// Whether `call_descriptor_get` owns binding for this resolved slot value.
+///
+/// Generic operator dispatch intentionally uses the narrower
+/// [`slot_is_descriptor`] policy. Iteration and hashing additionally acquire
+/// native member descriptors and unbound `super` values through their typed
+/// descriptor implementations before applying consumer-specific errors.
+#[inline]
+pub(crate) fn slot_supports_descriptor_get(v: &Value) -> bool {
+    match v.kind() {
+        ValueKind::SuperProxyUnbound { .. } => true,
+        ValueKind::BuiltinObject { .. }
+            if pyrust_builtins::member_descriptor::is_member_descriptor(v) =>
+        {
+            true
+        }
+        ValueKind::BuiltinObject { .. }
+            if pyrust_builtins::numeric_attrs_descriptor::as_getset_descriptor(v).is_some() =>
+        {
+            true
+        }
+        _ => slot_is_descriptor(v),
+    }
+}
+
 #[inline(never)]
 fn slot_is_descriptor_probe(v: &Value) -> bool {
     match v.kind() {

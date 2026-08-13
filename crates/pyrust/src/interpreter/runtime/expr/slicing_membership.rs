@@ -620,47 +620,85 @@ impl Interpreter {
                     )?;
                     return Ok(Value::bool_(self.truthy_value(&result)?));
                 }
-                // list/dict/set subclass with no user-defined __contains__:
-                // delegate to the backing primitive, matching CPython's
-                // inherited tp_sq_contains / sq_contains slot behaviour.
+                // A container subclass with no user-defined `__contains__`
+                // inherits the backing primitive's native containment slot.
+                // Scalar backings have no such slot and must continue to the
+                // user `__iter__` / `__getitem__` acquisition below.
                 if let Some(backing) = builtin_data_backing(&container) {
-                    return self.eval_in(backing, item);
-                }
-                // No __contains__ or __builtin_data__: fall back to __iter__ if available.
-                if let Some(iter_method) = lookup_class_attr(&class, "__iter__") {
-                    let iter_obj = invoke_class_method(
-                        self,
-                        iter_method,
-                        Value::py_instance(Rc::clone(&inst_rc)),
-                        &[],
-                    )?;
-                    loop {
-                        match self.call_next(&iter_obj, None) {
-                            Ok(elem) => {
-                                if self.values_richcompare_eq(&elem, &item)? {
-                                    return Ok(Value::bool_(true));
-                                }
-                            }
-                            Err(ref e) if is_stop_iteration_error(e) => {
-                                return Ok(Value::bool_(false));
-                            }
-                            // Only the canonical class and real subclasses terminate;
-                            // any unrelated exception (including a same-named class)
-                            // propagates.
-                            Err(PyError::Raised(exc)) => return Err(PyError::Raised(exc)),
-                            Err(e) => return Err(e),
-                        }
+                    let inherits_contains = match backing.kind() {
+                        ValueKind::List(_)
+                        | ValueKind::Tuple(_)
+                        | ValueKind::Dict(_)
+                        | ValueKind::Set(_)
+                        | ValueKind::Str(_)
+                        | ValueKind::Bytes(_) => true,
+                        ValueKind::BuiltinObject { ops, .. } => matches!(
+                            ops.canonical_class_tag(),
+                            Some(
+                                pyrust_core::CanonicalClassTag::Bytearray
+                                    | pyrust_core::CanonicalClassTag::Frozenset
+                            )
+                        ),
+                        _ => false,
+                    };
+                    if inherits_contains {
+                        return self.eval_in(backing, item);
                     }
                 }
-                // Legacy sequence-iter protocol (#394): if the class
-                // defines `__getitem__` but no `__iter__`/`__contains__`,
-                // walk indices 0, 1, … until IndexError/StopIteration.
-                // **Short-circuits** on first match (#416 Copilot
-                // review): the lazy iterator stops calling
-                // `__getitem__` past the matching index, so a later
-                // index raising `RuntimeError` doesn't surface.
-                if lookup_class_attr(&class, "__getitem__").is_some() {
-                    let iter_val = self.make_getitem_iter(Rc::clone(&inst_rc))?;
+                // With no containment slot, acquire `__iter__` through the
+                // same descriptor-aware boundary as list()/iter()/for. A
+                // binding failure is cleared by `slot_tp_iter` and activates
+                // the legacy sequence fallback; an exception from the bound
+                // callable body remains visible.
+                let receiver = Value::py_instance(Rc::clone(&inst_rc));
+                let iter_method = lookup_class_attr(&class, "__iter__");
+                let resolved = match resolve_value_iter_slot(self, receiver.clone(), iter_method) {
+                    Ok(resolved) => resolved,
+                    Err(error) if error.class_name_is("TypeError") => {
+                        return Err(pyrust_core::type_err!(
+                            "argument of type '{}' is not iterable",
+                            class.borrow().name
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                };
+                let iter_val = match resolved {
+                    ResolvedIterSlot::Iterator(iterator) => Some(iterator),
+                    ResolvedIterSlot::LookupFailed => {
+                        let getitem = lookup_class_attr(&class, "__getitem__");
+                        match resolve_iter_fallback(&receiver, getitem)? {
+                            IterFallback::GetItem(method) => {
+                                Some(make_getitem_iterator(receiver, method))
+                            }
+                            IterFallback::NativeBacking(backing) => {
+                                return self.eval_in(backing, item);
+                            }
+                            IterFallback::Missing => None,
+                        }
+                    }
+                    ResolvedIterSlot::NonIterable => {
+                        return Err(pyrust_core::type_err!(
+                            "argument of type '{}' is not iterable",
+                            class.borrow().name
+                        ));
+                    }
+                    ResolvedIterSlot::Missing => lookup_class_attr(&class, "__getitem__")
+                        .map(|method| make_getitem_iterator(receiver, method)),
+                };
+                let iter_val = match iter_val.map(validate_iterator_result).transpose() {
+                    Ok(iterator) => iterator,
+                    Err(error) if error.class_name_is("TypeError") => {
+                        return Err(pyrust_core::type_err!(
+                            "argument of type '{}' is not iterable",
+                            class.borrow().name
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                };
+                // Keep the membership scan lazy: the sequence adapter stops
+                // requesting indices as soon as equality succeeds, and only
+                // IndexError/StopIteration terminate the fallback.
+                if let Some(iter_val) = iter_val {
                     loop {
                         match self.call_next(&iter_val, None) {
                             Ok(elem) => {
@@ -713,19 +751,69 @@ impl Interpreter {
             // A class whose metaclass defines `__contains__` (e.g. an `Enum`
             // subclass under `EnumMeta`): `member in Color` dispatches the
             // metaclass slot with the class as the receiver (#2611).
-            ValueKind::PyClass(cls) if metaclass_dunder(cls, "__contains__").is_some() => {
-                let method_val = metaclass_dunder_for_call(cls, "__contains__")
-                    .expect("metaclass slot was checked above")?;
-                let result = invoke_class_method(
-                    self,
-                    method_val,
-                    Value::py_class(Rc::clone(cls)),
-                    &[ExpandedCallArg {
-                        name: None,
-                        value: item.clone(),
-                    }],
-                )?;
-                Ok(Value::bool_(self.truthy_value(&result)?))
+            ValueKind::PyClass(cls) => {
+                if metaclass_dunder(cls, "__contains__").is_some() {
+                    let method_val = metaclass_dunder_for_call(cls, "__contains__")
+                        .expect("metaclass slot was checked above")?;
+                    let result = invoke_class_method(
+                        self,
+                        method_val,
+                        Value::py_class(Rc::clone(cls)),
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: item.clone(),
+                        }],
+                    )?;
+                    return Ok(Value::bool_(self.truthy_value(&result)?));
+                }
+
+                let membership_error = || {
+                    pyrust_core::type_err!(
+                        "argument of type '{}' is not iterable",
+                        value_type_name_str(&container)
+                    )
+                };
+                let resolved = match resolve_metaclass_iter_slot(self, cls) {
+                    Ok(resolved) => resolved,
+                    Err(error) if error.class_name_is("TypeError") => {
+                        return Err(membership_error());
+                    }
+                    Err(error) => return Err(error),
+                };
+                let iter_val = match resolved {
+                    ResolvedIterSlot::Iterator(iterator) => Some(iterator),
+                    ResolvedIterSlot::LookupFailed | ResolvedIterSlot::Missing => {
+                        let getitem = metaclass_dunder_for_call(cls, "__getitem__").transpose()?;
+                        match resolve_iter_fallback(&container, getitem)? {
+                            IterFallback::GetItem(method) => {
+                                Some(make_getitem_iterator(container.clone(), method))
+                            }
+                            IterFallback::Missing => None,
+                            IterFallback::NativeBacking(_) => unreachable!(),
+                        }
+                    }
+                    ResolvedIterSlot::NonIterable => None,
+                };
+                let iter_val = match iter_val.map(validate_iterator_result).transpose() {
+                    Ok(Some(iterator)) => iterator,
+                    Ok(None) => return Err(membership_error()),
+                    Err(error) if error.class_name_is("TypeError") => {
+                        return Err(membership_error());
+                    }
+                    Err(error) => return Err(error),
+                };
+                loop {
+                    match self.call_next(&iter_val, None) {
+                        Ok(element) if self.values_richcompare_eq(&element, &item)? => {
+                            return Ok(Value::bool_(true));
+                        }
+                        Ok(_) => {}
+                        Err(ref error) if is_stop_iteration_error(error) => {
+                            return Ok(Value::bool_(false));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
             }
             // Scalar non-iterables (int/float/bool/bigint/complex/None …) reach
             // here.  CPython raises `TypeError: argument of type '<type>' is not

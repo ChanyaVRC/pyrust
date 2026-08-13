@@ -23,7 +23,7 @@ mod value_protocols {
 pub(crate) use value_protocols::{
     coerce_numeric, coerce_subclass_backing, lookup_value_special_method,
     normalize_complex_slot_result, normalize_float_slot_result, normalize_int_slot_result,
-    slot_is_callable, slot_is_descriptor, slot_is_dispatchable,
+    slot_is_callable, slot_is_descriptor, slot_is_dispatchable, slot_supports_descriptor_get,
 };
 use value_protocols::{coerce_operand_backing, is_not_implemented};
 
@@ -81,11 +81,11 @@ mod calls {
         BUILTIN_DATA_ATTR, CallDepthGuard, EnvRef, ExcHandlersBuf, ExpandedArgBuf, ExpandedCallArg,
         FnCode, FrameKind, GeneratorFrame, GeneratorKind, HandledExcBuf, HashMap, InstanceAttrs,
         Interpreter, PyClass, PyDict, PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf,
-        Result, UserFunction, Value, ValueKind, VmFrameView, call_depth,
-        class_chain_new_slot_wrapped, class_is_subclass_of, invoke_class_method,
-        is_exception_class, is_primitive_class, lookup_class_attr, mapping_entries_for_expansion,
-        max_call_depth, object_class_singleton, smallvec, type_class_singleton,
-        value_type_name_str,
+        Result, UserFunction, Value, ValueKind, VmFrameView, bind_class_level_method_wrapper,
+        call_depth, call_descriptor_get, call_slot_value_unbound, class_chain_new_slot_wrapped,
+        class_is_subclass_of, invoke_class_method, is_exception_class, is_primitive_class,
+        lookup_class_attr, mapping_entries_for_expansion, max_call_depth, object_class_singleton,
+        slot_is_descriptor, smallvec, type_class_singleton, value_type_name_str,
     };
     include!("runtime/calls.rs");
 }
@@ -125,8 +125,9 @@ mod builtin_methods {
         BUILTIN_DATA_ATTR, BinaryOp, ExpandedArgBuf, ExpandedCallArg, GeneratorKind, IndexMap,
         Interpreter, PrimitiveClassKind, PrintOptions, PyBigInt, PyClass, PyDict, PyError,
         PyInstance, PyKey, PySet, PyToPrimitive, Rc, RefCell, RegSlice, Result, Value, ValueKind,
-        apply_format_spec, builtin_data_backing, builtin_iterator_has_length_hint,
-        c3_linearize_classes, call_bytes_method_coerced_prevalidated, canonical_class_by_tag,
+        apply_format_spec, bind_class_level_method_wrapper, builtin_data_backing,
+        builtin_iterator_has_length_hint, c3_linearize_classes,
+        call_bytes_method_coerced_prevalidated, canonical_class_by_tag,
         class_descriptor_display_name, class_direct_subclasses, class_is_subclass_of,
         class_mro_items, coerce_bytes_subclass_arg, coerce_bytes_subclass_join_iterable,
         coerce_bytes_subclass_method_args, coerce_bytes_subclass_method_kwargs,
@@ -158,10 +159,11 @@ mod collection_keys {
         ordered_iteration_watch, ordered_mapping_guard_outcome,
     };
     use super::{
-        Interpreter, PyDict, PyError, PyKey, PySet, Rc, Result, StrKey, Value, ValueKind,
-        builtin_data_backing, class_hash_inherits_builtin_none, coerce_numeric,
+        Interpreter, PyClass, PyDict, PyError, PyKey, PySet, Rc, RefCell, Result, StrKey, Value,
+        ValueKind, bind_class_level_method_wrapper, builtin_data_backing, call_descriptor_get,
+        call_slot_value_unbound, class_hash_inherits_builtin_none, coerce_numeric,
         coerce_subclass_backing, invoke_class_method, lookup_class_attr, py_hash_bigint,
-        py_hash_float, py_hash_int, range_len, slot_is_dispatchable, values_are_identical,
+        py_hash_float, py_hash_int, range_len, slot_supports_descriptor_get, values_are_identical,
     };
     include!("runtime/collection_keys.rs");
 }
@@ -204,16 +206,18 @@ mod expressions {
     };
     use super::fast_path::try_tagged_int_unary;
     use super::{
-        BinaryOp, ExpandedCallArg, Interpreter, PyBigInt, PyBigIntSign, PyDict, PyError, PyKey,
-        PyPow, PySet, PyToPrimitive, PyZero, Rc, RegSlice, Result, UnaryOp, Value, ValueKind,
-        builtin_data_backing, class_is_subclass_of, coerce_bytes_subclass_arg, coerce_numeric,
-        coerce_operand_backing, coerce_str_subclass_arg, compare_values_with_op,
-        effective_builtin_receiver, float_divmod, int_pow_promoting, invoke_class_method,
-        is_async_generator_value, is_builtin_class_getitem_sentinel, is_coroutine_value,
-        is_not_implemented, is_stop_iteration_error, is_type_alias_class, key_contains_object,
-        lookup_class_attr, make_builtin_generic_alias, make_slice_value, metaclass_dunder,
-        metaclass_dunder_for_call, normalize_index, normalize_index_write, py_mod_i64, range_len,
-        slot_is_dispatchable, type_class_singleton, value_type_name_str, values_are_identical,
+        BinaryOp, ExpandedCallArg, Interpreter, IterFallback, PyBigInt, PyBigIntSign, PyDict,
+        PyError, PyKey, PyPow, PySet, PyToPrimitive, PyZero, Rc, RegSlice, ResolvedIterSlot,
+        Result, UnaryOp, Value, ValueKind, builtin_data_backing, class_is_subclass_of,
+        coerce_bytes_subclass_arg, coerce_numeric, coerce_operand_backing, coerce_str_subclass_arg,
+        compare_values_with_op, effective_builtin_receiver, float_divmod, int_pow_promoting,
+        invoke_class_method, is_async_generator_value, is_builtin_class_getitem_sentinel,
+        is_coroutine_value, is_not_implemented, is_stop_iteration_error, is_type_alias_class,
+        key_contains_object, lookup_class_attr, make_builtin_generic_alias, make_getitem_iterator,
+        make_slice_value, metaclass_dunder, metaclass_dunder_for_call, normalize_index,
+        normalize_index_write, py_mod_i64, range_len, resolve_iter_fallback,
+        resolve_metaclass_iter_slot, resolve_value_iter_slot, slot_is_dispatchable,
+        type_class_singleton, validate_iterator_result, value_type_name_str, values_are_identical,
         vm_read,
     };
     include!("runtime/expr.rs");
@@ -231,9 +235,9 @@ mod attributes {
         adapt_builtin_subclass_method, bind_builtin_class_special, builtin_callable_metadata,
         builtin_class_doc, call_slot_value_unbound, canonical_class_by_tag,
         class_chain_new_slot_wrapped, class_hash_inherits_builtin_none, class_is_subclass_of,
-        class_suppresses_instance_dict, descriptor_get_slot_raw_call, exception_slot_policy,
-        instance_builtin_data, invoke_class_method, is_exception_class, is_type_alias_class,
-        is_typevar_class, lookup_class_attr, metaclass_dunder, metaclass_of,
+        class_suppresses_instance_dict, descriptor_get_slot_raw_call, effective_builtin_receiver,
+        exception_slot_policy, instance_builtin_data, invoke_class_method, is_exception_class,
+        is_type_alias_class, is_typevar_class, lookup_class_attr, metaclass_dunder, metaclass_of,
         mro_has_unslotted_ancestor, mro_slot_allows, object_class_singleton,
         primitive_owned_object_dunder, replace_instance_dict, type_alias_readonly_attr_error,
         typevar_readonly_attr_error, value_class, value_type_name_str,
@@ -295,26 +299,30 @@ mod pattern_matching {
 mod iteration {
     use super::{
         AsyncGenASend, ExpandedArgBuf, ExpandedCallArg, GenDriving, GeneratorCell, GeneratorFrame,
-        Interpreter, PyBigInt, PyBigIntSign, PyError, PyInstance, PyKey, Rc, RefCell, Result,
-        Value, ValueKind, builtin_data_backing, effective_builtin_receiver, effective_user_iter,
-        full_type_name_str, i64_range_native_cursor_safe, instance_builtin_data,
-        invoke_class_method, is_coroutine_value, is_inherited_builtin_iter_sentinel,
-        is_sequence_iter_terminator, is_stop_iteration_error, key_ref_to_value, key_to_value,
-        lookup_class_attr, lookup_value_special_method, metaclass_dunder_for_call, range_len,
-        value_from_bigint, value_to_bigint, value_type_name_str,
+        Interpreter, PyBigInt, PyBigIntSign, PyClass, PyError, PyInstance, PyKey, Rc, RefCell,
+        Result, Value, ValueKind, bind_class_level_method_wrapper, builtin_data_backing,
+        call_descriptor_get, call_slot_value_unbound, effective_builtin_receiver,
+        effective_user_iter, full_type_name_str, i64_range_native_cursor_safe,
+        instance_builtin_data, invoke_class_method, is_coroutine_value,
+        is_inherited_builtin_iter_sentinel, is_sequence_iter_terminator, is_stop_iteration_error,
+        key_ref_to_value, key_to_value, lookup_class_attr, lookup_value_special_method,
+        metaclass_dunder, metaclass_dunder_for_call, range_len, slot_supports_descriptor_get,
+        value_class, value_from_bigint, value_to_bigint, value_type_name_str,
     };
     include!("runtime/iteration.rs");
 }
 pub(crate) use iteration::{
     BigRangeIter, BigRangeState, CallableIter, ConsumerIterator, EnumerateIter, FilterIter,
-    GetItemIter, GuardVersion, IterCacheBuf, IterSrcBuf, IterState, IteratorCopy, ItersBuf,
-    LiveDictViewItem, LoopIteratorAdvance, MapIter, NativeIterFrame, NativeIterGuard,
-    OrderedIterationWatch, ProviderIterator, RangeIter, ZipIter, builtin_iterator_has_length_hint,
-    copy_iterator_object, indexed_sequence_item, iter_values, iterator_retained_values,
-    live_collection_len, live_dict_view_item, make_iterator, make_reversed_dict_iter,
-    make_reversed_getitem_iterator, make_reversed_mapping_snapshot_iter,
-    make_reversed_range_iterator, make_reversed_sequence_iterator, ordered_mapping_guard_outcome,
-    set_iterator_retained_values, value_has_length_hint,
+    GetItemIter, GuardVersion, IterCacheBuf, IterFallback, IterSrcBuf, IterState, IteratorCopy,
+    ItersBuf, LiveDictViewItem, LoopIteratorAdvance, MapIter, NativeIterFrame, NativeIterGuard,
+    OrderedIterationWatch, ProviderIterator, RangeIter, ResolvedIterSlot, ZipIter,
+    builtin_iterator_has_length_hint, copy_iterator_object, indexed_sequence_item, iter_values,
+    iterator_retained_values, live_collection_len, live_dict_view_item, make_getitem_iterator,
+    make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
+    make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
+    make_reversed_sequence_iterator, ordered_mapping_guard_outcome, resolve_iter_fallback,
+    resolve_metaclass_iter_slot, resolve_value_iter_slot, set_iterator_retained_values,
+    validate_iterator_result, value_has_length_hint,
 };
 
 mod type_objects {

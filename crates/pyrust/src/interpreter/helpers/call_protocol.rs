@@ -243,6 +243,26 @@ fn bind_descriptor_slot(
     }
 }
 
+/// Bind a non-function `staticmethod` / `classmethod` wrapper for class-level
+/// descriptor access. This is the non-invoking form of the typed wrapper logic
+/// in [`invoke_class_method`], used when a protocol must add its own explicit
+/// arguments after binding (notably `type.__call__` dispatching `__new__`).
+/// `None` means `value` is not one of these wrappers.
+#[inline]
+pub(crate) fn bind_class_level_method_wrapper(
+    value: &Value,
+    class: &Rc<RefCell<PyClass>>,
+) -> Result<Option<Value>> {
+    if !matches!(value.kind(), ValueKind::BuiltinObject { .. }) {
+        return Ok(None);
+    }
+    if let Some(binding) = pyrust_builtins::classmethod::as_class_method_any(value) {
+        return pyrust_builtins::classmethod::bind_wrapped_class_method(binding, Rc::clone(class))
+            .map(Some);
+    }
+    Ok(pyrust_builtins::classmethod::as_static_method_any(value))
+}
+
 /// Invoke a `__get__` slot the way CPython's `slot_tp_descr_get` does.
 ///
 /// `__get__` is the one special method CPython deliberately does *not* run
