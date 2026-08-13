@@ -9,7 +9,7 @@ canonical sequence.
 
 import builtins
 
-# ── The bound is re-read every iteration ──────────────────────────────────────
+# ── The original path observes mutations in its body ─────────────────────────
 
 growing = [1, 2, 3]
 index = 0
@@ -38,6 +38,31 @@ while index < len(emptied):
     emptied.clear()
     index += 1
 print("clear", steps, index, emptied)
+
+# The mutating calls and deletion above deliberately keep those loops on the
+# original path.
+# Here a guarded subscript first reaches the copy, then side-exits on an int
+# subclass. Its reflected add runs outside the copy, grows the bound, and the
+# next entry must read the new length rather than reuse the original two.
+def external_growth():
+    holder = [[1, 2]]
+    bounds = holder[0]
+
+    class GrowOnAdd(int):
+        def __radd__(self, other):
+            holder[0].extend([3, 4])
+            return other + int(self)
+
+    values = [GrowOnAdd(10), 11, 12, 13]
+    index = 0
+    total = 0
+    while index < len(bounds):
+        total += values[index]
+        index += 1
+    return total, index, bounds
+
+
+print("external-grow", external_growth())
 
 # ── A cursor that outruns the sequence still raises on the original path ──────
 
@@ -151,6 +176,14 @@ while index < len(text):
     index += 1
 print("str", letters, index)
 
+astral = "a😀bé"
+index = 0
+steps = 0
+while index < len(astral):
+    steps += 1
+    index += 1
+print("astral-str-bound", steps, index)
+
 raw = b"abc"
 index = 0
 total = 0
@@ -158,6 +191,16 @@ while index < len(raw):
     total += raw[index]
     index += 1
 print("bytes", total, index)
+
+# bytearray is not a canonical fast-path receiver. This pins the original/deopt
+# path's real-len bound.
+buffer = bytearray(b"abc")
+index = 0
+steps = 0
+while index < len(buffer):
+    steps += 1
+    index += 1
+print("bytearray-bound", steps, index)
 
 pair = (7, 8, 9)
 index = 0
