@@ -359,11 +359,15 @@ impl Value {
             ValueKind::ClassBoundMethod { function, class } => {
                 format!("<bound method {}.{}>", class.borrow().name, function.name)
             }
-            ValueKind::SuperProxy { class, .. } => {
-                format!("<super: <class '{}'>>", class.borrow().name)
+            ValueKind::SuperProxy { class, instance } => {
+                let class_name = class.borrow().name.clone();
+                let object_name = instance.borrow().class.borrow().name.clone();
+                format!("<super: <class '{class_name}'>, <{object_name} object>>")
             }
-            ValueKind::SuperProxyClass { class, .. } => {
-                format!("<super: <class '{}'>>", class.borrow().name)
+            ValueKind::SuperProxyClass { class, obj_class } => {
+                let class_name = class.borrow().name.clone();
+                let object_name = obj_class.borrow().name.clone();
+                format!("<super: <class '{class_name}'>, <{object_name} object>>")
             }
             ValueKind::SuperProxyUnbound { class, .. } => {
                 format!("<super: <class '{}'>, NULL>", class.borrow().name)

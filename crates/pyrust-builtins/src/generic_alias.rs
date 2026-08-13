@@ -9,12 +9,15 @@
 //! implementation backed by `GenericAliasState`.
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 use indexmap::IndexMap;
 use pyrust_core::{
-    BuiltinState, BuiltinTypeOps, CanonicalClassTag, PyKey, Value, ValueKind, builtin_ops_is,
+    BuiltinState, BuiltinTypeOps, CanonicalClassTag, PyClass, PyKey, Value, ValueKind,
+    builtin_ops_is,
 };
 
 pub struct GenericAliasState {
@@ -59,90 +62,22 @@ impl<const TYPING_UNION: bool> BuiltinTypeOps for GenericAliasOps<TYPING_UNION> 
     }
 
     fn repr(&self, state: &BuiltinState) -> String {
-        let borrow = state.borrow();
-        let s = borrow
-            .downcast_ref::<GenericAliasState>()
-            .expect("GenericAliasOps: bad state");
-
-        // Derive the origin name: prefer `qualname` for PyClass, fall back to
-        // the builtin_type_name helper for any other kind of origin.
-        //
-        // CPython's `ga_repr` qualifies a class origin with its module
-        // (`{__module__}.{__qualname__}`) unless the module is `builtins` (or
-        // absent), so `class D[T]` renders as `__main__.D[int]` while
-        // `list[int]` stays bare.  We mirror that by reading `__module__` from
-        // the origin class's own dict.
-        let origin_name = match s.origin.kind() {
-            ValueKind::PyClass(rc) => {
-                let c = rc.borrow();
-                let module = c
-                    .attrs
-                    .get("__module__")
-                    .and_then(|m| m.as_str().map(|s| s.to_string()));
-                match module {
-                    Some(m) if m != "builtins" && !m.is_empty() => {
-                        format!("{m}.{}", c.qualname)
-                    }
-                    _ => c.qualname.clone(),
-                }
-            }
-            // A PEP 695 `TypeAliasType` origin (`type Pair[T] = ...; Pair[int]`)
-            // is a `PyInstance` carrying a `__name__` string; CPython reprs the
-            // parameterized alias as `Pair[int]` using that name (issue #2779).
-            ValueKind::PyInstance(rc) => rc
-                .borrow()
-                .attrs
-                .get("__name__")
-                .and_then(|n| n.as_str().map(|s| s.to_string()))
-                .unwrap_or_else(|| pyrust_core::builtin_type_name(&s.origin).into_owned()),
-            _ => pyrust_core::builtin_type_name(&s.origin).into_owned(),
+        let (origin, args) = {
+            let borrow = state.borrow();
+            let alias = borrow
+                .downcast_ref::<GenericAliasState>()
+                .expect("GenericAliasOps: bad state");
+            (alias.origin.clone(), alias.args.clone())
         };
-
-        // `typing.Union[X, NoneType]` (exactly two args, one of them
-        // `NoneType`) renders as `typing.Optional[X]`, mirroring CPython's
-        // `_SpecialForm`/`_GenericAlias.__repr__` for unions.  The flatten
-        // helper in `typing.rs` always lowers `Optional[...]` to a `Union`
-        // origin, so this is the single place the `Optional` spelling is
-        // reconstructed.
-        if TYPING_UNION
-            && let ValueKind::Tuple(items) = s.args.kind()
-            && items.len() == 2
-        {
-            let none_pos = items.iter().position(is_none_type_class);
-            if let Some(pos) = none_pos {
-                let other = &items[1 - pos];
-                return format!("typing.Optional[{}]", repr_type_arg(other, false));
-            }
-        }
-
-        // CPython's `typing` special forms run their args through `_type_check`
-        // at construction, which substitutes `type(None)` for a bare `None`.
-        // So every `typing.*` alias (`typing.List[None]`, `typing.Final[None]`,
-        // `typing.Callable[[], None]`, …) reprs the argument as `NoneType`.  The
-        // sole exception is `typing.Literal`, whose members are values, not
-        // types, and so keep a bare `None` (`typing.Literal[None]`).  PEP 585
-        // builtin aliases (`list[None]`, `dict[str, None]`) are not type-checked
-        // and likewise keep `None`.  The substitution only touches the alias's
-        // own direct args (and, for Callable, the elements of its parameter
-        // list); it does not recurse into nested aliases
-        // (`Callable[[list[None]], int]` keeps `list[None]`).
-        let lower_none = origin_name.starts_with("typing.") && origin_name != "typing.Literal";
-
-        // args is a tuple; for `tuple[()]` it is empty, which CPython's
-        // `ga_repr` renders as `()` (so `repr(tuple[()]) == "tuple[()]"`)
-        // rather than the empty string that joining an empty list yields.
-        let args_repr = match s.args.kind() {
-            ValueKind::Tuple([]) => "()".to_string(),
-            ValueKind::Tuple(items) => items
-                .iter()
-                .map(|a| repr_type_arg(a, lower_none))
-                .collect::<Vec<_>>()
-                .join(", "),
-            // Fallback: shouldn't happen in normal use, but handle gracefully.
-            _ => repr_type_arg(&s.args, lower_none),
-        };
-
-        format!("{origin_name}[{args_repr}]")
+        render_generic_alias_parts(
+            &origin,
+            &args,
+            TYPING_UNION,
+            &mut (),
+            data_only_arg_repr,
+            data_only_module_str,
+        )
+        .expect("the data-only GenericAlias renderer is infallible")
     }
 
     fn truthy(&self, _state: &BuiltinState) -> bool {
@@ -287,6 +222,149 @@ impl<const TYPING_UNION: bool> BuiltinTypeOps for GenericAliasOps<TYPING_UNION> 
     }
 }
 
+/// Render a GenericAlias while delegating ordinary argument reprs to the
+/// interpreter. The alias state is snapshotted before the callback runs, so a
+/// user `__repr__` may safely re-enter the same alias.
+pub fn render_generic_alias_with<C>(
+    value: &Value,
+    context: &mut C,
+    render_other: fn(&mut C, &Value) -> pyrust_core::Result<String>,
+    render_module_str: fn(&mut C, &Value) -> pyrust_core::Result<String>,
+) -> pyrust_core::Result<String> {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return Err(pyrust_core::PyError::Runtime(
+            "expected GenericAlias value".to_string(),
+        ));
+    };
+    let Some(typing_union) = generic_alias_ops_kind(ops) else {
+        return Err(pyrust_core::PyError::Runtime(
+            "expected GenericAlias value".to_string(),
+        ));
+    };
+    let (origin, args) = {
+        let borrow = state.borrow();
+        let alias = borrow
+            .downcast_ref::<GenericAliasState>()
+            .ok_or_else(|| pyrust_core::PyError::Runtime("invalid GenericAlias state".into()))?;
+        (alias.origin.clone(), alias.args.clone())
+    };
+    render_generic_alias_parts(
+        &origin,
+        &args,
+        typing_union,
+        context,
+        render_other,
+        render_module_str,
+    )
+}
+
+fn render_generic_alias_parts<C>(
+    origin: &Value,
+    args: &Value,
+    typing_union: bool,
+    context: &mut C,
+    render_other: fn(&mut C, &Value) -> pyrust_core::Result<String>,
+    render_module_str: fn(&mut C, &Value) -> pyrust_core::Result<String>,
+) -> pyrust_core::Result<String> {
+    // CPython applies the same class-qualifier spelling to a GenericAlias's
+    // origin as to a PEP 585 class argument. The shared helper snapshots raw
+    // class metadata before a non-string module invokes Python-visible str().
+    let origin_name = match origin.kind() {
+        ValueKind::PyClass(class) => repr_class_type_arg_with(
+            class,
+            ClassTypeArgReprStyle::Pep585,
+            context,
+            render_module_str,
+        )?,
+        // A PEP 695 `TypeAliasType` origin (`type Pair[T] = ...; Pair[int]`)
+        // is a `PyInstance` carrying a `__name__` string; CPython reprs the
+        // parameterized alias as `Pair[int]` using that name (issue #2779).
+        ValueKind::PyInstance(rc) => rc
+            .borrow()
+            .attrs
+            .get("__name__")
+            .and_then(|n| n.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| pyrust_core::builtin_type_name(origin).into_owned()),
+        _ => pyrust_core::builtin_type_name(origin).into_owned(),
+    };
+
+    // `typing.Union[X, NoneType]` (exactly two args, one of them
+    // `NoneType`) renders as `typing.Optional[X]`, mirroring CPython's
+    // `_SpecialForm`/`_GenericAlias.__repr__` for unions.  The flatten
+    // helper in `typing.rs` always lowers `Optional[...]` to a `Union`
+    // origin, so this is the single place the `Optional` spelling is
+    // reconstructed.
+    if typing_union
+        && let ValueKind::Tuple(items) = args.kind()
+        && items.len() == 2
+    {
+        let none_pos = items.iter().position(is_none_type_class);
+        if let Some(pos) = none_pos {
+            let other = &items[1 - pos];
+            return Ok(format!(
+                "typing.Optional[{}]",
+                repr_type_arg(
+                    other,
+                    false,
+                    ClassTypeArgReprStyle::Typing,
+                    context,
+                    render_other,
+                    render_module_str,
+                )?
+            ));
+        }
+    }
+
+    let lower_none = origin_name.starts_with("typing.") && origin_name != "typing.Literal";
+    let class_style = if origin_name.starts_with("typing.") {
+        ClassTypeArgReprStyle::Typing
+    } else {
+        ClassTypeArgReprStyle::Pep585
+    };
+
+    let args_repr = match args.kind() {
+        ValueKind::Tuple([]) => "()".to_string(),
+        ValueKind::Tuple(items) => items
+            .iter()
+            .map(|arg| {
+                repr_type_arg(
+                    arg,
+                    lower_none,
+                    class_style,
+                    context,
+                    render_other,
+                    render_module_str,
+                )
+            })
+            .collect::<pyrust_core::Result<Vec<_>>>()?
+            .join(", "),
+        _ => repr_type_arg(
+            args,
+            lower_none,
+            class_style,
+            context,
+            render_other,
+            render_module_str,
+        )?,
+    };
+
+    Ok(format!("{origin_name}[{args_repr}]"))
+}
+
+fn data_only_arg_repr(_context: &mut (), value: &Value) -> pyrust_core::Result<String> {
+    if let ValueKind::PyInstance(instance) = value.kind()
+        && let Some(name) = instance.borrow().attrs.get("__name__")
+        && let Some(name) = name.as_str()
+    {
+        return Ok(name.to_string());
+    }
+    Ok(value.repr_raw())
+}
+
+fn data_only_module_str(_context: &mut (), value: &Value) -> pyrust_core::Result<String> {
+    Ok(value.to_py_str())
+}
+
 /// True if `v` is the `NoneType` class singleton (the union component that
 /// `None` lowers to). The immutable canonical tag prevents a user class named
 /// `NoneType` from being mistaken for the runtime singleton.
@@ -302,16 +380,22 @@ fn is_none_type_class(v: &Value) -> bool {
 /// `GenericAlias.__repr__`.  For a class this is just the qualified name
 /// (e.g. `"int"`, `"str"`).  For nested GenericAlias values (e.g.
 /// `list[list[int]]`) it recursively produces `"list[int]"`.  For a
-/// `PyInstance` that has a `__name__` attribute (e.g. a `TypeVar` created by
-/// PEP 695 `type X[T] = ...` syntax), we use the `__name__` string directly
-/// so that `list[T]` renders as `list[T]` rather than `list[<object at ...>]`.
-/// For anything else we fall back to the general `Value::repr_raw()`.
-fn repr_type_arg(v: &Value, lower_none: bool) -> String {
+/// A canonical `TypeVar` uses its immutable variance metadata. Everything
+/// else delegates to either interpreter-aware repr dispatch or the data-only
+/// fallback selected by the caller.
+fn repr_type_arg<C>(
+    v: &Value,
+    lower_none: bool,
+    class_style: ClassTypeArgReprStyle,
+    context: &mut C,
+    render_other: fn(&mut C, &Value) -> pyrust_core::Result<String>,
+    render_module_str: fn(&mut C, &Value) -> pyrust_core::Result<String>,
+) -> pyrust_core::Result<String> {
     match v.kind() {
         // CPython's `ga_repr_item` special-cases `Ellipsis` to render `...`
         // rather than its bare repr (`Ellipsis`), so `tuple[int, ...]` prints
         // as `tuple[int, ...]` instead of `tuple[int, Ellipsis]`.
-        ValueKind::Ellipsis => "...".to_string(),
+        ValueKind::Ellipsis => Ok("...".to_string()),
         // A bare `None` renders as `None` for PEP 585 builtin aliases
         // (`list[None]`) and `typing.Literal`, but lowers to `NoneType` for
         // every other `typing.*` special form, which substitutes `type(None)`
@@ -320,9 +404,11 @@ fn repr_type_arg(v: &Value, lower_none: bool) -> String {
         // sets `lower_none` accordingly (see the `lower_none` derivation in
         // `repr`); it carries that context down here and into Callable's
         // parameter list.
-        ValueKind::None if lower_none => "NoneType".to_string(),
-        ValueKind::None => "None".to_string(),
-        ValueKind::PyClass(rc) => rc.borrow().qualname.clone(),
+        ValueKind::None if lower_none => Ok("NoneType".to_string()),
+        ValueKind::None => Ok("None".to_string()),
+        ValueKind::PyClass(class) => {
+            repr_class_type_arg_with(class, class_style, context, render_module_str)
+        }
         // The parameter-list of a `Callable[[int, str], ret]` subscript is
         // stored as a `list` argument.  Render it as `[int, str]`, recursing
         // so each element uses its type repr (`int`, not `<class 'int'>`).  The
@@ -331,22 +417,132 @@ fn repr_type_arg(v: &Value, lower_none: bool) -> String {
         ValueKind::List(items) => {
             let inner = items
                 .iter()
-                .map(|a| repr_type_arg(a, lower_none))
-                .collect::<Vec<_>>()
+                .map(|arg| {
+                    repr_type_arg(
+                        arg,
+                        lower_none,
+                        class_style,
+                        context,
+                        render_other,
+                        render_module_str,
+                    )
+                })
+                .collect::<pyrust_core::Result<Vec<_>>>()?
                 .join(", ");
-            format!("[{inner}]")
+            Ok(format!("[{inner}]"))
         }
-        ValueKind::BuiltinObject { ops, state } if is_generic_alias_ops(ops) => ops.repr(state),
-        ValueKind::PyInstance(inst_rc) => {
-            if let Some(name_val) = inst_rc.borrow().attrs.get("__name__")
-                && let Some(s) = name_val.as_str()
-            {
-                return s.to_string();
+        ValueKind::PyInstance(_) => {
+            if let Some(rendered) = typevar_arg_repr(v) {
+                return Ok(rendered);
             }
-            v.repr_raw()
+            render_other(context, v)
         }
-        _ => v.repr_raw(),
+        _ => render_other(context, v),
     }
+}
+
+/// Render a TypeVar argument without interpreter dispatch. TypeVar variance
+/// attributes are immutable booleans, so this preserves `~T` / `+T` / `-T`
+/// while never invoking an arbitrary user `__repr__` implementation.
+pub fn typevar_arg_repr(value: &Value) -> Option<String> {
+    let ValueKind::PyInstance(instance) = value.kind() else {
+        return None;
+    };
+    let instance = instance.borrow();
+    if instance.class.borrow().canonical_tag != Some(CanonicalClassTag::TypeVar) {
+        return None;
+    }
+    let name = instance.attrs.get("__name__")?.as_str()?;
+    let flag = |attr: &str| {
+        instance
+            .attrs
+            .get(attr)
+            .is_some_and(|value| matches!(value.kind(), ValueKind::Bool(true)))
+    };
+    let prefix = if flag("__infer_variance__") {
+        ""
+    } else if flag("__covariant__") {
+        "+"
+    } else if flag("__contravariant__") {
+        "-"
+    } else {
+        "~"
+    };
+    Some(format!("{prefix}{name}"))
+}
+
+/// Which CPython class-argument spelling owns a generic alias repr.
+#[derive(Clone, Copy)]
+pub enum ClassTypeArgReprStyle {
+    /// `types.GenericAlias` (`list[C]`): a `None` module falls back to the
+    /// class repr, while every other module value qualifies `__qualname__`.
+    Pep585,
+    /// `typing` aliases: every module value, including `None`, qualifies the
+    /// class `__qualname__`.
+    Typing,
+}
+
+/// Render a class used as a generic-alias argument.
+///
+/// The class metadata is snapshotted before a non-string `__module__` is
+/// delegated to Python-visible `str()` dispatch. This keeps user code outside
+/// the class borrow while preserving the data-only path used by `repr_raw()`.
+pub fn repr_class_type_arg_with<C>(
+    class: &Rc<RefCell<PyClass>>,
+    style: ClassTypeArgReprStyle,
+    context: &mut C,
+    render_module_str: fn(&mut C, &Value) -> pyrust_core::Result<String>,
+) -> pyrust_core::Result<String> {
+    let (module, name, qualname) = {
+        let class = class.borrow();
+        (
+            class.attrs.get("__module__").cloned(),
+            class.name.clone(),
+            class.qualname.clone(),
+        )
+    };
+    let Some(module) = module else {
+        // Canonical builtin classes synthesize their `builtins` module at the
+        // attribute layer rather than storing it in the raw class mapping.
+        return Ok(qualname);
+    };
+    if matches!(style, ClassTypeArgReprStyle::Pep585) && module.is_none() {
+        return Ok(format!("<class '{name}'>"));
+    }
+    let module = match raw_string_text(&module) {
+        Some(module) => module,
+        None => render_module_str(context, &module)?,
+    };
+    if module == "builtins" {
+        Ok(qualname)
+    } else {
+        Ok(format!("{module}.{qualname}"))
+    }
+}
+
+fn raw_string_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    let ValueKind::PyInstance(instance) = value.kind() else {
+        return None;
+    };
+    let instance = instance.borrow();
+    if !class_chain_is_str(&instance.class) {
+        return None;
+    }
+    instance
+        .attrs
+        .get("__builtin_data__")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn class_chain_is_str(class: &Rc<RefCell<PyClass>>) -> bool {
+    let class = class.borrow();
+    class.canonical_tag == Some(CanonicalClassTag::Str)
+        || class.base.as_ref().is_some_and(class_chain_is_str)
+        || class.extra_bases.iter().any(class_chain_is_str)
 }
 
 /// Collect the type-variable parameters from a `GenericAlias`'s `__args__`,

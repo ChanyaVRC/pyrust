@@ -7,7 +7,7 @@
 impl Interpreter {
     /// Render a value using the same priority as `str(x)`: `__str__` first,
     /// then `__repr__`, then the default object representation.
-    pub(super) fn render_value_as_str(&mut self, value: &Value) -> Result<String> {
+    pub(crate) fn render_value_as_str(&mut self, value: &Value) -> Result<String> {
         // `str(cls)` dispatches `type(cls).__str__(cls)` (falling back to the
         // metaclass `__repr__`) when the class has a user metaclass override.
         if let ValueKind::PyClass(cls_rc) = value.kind() {

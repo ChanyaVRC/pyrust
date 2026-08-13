@@ -77,6 +77,14 @@ fn key_needs_interp_repr(k: &PyKey) -> bool {
 /// visit short-circuits to the CPython placeholder (`[...]` / `(...)` /
 /// `{...}`).
 pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) -> Result<String> {
+    // GenericAlias's core operations table cannot invoke user `__repr__`
+    // methods. Delegate ordinary type arguments back through this renderer;
+    // the builtins helper snapshots alias state before calling us, so a user
+    // repr may safely re-enter the same alias.
+    if pyrust_builtins::generic_alias::is_generic_alias(value) {
+        return render_generic_alias_repr(interp, value);
+    }
+
     // Dispatch __repr__ for user instances.
     if let ValueKind::PyInstance(instance) = value.kind() {
         let instance_rc = Rc::clone(instance);
@@ -445,4 +453,15 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
         // pure `Value::repr_raw()` is correct and needs no interpreter.
         _ => Ok(value.repr_raw()),
     }
+}
+
+/// Render the Python-visible repr/str of a GenericAlias. Argument repr and
+/// class-module str dispatch share this path for repr(), str(), and print().
+fn render_generic_alias_repr(interp: &mut Interpreter, value: &Value) -> Result<String> {
+    pyrust_builtins::generic_alias::render_generic_alias_with(
+        value,
+        interp,
+        render_value_repr,
+        Interpreter::render_value_as_str,
+    )
 }

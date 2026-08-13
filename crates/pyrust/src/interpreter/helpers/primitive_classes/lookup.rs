@@ -125,6 +125,9 @@ pub(crate) fn canonical_class_by_tag(tag: pyrust_core::CanonicalClassTag) -> Rc<
             pyrust_core::CanonicalClassTag::Set => &classes.set_class,
             pyrust_core::CanonicalClassTag::Str => &classes.str_class,
             pyrust_core::CanonicalClassTag::Tuple => &classes.tuple_class,
+            pyrust_core::CanonicalClassTag::TypeVar => {
+                return typevar_class_singleton();
+            }
         })
     })
 }
