@@ -201,26 +201,12 @@ impl Interpreter {
                     let class_name = pyrust_core::error_type_name(value);
                     return Err(pyrust_core::type_err!("unhashable type: '{class_name}'"));
                 }
-                // Issue #2055: a non-callable `__hash__` slot (`__hash__ = 5`)
-                // raises `TypeError: 'int' object is not callable` when hashed,
-                // matching CPython, instead of silently falling back to the
-                // identity hash.  A callable instance / bound method is invoked
-                // (issue #2054) via `invoke_class_method`.
-                if !slot_is_dispatchable(&hash_method) {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "'{}' object is not callable",
-                            pyrust_core::error_type_name(&hash_method)
-                        ),
-                    ));
-                }
                 {
-                    let result = invoke_class_method(
+                    let result = invoke_instance_hash_slot(
                         self,
                         hash_method,
                         Value::py_instance(Rc::clone(inst)),
-                        &[],
+                        &class,
                     )?;
                     // Mirror CPython's slot_tp_hash semantics (issue #503):
                     //

@@ -85,23 +85,6 @@ pub(crate) fn bind_cached_native_class_method(
     pyrust_builtins::classmethod::bind_cached_native_class_method(plan, class)
 }
 
-/// Bind only descriptor categories explicitly installed by a built-in class.
-///
-/// Primitive values use specialised attribute adapters rather than the
-/// `PyInstance` path, but classmethod/staticmethod semantics still come from
-/// their canonical class dictionaries. Returning `None` for ordinary values
-/// keeps concrete instance-method routing unchanged.
-fn bind_explicit_builtin_descriptor(
-    value: &Value,
-    class: &Rc<RefCell<PyClass>>,
-) -> Result<Option<Value>> {
-    if let Some(binding) = pyrust_builtins::classmethod::as_class_method_any(value) {
-        return pyrust_builtins::classmethod::bind_wrapped_class_method(binding, Rc::clone(class))
-            .map(Some);
-    }
-    Ok(pyrust_builtins::classmethod::as_static_method_any(value))
-}
-
 /// Apply a cached `BuiltinFunction` class attribute to an instance.
 ///
 /// `Some(value)` is a cache-safe result. `None` asks the fast path to fall
@@ -414,7 +397,7 @@ impl Interpreter {
     ) -> Result<Value> {
         if let Some(class) = crate::interpreter::primitive_class_for_value(target)
             && let Some(descriptor) = lookup_class_attr(&class, name)
-            && let Some(bound) = bind_explicit_builtin_descriptor(&descriptor, &class)?
+            && let Some(bound) = bind_class_level_method_wrapper(&descriptor, &class)?
         {
             return Ok(bound);
         }
@@ -587,7 +570,7 @@ impl Interpreter {
         }
         if let Some(class) = crate::interpreter::primitive_class_for_value(target)
             && let Some(descriptor) = lookup_class_attr(&class, name)
-            && let Some(bound) = bind_explicit_builtin_descriptor(&descriptor, &class)?
+            && let Some(bound) = bind_class_level_method_wrapper(&descriptor, &class)?
         {
             return Ok(bound);
         }

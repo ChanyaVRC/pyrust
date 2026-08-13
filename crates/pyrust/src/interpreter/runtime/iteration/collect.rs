@@ -196,14 +196,34 @@ impl Interpreter {
             // does not make a class iterable.
             let instance = Rc::clone(instance);
             let class = Rc::clone(&instance.borrow().class);
-            let user_iter = lookup_class_attr(&class, "__iter__")
+            let iter_method = lookup_class_attr(&class, "__iter__")
                 .filter(|method| !is_inherited_builtin_iter_sentinel(&class, method));
+            let user_iter = resolve_instance_iter_slot(self, &instance, iter_method)?;
+
+            if matches!(&user_iter, ResolvedIterSlot::LookupFailed) {
+                let getitem = lookup_class_attr(&class, "__getitem__");
+                match resolve_iter_fallback(val, getitem)? {
+                    IterFallback::GetItem(method) => {
+                        let iterator = make_getitem_iterator(val.clone(), method);
+                        return self.collect_iterator(&iterator);
+                    }
+                    IterFallback::NativeBacking(backing) => {
+                        return self.collect_iterable(&backing);
+                    }
+                    IterFallback::Missing => {
+                        return Err(pyrust_core::type_err!(
+                            "'{}' object is not iterable",
+                            class.borrow().name
+                        ));
+                    }
+                }
+            }
 
             // A primitive subclass without a user override iterates its backing
             // value. Validate the class/backing relationship because
             // `__builtin_data__` is writable by Python code (#2975). Preserve
             // the carrier class name in not-iterable errors.
-            if user_iter.is_none()
+            if matches!(&user_iter, ResolvedIterSlot::Missing)
                 && let Some(backing) = effective_builtin_receiver(val, &[])
             {
                 return self.collect_iterable(&backing).map_err(|error| {
@@ -215,23 +235,54 @@ impl Interpreter {
                 });
             }
 
-            let iterator = if let Some(method) = user_iter {
-                invoke_class_method(self, method, Value::py_instance(Rc::clone(&instance)), &[])?
-            } else if lookup_class_attr(&class, "__getitem__").is_some() {
-                self.make_getitem_iter(Rc::clone(&instance))?
-            } else {
-                return Err(pyrust_core::type_err!(
-                    "'{}' object is not iterable",
-                    class.borrow().name
-                ));
+            let iterator = match user_iter {
+                ResolvedIterSlot::Iterator(iterator) => iterator,
+                ResolvedIterSlot::Missing if lookup_class_attr(&class, "__getitem__").is_some() => {
+                    self.make_getitem_iter(Rc::clone(&instance))?
+                }
+                ResolvedIterSlot::Missing => {
+                    return Err(pyrust_core::type_err!(
+                        "'{}' object is not iterable",
+                        class.borrow().name
+                    ));
+                }
+                ResolvedIterSlot::NonIterable => {
+                    return Err(pyrust_core::type_err!(
+                        "'{}' object is not iterable",
+                        class.borrow().name
+                    ));
+                }
+                ResolvedIterSlot::LookupFailed => unreachable!("handled above"),
             };
             let iterator = validate_iterator_result(iterator)?;
 
             self.collect_iterator(&iterator)
         } else if let ValueKind::PyClass(class) = val.kind()
-            && let Some(iter_method) = metaclass_dunder_for_call(class, "__iter__").transpose()?
+            && (metaclass_dunder(class, "__iter__").is_some()
+                || metaclass_dunder(class, "__getitem__").is_some())
         {
-            let iterator = invoke_class_method(self, iter_method, val.clone(), &[])?;
+            let iterator = match resolve_metaclass_iter_slot(self, class)? {
+                ResolvedIterSlot::Iterator(iterator) => iterator,
+                ResolvedIterSlot::LookupFailed | ResolvedIterSlot::Missing => {
+                    let getitem = metaclass_dunder_for_call(class, "__getitem__").transpose()?;
+                    match resolve_iter_fallback(val, getitem)? {
+                        IterFallback::GetItem(method) => make_getitem_iterator(val.clone(), method),
+                        IterFallback::Missing => {
+                            return Err(pyrust_core::type_err!(
+                                "'{}' object is not iterable",
+                                value_type_name_str(val)
+                            ));
+                        }
+                        IterFallback::NativeBacking(_) => unreachable!(),
+                    }
+                }
+                ResolvedIterSlot::NonIterable => {
+                    return Err(pyrust_core::type_err!(
+                        "'{}' object is not iterable",
+                        value_type_name_str(val)
+                    ));
+                }
+            };
             let iterator = validate_iterator_result(iterator)?;
             self.collect_iterator(&iterator)
         } else {

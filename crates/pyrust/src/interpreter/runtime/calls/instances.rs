@@ -151,6 +151,37 @@ impl Interpreter {
                     combined.extend(args.iter().cloned());
                     self.call_builtin_new_value(&new_val, &combined)?
                 }
+                _ if prim == PrimitiveLayout::None
+                    && !class_is_subclass_of(&class, &type_class_singleton()) =>
+                {
+                    // Ordinary classes resolve an arbitrary `__new__` through
+                    // class-level descriptor access. `__new__` is implicitly
+                    // static, so the bound result still receives the explicit
+                    // class exactly once from `type.__call__`.
+                    let class_value = Value::py_class(Rc::clone(&class));
+                    let callable =
+                        if let Some(bound) = bind_class_level_method_wrapper(&new_val, &class)? {
+                            bound
+                        } else if slot_is_descriptor(&new_val) {
+                            call_descriptor_get(
+                                self,
+                                &new_val,
+                                Value::none(),
+                                class_value.clone(),
+                                "__new__",
+                            )?
+                        } else {
+                            new_val.clone()
+                        };
+                    let mut combined: ExpandedArgBuf =
+                        ExpandedArgBuf::with_capacity(args.len() + 1);
+                    combined.push(ExpandedCallArg {
+                        name: None,
+                        value: class_value,
+                    });
+                    combined.extend(args.iter().cloned());
+                    call_slot_value_unbound(self, callable, &combined)?
+                }
                 _ => {
                     return Err(pyrust_core::type_err!(
                         "__new__ must be a callable, not '{}'",
@@ -165,12 +196,7 @@ impl Interpreter {
                 let inst_class = inst_rc.borrow().class.clone();
                 if class_is_subclass_of(&inst_class, &class) {
                     let init = lookup_class_attr(&inst_class, "__init__");
-                    if let Some(init_val) = init
-                        && matches!(
-                            init_val.kind(),
-                            ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
-                        )
-                    {
+                    if let Some(init_val) = init {
                         let result = invoke_class_method(
                             self,
                             init_val,

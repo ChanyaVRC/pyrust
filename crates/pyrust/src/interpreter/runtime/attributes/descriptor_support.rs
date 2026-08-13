@@ -37,6 +37,53 @@ pub(crate) fn call_descriptor_get(
         )?;
         return member_descriptor_get(&instance, info.slot_id, &info.attr_name);
     }
+    // Native read-only getset descriptors bind through their concrete owner.
+    // Wrong-owner errors are consumed by iteration/hash slot acquisition, while
+    // a valid numeric-subclass receiver returns the backing numeric attribute.
+    if let Some(info) =
+        pyrust_builtins::numeric_attrs_descriptor::as_dict_view_mapping_descriptor(descriptor)
+    {
+        if instance.is_none() {
+            return Ok(descriptor.clone());
+        }
+        if pyrust_builtins::dict_views::view_kind(&instance) != Some(info.view_kind) {
+            let actual = value_type_name_str(&instance);
+            return Err(pyrust_core::type_err!(
+                "descriptor 'mapping' for '{}' objects doesn't apply to a '{}' object",
+                info.class_name,
+                actual
+            ));
+        }
+        return interp.get_attr(&instance, "mapping");
+    }
+    if let Some((attr_name, class_name)) =
+        pyrust_builtins::numeric_attrs_descriptor::as_getset_descriptor(descriptor)
+    {
+        if instance.is_none() {
+            return Ok(descriptor.clone());
+        }
+        let backing =
+            effective_builtin_receiver(&instance, &[]).unwrap_or_else(|| instance.clone());
+        let applies = match class_name {
+            "int" => matches!(
+                backing.kind(),
+                ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_)
+            ),
+            "float" => matches!(backing.kind(), ValueKind::Float(_)),
+            _ => false,
+        };
+        if !applies {
+            let actual = value_type_name_str(&instance);
+            return Err(pyrust_core::type_err!(
+                "descriptor '{attr_name}' for '{class_name}' objects doesn't apply to a '{actual}' object"
+            ));
+        }
+        if let Some(value) =
+            pyrust_builtins::numeric_attrs_descriptor::numeric_tower_attr(&backing, attr_name)
+        {
+            return Ok(value);
+        }
+    }
     // property special-case: use the stored fget directly.
     if let Some((fget, partial_slot, prop_name)) =
         pyrust_builtins::property::with_property(descriptor, |s| {

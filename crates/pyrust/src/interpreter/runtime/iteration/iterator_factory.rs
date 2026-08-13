@@ -161,6 +161,135 @@ pub(crate) fn make_reversed_getitem_iterator(
     }))
 }
 
+pub(crate) enum ResolvedIterSlot {
+    Missing,
+    LookupFailed,
+    NonIterable,
+    Iterator(Value),
+}
+
+pub(crate) enum IterFallback {
+    Missing,
+    GetItem(Value),
+    NativeBacking(Value),
+}
+
+/// Resolve the lazy fallback after `slot_tp_iter` clears descriptor binding.
+/// A user/metaclass `__getitem__` wins; only native sequence backings inherit
+/// the C-level sequence fallback, sets remain non-sequences, and CPython's dict
+/// sequence slot reports its internal-function SystemError.
+#[cold]
+#[inline(never)]
+pub(crate) fn resolve_iter_fallback(
+    receiver: &Value,
+    getitem: Option<Value>,
+) -> Result<IterFallback> {
+    let Some(backing) = effective_builtin_receiver(receiver, &[]) else {
+        return Ok(getitem.map_or(IterFallback::Missing, IterFallback::GetItem));
+    };
+    if backing.is_dict() {
+        return Err(PyError::named(
+            "SystemError",
+            "../Objects/iterobject.c:19: bad argument to internal function".to_string(),
+        ));
+    }
+    let is_sequence = matches!(
+        backing.kind(),
+        ValueKind::List(_) | ValueKind::Tuple(_) | ValueKind::Str(_) | ValueKind::Bytes(_)
+    ) || pyrust_builtins::bytearray::as_bytearray_rc(&backing).is_some();
+    if !is_sequence {
+        return Ok(getitem.map_or(IterFallback::Missing, IterFallback::GetItem));
+    }
+    Ok(
+        match effective_builtin_receiver(receiver, &["__getitem__"]) {
+            Some(backing) => IterFallback::NativeBacking(backing),
+            None => getitem.map_or(IterFallback::Missing, IterFallback::GetItem),
+        },
+    )
+}
+
+pub(crate) fn make_getitem_iterator(receiver: Value, method: Value) -> Value {
+    Value::generator(Box::new(GetItemIter {
+        obj: receiver,
+        method,
+        length_method: None,
+        index: 0,
+        step: 1,
+        remaining: None,
+        exhausted: false,
+    }))
+}
+
+/// Acquire a value's resolved `__iter__` result while preserving
+/// `slot_tp_iter`'s exceptional fallback rule. A failure while descriptor-
+/// binding the slot is cleared and reported separately so the caller can run
+/// the appropriate `__getitem__` fallback. Once binding succeeds, a
+/// non-callable result or callable-body exception remains visible.
+pub(crate) fn resolve_value_iter_slot(
+    interp: &mut Interpreter,
+    receiver: Value,
+    iter_method: Option<Value>,
+) -> Result<ResolvedIterSlot> {
+    let Some(iter_method) = iter_method else {
+        return Ok(ResolvedIterSlot::Missing);
+    };
+
+    if iter_method.is_none() {
+        return Ok(ResolvedIterSlot::NonIterable);
+    }
+    if matches!(iter_method.kind(), ValueKind::BuiltinObject { .. }) {
+        let owner = value_class(&receiver);
+        if let ValueKind::PyClass(class) = owner.kind() {
+            match bind_class_level_method_wrapper(&iter_method, class) {
+                Ok(Some(bound)) => {
+                    if bound.is_none() {
+                        return Ok(ResolvedIterSlot::NonIterable);
+                    }
+                    return call_slot_value_unbound(interp, bound, &[])
+                        .map(ResolvedIterSlot::Iterator);
+                }
+                Ok(None) => {}
+                Err(_) => return Ok(ResolvedIterSlot::LookupFailed),
+            }
+        }
+    }
+    let iterator = if slot_supports_descriptor_get(&iter_method) {
+        let owner = value_class(&receiver);
+        let bound =
+            match call_descriptor_get(interp, &iter_method, receiver.clone(), owner, "__iter__") {
+                Ok(bound) => bound,
+                Err(_) => return Ok(ResolvedIterSlot::LookupFailed),
+            };
+        if bound.is_none() {
+            return Ok(ResolvedIterSlot::NonIterable);
+        }
+        call_slot_value_unbound(interp, bound, &[])?
+    } else {
+        invoke_class_method(interp, iter_method, receiver, &[])?
+    };
+    Ok(ResolvedIterSlot::Iterator(iterator))
+}
+
+fn resolve_instance_iter_slot(
+    interp: &mut Interpreter,
+    instance: &Rc<RefCell<PyInstance>>,
+    iter_method: Option<Value>,
+) -> Result<ResolvedIterSlot> {
+    resolve_value_iter_slot(interp, Value::py_instance(Rc::clone(instance)), iter_method)
+}
+
+pub(crate) fn resolve_metaclass_iter_slot(
+    interp: &mut Interpreter,
+    class: &Rc<RefCell<PyClass>>,
+) -> Result<ResolvedIterSlot> {
+    let iter_method = match metaclass_dunder_for_call(class, "__iter__") {
+        Some(Ok(method)) => Some(method),
+        Some(Err(_)) => return Ok(ResolvedIterSlot::LookupFailed),
+        None => None,
+    };
+    resolve_value_iter_slot(interp, Value::py_class(Rc::clone(class)), iter_method)
+}
+
 /// Convert an arbitrary Python iterable value into an iterator object without
 /// consuming any elements.
 ///
@@ -179,7 +308,7 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
     enum IterKind {
         Generator,
         PyInstance(Rc<RefCell<crate::value::PyInstance>>),
-        Metaclass(Value),
+        Metaclass(Rc<RefCell<PyClass>>),
         Range(i64, i64, i64),
         BigRange(
             crate::value::PyBigInt,
@@ -207,10 +336,12 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
     let kind = match v.kind() {
         ValueKind::Generator(_) => IterKind::Generator,
         ValueKind::PyInstance(inst) => IterKind::PyInstance(Rc::clone(inst)),
-        ValueKind::PyClass(class) => metaclass_dunder_for_call(class, "__iter__")
-            .transpose()?
-            .map(IterKind::Metaclass)
-            .unwrap_or(IterKind::Other),
+        ValueKind::PyClass(class)
+            if metaclass_dunder(class, "__iter__").is_some()
+                || metaclass_dunder(class, "__getitem__").is_some() =>
+        {
+            IterKind::Metaclass(Rc::clone(class))
+        }
         // The common i64-backed range needs the same lazy construction as a
         // BigRange. Materialising here makes `iter(range(10**9))`, and every
         // map/zip wrapping it, attempt a billion-element allocation.
@@ -229,21 +360,52 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
         IterKind::BigRange(cur, stop, step) => {
             Ok(Value::generator(Box::new(BigRangeIter { cur, stop, step })))
         }
-        IterKind::Metaclass(iter_method) => {
-            let iterator = invoke_class_method(interp, iter_method, v.clone(), &[])?;
-            validate_iterator_result(iterator)
-        }
+        IterKind::Metaclass(class) => match resolve_metaclass_iter_slot(interp, &class)? {
+            ResolvedIterSlot::Iterator(iterator) => validate_iterator_result(iterator),
+            ResolvedIterSlot::LookupFailed | ResolvedIterSlot::Missing => {
+                let getitem = metaclass_dunder_for_call(&class, "__getitem__").transpose()?;
+                match resolve_iter_fallback(v, getitem)? {
+                    IterFallback::GetItem(method) => Ok(make_getitem_iterator(v.clone(), method)),
+                    IterFallback::Missing => Err(pyrust_core::type_err!(
+                        "'{}' object is not iterable",
+                        value_type_name_str(v)
+                    )),
+                    IterFallback::NativeBacking(_) => unreachable!(),
+                }
+            }
+            ResolvedIterSlot::NonIterable => Err(pyrust_core::type_err!(
+                "'{}' object is not iterable",
+                value_type_name_str(v)
+            )),
+        },
         IterKind::PyInstance(inst_rc) => {
             let class = Rc::clone(&inst_rc.borrow().class);
-            if let Some(method_val) = effective_user_iter(&class, &inst_rc) {
-                let iter_obj = invoke_class_method(
-                    interp,
-                    method_val,
-                    Value::py_instance(Rc::clone(&inst_rc)),
-                    &[],
-                )?;
-                validate_iterator_result(iter_obj)
-            } else if let Some(backing) = effective_builtin_receiver(v, &[]) {
+            let iter_method = effective_user_iter(&class, &inst_rc);
+            let iter_slot = resolve_instance_iter_slot(interp, &inst_rc, iter_method)?;
+            if let ResolvedIterSlot::Iterator(iter_obj) = iter_slot {
+                return validate_iterator_result(iter_obj);
+            }
+            let backing = match iter_slot {
+                ResolvedIterSlot::LookupFailed => {
+                    let getitem = lookup_class_attr(&class, "__getitem__");
+                    match resolve_iter_fallback(v, getitem)? {
+                        IterFallback::GetItem(method) => {
+                            return Ok(make_getitem_iterator(v.clone(), method));
+                        }
+                        IterFallback::NativeBacking(backing) => Some(backing),
+                        IterFallback::Missing => None,
+                    }
+                }
+                ResolvedIterSlot::Missing => effective_builtin_receiver(v, &[]),
+                ResolvedIterSlot::NonIterable => {
+                    return Err(pyrust_core::type_err!(
+                        "'{}' object is not iterable",
+                        class.borrow().name
+                    ));
+                }
+                ResolvedIterSlot::Iterator(_) => unreachable!(),
+            };
+            if let Some(backing) = backing {
                 // Builtin subclasses inherit the primitive's iterator slot,
                 // but store that primitive in `__builtin_data__`.  Keep the
                 // ancestry-validated classification here, beside the primitive
@@ -365,7 +527,7 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
     }
 }
 
-fn validate_iterator_result(iterator: Value) -> Result<Value> {
+pub(crate) fn validate_iterator_result(iterator: Value) -> Result<Value> {
     let valid = match iterator.kind() {
         ValueKind::Generator(_) => true,
         ValueKind::PyInstance(instance) => {

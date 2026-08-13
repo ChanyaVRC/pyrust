@@ -81,6 +81,90 @@ class PropIter:
 t("property __iter__", lambda: list(PropIter()))
 
 
+def iter_consumers(label, factory):
+    t(f"{label} list", lambda: list(factory()))
+    t(f"{label} iter", lambda: next(iter(factory())))
+    t(f"{label} for", lambda: [item for item in factory()])
+def iter_error(fn):
+    try:
+        fn()
+    except Exception as e:
+        return type(e).__name__, str(e)
+def iter_consumer_errors(label, factory):
+    consumers = (list, iter, lambda x: [v for v in x])
+    errors = (iter_error(lambda c=c: c(factory())) for c in consumers)
+    print(f"{label}: {[(k, m.endswith('bad argument to internal function')) for k, m in errors]}")
+class IterBindRaises:
+    def __get__(self, obj, objtype=None):
+        raise RuntimeError("iter-bind")
+
+IterFallback = type("IterFallback", (), {"__iter__": IterBindRaises(), "__getitem__": lambda self, index: (10, 11)[index]})
+
+class IterNoFallback: __iter__ = IterBindRaises()
+
+iter_consumers("iter bind error fallback", IterFallback)
+iter_consumers("iter bind error no fallback", IterNoFallback)
+
+class IterBodyRaises:
+    class Slot:
+        def __get__(self, obj, objtype=None):
+            def fail():
+                raise RuntimeError("iter-body")
+
+            return fail
+
+    __iter__ = Slot()
+
+class NoneDescriptor:
+    def __get__(self, obj, objtype=None):
+        return None
+
+class IterBindsNone:
+    __iter__ = NoneDescriptor()
+
+    def __getitem__(self, index):
+        return index
+
+t("iter callable body error", lambda: list(IterBodyRaises()))
+t("iter descriptor returns None", lambda: list(IterBindsNone()))
+t("iter bind membership hit", lambda: 10 in IterFallback())
+t("iter bind membership miss", lambda: 99 in IterFallback())
+t("iter bind membership no fallback", lambda: 1 in IterNoFallback())
+t("iter body membership error", lambda: 1 in IterBodyRaises())
+t("iter None membership", lambda: (iter_error(lambda: 1 in type("RawNone", (), {"__iter__": None})()), iter_error(lambda: 1 in IterBindsNone())))
+IterStaticNone = type("IterStaticNone", (), {"__iter__": staticmethod(None)})
+IterClassNone = type("IterClassNone", (), {"__iter__": classmethod(None)})
+IterTypeRaises = type("IterTypeRaises", (), {"__iter__": lambda self: (_ for _ in ()).throw(TypeError("iter-type"))})
+IterInvalid = type("IterInvalid", (), {"__iter__": lambda self: []})
+iter_consumers("iter static None", IterStaticNone)
+iter_consumers("iter class None", IterClassNone)
+t("iter wrapper None membership", lambda: (iter_error(lambda: 1 in IterStaticNone()), iter_error(lambda: 1 in IterClassNone())))
+t("iter TypeError membership", lambda: (iter_error(lambda: 1 in IterTypeRaises()), iter_error(lambda: 1 in IterInvalid())))
+class IterListBacking(list): __iter__ = IterBindRaises()
+IterListGetitem = type("IterListGetitem", (list,), {"__iter__": IterBindRaises(), "__getitem__": lambda self, index: (90, 91)[index]})
+class IterSetBacking(set): __iter__ = IterBindRaises()
+class IterDictGetitem(dict):
+    __iter__ = IterBindRaises()
+    def __getitem__(self, index):
+        return index + 70
+IterNativeDescriptor = type("IterNativeDescriptor", (), {"__iter__": dict.__dict__["fromkeys"], "__getitem__": lambda self, index: (60, 61)[index]})
+MemberSlot = type("MemberSlot", (), {"__slots__": ("value",)}).__dict__["value"]
+IterMemberDescriptor = type("IterMemberDescriptor", (), {"__iter__": MemberSlot, "__getitem__": lambda self, index: (80, 81)[index]})
+IterGetsetDescriptor = type("IterGetsetDescriptor", (), {"__iter__": int.real, "__getitem__": lambda self, index: (70, 71)[index]})
+IterViewGetset = type("IterViewGetset", (), {"__iter__": type({}.keys()).mapping, "__getitem__": lambda self, index: (50, 51)[index]})
+UnboundSuper = super(type("SuperOwner", (), {})); IterSuperDescriptor = type("IterSuperDescriptor", (), {"__iter__": UnboundSuper, "__getitem__": lambda self, index: (20, 21)[index]})
+iter_consumers("iter bind list backing", lambda: IterListBacking([1, 2]))
+iter_consumers("iter bind list getitem", lambda: IterListGetitem([1, 2]))
+iter_consumers("iter bind set", lambda: IterSetBacking([1, 2]))
+iter_consumer_errors("iter bind dict getitem", IterDictGetitem)
+iter_consumers("iter native descriptor fallback", IterNativeDescriptor)
+t("iter native descriptor membership", lambda: (60 in IterNativeDescriptor(), 99 in IterNativeDescriptor()))
+iter_consumers("iter member descriptor fallback", IterMemberDescriptor)
+t("iter member descriptor membership", lambda: (80 in IterMemberDescriptor(), 99 in IterMemberDescriptor()))
+iter_consumers("iter getset fallback", IterGetsetDescriptor)
+iter_consumers("iter view getset fallback", IterViewGetset)
+iter_consumers("iter super fallback", IterSuperDescriptor); t("iter super membership", lambda: (20 in IterSuperDescriptor(), 99 in IterSuperDescriptor()))
+IntGetsetIter = type("IntGetsetIter", (int,), {"__iter__": int.real}); t("valid getset iter", lambda: (iter_error(lambda: list(IntGetsetIter(5))), iter_error(lambda: 1 in IntGetsetIter(5))))
 class PropHash:
     @property
     def __hash__(self):
@@ -90,6 +174,43 @@ class PropHash:
 t("property __hash__", lambda: hash(PropHash()))
 
 
+def hash_consumers(label, factory):
+    t(f"{label} hash", lambda: hash(factory()))
+    t(f"{label} dict", lambda: len({factory(): 1}))
+    t(f"{label} set", lambda: len({factory()}))
+
+
+class HashBindRaises:
+    def __get__(self, obj, objtype=None):
+        raise RuntimeError("hash-bind")
+
+class HashBindError: __hash__ = HashBindRaises()
+
+class HashBindsNone: __hash__ = NoneDescriptor()
+
+class HashBodyRaises:
+    class Slot:
+        def __get__(self, obj, objtype=None):
+            def fail():
+                raise RuntimeError("hash-body")
+
+            return fail
+
+    __hash__ = Slot()
+
+hash_consumers("hash bind error", HashBindError)
+hash_consumers("hash descriptor returns None", HashBindsNone)
+hash_consumers("hash callable body error", HashBodyRaises)
+HashStaticNone = type("HashStaticNone", (), {"__hash__": staticmethod(None)})
+HashClassNone = type("HashClassNone", (), {"__hash__": classmethod(None)})
+hash_consumers("hash static None", HashStaticNone)
+hash_consumers("hash class None", HashClassNone)
+HashNativeDescriptor = type("HashNativeDescriptor", (), {"__hash__": dict.__dict__["fromkeys"]}); hash_consumers("hash native descriptor", HashNativeDescriptor)
+HashMemberDescriptor = type("HashMemberDescriptor", (), {"__hash__": MemberSlot})
+hash_consumers("hash member descriptor", HashMemberDescriptor)
+HashGetsetDescriptor = type("HashGetsetDescriptor", (), {"__hash__": int.real}); HashViewGetset = type("HashViewGetset", (), {"__hash__": type({}.keys()).mapping})
+HashSuperDescriptor = type("HashSuperDescriptor", (), {"__hash__": UnboundSuper}); hash_consumers("hash super descriptor", HashSuperDescriptor)
+hash_consumers("hash getset descriptor", HashGetsetDescriptor); hash_consumers("hash view getset", HashViewGetset)
 class PropContains:
     @property
     def __contains__(self):
@@ -369,6 +490,42 @@ class WithMetaCall(metaclass=MetaCall):
 t("metaclass property __call__", lambda: WithMetaCall(1))
 
 
+class MetaIterGetitem(type):
+    __iter__ = IterBindRaises()
+
+    def __getitem__(cls, index):
+        if index < 2:
+            return index + 30
+        raise IndexError
+
+
+class MetaIterNoGetitem(type): __iter__ = IterBindRaises()
+
+class MetaIterBody(type): __iter__ = IterBodyRaises.Slot()
+
+class MetaIterNone(type): __iter__ = NoneDescriptor()
+
+class MetaIterFallback(metaclass=MetaIterGetitem): pass
+class MetaIterMissing(metaclass=MetaIterNoGetitem): pass
+class MetaIterRaises(metaclass=MetaIterBody): pass
+class MetaIterNoniterable(metaclass=MetaIterNone): pass
+class MetaIterType(type): __iter__ = lambda cls: (print("  [meta type body]"), (_ for _ in ()).throw(TypeError("meta-type")))[1]
+class MetaIterInvalid(type): __iter__ = lambda cls: (print("  [meta invalid body]"), [])[1]
+class MetaGetOnly(type): __getitem__ = lambda cls, index: (40, 41)[index]
+class MetaTypeRaises(metaclass=MetaIterType): pass
+class MetaInvalid(metaclass=MetaIterInvalid): pass
+class MetaOnlyGetitem(metaclass=MetaGetOnly): pass
+MetaNativeIter = type("MetaNativeIter", (type,), {"__iter__": dict.__dict__["fromkeys"], "__getitem__": lambda cls, index: (4, 5)[index]}); MetaNative = MetaNativeIter("MetaNative", (), {})
+iter_consumers("metaclass iter bind fallback", lambda: MetaIterFallback)
+iter_consumers("metaclass iter bind no fallback", lambda: MetaIterMissing)
+iter_consumers("metaclass getitem only", lambda: MetaOnlyGetitem)
+t("metaclass iter body error", lambda: list(MetaIterRaises))
+t("metaclass iter returns None", lambda: list(MetaIterNoniterable))
+t("metaclass iter membership", lambda: (30 in MetaIterFallback, 99 in MetaIterFallback, 40 in MetaOnlyGetitem, iter_error(lambda: 1 in MetaIterMissing), iter_error(lambda: 1 in MetaIterNoniterable), iter_error(lambda: 1 in MetaIterRaises)))
+t("metaclass TypeError membership", lambda: (iter_error(lambda: 1 in MetaTypeRaises), iter_error(lambda: 1 in MetaInvalid)))
+iter_consumers("metaclass native descriptor", lambda: MetaNative); t("metaclass native membership", lambda: (4 in MetaNative, 99 in MetaNative))
+
+
 # --- construction slots ---------------------------------------------------
 class PropInit:
     @property
@@ -408,6 +565,69 @@ class IntInit:
 
 t("non-callable __init__", lambda: IntInit())
 
+
+class NewDescriptor:
+    def __get__(self, obj, owner=None):
+        print(f"  [new descriptor obj_is_none={obj is None} owner={owner.__name__}]")
+
+        def allocate(cls, token):
+            result = object.__new__(cls)
+            result.new_seen = (cls.__name__, token)
+            return result
+
+        return allocate
+
+
+class UsesNewDescriptor:
+    __new__ = NewDescriptor()
+    def __init__(self, token):
+        self.init_seen = token
+def use_new_descriptor():
+    result = UsesNewDescriptor("ok")
+    return result.new_seen, result.init_seen
+
+
+t("descriptor __new__ class bind", use_new_descriptor)
+
+
+class NewBindRaises:
+    def __get__(self, obj, owner=None):
+        raise RuntimeError("new-bind")
+
+
+class UsesNewBindRaises: __new__ = NewBindRaises()
+
+
+class NewBindsInt:
+    def __get__(self, obj, owner=None):
+        return 5
+
+
+class UsesNewBindsInt: __new__ = NewBindsInt()
+
+
+class NewIsInt: __new__ = 5
+
+
+t("descriptor __new__ bind error", lambda: UsesNewBindRaises()); t("descriptor __new__ non-callable", lambda: UsesNewBindsInt())
+t("raw __new__ non-callable", lambda: NewIsInt())
+NewCallable = type("NewCallable", (), {"__call__": lambda self, *args: tuple(x.__name__ if isinstance(x, type) else x for x in args)})
+NewStatic = type("NewStatic", (), {"__new__": staticmethod(NewCallable())})
+NewClass = type("NewClass", (), {"__new__": classmethod(NewCallable())})
+NewStaticNone = type("NewStaticNone", (), {"__new__": staticmethod(None)})
+NewStaticInt = type("NewStaticInt", (), {"__new__": staticmethod(5)})
+t("staticmethod callable __new__", lambda: NewStatic("x"))
+t("classmethod callable __new__", lambda: NewClass("x"))
+t("staticmethod None __new__", lambda: NewStaticNone())
+t("staticmethod int __new__", lambda: NewStaticInt())
+PostInitDescriptor = type("PostInitDescriptor", (), {"__get__": lambda self, obj, owner=None: lambda token: setattr(obj, "init_seen", ("descriptor", token))})(); PostInitCallable = type("PostInitCallable", (), {"__call__": lambda self, token: print(f"  [post callable {token}]")})()
+PostNewDesc = type("PostNewDesc", (), {"__new__": NewDescriptor(), "__init__": PostInitDescriptor}); PostNewCallable = type("PostNewCallable", (), {"__new__": NewDescriptor(), "__init__": PostInitCallable}); PostNewBad = type("PostNewBad", (), {"__new__": NewDescriptor(), "__init__": 5})
+t("post descriptor new init", lambda: (PostNewDesc("x").init_seen, type(PostNewCallable("y")).__name__, iter_error(lambda: PostNewBad("z"))))
+FunctionNew = lambda cls, token: object.__new__(cls); FunctionNewDesc = type("FunctionNewDesc", (), {"__new__": FunctionNew, "__init__": PostInitDescriptor})
+FunctionNewCallable = type("FunctionNewCallable", (), {"__new__": FunctionNew, "__init__": PostInitCallable}); FunctionNewBad = type("FunctionNewBad", (), {"__new__": FunctionNew, "__init__": 5})
+t("post function new init", lambda: (FunctionNewDesc("a").init_seen, type(FunctionNewCallable("b")).__name__, iter_error(lambda: FunctionNewBad("c"))))
+InitToken = lambda self, token: setattr(self, "init_seen", token); RawObjectNew = type("RawObjectNew", (), {"__new__": object.__new__, "__init__": InitToken}); StaticObjectNew = type("StaticObjectNew", (), {"__new__": staticmethod(object.__new__), "__init__": InitToken}); ClassObjectNew = type("ClassObjectNew", (), {"__new__": classmethod(object.__new__), "__init__": InitToken})
+t("wrapped object new provenance", lambda: (RawObjectNew("raw").init_seen, iter_error(lambda: StaticObjectNew("static")), iter_error(lambda: ClassObjectNew("class"))))
 
 # --- `__get__` is NOT itself descriptor-bound (raw lookup, 3-arg call) -----
 class InnerGet:
