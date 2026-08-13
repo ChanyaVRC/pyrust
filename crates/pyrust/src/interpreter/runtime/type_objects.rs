@@ -58,6 +58,7 @@ thread_local! {
         );
         attrs.insert("__module__".to_string(), Value::string("typing"));
         let mut class = PyClass::new("TypeVar", "TypeVar", None, attrs);
+        class.canonical_tag = Some(pyrust_core::CanonicalClassTag::TypeVar);
         class.non_subclassable_name = Some("typing.TypeVar");
         Rc::new(RefCell::new(class))
     };

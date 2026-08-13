@@ -27,8 +27,8 @@ pub struct CachedConstructionPlan {
 /// Immutable identity tag for interpreter-owned classes whose semantics must
 /// survive Python-visible `__name__` / `__qualname__` changes.
 ///
-/// Ordinary user classes never receive a tag.  The interpreter assigns one
-/// only while constructing its canonical primitive/object singletons.
+/// Ordinary user classes never receive a tag. The interpreter assigns one
+/// only while constructing canonical runtime-owned class singletons.
 /// Cross-crate protocol code can therefore distinguish a real runtime-owned
 /// built-in class from a same-named user class without depending on mutable
 /// presentation metadata.
@@ -52,6 +52,7 @@ pub enum CanonicalClassTag {
     Set,
     Str,
     Tuple,
+    TypeVar,
 }
 
 impl CanonicalClassTag {
@@ -81,7 +82,7 @@ impl CanonicalClassTag {
     }
 
     pub const fn is_primitive(self) -> bool {
-        !matches!(self, Self::Object | Self::GenericAlias)
+        !matches!(self, Self::Object | Self::GenericAlias | Self::TypeVar)
     }
 
     pub const fn canonical_name(self) -> &'static str {
@@ -104,6 +105,7 @@ impl CanonicalClassTag {
             Self::Set => "set",
             Self::Str => "str",
             Self::Tuple => "tuple",
+            Self::TypeVar => "TypeVar",
         }
     }
 }
@@ -201,8 +203,8 @@ pub struct PyClass {
     ///
     /// This tag is internal metadata and cannot be changed through Python
     /// `__name__` / `__qualname__` assignment. Primitive backing and
-    /// `NoneType` decisions use it instead of mutable visible names. `None`
-    /// denotes an ordinary user-defined class.
+    /// `NoneType` and other exact-runtime-type decisions use it instead of
+    /// mutable visible names. `None` denotes an ordinary user-defined class.
     pub canonical_tag: Option<CanonicalClassTag>,
     /// Stable identity for issue #3000's six non-primitive built-in type
     /// singletons.  Kept off Python-visible attrs so renaming or copying a

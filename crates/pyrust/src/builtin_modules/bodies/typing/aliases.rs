@@ -89,7 +89,15 @@ pub(super) fn generic_origin_repr(origin: &Value) -> String {
 /// Render one `_GenericAlias` argument with CPython's `_type_repr` spelling.
 pub(super) fn generic_arg_repr(interp: &mut Interpreter, value: &Value) -> Result<String> {
     if let ValueKind::PyClass(class) = value.kind() {
-        return Ok(class.borrow().qualname.clone());
+        return pyrust_builtins::generic_alias::repr_class_type_arg_with(
+            class,
+            pyrust_builtins::generic_alias::ClassTypeArgReprStyle::Typing,
+            interp,
+            Interpreter::render_value_as_str,
+        );
+    }
+    if let Some(rendered) = pyrust_builtins::generic_alias::typevar_arg_repr(value) {
+        return Ok(rendered);
     }
     crate::interpreter::render_value_repr(interp, value)
 }

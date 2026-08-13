@@ -74,19 +74,20 @@ impl Interpreter {
 
     /// Resolve the active module's display name for runtime objects created by
     /// language syntax. The lexical environment is authoritative; the live
-    /// globals dict is the fallback for user mutation through `globals()`.
+    /// globals dict is the fallback for user mutation through `globals()`,
+    /// followed by the configured builtins provider for explicit exec roots.
     pub(crate) fn defining_module_name(&self) -> Result<String> {
-        let _namespace = self.prepare_global_namespace("__name__");
-        self.lookup_name_inner("__name__", false).map(|resolved| {
-            resolved
-                .or_else(|| {
-                    self.active_globals_dict()
-                        .dict_with(|dict| dict.get(&StrKey("__name__")).cloned())
-                        .flatten()
-                })
-                .and_then(|value| value.as_str().map(str::to_string))
-                .unwrap_or_else(|| "__main__".to_string())
-        })
+        let namespace = self.prepare_global_namespace("__name__");
+        let resolved = self.lookup_name_inner("__name__", false)?.or_else(|| {
+            namespace
+                .globals()
+                .dict_with(|dict| dict.get(&StrKey("__name__")).cloned())
+                .flatten()
+        });
+        if let Some(name) = resolved.and_then(|value| value.as_str().map(str::to_string)) {
+            return Ok(name);
+        }
+        builtins_provider_module_name(namespace.globals()).ok_or_else(|| undefined_name("__name__"))
     }
 
     /// Name resolution for `Insn::LoadGlobal` / `Insn::LoadCell`.
@@ -134,5 +135,35 @@ impl Interpreter {
         if self.env_pool.len() < ENV_POOL_MAX && Rc::strong_count(&env) == 1 {
             self.env_pool.push(env);
         }
+    }
+}
+
+/// Read the configured builtins provider's module name without invoking user
+/// attribute code. Native modules synthesize `__name__` from their internal
+/// name; explicit dict and module namespaces must carry their own value.
+fn builtins_provider_module_name(globals: &Value) -> Option<String> {
+    let provider = globals
+        .dict_with(|dict| dict.get(&StrKey("__builtins__")).cloned())
+        .flatten()
+        .unwrap_or_else(cached_builtins_module);
+    match provider.kind() {
+        ValueKind::Dict(_) => provider
+            .dict_with(|dict| dict.get(&StrKey("__name__")).cloned())
+            .flatten()
+            .and_then(|value| value.as_str().map(str::to_string)),
+        ValueKind::PyModule(module) => {
+            let module = module.borrow();
+            match module.get_attr_value("__name__") {
+                Some(value) if !value.is_unset() => value.as_str().map(str::to_string),
+                Some(_) => None,
+                None if module.live_namespace().is_none()
+                    && module.filesystem_namespace().is_none() =>
+                {
+                    Some(module.name.clone())
+                }
+                None => None,
+            }
+        }
+        _ => None,
     }
 }
