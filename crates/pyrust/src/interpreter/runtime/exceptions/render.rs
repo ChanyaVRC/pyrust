@@ -111,7 +111,9 @@ fn exception_instance_args(inst_rc: &Rc<RefCell<pyrust_core::PyInstance>>) -> Ve
 /// Renders a value using its `__repr__` dunder for the `!r` conversion flag in
 /// `str.format`.  Mirrors the `repr()` builtin's dispatch: for `PyInstance`
 /// values, looks up `__repr__` via MRO, calls it, and validates the return is a
-/// `str`.  Non-instances (built-in types) fall back to `value.repr_raw()` unchanged.
+/// `str`.  Generator-backed values use the interpreter renderer because their
+/// public repr carries state that `value.repr_raw()` cannot see; other
+/// non-instances fall back to `value.repr_raw()` unchanged.
 ///
 /// Note: exception instances do not bypass `__repr__` here — CPython dispatches
 /// `__repr__` on exceptions normally (only `__str__` has the special-case).
@@ -130,6 +132,9 @@ pub(super) fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> R
         {
             return res;
         }
+    }
+    if matches!(value.kind(), ValueKind::Generator(_)) {
+        return render_value_repr(interp, value);
     }
     let ValueKind::PyInstance(inst) = value.kind() else {
         return Ok(value.repr_raw());

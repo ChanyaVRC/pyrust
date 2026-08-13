@@ -60,6 +60,15 @@ pyrust_module! {
         } else {
             String::new()
         };
+        if native_iterator_class(&self_val).is_some() {
+            if spec_str.is_empty() {
+                return Ok(Value::string(render_value_repr(_interp, &self_val)?));
+            }
+            return Err(pyrust_core::type_err!(
+                "unsupported format string passed to {}.__format__",
+                full_type_name_str(&self_val)
+            ));
+        }
         // A builtin subclass (`class I(int)`, `class S(str)`, …) that does not
         // override `__format__` resolves `super().__format__(spec)` and the
         // method-call form `inst.__format__(spec)` to *this* `object.__format__`

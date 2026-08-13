@@ -163,7 +163,13 @@ fn native_frame_remaining(frame: &NativeIterFrame) -> i64 {
             i64::try_from(cursor.next_index).unwrap_or(i64::MAX)
         }
         NativeIterSource::DictView { keys, .. } => remaining_from(keys.len()),
-        NativeIterSource::Deque(data) => remaining_from(data.borrow().len()),
+        NativeIterSource::Deque { remaining, .. } => {
+            if frame.guard.as_ref().is_some_and(|guard| guard.failed) {
+                0
+            } else {
+                i64::try_from(*remaining).unwrap_or(i64::MAX)
+            }
+        }
         NativeIterSource::Bytes(value) => remaining_from(match value.kind() {
             ValueKind::Bytes(bytes) => bytes.len(),
             _ => 0,
@@ -171,7 +177,7 @@ fn native_frame_remaining(frame: &NativeIterFrame) -> i64 {
         // `bytearrayiter_length_hint` subtracts the position from the buffer's
         // *current* size, so a mid-walk append raises the count again while a
         // shrink past the cursor drops it to zero (#2921).
-        NativeIterSource::Bytearray(data) => remaining_from(data.borrow().len()),
+        NativeIterSource::Bytearray { data, .. } => remaining_from(data.borrow().len()),
         NativeIterSource::String { value, .. } => remaining_from(value.str_codepoint_len()),
         NativeIterSource::Exhausted { .. } => 0,
     }

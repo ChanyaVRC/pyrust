@@ -121,6 +121,9 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__repr__", "object")
         })?;
+        if native_iterator_class(&self_val).is_some() {
+            return Ok(Value::string(render_value_repr(_interp, &self_val)?));
+        }
         // Issue #1600: for a PyInstance with backing primitive data, render the
         // backing value directly (bypassing MRO lookup) so that
         // `list.__repr__(MyList([1,2,3]))` returns `[1, 2, 3]`.
@@ -197,11 +200,15 @@ pyrust_module! {
         // the same object (Rc::ptr_eq), matching CPython's default __eq__.
         // For non-instance primitives we fall back to structural equality so
         // that `int.__eq__(1, 1)` still returns True.
-        let same = match (a.kind(), b.kind()) {
-            (ValueKind::PyInstance(ra), ValueKind::PyInstance(rb)) => {
-                Rc::ptr_eq(ra, rb)
+        let same = if native_iterator_class(&a).is_some() {
+            a.object_id() == b.object_id()
+        } else {
+            match (a.kind(), b.kind()) {
+                (ValueKind::PyInstance(ra), ValueKind::PyInstance(rb)) => {
+                    Rc::ptr_eq(ra, rb)
+                }
+                _ => a == b,
             }
-            _ => a == b,
         };
         Ok(if same { Value::bool_(true) } else { Value::not_implemented() })
     }
@@ -217,11 +224,15 @@ pyrust_module! {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
             _ => return Err(pyrust_core::descriptor_needs_arg!("__ne__", "object")),
         };
-        let same = match (a.kind(), b.kind()) {
-            (ValueKind::PyInstance(ra), ValueKind::PyInstance(rb)) => {
-                Rc::ptr_eq(ra, rb)
+        let same = if native_iterator_class(&a).is_some() {
+            a.object_id() == b.object_id()
+        } else {
+            match (a.kind(), b.kind()) {
+                (ValueKind::PyInstance(ra), ValueKind::PyInstance(rb)) => {
+                    Rc::ptr_eq(ra, rb)
+                }
+                _ => a == b,
             }
-            _ => a == b,
         };
         Ok(if same { Value::bool_(false) } else { Value::not_implemented() })
     }
@@ -239,6 +250,9 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__hash__", "object")
         })?;
+        if native_iterator_class(&self_val).is_some() {
+            return Ok(self_val.object_id());
+        }
         // For user instances use the Rc pointer as the identity hash, matching
         // CPython's default `id(x) >> 4`.  Map -1 → -2 as CPython requires.
         if let ValueKind::PyInstance(inst) = self_val.kind() {
@@ -277,6 +291,25 @@ pyrust_module! {
         Ok(Value::list(names.into_iter().map(Value::string).collect()))
     }
 
+    #[py_name = "object.__getstate__"]
+    fn object_getstate_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|arg| arg.value.clone()).ok_or_else(|| {
+            pyrust_core::descriptor_needs_arg!("__getstate__", "object", method)
+        })?;
+        if args.len() != 1 || args.iter().any(|arg| arg.name.is_some()) {
+            return Err(pyrust_core::type_err!(
+                "object.__getstate__() takes no arguments ({} given)",
+                args.len().saturating_sub(1)
+            ));
+        }
+        match self_val.kind() {
+            ValueKind::PyInstance(rc) => Ok(
+                crate::builtin_modules::copy::default_instance_state(rc),
+            ),
+            _ => Ok(Value::none()),
+        }
+    }
+
     /// Issue #2151: `object.__reduce_ex__(self, protocol)` — the pickle-protocol
     /// reduction.  CPython returns the `copyreg.__newobj__` tuple; pyrust does
     /// not model copyreg, so we return a tuple of the correct *shape*
@@ -286,6 +319,22 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__reduce_ex__", "object", method)
         })?;
+        if let Some(kind) = native_iterator_class(&self_val) {
+            if args.len() != 2 || args.iter().any(|arg| arg.name.is_some()) {
+                return Err(pyrust_core::type_err!(
+                    "object.__reduce_ex__() takes exactly one argument ({} given)",
+                    args.len().saturating_sub(1)
+                ));
+            }
+            let protocol = _interp.value_to_isize(
+                &args[1].value,
+                "Python int too large to convert to C int",
+            )?;
+            i32::try_from(protocol).map_err(|_| {
+                pyrust_core::overflow_err!("Python int too large to convert to C int")
+            })?;
+            return native_iterator_reduce(&self_val, kind);
+        }
         Ok(Value::tuple(vec![
             value_class(&self_val),
             Value::tuple(Vec::new()),
@@ -299,6 +348,12 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__reduce__", "object", method)
         })?;
+        if let Some(kind) = native_iterator_class(&self_val) {
+            return Err(pyrust_core::type_err!(
+                "cannot pickle '{}' object",
+                kind.class_name()
+            ));
+        }
         Ok(Value::tuple(vec![
             value_class(&self_val),
             Value::tuple(Vec::new()),

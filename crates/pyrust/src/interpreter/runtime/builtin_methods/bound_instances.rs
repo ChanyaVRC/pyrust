@@ -89,7 +89,10 @@ impl Interpreter {
                     });
                 }
                 let args_vec: Vec<Value> = std::mem::take(pos);
-                if is_mutable_builtin_inplace_dunder(method) {
+                if is_mutable_builtin_inplace_dunder(method)
+                    || (method == "__iter__"
+                        && pyrust_builtins::bytearray::as_bytearray_rc(&backing).is_some())
+                {
                     return self.dispatch_builtin_subclass_protocol_dunder(
                         method, receiver, backing, args_vec,
                     );

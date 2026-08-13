@@ -49,7 +49,8 @@ pub(crate) fn dict_view_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>
 
 /// True when `class` is an interpreter-owned `builtins` type singleton that
 /// carries no [`CanonicalClassTag`](pyrust_core::CanonicalClassTag) — `range`
-/// plus the [`BuiltinTypeClass`] and dictionary-view groups.  Such a class
+/// plus the [`BuiltinTypeClass`], dictionary-view, and hidden bytearray
+/// iterator groups. Such a class
 /// still has the built-in type metadata (`__module__ == "builtins"`, a
 /// `__doc__` from [`builtin_class_doc`]) that `type` supplies virtually.
 pub(crate) fn is_untagged_builtin_type_class(class: &Rc<RefCell<PyClass>>) -> bool {
@@ -57,6 +58,7 @@ pub(crate) fn is_untagged_builtin_type_class(class: &Rc<RefCell<PyClass>>) -> bo
     RANGE_CLASS.with(|range| ptr == Rc::as_ptr(range))
         || BUILTIN_TYPE_CLASSES.with(|classes| classes.iter().any(|entry| ptr == Rc::as_ptr(entry)))
         || DICT_VIEW_CLASSES.with(|classes| classes.iter().any(|entry| ptr == Rc::as_ptr(entry)))
+        || NativeIteratorClass::from_class(class) == Some(NativeIteratorClass::Bytearray)
 }
 
 /// Look up the per-primitive `PyClass` singleton for one of the migrated

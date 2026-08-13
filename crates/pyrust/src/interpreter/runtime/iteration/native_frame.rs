@@ -5,8 +5,23 @@ impl NativeIterFrame {
             source: NativeIterSource::Materialized(items),
             pos: 0,
             type_name,
+            class: None,
             guard: None,
             exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
+        }
+    }
+
+    /// Construct a native frame for an API that exposes a real generator.
+    pub(crate) fn generator(items: Vec<Value>) -> Self {
+        NativeIterFrame {
+            source: NativeIterSource::Materialized(items),
+            pos: 0,
+            type_name: "generator",
+            class: None,
+            guard: None,
+            exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Generator,
         }
     }
 
@@ -26,8 +41,10 @@ impl NativeIterFrame {
             },
             pos: 0,
             type_name,
+            class: None,
             guard: None,
             exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
         }
     }
 
@@ -43,8 +60,10 @@ impl NativeIterFrame {
             },
             pos: 0,
             type_name: "dict_keyiterator",
+            class: None,
             guard: None,
             exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
         }
     }
 
@@ -58,8 +77,10 @@ impl NativeIterFrame {
             source: NativeIterSource::Indexed(source),
             pos: 0,
             type_name,
+            class: None,
             guard: None,
             exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
         }
     }
 
@@ -73,8 +94,10 @@ impl NativeIterFrame {
             },
             pos: 0,
             type_name,
+            class: None,
             guard: None,
             exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
         }
     }
 
@@ -86,8 +109,10 @@ impl NativeIterFrame {
             ))),
             pos: 0,
             type_name,
+            class: None,
             guard: None,
             exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
         }
     }
 
@@ -111,23 +136,68 @@ impl NativeIterFrame {
             source: NativeIterSource::DictView { dict, keys, kind },
             pos: 0,
             type_name,
+            class: None,
             guard: None,
             exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
         }
     }
 
     /// Construct a live, allocation-free iterator over deque storage.
     pub(crate) fn deque(
         data: pyrust_builtins::deque_storage::DequeData,
-        type_name: &'static str,
+        replacement: DequeIteratorReplacement,
+        reverse: bool,
+        consumed: usize,
     ) -> Self {
+        let len = data.borrow().len();
+        let pos = consumed.min(len);
+        let remaining = len - pos;
+        let class = if reverse {
+            NativeIteratorClass::DequeReverse
+        } else {
+            NativeIteratorClass::Deque
+        };
         NativeIterFrame {
-            source: NativeIterSource::Deque(data),
-            pos: 0,
-            type_name,
+            source: NativeIterSource::Deque {
+                data,
+                remaining,
+                reverse,
+                replacement,
+            },
+            pos,
+            type_name: class.full_type_name(),
+            class: Some(class),
             guard: None,
             exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
         }
+    }
+
+    /// Construct a guarded deque iterator from provider-validated storage.
+    pub(crate) fn guarded_deque(
+        data: pyrust_builtins::deque_storage::DequeData,
+        counter: pyrust_builtins::deque_storage::DequeMutationState,
+        container: Value,
+        replacement: DequeIteratorReplacement,
+        reverse: bool,
+        consumed: usize,
+    ) -> Self {
+        let version = counter.get();
+        let mut frame = Self::deque(data, replacement, reverse, consumed);
+        frame.guard = Some(Box::new(NativeIterGuard {
+            container,
+            version,
+            kind: GuardVersion::DequeState {
+                counter,
+                exhaust_after_raise: reverse,
+            },
+            msg: "deque mutated during iteration",
+            exhaust_first: false,
+            failed: false,
+            ordered_watch: None,
+        }));
+        frame
     }
 
     /// Construct a lazy iterator over immutable bytes.
@@ -137,8 +207,10 @@ impl NativeIterFrame {
             source: NativeIterSource::Bytes(value),
             pos: 0,
             type_name,
+            class: None,
             guard: None,
             exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
         }
     }
 
@@ -149,11 +221,35 @@ impl NativeIterFrame {
     pub(crate) fn bytearray(value: Value, type_name: &'static str) -> Option<Self> {
         let data = pyrust_builtins::bytearray::as_bytearray_rc(&value)?;
         Some(NativeIterFrame {
-            source: NativeIterSource::Bytearray(data),
+            source: NativeIterSource::Bytearray {
+                carrier: value,
+                data,
+            },
             pos: 0,
             type_name,
+            class: Some(NativeIteratorClass::Bytearray),
             guard: None,
             exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
+        })
+    }
+
+    /// Construct a bytearray iterator whose Python reduction owner differs
+    /// from the primitive buffer used by the indexed hot path (a subclass).
+    pub(crate) fn bytearray_with_carrier(
+        carrier: Value,
+        backing: &Value,
+        type_name: &'static str,
+    ) -> Option<Self> {
+        let data = pyrust_builtins::bytearray::as_bytearray_rc(backing)?;
+        Some(NativeIterFrame {
+            source: NativeIterSource::Bytearray { carrier, data },
+            pos: 0,
+            type_name,
+            class: Some(NativeIteratorClass::Bytearray),
+            guard: None,
+            exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
         })
     }
 
@@ -164,8 +260,10 @@ impl NativeIterFrame {
             source: NativeIterSource::String { value, byte_pos: 0 },
             pos: 0,
             type_name,
+            class: None,
             guard: None,
             exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
         }
     }
 
@@ -185,7 +283,7 @@ impl NativeIterFrame {
                 NativeIterSource::Materialized(_)
                     | NativeIterSource::Indexed(_)
                     | NativeIterSource::Bytes(_)
-                    | NativeIterSource::Bytearray(_)
+                    | NativeIterSource::Bytearray { .. }
                     | NativeIterSource::String { .. }
                     | NativeIterSource::Exhausted { .. }
             )
@@ -213,7 +311,7 @@ impl NativeIterFrame {
                 ValueKind::Bytes(bytes) => bytes.get(pos).map(|byte| Value::int(*byte as i64)),
                 _ => None,
             },
-            NativeIterSource::Bytearray(data) => {
+            NativeIterSource::Bytearray { data, .. } => {
                 data.borrow().get(pos).map(|byte| Value::int(*byte as i64))
             }
             NativeIterSource::String { value, byte_pos } => {
@@ -262,12 +360,12 @@ impl NativeIterFrame {
             }
             NativeIterSource::ReverseDict(cursor) => self.pos.saturating_add(cursor.next_index),
             NativeIterSource::DictView { keys, .. } => keys.len(),
-            NativeIterSource::Deque(data) => data.borrow().len(),
+            NativeIterSource::Deque { remaining, .. } => self.pos.saturating_add(*remaining),
             NativeIterSource::Bytes(value) => match value.kind() {
                 ValueKind::Bytes(bytes) => bytes.len(),
                 _ => 0,
             },
-            NativeIterSource::Bytearray(data) => data.borrow().len(),
+            NativeIterSource::Bytearray { data, .. } => data.borrow().len(),
             NativeIterSource::String { value, .. } => value.as_str().map_or(0, str::len),
             NativeIterSource::Exhausted { .. } => 0,
         }
@@ -368,12 +466,27 @@ impl NativeIterFrame {
                 };
                 Ok(Some(value))
             }
-            NativeIterSource::Deque(data) => Ok(data.borrow().get(index).cloned()),
+            NativeIterSource::Deque {
+                data,
+                remaining,
+                reverse,
+                ..
+            } => {
+                if *remaining == 0 {
+                    return Ok(None);
+                }
+                let item_index = if *reverse { *remaining - 1 } else { index };
+                let item = data.borrow().get(item_index).cloned();
+                if item.is_some() {
+                    *remaining -= 1;
+                }
+                Ok(item)
+            }
             NativeIterSource::Bytes(value) => Ok(match value.kind() {
                 ValueKind::Bytes(bytes) => bytes.get(index).map(|byte| Value::int(*byte as i64)),
                 _ => None,
             }),
-            NativeIterSource::Bytearray(data) => Ok(data
+            NativeIterSource::Bytearray { data, .. } => Ok(data
                 .borrow()
                 .get(index)
                 .map(|byte| Value::int(*byte as i64))),
@@ -400,6 +513,20 @@ impl NativeIterFrame {
         if self.exhausted {
             return Ok(Vec::new());
         }
+        // Match `advance`: a reverse deque cursor with no creation quota left
+        // is terminal before mutation is diagnosed. Forward deque iterators
+        // deliberately retain mutation-first ordering at the same boundary.
+        if matches!(
+            self.source,
+            NativeIterSource::Deque {
+                remaining: 0,
+                reverse: true,
+                ..
+            }
+        ) {
+            self.latch_exhausted();
+            return Ok(Vec::new());
+        }
         // Same ordering `advance` uses: a provider that asks for
         // exhaustion-first never reports a mutation to a cursor already at its
         // end, so draining one yields nothing instead of raising.
@@ -421,9 +548,11 @@ impl NativeIterFrame {
             self.pos += 1;
         }
         self.exhausted = true;
-        self.source = NativeIterSource::Exhausted {
-            reduces_to_list: self.source.reduces_to_list(),
-        };
+        if !matches!(self.source, NativeIterSource::Deque { .. }) {
+            self.source = NativeIterSource::Exhausted {
+                copy_kind: self.source.exhausted_copy_kind(),
+            };
+        }
         Ok(remaining)
     }
 
@@ -437,13 +566,12 @@ impl NativeIterFrame {
                 | NativeIterSource::LiveKeys { .. }
                 | NativeIterSource::InstanceDict { .. }
                 | NativeIterSource::DictView { .. }
-                | NativeIterSource::Deque(_)
                 | NativeIterSource::Bytes(_)
-                | NativeIterSource::Bytearray(_)
+                | NativeIterSource::Bytearray { .. }
                 | NativeIterSource::String { .. }
         ) {
             self.source = NativeIterSource::Exhausted {
-                reduces_to_list: self.source.reduces_to_list(),
+                copy_kind: self.source.exhausted_copy_kind(),
             };
         }
     }
@@ -468,7 +596,7 @@ impl NativeIterFrame {
         };
         let live = match &guard.kind {
             GuardVersion::Size => live_collection_len(&guard.container).map(|len| len as i64),
-            GuardVersion::DequeState { counter } => Some(counter.get()),
+            GuardVersion::DequeState { counter, .. } => Some(counter.get()),
         };
         // An ordered mapping is diagnosed on two independent facts, so either
         // one reaching the provider is enough: a relink that restores the
@@ -478,6 +606,7 @@ impl NativeIterFrame {
             .as_ref()
             .is_some_and(|watch| watch.relinked());
         if relinked || live != Some(guard.version) {
+            guard.failed = true;
             let (message, exhaust_after_raise) = if let Some(watch) = &guard.ordered_watch {
                 let outcome =
                     ordered_mapping_guard_outcome(&guard.container, guard.version as usize, watch);
@@ -490,7 +619,16 @@ impl NativeIterFrame {
                 // (#2915). A provider guard keeps its own recorded length,
                 // which its outcome logic still needs.
                 guard.version = -1;
-                (guard.msg, false)
+                (
+                    guard.msg,
+                    matches!(
+                        &guard.kind,
+                        GuardVersion::DequeState {
+                            exhaust_after_raise: true,
+                            ..
+                        }
+                    ),
+                )
             };
             // A provider whose guard reports once leaves the iterator
             // permanently exhausted, so every later step is plain
@@ -515,6 +653,20 @@ impl NativeIterFrame {
         if self.exhausted {
             return Ok(None);
         }
+        // A reverse deque cursor whose creation quota is already consumed is
+        // terminal before mutation is diagnosed. Forward deque iterators keep
+        // CPython's mutation-first ordering at the same boundary.
+        if matches!(
+            self.source,
+            NativeIterSource::Deque {
+                remaining: 0,
+                reverse: true,
+                ..
+            }
+        ) {
+            self.latch_exhausted();
+            return Ok(None);
+        }
         if let NativeIterSource::LiveKeys { container, cursor } = &mut self.source
             && cursor.snapshot.is_some()
         {
@@ -529,7 +681,7 @@ impl NativeIterFrame {
                 StableSnapshotAdvance::Exhausted => {
                     self.exhausted = true;
                     self.source = NativeIterSource::Exhausted {
-                        reduces_to_list: self.source.reduces_to_list(),
+                        copy_kind: self.source.exhausted_copy_kind(),
                     };
                     return Ok(None);
                 }
@@ -553,6 +705,72 @@ impl NativeIterFrame {
         }
         self.latch_exhausted();
         Ok(None)
+    }
+}
+
+impl Interpreter {
+    /// Invoke a class-owned protocol descriptor for a concrete native iterator.
+    pub(crate) fn call_native_iterator_unbound(
+        &mut self,
+        args: &[ExpandedCallArg],
+        expected: NativeIteratorClass,
+        method: &str,
+    ) -> Result<Value> {
+        let owner = expected.full_type_name();
+        let method_descriptor = matches!(method, "__length_hint__" | "__reduce__" | "__setstate__");
+        let receiver = args
+            .first()
+            .filter(|arg| arg.name.is_none())
+            .map(|arg| arg.value.clone())
+            .ok_or_else(|| {
+                if method_descriptor {
+                    pyrust_core::descriptor_needs_arg!(method, owner, method)
+                } else {
+                    pyrust_core::descriptor_needs_arg!(method, owner)
+                }
+            })?;
+        if native_iterator_class(&receiver) != Some(expected) {
+            let actual = full_type_name_str(&receiver);
+            return Err(if method_descriptor {
+                pyrust_core::descriptor_requires!(method, owner, actual, method)
+            } else {
+                pyrust_core::descriptor_requires!(method, owner, actual)
+            });
+        }
+        let rest = args.get(1..).unwrap_or_default();
+        if rest.iter().any(|arg| arg.name.is_some()) {
+            return Err(pyrust_core::type_err!(
+                "{owner}.{method}() takes no keyword arguments"
+            ));
+        }
+        let expected_args = usize::from(matches!(method, "__setstate__" | "__getattribute__"));
+        if rest.len() != expected_args {
+            return Err(pyrust_core::type_err!(
+                "expected {expected_args} arguments, got {}",
+                rest.len()
+            ));
+        }
+        match method {
+            "__iter__" => Ok(receiver),
+            "__next__" => self.call_next(&receiver, None),
+            "__length_hint__" => self
+                .builtin_iterator_length_hint_value(&receiver)?
+                .ok_or_else(|| PyError::Runtime("native iterator lost its length hint".into())),
+            "__reduce__" => native_iterator_reduce(&receiver, expected),
+            "__getattribute__" => {
+                let name = rest[0].value.as_str().ok_or_else(|| {
+                    pyrust_core::type_err!(
+                        "attribute name must be string, not '{}'",
+                        full_type_name_str(&rest[0].value)
+                    )
+                })?;
+                self.get_attr(&receiver, name)
+            }
+            "__setstate__" => {
+                self.call_generator_method(receiver, method, vec![rest[0].value.clone()])
+            }
+            _ => unreachable!("unknown native iterator protocol method"),
+        }
     }
 }
 

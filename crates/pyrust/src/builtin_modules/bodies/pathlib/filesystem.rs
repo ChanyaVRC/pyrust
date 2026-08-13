@@ -320,9 +320,8 @@ pub(super) fn path_iterdir(args: &[ExpandedCallArg], fn_name: &str) -> Result<Va
         let child_path = entry.path().to_string_lossy().into_owned();
         items.push(make_path_result(&inst, &child_path));
     }
-    Ok(Value::generator(Box::new(NativeIterFrame::new(
+    Ok(Value::generator(Box::new(NativeIterFrame::generator(
         items,
-        "generator",
     ))))
 }
 
@@ -349,9 +348,8 @@ pub(super) fn path_glob(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value
     let base = get_path(&inst, fn_name)?;
     let result_class = Rc::clone(&inst.borrow().class);
     let items = glob_collect(&base, &pattern, &result_class)?;
-    Ok(Value::generator(Box::new(NativeIterFrame::new(
+    Ok(Value::generator(Box::new(NativeIterFrame::generator(
         items,
-        "generator",
     ))))
 }
 

@@ -315,6 +315,10 @@ pub(crate) fn hash_value_with_interp(
     value: &Value,
 ) -> Result<i64> {
     match value.kind() {
+        ValueKind::Generator(_) if native_iterator_class(value).is_some() => Ok(value
+            .object_id()
+            .as_int()
+            .expect("object id must be an int")),
         ValueKind::Tuple(items) => {
             // Fast path: if no element at any depth requires the slow path
             // (PyInstance needing __hash__ dispatch, or a slice with unhashable

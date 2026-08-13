@@ -236,6 +236,13 @@ impl Interpreter {
                 ))
             }
             ValueKind::Generator(_) => {
+                if let Some(iterator_class) = native_iterator_class(&target) {
+                    return Err(pyrust_core::py_err!(
+                        "AttributeError",
+                        "'{}' object has no attribute '{name}'",
+                        iterator_class.full_type_name()
+                    ));
+                }
                 // CPython 3.12 symmetry with assign_attr: deleting __name__ or
                 // __qualname__ raises the same TypeError as assigning a non-string.
                 // The read-only gi_* attrs raise AttributeError "not writable".

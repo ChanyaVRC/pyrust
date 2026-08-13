@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::interpreter::Interpreter;
+use crate::interpreter::{Interpreter, NativeIteratorClass};
 use crate::value::ValueKind;
 
 /// Apply native module-specific class wiring before a built-in module enters
@@ -87,6 +87,13 @@ fn prepare_collections_module(module: &Value) {
     let ValueKind::PyModule(module) = module.kind() else {
         return;
     };
+    // CPython publishes the forward deque iterator class under its private
+    // implementation name.  The reverse iterator class remains discoverable
+    // only through `type(reversed(deque()))` and is not a module attribute.
+    module.borrow_mut().insert_attr(
+        "_deque_iterator".to_string(),
+        Value::py_class(NativeIteratorClass::Deque.singleton()),
+    );
     let Some(dictionary_class) = crate::interpreter::primitive_class_by_name("dict") else {
         return;
     };

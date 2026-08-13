@@ -113,6 +113,9 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
         ValueKind::PyClass(class) => {
             let mut names: Vec<String> = Vec::new();
             collect_class_names(class, &mut names);
+            if NativeIteratorClass::from_class(class).is_some() {
+                names.retain(|name| name != "__getstate__");
+            }
             names
         }
         ValueKind::PyModule(module) => {
@@ -169,6 +172,17 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
             with_object_dunders(builtin_object_method_names(ops))
         }
         ValueKind::Generator(cell) => {
+            // A small set of concrete built-in iterator classes use a
+            // GeneratorCell only as their storage carrier. Their dir()
+            // surface comes from the real class MRO, not from generator's
+            // send/throw/close and gi_* API.
+            if let Some(iterator_class) = native_iterator_class(value) {
+                let mut names = Vec::new();
+                collect_class_names(&iterator_class.singleton(), &mut names);
+                names.retain(|name| name != "__getstate__");
+                return names;
+            }
+
             // CPython exposes a type-specific introspection surface per
             // generator kind (issue #2302): a plain generator advertises the
             // synchronous iteration protocol plus `gi_*`; an async generator

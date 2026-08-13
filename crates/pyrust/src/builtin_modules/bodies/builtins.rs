@@ -21,8 +21,8 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     BuiltinTypeClass, CallableIter, ConsumerIterator, EnumerateIter, FilterIter, Interpreter,
-    IterSrcBuf, MapIter, ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp,
-    bigint_divmod_floor, bind_constructor_kwargs, builtin_data_backing,
+    IterSrcBuf, MapIter, NativeIteratorClass, ZipIter, apply_format_spec, apply_format_spec_named,
+    ascii_repr_interp, bigint_divmod_floor, bind_constructor_kwargs, builtin_data_backing,
     builtin_type_class_isinstance_fast, class_has_native_builtin_type_ancestor,
     class_is_subclass_of, class_suppresses_instance_dict, classify_exception_class, coerce_numeric,
     coerce_subclass_backing, compare_values, compare_values_with_op, current_locals_value,
@@ -34,12 +34,13 @@ use crate::interpreter::{
     make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
     make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
     make_reversed_sequence_iterator, mapping_pairs_via_protocol, method_type_singleton,
-    modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, normalize_complex_slot_result,
-    normalize_float_slot_result, normalize_int_slot_result, primitive_class_by_name,
-    primitive_class_dispatch, py_mod_i64, py_round_half_even_checked, reject_keyword_args_expanded,
-    render_instance_str, render_key_repr, render_value_repr, resolve_zero_arg_super,
-    round_bigint_neg_ndigits, round_float_ndigits, sync_module_env_to_globals_dict,
-    type_class_singleton, unicode_exc_set_attrs, value_class, value_to_float, value_type_name_str,
+    modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, native_iterator_class,
+    native_iterator_reduce, normalize_complex_slot_result, normalize_float_slot_result,
+    normalize_int_slot_result, primitive_class_by_name, primitive_class_dispatch, py_mod_i64,
+    py_round_half_even_checked, reject_keyword_args_expanded, render_instance_str, render_key_repr,
+    render_value_repr, resolve_zero_arg_super, round_bigint_neg_ndigits, round_float_ndigits,
+    sync_module_env_to_globals_dict, type_class_singleton, unicode_exc_set_attrs, value_class,
+    value_to_float, value_type_name_str,
 };
 use crate::value::{
     InstanceAttrs, PyBigInt, PyClass, PyDict, PyKey, PySet, PyToPrimitive, PyZero, SortKind,
@@ -89,8 +90,8 @@ mod aggregation {
 mod iteration {
     use super::{
         BuiltinTypeClass, CallableIter, EnumerateIter, ExpandedCallArg, FN_PREFIX, FilterIter,
-        Interpreter, IterSrcBuf, MODULE_NAME, MapIter, PyError, PyValue, Rc, Result, Value,
-        ValueKind, ZipIter, builtin_type_class_isinstance_fast, builtin_type_new,
+        Interpreter, IterSrcBuf, MODULE_NAME, MapIter, NativeIteratorClass, PyError, PyValue, Rc,
+        Result, Value, ValueKind, ZipIter, builtin_type_class_isinstance_fast, builtin_type_new,
         class_is_subclass_of, full_type_name_str, instance_builtin_data, invoke_class_method,
         iter_values, lookup_class_attr, make_iterator, make_reversed_dict_iter,
         make_reversed_getitem_iterator, make_reversed_mapping_snapshot_iter,
@@ -228,9 +229,9 @@ mod object_basics {
         ExpandedCallArg, FN_PREFIX, InstanceAttrs, MODULE_NAME, PyError, Rc, Result, Value,
         ValueKind, class_has_native_builtin_type_ancestor, dir_names,
         find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
-        hash_value_with_interp, instance_builtin_data, lookup_class_attr,
-        reject_keyword_args_expanded, render_key_repr, render_value_repr, value_class,
-        value_type_name_str,
+        hash_value_with_interp, instance_builtin_data, lookup_class_attr, native_iterator_class,
+        native_iterator_reduce, reject_keyword_args_expanded, render_key_repr, render_value_repr,
+        value_class, value_type_name_str,
     };
     include!("builtins/object_basics.rs");
 }
@@ -254,8 +255,8 @@ mod primitive_construction_protocols {
 mod object_comparison {
     use super::{
         ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, Result, Value, ValueKind,
-        apply_format_spec, apply_format_spec_named, builtin_data_backing, render_instance_str,
-        value_type_name_str,
+        apply_format_spec, apply_format_spec_named, builtin_data_backing, full_type_name_str,
+        native_iterator_class, render_instance_str, render_value_repr, value_type_name_str,
     };
     include!("builtins/object_comparison.rs");
 }

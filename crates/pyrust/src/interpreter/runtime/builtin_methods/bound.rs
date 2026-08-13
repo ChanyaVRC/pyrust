@@ -251,6 +251,44 @@ impl Interpreter {
             );
         }
 
+        // These concrete iterators use Generator as a storage carrier, but
+        // their own reduction/state methods must win over the generic object
+        // protocol interception below (notably for a method saved by getattr).
+        if native_iterator_class(&receiver).is_some()
+            && matches!(
+                method,
+                "__iter__"
+                    | "__next__"
+                    | "__length_hint__"
+                    | "__reduce__"
+                    | "__reduce_ex__"
+                    | "__setstate__"
+            )
+        {
+            if has_kw {
+                return Err(pyrust_core::type_err!(
+                    "{}.{method}() takes no keyword arguments",
+                    full_type_name_str(&receiver)
+                ));
+            }
+            return self.call_generator_method(receiver, method, std::mem::take(pos));
+        }
+
+        // These methods are inherited from object, but the concrete iterator
+        // still uses GeneratorCell storage. Route them through its typed
+        // surface before the legacy built-in-data shortcut can ignore tails.
+        if native_iterator_class(&receiver).is_some()
+            && native_iterator_object_method_arity(method).is_some()
+        {
+            if has_kw {
+                return Err(pyrust_core::type_err!(
+                    "{}.{method}() takes no keyword arguments",
+                    full_type_name_str(&receiver)
+                ));
+            }
+            return self.call_generator_method(receiver, method, std::mem::take(pos));
+        }
+
         // #2151: object-protocol method-wrappers (`__sizeof__`, `__dir__`,
         // `__reduce__`, `__reduce_ex__`, and `None.__bool__`) bound on a
         // built-in data value.  Intercept here — the receiver is already bound,

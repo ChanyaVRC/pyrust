@@ -397,7 +397,9 @@ impl PartialEq for PyKey {
             (PyKey::Complex(re, im), other) | (other, PyKey::Complex(re, im)) => {
                 real_valued_complex_eq(*re, *im, other)
             }
-            (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => a == b,
+            (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => {
+                (matches!(a.kind(), ValueKind::Generator(_)) && a.is_identical_to(b)) || a == b
+            }
             _ => false,
         }
     }

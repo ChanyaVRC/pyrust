@@ -370,7 +370,7 @@ impl Interpreter {
     /// fast path; mirrors the `object.__sizeof__`/`__dir__`/`__reduce*` and
     /// `NoneType.__bool__` registry handlers.  `method` must satisfy
     /// `is_object_protocol_method(receiver, method)`.
-    fn object_protocol_method_result(&self, method: &str, receiver: &Value) -> Value {
+    pub(crate) fn object_protocol_method_result(&self, method: &str, receiver: &Value) -> Value {
         match method {
             // Implementation-specific size; tests assert the int type only.
             "__sizeof__" => Value::int(std::mem::size_of::<Value>() as i64),

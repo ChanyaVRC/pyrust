@@ -143,6 +143,13 @@ impl Interpreter {
                 }
             }
             ValueKind::Generator(cell) => {
+                if let Some(iterator_class) = native_iterator_class(&target) {
+                    return Err(pyrust_core::py_err!(
+                        "AttributeError",
+                        "'{}' object has no attribute '{name}'",
+                        iterator_class.full_type_name()
+                    ));
+                }
                 // CPython 3.12 allows setting __name__ and __qualname__ on
                 // generator objects (str only; TypeError on non-string).
                 // gi_running, gi_yieldfrom, gi_frame, gi_code are read-only

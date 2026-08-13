@@ -15,7 +15,9 @@ pub(crate) fn builtin_iter_type_name(value: &Value) -> &'static str {
         ValueKind::Range { .. } => "range_iterator",
         ValueKind::Bytes(_) => "bytes_iterator",
         ValueKind::BuiltinObject { ops, .. } => {
-            if pyrust_builtins::instance_dict::is_instance_dict(value) {
+            if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) {
+                "bytearray_iterator"
+            } else if pyrust_builtins::instance_dict::is_instance_dict(value) {
                 "dict_keyiterator"
             } else if let Some(policy) = pyrust_builtins::ordered_mapping::view_policy(value) {
                 policy.iterator_type_name
@@ -432,7 +434,9 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                     NativeIterFrame::bytes(backing.clone(), type_name)
                 } else if matches!(backing.kind(), ValueKind::Str(_)) {
                     NativeIterFrame::string(backing.clone(), type_name)
-                } else if let Some(frame) = NativeIterFrame::bytearray(backing.clone(), type_name) {
+                } else if let Some(frame) =
+                    NativeIterFrame::bytearray_with_carrier(v.clone(), &backing, type_name)
+                {
                     frame
                 } else {
                     // Use the carrier for error reporting so a non-iterable
@@ -456,6 +460,7 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                         kind: GuardVersion::Size,
                         msg,
                         exhaust_first,
+                        failed: false,
                         ordered_watch: ordered.then(|| ordered_iteration_watch(&backing)),
                     }));
                 }
@@ -519,6 +524,7 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                     kind: GuardVersion::Size,
                     msg,
                     exhaust_first,
+                    failed: false,
                     ordered_watch: ordered_policy.is_some().then(|| ordered_iteration_watch(v)),
                 }));
             }
@@ -619,6 +625,7 @@ fn guarded_reverse_mapping_iter(
         kind: GuardVersion::Size,
         msg,
         exhaust_first,
+        failed: false,
         ordered_watch,
     }));
     frame

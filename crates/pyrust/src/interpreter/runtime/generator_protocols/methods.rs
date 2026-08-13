@@ -9,6 +9,7 @@ impl Interpreter {
         method: &str,
         args: Vec<Value>,
     ) -> Result<Value> {
+        let native_class = native_iterator_class(&receiver);
         // Async-generator protocol (#2280): `__aiter__` returns the async
         // generator itself; `__anext__`/`asend`/`athrow`/`aclose` return an
         // awaitable (`AsyncGenASend`) that the `await` machinery drives.
@@ -111,6 +112,94 @@ impl Interpreter {
                 self.builtin_iterator_length_hint_value(&receiver)
                     .map(|hint| hint.unwrap_or_else(Value::not_implemented))
             }
+            "__reduce__" => {
+                if !args.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "{}.__reduce__() takes no arguments ({} given)",
+                        full_type_name_str(&receiver),
+                        args.len()
+                    ));
+                }
+                let kind = native_iterator_class(&receiver).ok_or_else(|| {
+                    PyError::attribute_error(
+                        format!(
+                            "'{}' object has no attribute '__reduce__'",
+                            full_type_name_str(&receiver)
+                        ),
+                        Some("__reduce__".to_string()),
+                        Some(receiver.clone()),
+                    )
+                })?;
+                native_iterator_reduce(&receiver, kind)
+            }
+            "__reduce_ex__" => {
+                if args.len() != 1 {
+                    return Err(pyrust_core::type_err!(
+                        "{}.__reduce_ex__() takes exactly one argument ({} given)",
+                        full_type_name_str(&receiver),
+                        args.len()
+                    ));
+                }
+                let protocol =
+                    self.value_to_isize(&args[0], "Python int too large to convert to C int")?;
+                i32::try_from(protocol).map_err(|_| {
+                    pyrust_core::overflow_err!("Python int too large to convert to C int")
+                })?;
+                let kind = native_iterator_class(&receiver).ok_or_else(|| {
+                    PyError::attribute_error(
+                        format!(
+                            "'{}' object has no attribute '__reduce_ex__'",
+                            full_type_name_str(&receiver)
+                        ),
+                        Some("__reduce_ex__".to_string()),
+                        Some(receiver.clone()),
+                    )
+                })?;
+                native_iterator_reduce(&receiver, kind)
+            }
+            "__setstate__" if native_class == Some(NativeIteratorClass::Bytearray) => {
+                if args.len() != 1 {
+                    return Err(pyrust_core::type_err!(
+                        "bytearray_iterator.__setstate__() takes exactly one argument ({} given)",
+                        args.len()
+                    ));
+                }
+                let raw = &args[0];
+                let normalized = if matches!(
+                    raw.kind(),
+                    ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                ) {
+                    raw.clone()
+                } else {
+                    effective_builtin_receiver(raw, &[])
+                        .filter(|value| {
+                            matches!(
+                                value.kind(),
+                                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                            )
+                        })
+                        .ok_or_else(|| pyrust_core::type_err!("an integer is required"))?
+                };
+                let position = self
+                    .value_to_isize(&normalized, "Python int too large to convert to C ssize_t")?
+                    .max(0) as usize;
+                native_bytearray_iterator_setstate(&receiver, position)
+            }
+            "__getattribute__" if native_class.is_some() => {
+                if args.len() != 1 {
+                    return Err(pyrust_core::type_err!(
+                        "expected 1 argument, got {}",
+                        args.len()
+                    ));
+                }
+                let name = args[0].as_str().ok_or_else(|| {
+                    pyrust_core::type_err!(
+                        "attribute name must be string, not '{}'",
+                        full_type_name_str(&args[0])
+                    )
+                })?;
+                self.get_attr(&receiver, name)
+            }
             "close" => {
                 if !args.is_empty() {
                     return Err(pyrust_core::type_err!(
@@ -211,11 +300,48 @@ impl Interpreter {
                 let sent_value = args.into_iter().next().unwrap();
                 self.generator_send(receiver, sent_value)
             }
-            other => Err(PyError::attribute_error(
-                format!("'generator' object has no attribute '{}'", other),
-                Some(other.to_string()),
-                None,
-            )),
+            other => {
+                if let Some(iterator_class) = native_class {
+                    if let Some(expected) = native_iterator_object_method_arity(other)
+                        && args.len() != expected
+                    {
+                        return Err(pyrust_core::type_err!(
+                            "expected {expected} arguments, got {}",
+                            args.len()
+                        ));
+                    }
+                    if let Some(inherited) = lookup_class_attr(&iterator_class.singleton(), other)
+                        && let ValueKind::BuiltinFunction(function_name) = inherited.kind()
+                        && function_name.starts_with("object.")
+                    {
+                        let dispatch = crate::builtin_registry::lookup(function_name)
+                            .unwrap_or_else(|| panic!("{function_name} must be in the registry"));
+                        let mut call_args = Vec::with_capacity(args.len() + 1);
+                        call_args.push(ExpandedCallArg {
+                            name: None,
+                            value: receiver,
+                        });
+                        call_args.extend(
+                            args.into_iter()
+                                .map(|value| ExpandedCallArg { name: None, value }),
+                        );
+                        return dispatch(self, &call_args);
+                    }
+                    return Err(PyError::attribute_error(
+                        format!(
+                            "'{}' object has no attribute '{other}'",
+                            iterator_class.full_type_name()
+                        ),
+                        Some(other.to_string()),
+                        Some(receiver),
+                    ));
+                }
+                Err(PyError::attribute_error(
+                    format!("'generator' object has no attribute '{}'", other),
+                    Some(other.to_string()),
+                    None,
+                ))
+            }
         }
     }
 

@@ -424,6 +424,15 @@ impl Interpreter {
     /// before the platform comparison budget is exhausted. Legacy set/view
     /// paths retain `eq_in_progress` below.
     pub(crate) fn values_user_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
+        // Key lookup accepts an identical native iterator without invoking
+        // equality. Distinct hash collisions must continue to reflected
+        // user `__eq__` after the iterator's object comparison declines them.
+        if matches!(a.kind(), ValueKind::Generator(_))
+            && native_iterator_class(a).is_some()
+            && values_are_identical(a, b)
+        {
+            return Ok(true);
+        }
         // Same-kind sequence containers come first.  For `List`/`Tuple`
         // pairs an upfront `Value::eq` would double-walk: `Vec::eq`
         // already iterates element-wise, and the recursion below would
