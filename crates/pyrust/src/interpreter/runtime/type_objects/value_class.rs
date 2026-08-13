@@ -73,7 +73,10 @@ pub(crate) fn value_class(value: &Value) -> Value {
                 // `reversed(tuple/str/bytes/bytearray)` reports the `reversed`
                 // class in CPython; the per-type cursors (`list_reverseiterator`,
                 // `dict_keyiterator`, …) remain unmigrated name tokens.
-                builtin_type_class_by_name(native.type_name)
+                native
+                    .class
+                    .map(NativeIteratorClass::singleton)
+                    .or_else(|| builtin_type_class_by_name(native.type_name))
                     .map(Value::py_class)
                     .unwrap_or_else(|| Value::builtin_function(native.type_name))
             } else if state.downcast_ref::<AsyncGenASend>().is_some() {

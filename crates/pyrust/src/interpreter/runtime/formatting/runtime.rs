@@ -23,7 +23,9 @@ impl Interpreter {
         if let ValueKind::Int(n) = value.kind() {
             return Ok(Value::int_string(n));
         }
-        if matches!(value.kind(), ValueKind::PyInstance(_)) {
+        if matches!(value.kind(), ValueKind::PyInstance(_))
+            || native_iterator_class(value).is_some()
+        {
             return self.call_function_expanded(
                 Value::builtin_function("format"),
                 &[
@@ -81,6 +83,7 @@ impl Interpreter {
         if matches!(value.kind(), ValueKind::PyInstance(_))
             || class_with_custom_metaclass
             || owner_carrying_mappingproxy
+            || native_iterator_class(value).is_some()
         {
             return self.dispatch_dunder_format(value, spec);
         }
@@ -102,6 +105,15 @@ impl Interpreter {
     ///
     /// For all other value kinds: delegate straight to `apply_format_spec`.
     pub(crate) fn dispatch_dunder_format(&mut self, value: &Value, spec: &str) -> Result<Value> {
+        if native_iterator_class(value).is_some() {
+            if spec.is_empty() {
+                return Ok(Value::string(render_value_repr(self, value)?));
+            }
+            return Err(pyrust_core::type_err!(
+                "unsupported format string passed to {}.__format__",
+                full_type_name_str(value)
+            ));
+        }
         // Issue #2771: `format(cls, spec)` runs `type(cls).__format__`, which is
         // the inherited `object.__format__`: empty spec returns `str(cls)`
         // (now honouring a metaclass `__str__`/`__repr__`), a non-empty spec

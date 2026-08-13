@@ -157,6 +157,112 @@ fn deque_items_data(
         .ok_or_else(|| PyError::Runtime("internal: deque storage lost its buffer".to_string()))
 }
 
+/// Build either concrete deque iterator frame over one shared storage generation.
+fn deque_iterator_frame(
+    inst: &Rc<RefCell<PyInstance>>,
+    reverse: bool,
+    consumed: usize,
+) -> Result<NativeIterFrame> {
+    let storage = deque_storage_value(inst)?;
+    let items = pyrust_builtins::deque_storage::data(&storage)
+        .ok_or_else(|| PyError::Runtime("internal: deque storage lost its buffer".to_string()))?;
+    let counter = pyrust_builtins::deque_storage::mutation_state(&storage).ok_or_else(|| {
+        PyError::Runtime("internal: deque storage lost its mutation state".to_string())
+    })?;
+    Ok(NativeIterFrame::guarded_deque(
+        items,
+        counter,
+        Value::py_instance(Rc::clone(inst)),
+        deque_iterator_replacement,
+        reverse,
+        consumed,
+    ))
+}
+
+fn deque_iterator_at(
+    inst: &Rc<RefCell<PyInstance>>,
+    reverse: bool,
+    consumed: usize,
+) -> Result<Value> {
+    Ok(Value::generator(Box::new(deque_iterator_frame(
+        inst, reverse, consumed,
+    )?)))
+}
+
+fn deque_iterator(inst: &Rc<RefCell<PyInstance>>, reverse: bool) -> Result<Value> {
+    deque_iterator_at(inst, reverse, 0)
+}
+
+pub(crate) fn deque_iterator_constructor(
+    interp: &mut crate::Interpreter,
+    args: &[ExpandedCallArg],
+    reverse: bool,
+) -> Result<Value> {
+    let positional: Vec<&Value> = args
+        .iter()
+        .filter(|arg| arg.name.is_none())
+        .map(|arg| &arg.value)
+        .collect();
+    if positional.is_empty() {
+        return Err(pyrust_core::type_err!(
+            "function takes at least 1 argument (0 given)"
+        ));
+    }
+    if positional.len() > 2 {
+        return Err(pyrust_core::type_err!(
+            "function takes at most 2 arguments ({} given)",
+            positional.len()
+        ));
+    }
+    let ValueKind::PyInstance(inst) = positional[0].kind() else {
+        return Err(pyrust_core::type_err!(
+            "argument 1 must be collections.deque, not {}",
+            crate::interpreter::value_type_name_str(positional[0])
+        ));
+    };
+    if !is_canonical_collection_class_or_subclass(
+        &inst.borrow().class,
+        CanonicalCollectionKind::Deque,
+    ) {
+        return Err(pyrust_core::type_err!(
+            "argument 1 must be collections.deque, not {}",
+            crate::interpreter::value_type_name_str(positional[0])
+        ));
+    }
+    let consumed = if let Some(index) = positional.get(1) {
+        interp
+            .value_to_isize(index, "Python int too large to convert to C ssize_t")?
+            .max(0) as usize
+    } else {
+        0
+    };
+    deque_iterator_at(inst, reverse, consumed)
+}
+
+/// Resolve the data and mutation generation owned by a replacement deque.
+/// Iterator deepcopy uses this typed provider boundary to re-seat every native
+/// reference together, without teaching the generic copy module about deque.
+pub(crate) fn deque_iterator_replacement(
+    value: &Value,
+) -> Option<(
+    pyrust_builtins::deque_storage::DequeData,
+    pyrust_builtins::deque_storage::DequeMutationState,
+)> {
+    let ValueKind::PyInstance(inst) = value.kind() else {
+        return None;
+    };
+    if !is_canonical_collection_class_or_subclass(
+        &inst.borrow().class,
+        CanonicalCollectionKind::Deque,
+    ) {
+        return None;
+    }
+    let storage = inst.borrow().attrs.get("_items").cloned()?;
+    let data = pyrust_builtins::deque_storage::data(&storage)?;
+    let counter = pyrust_builtins::deque_storage::mutation_state(&storage)?;
+    Some((data, counter))
+}
+
 /// Snapshot the deque's items as a `Vec<Value>` for read-only work.
 fn deque_items_snapshot(inst: &Rc<RefCell<PyInstance>>) -> Result<Vec<Value>> {
     Ok(deque_items_data(inst)?.borrow().iter().cloned().collect())

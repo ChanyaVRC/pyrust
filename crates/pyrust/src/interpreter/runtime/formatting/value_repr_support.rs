@@ -76,6 +76,9 @@ pub(crate) fn render_instance_str(
     // `check_int_str_conversion` fast-rejects non-BigInt/non-container values
     // from their NaN-box tag alone, so the common `str(int)` path pays nothing.
     pyrust_core::check_int_str_conversion(value)?;
+    if native_iterator_class(value).is_some() {
+        return render_value_repr(interp, value);
+    }
     if pyrust_builtins::generic_alias::is_generic_alias(value) {
         return render_generic_alias_repr(interp, value);
     }

@@ -92,6 +92,19 @@ impl Interpreter {
         if let Some(k) = value.to_key() {
             return Ok(k);
         }
+        // The three concrete iterator classes backed by GeneratorCell inherit
+        // object identity hashing. Keep them as identity keys without making
+        // real generators hashable through this conversion path.
+        if native_iterator_class(value).is_some() {
+            let hash = value
+                .object_id()
+                .as_int()
+                .expect("object id must be an int") as u64;
+            return Ok(PyKey::Object {
+                hash,
+                value: value.clone(),
+            });
+        }
         // Range objects are hashable (issue #937).  `Value::to_key` returns
         // `None` for ranges (they have no `PyKey` variant), so we handle them
         // here: compute the hash via `hash_value_with_interp` (which calls the

@@ -149,6 +149,21 @@ impl Interpreter {
         backing: Value,
         args: Vec<Value>,
     ) -> Result<Value> {
+        if method == "__iter__" && pyrust_builtins::bytearray::as_bytearray_rc(&backing).is_some() {
+            if !args.is_empty() {
+                return Err(pyrust_core::type_err!(
+                    "expected 0 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let frame = NativeIterFrame::bytearray_with_carrier(
+                receiver.clone(),
+                &backing,
+                "bytearray_iterator",
+            )
+            .ok_or_else(|| PyError::Runtime("bytearray iterator lost its backing".into()))?;
+            return Ok(Value::generator(Box::new(frame)));
+        }
         if !is_mutable_builtin_inplace_dunder(method) {
             return self.dispatch_builtin_protocol_dunder(method, backing, args);
         }

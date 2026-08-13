@@ -142,10 +142,7 @@ pub(super) fn environ_iter(args: &[ExpandedCallArg], fn_name: &str) -> Result<Va
     let keys = std::env::vars_os()
         .map(|(key, _)| Value::string(key.to_string_lossy()))
         .collect();
-    Ok(Value::generator(Box::new(NativeIterFrame::new(
-        keys,
-        "generator",
-    ))))
+    Ok(Value::generator(Box::new(NativeIterFrame::generator(keys))))
 }
 
 pub(super) fn environ_len(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {

@@ -33,9 +33,9 @@ use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    BUILTIN_DATA_ATTR, GuardVersion, Interpreter, IterSrcBuf, MapIter, NativeIterFrame,
-    NativeIterGuard, class_is_subclass_of, coerce_subclass_backing, invoke_class_method,
-    lookup_class_attr, value_from_bigint, value_type_name_str,
+    BUILTIN_DATA_ATTR, Interpreter, IterSrcBuf, MapIter, NativeIterFrame, NativeIteratorClass,
+    class_is_subclass_of, coerce_subclass_backing, invoke_class_method, lookup_class_attr,
+    value_from_bigint, value_type_name_str,
 };
 use crate::value::{
     InstanceAttrs, PyBigInt, PyClass, PyDict, PyInstance, PyKey, Value, ValueKind, key_repr,
@@ -216,6 +216,28 @@ fn tag_public_classes(
     }
 }
 
+fn native_deque_iterator_new(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    kind: NativeIteratorClass,
+) -> Result<Value> {
+    let class = args
+        .first()
+        .filter(|arg| arg.name.is_none())
+        .and_then(|arg| match arg.value.kind() {
+            ValueKind::PyClass(class) => Some(class),
+            _ => None,
+        });
+    if class.and_then(NativeIteratorClass::from_class) != Some(kind) {
+        return Err(pyrust_core::type_err!("invalid native iterator class"));
+    }
+    deque_iterator_constructor(
+        interp,
+        args.get(1..).unwrap_or_default(),
+        kind == NativeIteratorClass::DequeReverse,
+    )
+}
+
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
@@ -301,6 +323,86 @@ pyrust_module! {
         // this with the cached submodule value on first import, ensuring
         // `collections.abc is collections.abc` identity holds.
         "abc" => super::collections_abc::module()
+    }
+
+    #[py_name = "_deque_iterator.__new__"]
+    fn deque_iterator_new(args) -> Result<Value> {
+        native_deque_iterator_new(_interp, args, NativeIteratorClass::Deque)
+    }
+
+    #[py_name = "_deque_iterator.__getattribute__"]
+    fn deque_iterator_getattribute(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(
+            args,
+            NativeIteratorClass::Deque,
+            "__getattribute__",
+        )
+    }
+
+    #[py_name = "_deque_iterator.__iter__"]
+    fn deque_iterator_iter(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(args, NativeIteratorClass::Deque, "__iter__")
+    }
+
+    #[py_name = "_deque_iterator.__next__"]
+    fn deque_iterator_next(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(args, NativeIteratorClass::Deque, "__next__")
+    }
+
+    #[py_name = "_deque_iterator.__length_hint__"]
+    fn deque_iterator_length_hint(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(
+            args,
+            NativeIteratorClass::Deque,
+            "__length_hint__",
+        )
+    }
+
+    #[py_name = "_deque_iterator.__reduce__"]
+    fn deque_iterator_reduce(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(args, NativeIteratorClass::Deque, "__reduce__")
+    }
+
+    #[py_name = "_deque_reverse_iterator.__new__"]
+    fn deque_reverse_iterator_new(args) -> Result<Value> {
+        native_deque_iterator_new(_interp, args, NativeIteratorClass::DequeReverse)
+    }
+
+    #[py_name = "_deque_reverse_iterator.__getattribute__"]
+    fn deque_reverse_iterator_getattribute(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(
+            args,
+            NativeIteratorClass::DequeReverse,
+            "__getattribute__",
+        )
+    }
+
+    #[py_name = "_deque_reverse_iterator.__iter__"]
+    fn deque_reverse_iterator_iter(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(args, NativeIteratorClass::DequeReverse, "__iter__")
+    }
+
+    #[py_name = "_deque_reverse_iterator.__next__"]
+    fn deque_reverse_iterator_next(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(args, NativeIteratorClass::DequeReverse, "__next__")
+    }
+
+    #[py_name = "_deque_reverse_iterator.__length_hint__"]
+    fn deque_reverse_iterator_length_hint(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(
+            args,
+            NativeIteratorClass::DequeReverse,
+            "__length_hint__",
+        )
+    }
+
+    #[py_name = "_deque_reverse_iterator.__reduce__"]
+    fn deque_reverse_iterator_reduce(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(
+            args,
+            NativeIteratorClass::DequeReverse,
+            "__reduce__",
+        )
     }
 
     /// Private adapter used by Counter.elements' lazy map/chain composition.
@@ -1542,25 +1644,13 @@ pyrust_module! {
         /// `RuntimeError: deque mutated during iteration`, matching CPython.
         fn __iter__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            let storage = deque_storage_value(&inst)?;
-            let items = pyrust_builtins::deque_storage::data(&storage).ok_or_else(|| {
-                PyError::Runtime("internal: deque storage lost its buffer".to_string())
-            })?;
-            let counter =
-                pyrust_builtins::deque_storage::mutation_state(&storage).ok_or_else(|| {
-                    PyError::Runtime("internal: deque storage lost its mutation state".to_string())
-                })?;
-            let version = counter.get();
-            let mut frame = NativeIterFrame::deque(items, "generator");
-            frame.guard = Some(Box::new(NativeIterGuard {
-                container: storage,
-                version,
-                kind: GuardVersion::DequeState { counter },
-                msg: "deque mutated during iteration",
-                exhaust_first: false,
-                ordered_watch: None,
-            }));
-            Ok(Value::generator(Box::new(frame)))
+            deque_iterator(&inst, false)
+        }
+
+        /// `reversed(d)` — walk the same guarded storage right-to-left.
+        fn __reversed__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            deque_iterator(&inst, true)
         }
 
         /// `repr(d)` — `deque([1, 2, 3])` or `deque([1, 2, 3], maxlen=5)`.

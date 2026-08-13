@@ -53,6 +53,58 @@ pub(crate) enum DictViewClass {
     OrderedValues,
 }
 
+/// Concrete iterator classes whose public identity differs from their shared
+/// generator-backed storage. CPython publishes the forward deque iterator as
+/// `collections._deque_iterator`; the other two are discovered through
+/// `type(iterator)`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum NativeIteratorClass {
+    Bytearray,
+    Deque,
+    DequeReverse,
+}
+
+impl NativeIteratorClass {
+    pub(crate) const ALL: [Self; 3] = [Self::Bytearray, Self::Deque, Self::DequeReverse];
+
+    pub(crate) const fn full_type_name(self) -> &'static str {
+        match self {
+            Self::Bytearray => "bytearray_iterator",
+            Self::Deque => "collections._deque_iterator",
+            Self::DequeReverse => "collections._deque_reverse_iterator",
+        }
+    }
+
+    pub(crate) const fn class_name(self) -> &'static str {
+        match self {
+            Self::Bytearray => "bytearray_iterator",
+            Self::Deque => "_deque_iterator",
+            Self::DequeReverse => "_deque_reverse_iterator",
+        }
+    }
+
+    pub(crate) const fn module(self) -> &'static str {
+        match self {
+            Self::Bytearray => "builtins",
+            Self::Deque | Self::DequeReverse => "collections",
+        }
+    }
+
+    pub(crate) fn singleton(self) -> Rc<RefCell<PyClass>> {
+        NATIVE_ITERATOR_CLASSES.with(|classes| Rc::clone(&classes[self as usize]))
+    }
+
+    pub(crate) fn from_class(class: &Rc<RefCell<PyClass>>) -> Option<Self> {
+        let ptr = Rc::as_ptr(class);
+        NATIVE_ITERATOR_CLASSES.with(|classes| {
+            Self::ALL
+                .into_iter()
+                .zip(classes)
+                .find_map(|(kind, candidate)| (ptr == Rc::as_ptr(candidate)).then_some(kind))
+        })
+    }
+}
+
 impl DictViewClass {
     pub(crate) const ALL: [Self; 6] = [
         Self::Keys,

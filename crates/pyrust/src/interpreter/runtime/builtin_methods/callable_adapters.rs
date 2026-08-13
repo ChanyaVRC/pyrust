@@ -492,6 +492,23 @@ impl Interpreter {
         let ValueKind::BuiltinFunction(name) = function.kind() else {
             unreachable!("builtin function adapter requires BuiltinFunction");
         };
+        if let Some(method) = name.strip_prefix("object.")
+            && let Some(receiver) = args.first().filter(|arg| arg.name.is_none())
+            && native_iterator_class(&receiver.value).is_some()
+            && let Some(expected) = native_iterator_object_method_arity(method)
+        {
+            if args[1..].iter().any(|arg| arg.name.is_some()) {
+                return Err(pyrust_core::type_err!(
+                    "object.{method}() takes no keyword arguments"
+                ));
+            }
+            if args.len() - 1 != expected {
+                return Err(pyrust_core::type_err!(
+                    "expected {expected} arguments, got {}",
+                    args.len() - 1
+                ));
+            }
+        }
         if let Some((type_name, method)) = name.split_once('.')
             && method.starts_with("__")
             && is_protocol_dunder(type_name, method)

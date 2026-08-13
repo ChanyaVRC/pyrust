@@ -426,6 +426,52 @@ thread_local! {
         })
     };
 
+    /// Concrete iterator classes for bytearray and deque. All are real type
+    /// objects; CPython additionally binds the forward deque iterator under
+    /// its private `collections._deque_iterator` module name.
+    static NATIVE_ITERATOR_CLASSES: [Rc<RefCell<PyClass>>; NativeIteratorClass::ALL.len()] = {
+        let obj = OBJECT_CLASS.with(Rc::clone);
+        NativeIteratorClass::ALL.map(|kind| {
+            let mut attrs = IndexMap::new();
+            if kind != NativeIteratorClass::Bytearray {
+                attrs.insert("__module__".to_string(), Value::string(kind.module()));
+            }
+            attrs.insert("__doc__".to_string(), Value::none());
+            for method in [
+                "__getattribute__",
+                "__iter__",
+                "__next__",
+                "__length_hint__",
+                "__reduce__",
+            ] {
+                let qualified = registered_builtin_method_name(kind.full_type_name(), method);
+                attrs.insert(method.to_string(), Value::builtin_function(qualified));
+            }
+            if kind == NativeIteratorClass::Bytearray {
+                let qualified =
+                    registered_builtin_method_name(kind.full_type_name(), "__setstate__");
+                attrs.insert("__setstate__".to_string(), Value::builtin_function(qualified));
+            }
+            if matches!(kind, NativeIteratorClass::Deque | NativeIteratorClass::DequeReverse) {
+                let qualified = registered_builtin_method_name(kind.full_type_name(), "__new__");
+                attrs.insert("__new__".to_string(), Value::builtin_function(qualified));
+            }
+            let mut class = PyClass::new(
+                kind.class_name(),
+                kind.class_name(),
+                Some(Rc::clone(&obj)),
+                attrs,
+            );
+            class.non_subclassable_name = Some(kind.class_name());
+            let class = Rc::new(RefCell::new(class));
+            obj.borrow()
+                .subclasses
+                .borrow_mut()
+                .push(Rc::downgrade(&class));
+            class
+        })
+    };
+
     /// Per-thread class singletons for the plain dictionary views and the
     /// OrderedDict-specific subclasses. They are real built-in classes, but
     /// deliberately have no `builtins` binding and no public constructor.
@@ -637,6 +683,16 @@ thread_local! {
                     DictViewClass::OrderedKeys => odict_keys_ctor,
                     DictViewClass::OrderedItems => odict_items_ctor,
                     DictViewClass::OrderedValues => odict_values_ctor,
+                };
+                cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
+            }
+        });
+        NATIVE_ITERATOR_CLASSES.with(|classes| {
+            for (kind, class) in NativeIteratorClass::ALL.iter().zip(classes) {
+                let dispatch: crate::builtin_registry::BuiltinDispatchFn = match kind {
+                    NativeIteratorClass::Bytearray => bytearray_iterator_ctor,
+                    NativeIteratorClass::Deque => deque_iterator_ctor,
+                    NativeIteratorClass::DequeReverse => deque_reverse_iterator_ctor,
                 };
                 cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
             }

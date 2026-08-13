@@ -8,6 +8,12 @@ impl Interpreter {
     /// Render a value using the same priority as `str(x)`: `__str__` first,
     /// then `__repr__`, then the default object representation.
     pub(crate) fn render_value_as_str(&mut self, value: &Value) -> Result<String> {
+        // Concrete bytearray/deque iterators use GeneratorCell only as their
+        // storage carrier. Their str is the concrete iterator repr, never the
+        // generic `<generator object>` fallback.
+        if native_iterator_class(value).is_some() {
+            return render_value_repr(self, value);
+        }
         // `str(cls)` dispatches `type(cls).__str__(cls)` (falling back to the
         // metaclass `__repr__`) when the class has a user metaclass override.
         if let ValueKind::PyClass(cls_rc) = value.kind() {

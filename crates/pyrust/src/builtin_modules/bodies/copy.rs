@@ -34,7 +34,8 @@ use std::rc::{Rc, Weak};
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{
-    ExpandedCallArg, invoke_class_method, is_exception_class, key_to_value, lookup_class_attr,
+    ExpandedCallArg, effective_builtin_receiver, invoke_class_method, is_exception_class,
+    key_to_value, lookup_class_attr, make_iterator, restore_native_iterator_position,
 };
 use crate::value::{
     InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, PyModule, PySet, Value, ValueKind,
@@ -234,16 +235,37 @@ fn capture_state(
     if let Some(method) = lookup_class_attr(&class, "__getstate__") {
         return invoke_class_method(interp, method, Value::py_instance(Rc::clone(rc)), &[]);
     }
-    // Default: a dict snapshot of __dict__, or None when empty.
+    Ok(default_instance_state(rc))
+}
+
+/// Snapshot the instance attributes used by the default copy protocol, or
+/// return `None` when the instance carries no state.
+pub(crate) fn default_instance_state(rc: &Rc<RefCell<PyInstance>>) -> Value {
+    // `InstanceAttrs` also carries primitive-subclass storage. Exclude only
+    // the exact backing resolved through canonical ancestry; a plain user
+    // object may legitimately own an attribute with this spelling.
+    let receiver = Value::py_instance(Rc::clone(rc));
+    let builtin_backing = effective_builtin_receiver(&receiver, &[]);
     let borrow = rc.borrow();
-    if borrow.attrs.is_empty() {
-        return Ok(Value::none());
+    let attrs: Vec<_> = borrow
+        .attrs
+        .items_snapshot()
+        .into_iter()
+        .filter(|(name, value)| {
+            name.as_ref() != crate::interpreter::BUILTIN_DATA_ATTR
+                || !builtin_backing
+                    .as_ref()
+                    .is_some_and(|backing| backing.is_identical_to(value))
+        })
+        .collect();
+    if attrs.is_empty() {
+        return Value::none();
     }
-    let mut dict: PyDict = PyDict::with_capacity_and_hasher(borrow.attrs.len(), Default::default());
-    for (k, v) in borrow.attrs.items_snapshot() {
+    let mut dict: PyDict = PyDict::with_capacity_and_hasher(attrs.len(), Default::default());
+    for (k, v) in attrs {
         dict.insert(PyKey::str_from(k.as_ref()), v);
     }
-    Ok(Value::dict(dict))
+    Value::dict(dict)
 }
 
 /// Restore captured `state` onto the bare instance `rc`.  If the class defines
@@ -253,6 +275,12 @@ fn restore_state(
     state: Value,
     interp: &mut crate::interpreter::Interpreter,
 ) -> Result<()> {
+    // copy._reconstruct applies state only when the reducer supplied one.
+    // In particular, an otherwise-stateless subclass must not have its
+    // custom `__setstate__` called merely because PyRust stores a backing.
+    if state.is_none() {
+        return Ok(());
+    }
     let class = Rc::clone(&rc.borrow().class);
     if let Some(method) = lookup_class_attr(&class, "__setstate__") {
         invoke_class_method(
@@ -428,6 +456,9 @@ fn shallow_copy_with_reconstruct(
         // cursor representation — rebuilds the reduce-equivalent state.
         ValueKind::Generator(_) => match crate::interpreter::copy_iterator_object(&obj, false)? {
             crate::interpreter::IteratorCopy::Rebuilt(copy) => Ok(copy),
+            crate::interpreter::IteratorCopy::BytearrayReduction { carrier, position } => {
+                rebuild_reduced_iterator(carrier, position, interp)
+            }
             crate::interpreter::IteratorCopy::Unpicklable(noun) => Err(PyError::named(
                 "TypeError",
                 format!("cannot pickle '{noun}' object"),
@@ -867,6 +898,19 @@ fn deep_copy(
         ValueKind::Generator(_) => {
             let rebuilt = match crate::interpreter::copy_iterator_object(&obj, true)? {
                 crate::interpreter::IteratorCopy::Rebuilt(copy) => copy,
+                crate::interpreter::IteratorCopy::BytearrayReduction { carrier, position } => {
+                    // CPython copies reduction arguments before invoking the
+                    // reducer. A carrier that points back to this iterator
+                    // therefore reconstructs a second iterator over the
+                    // already-memoised copied carrier, rather than aliasing
+                    // the outer copy.
+                    let copied_carrier = deep_copy(carrier, memo, interp)?;
+                    let copy = rebuild_reduced_iterator(copied_carrier, position, interp)?;
+                    if let Some(id) = value_identity(&obj) {
+                        memo_insert(memo, id, copy.clone());
+                    }
+                    return Ok(copy);
+                }
                 crate::interpreter::IteratorCopy::Unpicklable(noun) => {
                     return Err(PyError::named(
                         "TypeError",
@@ -883,7 +927,7 @@ fn deep_copy(
                 for source in sources {
                     deep_sources.push(deep_copy(source, memo, interp)?);
                 }
-                crate::interpreter::set_iterator_retained_values(&rebuilt, deep_sources);
+                crate::interpreter::set_iterator_retained_values(&rebuilt, deep_sources)?;
             }
             Ok(rebuilt)
         }
@@ -945,6 +989,51 @@ fn deep_copy(
     }
 }
 
+/// Execute a bytearray iterator's `(iter, (carrier,), position)` reduction.
+/// A carrier subclass may override `__iter__`, changing the concrete type of
+/// the copied iterator; the reduction result, not the old native frame, owns
+/// that decision.
+fn rebuild_reduced_iterator(
+    carrier: Value,
+    position: usize,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<Value> {
+    let rebuilt = make_iterator(interp, &carrier)?;
+    if restore_native_iterator_position(&rebuilt, position)? {
+        return Ok(rebuilt);
+    }
+    let state = Value::int(position as i64);
+    match interp.get_attr(&rebuilt, "__setstate__") {
+        Ok(setstate) => {
+            interp.call_function_expanded(
+                setstate,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: state,
+                }],
+            )?;
+        }
+        // `copy._reconstruct` uses `hasattr(y, "__setstate__")`, then falls
+        // back to `y.__dict__.update(state)`.  Preserve that fallback for an
+        // override returning an arbitrary iterator: it intentionally raises
+        // TypeError for our integer reduction state on a normal instance and
+        // AttributeError for a generator, which has no `__dict__`.
+        Err(error) if error.class_name_is("AttributeError") => {
+            let dict = interp.get_attr(&rebuilt, "__dict__")?;
+            let update = interp.get_attr(&dict, "update")?;
+            interp.call_function_expanded(
+                update,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: state,
+                }],
+            )?;
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(rebuilt)
+}
+
 /// Default deep-copy path for an instance: build a bare instance, memoise it
 /// *before* deep-copying its state, then capture/restore the state.  Inserting
 /// into the memo first lets self-referential instance graphs terminate.
@@ -963,12 +1052,27 @@ fn deep_copy_via_protocol(
     if let Some(id) = value_identity(obj) {
         memo_insert(memo, id, new_val.clone());
     }
+    // A bytearray subclass's copied reduction carrier can be asked for an
+    // iterator while its user state is still recursing (the source may point
+    // back to the original iterator). Seed its primitive buffer first, as
+    // CPython's bytearray reconstruction does, so that nested `iter(copy)` is
+    // well-defined and retains the same live buffer. Other built-in-backed
+    // instances keep the established restore-then-detach order.
+    let bytearray_backed = effective_builtin_receiver(obj, &[])
+        .is_some_and(|backing| pyrust_builtins::bytearray::as_bytearray_rc(&backing).is_some());
+    if bytearray_backed {
+        detach_internal_storage(rc, &new_rc, interp, |value, interp| {
+            deep_copy(value, memo, interp)
+        })?;
+    }
     // Capture state from the original, deep-copy it, then restore.
     let state = capture_state(rc, interp)?;
     let deep_state = deep_copy(state, memo, interp)?;
     restore_state(&new_rc, deep_state, interp)?;
-    detach_internal_storage(rc, &new_rc, interp, |value, interp| {
-        deep_copy(value, memo, interp)
-    })?;
+    if !bytearray_backed {
+        detach_internal_storage(rc, &new_rc, interp, |value, interp| {
+            deep_copy(value, memo, interp)
+        })?;
+    }
     Ok(new_val)
 }

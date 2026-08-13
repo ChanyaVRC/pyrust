@@ -5,6 +5,16 @@ pub(crate) type IterSrcBuf = smallvec::SmallVec<[Value; 2]>;
 /// `pyrust_builtins::bytearray::as_bytearray_rc`.
 pub(crate) type ByteArrayBuffer = Rc<RefCell<Vec<u8>>>;
 
+/// Provider-supplied validation/reseating boundary for a copied deque owner.
+/// The iteration domain carries the typed policy without depending back on
+/// the concrete `collections` module implementation.
+pub(crate) type DequeIteratorReplacement = fn(
+    &Value,
+) -> Option<(
+    pyrust_builtins::deque_storage::DequeData,
+    pyrust_builtins::deque_storage::DequeMutationState,
+)>;
+
 /// Backing source for a built-in iterator object.
 pub(crate) enum NativeIterSource {
     Materialized(Vec<Value>),
@@ -51,9 +61,16 @@ pub(crate) enum NativeIterSource {
         keys: Vec<PyKey>,
         kind: pyrust_builtins::dict_views::DictViewKind,
     },
-    /// Live `collections.deque` buffer. A separate mutation-state guard
-    /// rejects structural changes before the next item is observed.
-    Deque(pyrust_builtins::deque_storage::DequeData),
+    /// Live `collections.deque` buffer. The creation-time remaining quota is
+    /// independent of the buffer's live size, and `reverse` selects the
+    /// descending `_deque_reverse_iterator` walk. A separate mutation-state
+    /// guard rejects structural changes before the next item is observed.
+    Deque {
+        data: pyrust_builtins::deque_storage::DequeData,
+        remaining: usize,
+        reverse: bool,
+        replacement: DequeIteratorReplacement,
+    },
     /// Immutable bytes indexed lazily, one integer per step.
     Bytes(Value),
     /// Live `bytearray` buffer walked by index.
@@ -62,12 +79,15 @@ pub(crate) enum NativeIterSource {
     /// re-reads the buffer's size on every step, so bytes appended mid-walk are
     /// yielded and a shrink below the cursor ends the walk (#2921).
     ///
-    /// The storage cell *is* the retained source: a `bytearray` allocates it
-    /// once and only ever writes it in place, so it stays the object's live
-    /// backing and outlives every binding to it — the walk keeps reading the
-    /// same buffer after the source variable is rebound or deleted. Resolving
-    /// it at construction also keeps each step a single indexed read.
-    Bytearray(ByteArrayBuffer),
+    /// The storage cell is resolved once for the indexed hot path and remains
+    /// live after the source variable is rebound or deleted. The separate
+    /// carrier preserves an exact bytearray subclass for reduction/copy.
+    Bytearray {
+        /// Exact Python object passed to `iter`, including a bytearray
+        /// subclass instance. Reduction and deepcopy retain this carrier.
+        carrier: Value,
+        data: ByteArrayBuffer,
+    },
     /// Immutable UTF-8/CESU-8 string with an incremental byte cursor.
     String {
         value: Value,
@@ -78,11 +98,20 @@ pub(crate) enum NativeIterSource {
     /// A released source no longer says what shape it had, but its *reduction*
     /// still does depend on it: a mapping or set cursor reduces to a
     /// `list_iterator` over its remainder whether or not that remainder is
-    /// empty, while a sequence walk keeps its own type (#2974). The latch
-    /// therefore carries the one bit the reduce path would otherwise lose.
+    /// empty, while bytes-like walks reduce to an empty tuple iterator and
+    /// other sequence walks keep their own type (#2974). The latch therefore
+    /// retains the reduction shape the released source would otherwise lose.
     Exhausted {
-        reduces_to_list: bool,
+        copy_kind: ExhaustedCopyKind,
     },
+}
+
+/// Reduction shape retained after a native frame releases its source.
+#[derive(Clone, Copy)]
+pub(crate) enum ExhaustedCopyKind {
+    PreserveType,
+    ListIterator,
+    TupleIterator,
 }
 
 impl NativeIterSource {
@@ -97,9 +126,22 @@ impl NativeIterSource {
                 | NativeIterSource::ReverseDict(_)
                 | NativeIterSource::DictView { .. }
                 | NativeIterSource::Exhausted {
-                    reduces_to_list: true
+                    copy_kind: ExhaustedCopyKind::ListIterator
                 }
         )
+    }
+
+    pub(crate) fn exhausted_copy_kind(&self) -> ExhaustedCopyKind {
+        match self {
+            Self::Materialized(_)
+            | Self::LiveKeys { .. }
+            | Self::InstanceDict { .. }
+            | Self::ReverseDict(_)
+            | Self::DictView { .. } => ExhaustedCopyKind::ListIterator,
+            Self::Bytes(_) | Self::Bytearray { .. } => ExhaustedCopyKind::TupleIterator,
+            Self::Exhausted { copy_kind } => *copy_kind,
+            _ => ExhaustedCopyKind::PreserveType,
+        }
     }
 }
 
@@ -329,8 +371,18 @@ pub(crate) struct NativeIterFrame {
     pub(crate) source: NativeIterSource,
     pub(crate) pos: usize,
     pub(crate) type_name: &'static str,
+    pub(crate) class: Option<NativeIteratorClass>,
     pub(crate) guard: Option<Box<NativeIterGuard>>,
     pub(crate) exhausted: bool,
+    /// A native frame can either implement a concrete built-in iterator's
+    /// reduction or expose a real generator whose copy protocol refuses it.
+    pub(crate) copy_policy: NativeIterCopyPolicy,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum NativeIterCopyPolicy {
+    Reducible,
+    Generator,
 }
 
 /// Live-collection mutation guard attached to a native iterator.
@@ -341,6 +393,7 @@ pub(crate) struct NativeIterGuard {
     pub(crate) kind: GuardVersion,
     pub(crate) msg: &'static str,
     pub(crate) exhaust_first: bool,
+    pub(crate) failed: bool,
     /// Provider-owned guard state for a tagged ordered mapping — the clear
     /// generation and the entry-order counter this iterator is diagnosed
     /// against. `None` for every other guarded collection.
@@ -353,6 +406,7 @@ pub(crate) enum GuardVersion {
     /// Safe shared structural-mutation state owned by opaque deque storage.
     DequeState {
         counter: pyrust_builtins::deque_storage::DequeMutationState,
+        exhaust_after_raise: bool,
     },
 }
 

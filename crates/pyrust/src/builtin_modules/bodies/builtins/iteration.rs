@@ -84,6 +84,60 @@ fn builtin_iterator_next(
 }
 
 pyrust_module! {
+    #[py_name = "bytearray_iterator.__getattribute__"]
+    fn bytearray_iterator_getattribute(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(
+            args,
+            NativeIteratorClass::Bytearray,
+            "__getattribute__",
+        )
+    }
+
+    #[py_name = "bytearray_iterator.__iter__"]
+    fn bytearray_iterator_iter(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(
+            args,
+            NativeIteratorClass::Bytearray,
+            "__iter__",
+        )
+    }
+
+    #[py_name = "bytearray_iterator.__next__"]
+    fn bytearray_iterator_next(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(
+            args,
+            NativeIteratorClass::Bytearray,
+            "__next__",
+        )
+    }
+
+    #[py_name = "bytearray_iterator.__length_hint__"]
+    fn bytearray_iterator_length_hint(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(
+            args,
+            NativeIteratorClass::Bytearray,
+            "__length_hint__",
+        )
+    }
+
+    #[py_name = "bytearray_iterator.__reduce__"]
+    fn bytearray_iterator_reduce(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(
+            args,
+            NativeIteratorClass::Bytearray,
+            "__reduce__",
+        )
+    }
+
+    #[py_name = "bytearray_iterator.__setstate__"]
+    fn bytearray_iterator_setstate(args) -> Result<Value> {
+        _interp.call_native_iterator_unbound(
+            args,
+            NativeIteratorClass::Bytearray,
+            "__setstate__",
+        )
+    }
+
     #[py_name = "zip.__new__"]
     fn zip_new(args) -> Result<Value> {
         builtin_type_new(_interp, args, BuiltinTypeClass::Zip)

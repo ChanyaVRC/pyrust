@@ -5,6 +5,63 @@
 
 import copy
 
+
+class UserBuiltinDataState:
+    def __init__(self, payload):
+        self.__builtin_data__ = payload
+
+    def __setstate__(self, state):
+        self.received_state = state
+
+
+user_builtin_payload = [1]
+user_builtin_state = UserBuiltinDataState(user_builtin_payload)
+for copier in (copy.copy, copy.deepcopy):
+    copied = copier(user_builtin_state)
+    state = copied.received_state
+    print(
+        "user-builtin-data-" + copier.__name__,
+        sorted(state),
+        state["__builtin_data__"],
+        state["__builtin_data__"] is user_builtin_payload,
+    )
+
+
+class ForgedBytearrayState:
+    def __init__(self):
+        self.__builtin_data__ = bytearray(b"x")
+
+    def __setstate__(self, state):
+        self.had_backing_before_setstate = hasattr(self, "__builtin_data__")
+        self.received_state = state
+
+
+for copier in (copy.copy, copy.deepcopy):
+    copied = copier(ForgedBytearrayState())
+    print(
+        "forged-bytearray-state-" + copier.__name__,
+        copied.had_backing_before_setstate,
+        type(copied.received_state["__builtin_data__"]).__name__,
+    )
+
+
+class EmptyBytearraySetstate(bytearray):
+    events = []
+
+    def __setstate__(self, state):
+        type(self).events.append(type(state).__name__)
+
+
+empty_bytearray_state = EmptyBytearraySetstate(b"xy")
+for copier in (copy.copy, copy.deepcopy):
+    EmptyBytearraySetstate.events.clear()
+    copied = copier(empty_bytearray_state)
+    print(
+        "empty-bytearray-setstate-" + copier.__name__,
+        bytes(copied),
+        EmptyBytearraySetstate.events,
+    )
+
 # ── __getstate__ + __setstate__: deepcopy drives state through the hooks ──────
 
 class St:

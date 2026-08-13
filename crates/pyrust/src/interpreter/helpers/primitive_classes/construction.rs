@@ -108,6 +108,24 @@ fn odict_values_ctor(_interp: &mut Interpreter, _args: &[ExpandedCallArg]) -> Re
     dict_view_ctor_error(pyrust_builtins::dict_views::ODICT_VALUES_TYPE_NAME)
 }
 
+fn bytearray_iterator_ctor(_interp: &mut Interpreter, _args: &[ExpandedCallArg]) -> Result<Value> {
+    Err(PyError::named(
+        "TypeError",
+        "cannot create 'bytearray_iterator' instances".to_string(),
+    ))
+}
+
+fn deque_iterator_ctor(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
+    crate::builtin_modules::collections::deque_iterator_constructor(interp, args, false)
+}
+
+fn deque_reverse_iterator_ctor(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
+    crate::builtin_modules::collections::deque_iterator_constructor(interp, args, true)
+}
+
 /// Identify one of the iterator/slice values migrated to a real built-in class
 /// in issue #3000 without materialising the class as a `Value`.
 ///
@@ -181,15 +199,18 @@ pub(crate) fn builtin_type_class_isinstance_fast(
 /// bypassed through `object.__new__`?
 ///
 /// The immutable tag identifies issue #3000's six built-in class singletons;
-/// dictionary views use their typed singleton identity because their hidden,
-/// final classes deliberately have no public constructor tag. Walking the
-/// class graph distinguishes genuine descendants from unrelated same-named
-/// user classes. `slice` and dictionary views cannot have descendants, but
-/// their exact classes must still reject bare allocation.
+/// dictionary views and concrete native iterators use their typed singleton
+/// identity because their final classes carry no public built-in layout tag.
+/// Walking the class graph distinguishes genuine descendants from unrelated
+/// same-named user classes. `slice` and dictionary views cannot have
+/// descendants, but their exact classes must still reject bare allocation.
 #[inline]
 pub(crate) fn class_has_native_builtin_type_ancestor(class: &Rc<RefCell<PyClass>>) -> bool {
     let borrowed = class.borrow();
-    if borrowed.builtin_type_tag.is_some() || DictViewClass::from_class(class).is_some() {
+    if borrowed.builtin_type_tag.is_some()
+        || DictViewClass::from_class(class).is_some()
+        || NativeIteratorClass::from_class(class).is_some()
+    {
         return true;
     }
     if let Some(base) = &borrowed.base

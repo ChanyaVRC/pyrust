@@ -30,6 +30,47 @@ impl Interpreter {
         // `try_borrow`-and-default read silently degraded every coroutine and
         // async generator to the plain-generator surface (#2978).
         let kind = cell.kind();
+
+        // These iterators share GeneratorCell storage with real generators,
+        // but their public surface belongs to their concrete built-in class.
+        // Keep generator-only methods and gi_* attributes out of getattr,
+        // while retaining the iterator protocols supplied by that class.
+        if let Some(iterator_class) = native_iterator_class(target) {
+            match name {
+                "__iter__" | "__next__" | "__length_hint__" | "__reduce__" | "__reduce_ex__" => {
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        name.to_string(),
+                        target.clone(),
+                    ));
+                }
+                "__setstate__" if iterator_class == NativeIteratorClass::Bytearray => {
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        name.to_string(),
+                        target.clone(),
+                    ));
+                }
+                _ => {}
+            }
+            if let Some(inherited) = lookup_class_attr(&iterator_class.singleton(), name) {
+                return Ok(
+                    if matches!(inherited.kind(), ValueKind::BuiltinFunction(_)) {
+                        pyrust_builtins::bound_method::bound_method(
+                            name.to_string(),
+                            target.clone(),
+                        )
+                    } else {
+                        inherited
+                    },
+                );
+            }
+            let obj_name = iterator_class.full_type_name();
+            return Err(PyError::attribute_error(
+                format!("'{obj_name}' object has no attribute '{name}'"),
+                Some(name.to_string()),
+                Some(target.clone()),
+            ));
+        }
+
         let is_async_gen = kind == GeneratorKind::AsyncGenerator;
         let is_coroutine_only = kind == GeneratorKind::Coroutine;
         if is_async_gen {

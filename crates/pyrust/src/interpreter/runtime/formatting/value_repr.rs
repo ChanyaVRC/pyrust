@@ -31,6 +31,8 @@ pub(crate) fn format_oct_i64(v: i64) -> String {
 ///   instance at any nesting depth
 /// - `BuiltinObject` — may be a frozenset containing `PyKey::Object`, or
 ///   another builtin type with user-backing
+/// - `Generator` — its public repr is reconstructed by the interpreter;
+///   `repr_raw()` only exposes the internal generator carrier
 ///
 /// Plain scalars (`Int`, `Str`, `Float`, `Bool`, `None`, `BigInt`, `Bytes`,
 /// `Complex`, `Ellipsis`, `NotImplemented`) always return `false`.
@@ -42,7 +44,8 @@ fn value_needs_interp_repr(v: &Value) -> bool {
         | ValueKind::List(_)
         | ValueKind::Tuple(_)
         | ValueKind::Dict(_)
-        | ValueKind::Set(_) => true,
+        | ValueKind::Set(_)
+        | ValueKind::Generator(_) => true,
         // Issue #2771: a class whose metaclass overrides `__repr__` needs the
         // interpreter to dispatch it (e.g. `[Color]` -> `[<enum 'Color'>]`).
         // Only classes with a *custom* metatype can carry such an override, so
