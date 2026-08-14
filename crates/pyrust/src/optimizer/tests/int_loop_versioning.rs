@@ -1680,7 +1680,7 @@ fn len_header_body() -> Vec<Insn> {
 }
 
 #[test]
-fn len_header_copy_reads_the_length_natively_every_iteration() {
+fn len_header_copy_hoists_the_length_read_for_a_non_mutating_body() {
     let result = versioned_with_names(
         len_header_loop(len_header_body()),
         &[Value::int(1)],
@@ -1695,63 +1695,225 @@ fn len_header_copy_reads_the_length_natively_every_iteration() {
             .any(|insn| matches!(insn, Insn::JumpIfNotBuiltinLen(4, _))),
         "the entry guard must value-check the loaded callee: {insns:?}"
     );
-    let len_read = fast
+    let len_reads = insns[..result.source_prefix_len]
         .iter()
-        .position(|insn| matches!(insn, Insn::LenSeqOrExit(4, 0, _)))
-        .expect("the header triple must become a native length read");
+        .filter(|insn| matches!(insn, Insn::LenSeqOrExit(4, 0, _)))
+        .count();
     assert_eq!(
-        len_read, 0,
-        "the length read opens the copy, so the back-edge re-runs it: {insns:?}"
+        len_reads, 1,
+        "the guard block must read the proven-invariant length once: {insns:?}"
     );
     assert!(
         !fast.iter().any(|insn| matches!(insn, Insn::Call(..))),
         "the copy must not keep the call it specializes: {insns:?}"
     );
-    // The copy rotates the header down to the latch, so the *loop* carries a
-    // second length read: the bound is re-derived on every pass, which is what
-    // lets a body that resizes the sequence move it.
-    let latch = fast
-        .iter()
-        .rposition(|insn| matches!(insn, Insn::LenSeqOrExit(4, 0, _)))
-        .expect("the latch re-reads the length");
     assert!(
-        latch > 0,
-        "the latch read must be distinct from the entry read: {insns:?}"
+        !fast
+            .iter()
+            .any(|insn| matches!(insn, Insn::LenSeqOrExit(4, 0, _))),
+        "the proven-non-mutating fast loop must reuse the guarded length: {insns:?}"
     );
     let back = fast
         .iter()
         .position(|insn| matches!(insn, Insn::CountCmpJumpTrue(2, BinaryOp::Lt, 4, 1, _)))
         .expect("the counter increment fuses into the rotated comparison");
     assert_eq!(
-        back,
-        latch + 1,
-        "the fused latch must follow its length read: {insns:?}"
-    );
-    assert_eq!(
         jump_target(result.source_prefix_len + back, &fast[back]),
-        Some(result.source_prefix_len + 2),
+        Some(result.source_prefix_len + 1),
         "the latch must jump back to the body top, past the entry test: {insns:?}"
     );
 }
 
 #[test]
-fn len_header_latch_deopt_resumes_at_the_counter_increment() {
-    // The rotated latch reads the length *above* the increment, so a deopt
-    // there must resume the original at the increment — not at the region
-    // head, which would re-run the body for an index already consumed.
+fn source_pipeline_hoists_only_a_proven_stable_len_header() {
+    let stable = optimize(compile_fn(
+        r#"values = [3, 1, 4, 1, 5]
+index = 0
+total = 0
+while index < len(values):
+    total += values[index]
+    index += 1
+"#,
+    ));
+    let (latch_pc, body_top) = stable
+        .insns
+        .iter()
+        .enumerate()
+        .find_map(|(pc, insn)| {
+            matches!(
+                insn,
+                Insn::CountCmpJumpTrue(..) | Insn::CountCmpJumpFalse(..)
+            )
+            .then(|| jump_target(pc, insn).map(|target| (pc, target)))
+            .flatten()
+            .filter(|&(_, target)| target < pc)
+        })
+        .expect("the real source loop must reach the fused fast copy");
+    let len_reads: Vec<usize> = stable
+        .insns
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, insn)| matches!(insn, Insn::LenSeqOrExit(..)).then_some(pc))
+        .collect();
+    assert_eq!(
+        len_reads.len(),
+        1,
+        "stable source must emit exactly one guarded length read: {:?}",
+        stable.insns
+    );
+    let fast_head = body_top
+        .checked_sub(1)
+        .filter(|&pc| {
+            matches!(
+                stable.insns[pc],
+                Insn::CmpJumpIfFalse(..) | Insn::CmpJumpIfTrue(..)
+            )
+        })
+        .expect("the fast copy keeps one zero-trip comparison before its body");
+    assert!(
+        len_reads[0] < fast_head,
+        "the only length read must precede the appended fast loop: {:?}",
+        stable.insns
+    );
+    assert!(
+        stable.insns[fast_head..=latch_pc]
+            .iter()
+            .all(|insn| !matches!(insn, Insn::LenSeqOrExit(..))),
+        "the compiled fast loop must not re-read the cached length: {:?}",
+        stable.insns
+    );
+
+    for (kind, source) in [
+        (
+            "mutating",
+            r#"values = [1, 2]
+index = 0
+while index < len(values):
+    values.append(index)
+    index += 1
+"#,
+        ),
+        (
+            "rebinding",
+            r#"values = [1, 2]
+replacement = 7
+index = 0
+while index < len(values):
+    values = replacement
+    index += 1
+"#,
+        ),
+        (
+            "protocol-reaching",
+            r#"class Probe:
+    value = 1
+probe = Probe()
+values = [1, 2]
+index = 0
+total = 0
+while index < len(values):
+    total += probe.value
+    index += 1
+"#,
+        ),
+    ] {
+        let declined = optimize(compile_fn(source));
+        assert!(
+            declined.insns.iter().all(|insn| !matches!(
+                insn,
+                Insn::JumpIfNotBuiltinLen(..) | Insn::LenSeqOrExit(..)
+            )),
+            "{kind} source body must retain the original per-iteration len call: {:?}",
+            declined.insns
+        );
+    }
+}
+
+#[test]
+fn len_header_hoisted_read_deopts_to_the_original_header() {
     let result = versioned_with_names(
         len_header_loop(len_header_body()),
         &[Value::int(1)],
         &len_names(),
     );
     let insns = &result.insns;
-    let latch = result.source_prefix_len
+    let len_pc = insns[..result.source_prefix_len]
+        .iter()
+        .position(|insn| matches!(insn, Insn::LenSeqOrExit(4, 0, _)))
+        .expect("the guard block reads the length");
+    let resume = jump_target(len_pc, &insns[len_pc]).expect("the length guard deopts");
+
+    assert!(
+        matches!(insns[resume], Insn::LoadGlobal(4, 0)),
+        "a rejected receiver must run the original len call: resume={resume} {insns:?}"
+    );
+    assert!(
+        !matches!(insns[resume + 1], Insn::JumpIfNotBuiltinLen(..)),
+        "the deopt must not re-enter the guard block: {insns:?}"
+    );
+}
+
+#[test]
+fn region_admission_policy_owns_len_hoist_safety() {
+    let admitted = classify_int_loop_region_insn(&Insn::Move(0, 1))
+        .expect("the region walk admits a register copy");
+    assert!(matches!(
+        admitted,
+        IntLoopRegionInsn::Copy { dst: 0, src: 1 }
+    ));
+    assert_eq!(
+        admitted.len_hoist_safety(9),
+        LenHoistSafety::ProvenNonMutating
+    );
+
+    let sequence_write = classify_int_loop_region_insn(&Insn::Move(9, 1))
+        .expect("the general region walk admits the copy before len policy");
+    assert_eq!(
+        sequence_write.len_hoist_safety(9),
+        LenHoistSafety::SequenceRegisterWrite,
+        "the same policy that admits the opcode must block a cached-bound copy"
+    );
+
+    for insn in [
+        Insn::Call(0, 1),
+        Insn::SetItem(0, 1, 2),
+        Insn::DeleteItem(0, 1),
+        Insn::ListAppend(0, 1),
+    ] {
+        assert!(
+            classify_int_loop_region_insn(&insn).is_none(),
+            "mutating or user-code-reaching bytecode must not enter the region policy: {insn:?}"
+        );
+    }
+}
+
+#[test]
+fn len_header_declines_when_the_body_replaces_the_sequence_register() {
+    let mut body = len_header_body();
+    body.insert(0, Insn::Move(0, 1));
+    let input = len_header_loop(body);
+
+    assert_eq!(
+        versioned_with_names(input.clone(), &[Value::int(1)], &len_names()).insns,
+        input,
+        "a body that rebinds the sequence must retain the per-iteration len call"
+    );
+}
+
+#[test]
+fn len_header_body_side_exit_resumes_the_original_operation() {
+    let result = versioned_with_names(
+        len_header_loop(len_header_body()),
+        &[Value::int(1)],
+        &len_names(),
+    );
+    let insns = &result.insns;
+    let fast_pc = result.source_prefix_len
         + insns[result.source_prefix_len..]
             .iter()
-            .rposition(|insn| matches!(insn, Insn::LenSeqOrExit(4, 0, _)))
-            .expect("the latch re-reads the length");
-
-    let stub = jump_target(latch, &insns[latch]).expect("the latch read side-exits");
+            .position(|insn| matches!(insn, Insn::GetItemSeqIntOrExit(3, 0, 2, _)))
+            .expect("the fast body guards its subscript");
+    let stub = jump_target(fast_pc, &insns[fast_pc]).expect("the subscript side-exits");
     let terminal = stub
         + insns[stub..]
             .iter()
@@ -1759,8 +1921,8 @@ fn len_header_latch_deopt_resumes_at_the_counter_increment() {
             .expect("the stub ends in a jump");
     let resume = jump_target(terminal, &insns[terminal]).expect("the stub jumps");
     assert!(
-        matches!(insns[resume], Insn::BinOpImm(2, 2, BinaryOp::Add, 1, true)),
-        "the latch deopt must resume at the un-run increment: resume={resume} {insns:?}"
+        matches!(insns[resume], Insn::GetItem(3, 0, 2)),
+        "the body deopt must resume at the guarded operation: resume={resume} {insns:?}"
     );
 }
 
@@ -1781,38 +1943,6 @@ fn len_header_call_base_is_not_entry_guarded() {
             .any(|insn| matches!(insn, Insn::JumpIfNotInt(4, _))),
         "the call base must not be entry-guarded: {:?}",
         result.insns
-    );
-}
-
-#[test]
-fn len_header_side_exit_resumes_the_original_loop_not_the_guard_block() {
-    // Deopting to `jump_target[head]` would re-enter the entry guards, pass
-    // them again, and jump straight back into the copy that just failed.
-    let result = versioned_with_names(
-        len_header_loop(len_header_body()),
-        &[Value::int(1)],
-        &len_names(),
-    );
-    let insns = &result.insns;
-    let len_pc = result.source_prefix_len;
-    let Insn::LenSeqOrExit(..) = insns[len_pc] else {
-        panic!("the copy opens with its length read: {insns:?}");
-    };
-
-    let stub = jump_target(len_pc, &insns[len_pc]).expect("the length read side-exits");
-    let terminal = stub
-        + insns[stub..]
-            .iter()
-            .position(|insn| !matches!(insn, Insn::SyncModuleGlobal(..)))
-            .expect("the stub ends in a jump");
-    let resume = jump_target(terminal, &insns[terminal]).expect("the stub jumps");
-    assert!(
-        matches!(insns[resume], Insn::LoadGlobal(4, 0)),
-        "the deopt must resume at the original LoadGlobal: resume={resume} {insns:?}"
-    );
-    assert!(
-        !matches!(insns[resume + 1], Insn::JumpIfNotBuiltinLen(..)),
-        "resuming inside the guard block would spin on the failed check: {insns:?}"
     );
 }
 
