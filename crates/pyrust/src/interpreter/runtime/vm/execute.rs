@@ -959,10 +959,11 @@ impl Interpreter {
                     }
                 }
                 Insn::LenSeqOrExit(dst, seq, offset) => {
-                    // Mid-loop side exit: reading a canonical sequence's length
-                    // is the whole observable effect of the `len(seq)` call this
-                    // replaces, and it runs every iteration, so a mid-loop
-                    // resize moves the loop bound exactly as the call would.
+                    // Entry guard for the out-of-line native-len loop copy. The
+                    // optimizer caches this canonical sequence length only
+                    // after its typed region policy proves that the copy cannot
+                    // resize, replace, or re-enter through the receiver; any
+                    // other shape resumes the original per-iteration call.
                     match try_builtin_sequence_len(&regs[*seq as usize]) {
                         Some(length) => regs[*dst as usize] = Value::int(length),
                         None => pc = jump_pc!(*offset),

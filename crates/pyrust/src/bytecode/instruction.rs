@@ -288,15 +288,15 @@ pub enum Insn {
     /// a canonical `list`/`tuple`/`str`/`bytes`, `R[dst] = len(R[seq])`;
     /// otherwise jump and leave R[dst] unchanged.
     ///
-    /// Emitted only inside an out-of-line specialized loop copy, in place of
-    /// the `LoadGlobal len` + `Move` + `Call` header triple it replaces, and
-    /// re-executed on **every** iteration — a mid-loop `append` / `pop` moves
-    /// the loop bound exactly as the original per-iteration call would.  On any
+    /// Emitted in the entry guard block for an out-of-line specialized loop,
+    /// after the header's `LoadGlobal len` and its value guard. The optimizer
+    /// reuses the result only after the typed region-admission policy proves
+    /// that no copied operation can resize or replace the sequence. Mutating
+    /// and protocol-reaching bodies retain the original per-iteration call. On any
     /// other operand shape (user `__len__`, `dict`, `set`, a `range` whose
-    /// length overflows `i64`, an unset slot) the jump target is a side-exit
-    /// stub that flushes the deferred module syncs and resumes the original
-    /// loop at its `LoadGlobal`, so the real `len` owns the raise, the protocol
-    /// dispatch, and the diagnostics.
+    /// length overflows `i64`, an unset slot), the jump resumes the original
+    /// loop at its `LoadGlobal`, so the real `len` owns the raise, protocol
+    /// dispatch, and diagnostics.
     LenSeqOrExit(Reg, Reg, i32),
     /// Guarded numeric leaf-call inlining site (emitted only by the
     /// optimizer, always immediately before the original call sequence it
