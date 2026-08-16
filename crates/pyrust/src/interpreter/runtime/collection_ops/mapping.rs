@@ -73,7 +73,9 @@ pub(super) fn mapping_entries_for_expansion(
     if let Some(entries) = dict_entries_from_value(value) {
         return Ok(Some(entries));
     }
-    if matches!(value.kind(), ValueKind::PyInstance(_)) {
+    if matches!(value.kind(), ValueKind::PyInstance(_))
+        || pyrust_builtins::mapping_proxy::owner_of(value).is_some()
+    {
         return mapping_pairs_via_protocol(interp, value);
     }
     Ok(None)
@@ -94,7 +96,10 @@ impl Interpreter {
         receiver: &Value,
         source: &Value,
     ) -> Result<()> {
-        let values = self.collect_iterable(source)?;
+        let values = match self.collect_mapping_proxy_with_length_hint(source)? {
+            Some(values) => values,
+            None => self.collect_iterable(source)?,
+        };
         receiver.list_extend(values)
     }
 

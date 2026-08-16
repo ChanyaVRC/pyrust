@@ -129,6 +129,7 @@ impl Interpreter {
             Instance(Rc<RefCell<PyInstance>>),
             Metaclass(Rc<RefCell<PyClass>>),
             BuiltinIterator,
+            MappingProxy(Value),
             IndexedValue,
             Other,
         }
@@ -145,6 +146,14 @@ impl Interpreter {
                     || metaclass_dunder(class, "__getitem__").is_some() =>
             {
                 IterKind::Metaclass(Rc::clone(class))
+            }
+            ValueKind::BuiltinObject { ops, state }
+                if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) =>
+            {
+                IterKind::MappingProxy(
+                    pyrust_builtins::mapping_proxy::owner_from_state(state)
+                        .expect("object mappingproxy state"),
+                )
             }
             ValueKind::BuiltinObject { ops, .. } if ops.is_iterator() => IterKind::BuiltinIterator,
             ValueKind::List(_) | ValueKind::Tuple(_) => IterKind::IndexedValue,
@@ -208,6 +217,7 @@ impl Interpreter {
                     value_type_name_str(&source)
                 )),
             },
+            IterKind::MappingProxy(owner) => self.make_loop_iter_state(owner),
             IterKind::BuiltinIterator => {
                 if pyrust_builtins::bytearray::iter_elements(&source).is_some() {
                     Ok(IterState::Materialized(iter_values(&source)?, 0))

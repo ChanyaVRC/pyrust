@@ -7,10 +7,13 @@ impl Interpreter {
     /// `__iter__`/`__index__`. Keep those callbacks at this boundary and pass
     /// the storage layer an owned list after every callback has completed.
     fn prepare_bytearray_slice_rhs(&mut self, value: Value) -> Result<Value> {
-        let needs_iterator = matches!(
-            value.kind(),
-            ValueKind::Generator(_) | ValueKind::PyInstance(_) | ValueKind::PyClass(_)
-        );
+        let needs_iterator = match value.kind() {
+            ValueKind::Generator(_) | ValueKind::PyInstance(_) | ValueKind::PyClass(_) => true,
+            ValueKind::BuiltinObject { ops, .. } => {
+                pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops)
+            }
+            _ => false,
+        };
         let mut items = if needs_iterator {
             let type_name = value_type_name_str(&value).into_owned();
             let iterator = match crate::interpreter::make_iterator(self, &value) {

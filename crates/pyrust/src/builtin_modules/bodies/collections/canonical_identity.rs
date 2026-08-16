@@ -84,6 +84,23 @@ fn is_canonical_collection_class_or_subclass(
     })
 }
 
+/// Whether `class` is one of the exact native `collections.deque` classes.
+///
+/// `MappingProxyType` mirrors CPython's `PyMapping_Check`: deque's inherited
+/// sequence-only `__getitem__` does not provide `mp_subscript`, while a deque
+/// subclass that defines its own `__getitem__` does. The caller compares the
+/// MRO attribute owner against this typed, reload-aware identity.
+pub(crate) fn is_canonical_deque_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    CANONICAL_COLLECTION_CLASSES.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let classes = registry.classes_mut(CanonicalCollectionKind::Deque);
+        classes.retain(|registered| registered.strong_count() > 0);
+        classes
+            .iter()
+            .any(|canonical| canonical.as_ptr() == Rc::as_ptr(class))
+    })
+}
+
 /// Return the canonical base class from a concrete receiver's generation.
 ///
 /// Counter arithmetic and unary normalization are specified to return a base

@@ -13,10 +13,42 @@ impl Interpreter {
         &mut self,
         val: &Value,
     ) -> Result<Vec<Value>> {
+        // list(mappingproxy) / tuple(mappingproxy) first acquire the owner's
+        // iterator, then ask the proxy for a length hint (which delegates to
+        // the owner's __len__). Preserve that observable callback ordering.
+        if let Some(items) = self.collect_mapping_proxy_with_length_hint(val)? {
+            return Ok(items);
+        }
         self.probe_reverse_getitem_length_hint(val)?;
         self.collect_iterable(val)
     }
 
+    /// Acquire an object-backed mappingproxy's delegated iterator, then probe
+    /// the proxy length hint before consuming it. CPython's sized consumers
+    /// (list, starred displays, list.extend, and sorted) expose this ordering;
+    /// consumers such as sum intentionally do not request a hint.
+    pub(crate) fn mapping_proxy_iterator_with_length_hint(
+        &mut self,
+        val: &Value,
+    ) -> Result<Option<Value>> {
+        let Some(owner) = pyrust_builtins::mapping_proxy::owner_of(val) else {
+            return Ok(None);
+        };
+        let iterator = make_iterator(self, &owner)?;
+        let _ = self.object_length_hint(val, 8)?;
+        Ok(Some(iterator))
+    }
+
+    /// Materialising companion to mapping_proxy_iterator_with_length_hint.
+    pub(crate) fn collect_mapping_proxy_with_length_hint(
+        &mut self,
+        val: &Value,
+    ) -> Result<Option<Vec<Value>>> {
+        let Some(iterator) = self.mapping_proxy_iterator_with_length_hint(val)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.collect_iterator(&iterator)?))
+    }
     fn probe_reverse_getitem_length_hint(&mut self, val: &Value) -> Result<()> {
         let ValueKind::Generator(state_rc) = val.kind() else {
             return Ok(());
@@ -285,6 +317,17 @@ impl Interpreter {
             };
             let iterator = validate_iterator_result(iterator)?;
             self.collect_iterator(&iterator)
+        } else if val.is_builtin_object() {
+            let ValueKind::BuiltinObject { ops, state } = val.kind() else {
+                unreachable!("is_builtin_object tag must match ValueKind")
+            };
+            if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) {
+                let owner = pyrust_builtins::mapping_proxy::owner_from_state(state)
+                    .expect("object mappingproxy state");
+                self.collect_iterable(&owner)
+            } else {
+                iter_values(val)
+            }
         } else {
             iter_values(val)
         }

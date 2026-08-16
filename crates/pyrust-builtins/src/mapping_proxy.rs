@@ -18,8 +18,9 @@ use pyrust_core::{
 
 pub const TYPE_NAME: &str = "mappingproxy";
 
-/// What a `mappingproxy` is proxying.  Both variants hold a live `Rc`, so reads
-/// reflect subsequent mutations of the underlying mapping.
+/// What a `mappingproxy` is proxying. Exact dicts and class namespaces retain
+/// their direct-storage fast paths; every other object is authoritative and
+/// must be read through the interpreter's normal mapping protocols.
 pub enum MappingProxySource {
     /// A class's attribute dict (`vars(C)` / `type(C).__dict__`).  Keys are
     /// always strings.
@@ -27,23 +28,69 @@ pub enum MappingProxySource {
     /// A plain dict (`d.keys().mapping`, issue #2679).  Keys are arbitrary
     /// hashable values.
     Dict(Rc<RefCell<PyDict>>),
+    /// Any non-exact mapping accepted by `types.MappingProxyType`. Keeping the
+    /// object itself (rather than a discovered backing dict) preserves its
+    /// Python-level `__getitem__`, `__len__`, `__iter__`, and named methods.
+    Object(Value),
 }
 
-/// Internal state: a live reference to the mapping being proxied.
+/// Internal state: the authoritative target being proxied.
 pub struct MappingProxyState {
     pub source: MappingProxySource,
-    /// The proxied object, when it is not the `source` itself — i.e. when
-    /// `types.MappingProxyType` was handed a dict *subclass* instance
-    /// (`OrderedDict` / `Counter` / `defaultdict` / a user `class D(dict)`) or
-    /// another `mappingproxy` (issue #2936).  `source` still points at that
-    /// object's live backing dict, so every read stays a live view; `owner`
-    /// only carries the identity CPython delegates `repr` and `copy` to.
-    pub owner: Option<Value>,
 }
 
 pub struct MappingProxyOps;
+pub struct MappingProxyObjectOps;
 
 pub const MAPPING_PROXY_OPS: &MappingProxyOps = &MappingProxyOps;
+pub const MAPPING_PROXY_OBJECT_OPS: &MappingProxyObjectOps = &MappingProxyObjectOps;
+
+/// Fast tag checks for interpreter dispatch. Object-backed proxies require
+/// Python protocol callbacks, while exact dict/class proxies stay entirely in
+/// the receiver-only ops table.
+#[inline]
+pub fn is_exact_proxy_ops(ops: &dyn BuiltinTypeOps) -> bool {
+    builtin_ops_is::<MappingProxyOps>(ops)
+}
+
+#[inline]
+pub fn is_object_proxy_ops(ops: &dyn BuiltinTypeOps) -> bool {
+    builtin_ops_is::<MappingProxyObjectOps>(ops)
+}
+
+/// Validate the public mappingproxy method wrapper before any delegated owner
+/// lookup runs. Exact and object-backed proxies share this boundary so their
+/// TypeError precedence and wording cannot drift.
+pub fn validate_method_call(method: &str, args_len: usize, has_kwargs: bool) -> Result<()> {
+    if has_kwargs
+        && matches!(
+            method,
+            "keys" | "values" | "items" | "get" | "copy" | "__reversed__"
+        )
+    {
+        return Err(PyError::named(
+            "TypeError",
+            format!("mappingproxy.{method}() takes no keyword arguments"),
+        ));
+    }
+    match method {
+        "get" if args_len == 0 => Err(PyError::named(
+            "TypeError",
+            "get expected at least 1 argument, got 0".to_string(),
+        )),
+        "get" if args_len > 2 => Err(PyError::named(
+            "TypeError",
+            format!("get expected at most 2 arguments, got {args_len}"),
+        )),
+        "keys" | "values" | "items" | "copy" | "__reversed__" if args_len != 0 => {
+            Err(PyError::named(
+                "TypeError",
+                format!("mappingproxy.{method}() takes no arguments ({args_len} given)"),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
 
 impl BuiltinTypeOps for MappingProxyOps {
     fn type_name(&self) -> &'static str {
@@ -61,9 +108,6 @@ impl BuiltinTypeOps for MappingProxyOps {
         // render, so `render_value_repr` intercepts this case before the
         // built-in ops table is consulted; the `repr_raw` here is the
         // no-interpreter fallback and is exact for a nested `mappingproxy`.
-        if let Some(owner) = borrow_owner(state) {
-            return format!("mappingproxy({})", owner.repr_raw());
-        }
         let src = borrow_source(state).expect("mappingproxy state");
         let inner: Vec<String> = match &src {
             MappingProxySource::Class(cls) => cls
@@ -77,6 +121,9 @@ impl BuiltinTypeOps for MappingProxyOps {
                 .iter()
                 .map(|(k, v)| format!("{}: {}", key_repr(k), v.repr_raw()))
                 .collect(),
+            MappingProxySource::Object(owner) => {
+                return format!("mappingproxy({})", owner.repr_raw());
+            }
         };
         format!("mappingproxy({{{}}})", inner.join(", "))
     }
@@ -85,6 +132,8 @@ impl BuiltinTypeOps for MappingProxyOps {
         match borrow_source(state) {
             Some(MappingProxySource::Class(cls)) => !cls.borrow().attrs.is_empty(),
             Some(MappingProxySource::Dict(rc)) => !rc.borrow().is_empty(),
+            // Interpreter::truthy_value delegates to the object's length slot.
+            Some(MappingProxySource::Object(_)) => false,
             None => false,
         }
     }
@@ -116,6 +165,9 @@ impl BuiltinTypeOps for MappingProxyOps {
                     lhs.iter()
                         .all(|(k, v)| rhs.get(k).is_some_and(|other_v| v == other_v))
                 }
+                // Interpreter-side rich comparison unwraps object targets before
+                // this receiver-only fallback is reached.
+                MappingProxySource::Object(_) => false,
             },
             ValueKind::BuiltinObject {
                 ops,
@@ -145,6 +197,7 @@ impl BuiltinTypeOps for MappingProxyOps {
                             .iter()
                             .all(|(k, v)| dict.get(&PyKey::str_from(k)).is_some_and(|dv| v == dv))
                     }
+                    _ => false,
                 }
             }
             _ => false,
@@ -155,6 +208,7 @@ impl BuiltinTypeOps for MappingProxyOps {
         match borrow_source(state)? {
             MappingProxySource::Class(cls) => Some(cls.borrow().attrs.len()),
             MappingProxySource::Dict(rc) => Some(rc.borrow().len()),
+            MappingProxySource::Object(_) => None,
         }
     }
 
@@ -181,6 +235,9 @@ impl BuiltinTypeOps for MappingProxyOps {
                     .cloned()
                     .ok_or_else(|| PyError::key_error(key.clone()))
             }
+            MappingProxySource::Object(_) => Err(PyError::Runtime(
+                "internal: mappingproxy object read requires interpreter dispatch".to_string(),
+            )),
         }
     }
 
@@ -202,6 +259,10 @@ impl BuiltinTypeOps for MappingProxyOps {
                 Some(pk) => Ok(rc.borrow().contains_key(&pk)),
                 None => Ok(false),
             },
+            MappingProxySource::Object(_) => Err(PyError::Runtime(
+                "internal: mappingproxy object membership requires interpreter dispatch"
+                    .to_string(),
+            )),
         }
     }
 
@@ -219,70 +280,19 @@ impl BuiltinTypeOps for MappingProxyOps {
         args: Vec<Value>,
         kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
+        validate_method_call(method, args.len(), !kwargs.is_empty())?;
         let src = borrow_source(state)
             .ok_or_else(|| PyError::Runtime("internal: bad mappingproxy state".to_string()))?;
-        // None of mappingproxy's methods accept keyword arguments in CPython 3.12.
-        if !kwargs.is_empty()
-            && matches!(
-                method,
-                "keys" | "values" | "items" | "get" | "copy" | "__reversed__"
-            )
-        {
-            return Err(PyError::named(
-                "TypeError",
-                format!("mappingproxy.{method}() takes no keyword arguments"),
+        if matches!(&src, MappingProxySource::Object(_)) {
+            return Err(PyError::Runtime(
+                "internal: mappingproxy object method requires interpreter dispatch".to_string(),
             ));
         }
         match method {
-            "keys" => {
-                if !args.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "mappingproxy.keys() takes no arguments ({} given)",
-                            args.len()
-                        ),
-                    ));
-                }
-                Ok(crate::dict_views::dict_keys(source_dict_rc(&src)))
-            }
-            "values" => {
-                if !args.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "mappingproxy.values() takes no arguments ({} given)",
-                            args.len()
-                        ),
-                    ));
-                }
-                Ok(crate::dict_views::dict_values(source_dict_rc(&src)))
-            }
-            "items" => {
-                if !args.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "mappingproxy.items() takes no arguments ({} given)",
-                            args.len()
-                        ),
-                    ));
-                }
-                Ok(crate::dict_views::dict_items(source_dict_rc(&src)))
-            }
+            "keys" => Ok(crate::dict_views::dict_keys(source_dict_rc(&src))),
+            "values" => Ok(crate::dict_views::dict_values(source_dict_rc(&src))),
+            "items" => Ok(crate::dict_views::dict_items(source_dict_rc(&src))),
             "get" => {
-                if args.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "get expected at least 1 argument, got 0".to_string(),
-                    ));
-                }
-                if args.len() > 2 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("get expected at most 2 arguments, got {}", args.len()),
-                    ));
-                }
                 let default = || args.get(1).cloned().unwrap_or(Value::none());
                 match &src {
                     MappingProxySource::Class(cls) => {
@@ -300,40 +310,22 @@ impl BuiltinTypeOps for MappingProxyOps {
                         Some(pk) => Ok(rc.borrow().get(&pk).cloned().unwrap_or_else(default)),
                         None => Ok(default()),
                     },
+                    MappingProxySource::Object(_) => unreachable!(),
                 }
             }
-            "copy" => {
-                if !args.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "mappingproxy.copy() takes no arguments ({} given)",
-                            args.len()
-                        ),
-                    ));
-                }
-                match &src {
-                    MappingProxySource::Class(cls) => {
-                        let class = cls.borrow();
-                        let mut dict: PyDict = PyDict::default();
-                        for (k, v) in class.attrs.iter() {
-                            dict.insert(PyKey::str_from(k), expose_class_value(v));
-                        }
-                        Ok(Value::dict(dict))
+            "copy" => match &src {
+                MappingProxySource::Class(cls) => {
+                    let class = cls.borrow();
+                    let mut dict: PyDict = PyDict::default();
+                    for (k, v) in class.attrs.iter() {
+                        dict.insert(PyKey::str_from(k), expose_class_value(v));
                     }
-                    MappingProxySource::Dict(rc) => Ok(Value::dict(rc.borrow().clone())),
+                    Ok(Value::dict(dict))
                 }
-            }
+                MappingProxySource::Dict(rc) => Ok(Value::dict(rc.borrow().clone())),
+                MappingProxySource::Object(_) => unreachable!(),
+            },
             "__reversed__" => {
-                if !args.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "mappingproxy.__reversed__() takes no arguments ({} given)",
-                            args.len()
-                        ),
-                    ));
-                }
                 // Yield keys in reverse insertion order (CPython 3.12 #2684).
                 // Reported as `dict_reversekeyiterator` to match CPython's
                 // kind-specific iterator type name (#2702).
@@ -345,6 +337,58 @@ impl BuiltinTypeOps for MappingProxyOps {
                 format!("'mappingproxy' object has no attribute '{method}'"),
             )),
         }
+    }
+}
+
+// Object-backed proxies need interpreter callbacks for reads. A distinct ops
+// type lets the interpreter reject exact dict/class proxies by type id without
+// borrowing their state on every hot read; fallback presentation and mutation
+// behavior remain shared with MappingProxyOps.
+impl BuiltinTypeOps for MappingProxyObjectOps {
+    fn type_name(&self) -> &'static str {
+        MAPPING_PROXY_OPS.type_name()
+    }
+
+    fn canonical_class_tag(&self) -> Option<CanonicalClassTag> {
+        MAPPING_PROXY_OPS.canonical_class_tag()
+    }
+
+    fn repr(&self, state: &BuiltinState) -> String {
+        MAPPING_PROXY_OPS.repr(state)
+    }
+
+    fn truthy(&self, state: &BuiltinState) -> bool {
+        MAPPING_PROXY_OPS.truthy(state)
+    }
+
+    fn eq(&self, state: &BuiltinState, other: &Value) -> bool {
+        MAPPING_PROXY_OPS.eq(state, other)
+    }
+
+    fn len(&self, state: &BuiltinState) -> Option<usize> {
+        MAPPING_PROXY_OPS.len(state)
+    }
+
+    fn get_item(&self, state: &BuiltinState, key: &Value) -> Result<Value> {
+        MAPPING_PROXY_OPS.get_item(state, key)
+    }
+
+    fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
+        MAPPING_PROXY_OPS.contains(state, item)
+    }
+
+    fn has_method(&self, name: &str) -> bool {
+        MAPPING_PROXY_OPS.has_method(name)
+    }
+
+    fn call_method(
+        &self,
+        state: &BuiltinState,
+        method: &str,
+        args: Vec<Value>,
+        kwargs: &IndexMap<String, Value>,
+    ) -> Result<Value> {
+        MAPPING_PROXY_OPS.call_method(state, method, args, kwargs)
     }
 }
 
@@ -370,6 +414,9 @@ fn source_dict_rc(src: &MappingProxySource) -> Rc<RefCell<PyDict>> {
             }
             Rc::new(RefCell::new(dict))
         }
+        MappingProxySource::Object(_) => {
+            unreachable!("object-backed mappingproxy methods dispatch in the interpreter")
+        }
     }
 }
 
@@ -390,6 +437,9 @@ fn source_keys(src: &MappingProxySource) -> Vec<Value> {
             .map(|k| Value::string(k.clone()))
             .collect(),
         MappingProxySource::Dict(rc) => rc.borrow().keys().map(key_to_value).collect(),
+        MappingProxySource::Object(_) => {
+            unreachable!("object-backed mappingproxy iteration dispatches in the interpreter")
+        }
     }
 }
 
@@ -417,7 +467,6 @@ fn key_to_value(key: &PyKey) -> Value {
 pub fn mapping_proxy(class: Rc<RefCell<PyClass>>) -> Value {
     let state: Box<dyn Any> = Box::new(MappingProxyState {
         source: MappingProxySource::Class(class),
-        owner: None,
     });
     Value::builtin_object(MAPPING_PROXY_OPS, state)
 }
@@ -426,22 +475,18 @@ pub fn mapping_proxy(class: Rc<RefCell<PyClass>>) -> Value {
 pub fn mapping_proxy_dict(dict: Rc<RefCell<PyDict>>) -> Value {
     let state: Box<dyn Any> = Box::new(MappingProxyState {
         source: MappingProxySource::Dict(dict),
-        owner: None,
     });
     Value::builtin_object(MAPPING_PROXY_OPS, state)
 }
 
-/// Construct a `mappingproxy` over `owner` — a mapping that is not itself a
-/// plain `dict` (issue #2936).  `source` must be `owner`'s *live* storage, so
-/// reads through the proxy observe later mutations of `owner`; `owner` is kept
-/// only so `repr` and `copy` can delegate to the proxied object the way
-/// CPython's `mappingproxy` does.
-pub fn mapping_proxy_owned(source: MappingProxySource, owner: Value) -> Value {
+/// Construct a `mappingproxy` over an arbitrary object. The interpreter
+/// delegates every read to this exact object; nested proxies intentionally
+/// retain each wrapper instead of being flattened.
+pub fn mapping_proxy_object(owner: Value) -> Value {
     let state: Box<dyn Any> = Box::new(MappingProxyState {
-        source,
-        owner: Some(owner),
+        source: MappingProxySource::Object(owner),
     });
-    Value::builtin_object(MAPPING_PROXY_OPS, state)
+    Value::builtin_object(MAPPING_PROXY_OBJECT_OPS, state)
 }
 
 /// The proxied object of an owner-carrying `mappingproxy`, or `None` for a
@@ -457,10 +502,21 @@ pub fn owner_of(value: &Value) -> Option<Value> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if !builtin_ops_is::<MappingProxyOps>(ops) {
+    if !is_object_proxy_ops(ops) {
         return None;
     }
-    borrow_owner(state)
+    owner_from_state(state)
+}
+
+/// Clone an object-backed proxy's authoritative owner directly from an
+/// already-matched `BuiltinObject` state. The state borrow is released before
+/// any interpreter callback runs.
+#[inline]
+pub fn owner_from_state(state: &BuiltinState) -> Option<Value> {
+    match borrow_source(state)? {
+        MappingProxySource::Object(owner) => Some(owner),
+        MappingProxySource::Class(_) | MappingProxySource::Dict(_) => None,
+    }
 }
 
 /// The object an owner-carrying `mappingproxy` ultimately proxies, following a
@@ -499,12 +555,6 @@ pub fn proxied_of(value: &Value) -> Option<Value> {
     Some(proxied)
 }
 
-/// Clone the live source out of a `mappingproxy` Value, for re-proxying it
-/// (`mappingproxy(some_proxy)`).
-pub fn source_of(value: &Value) -> Option<MappingProxySource> {
-    borrow_source_of(value)
-}
-
 /// Return whether `value` is backed by this module's mappingproxy operations
 /// table. The check uses the concrete Rust implementation type, never the
 /// Python-visible `mappingproxy` presentation name.
@@ -512,7 +562,8 @@ pub fn source_of(value: &Value) -> Option<MappingProxySource> {
 pub fn is_mapping_proxy(value: &Value) -> bool {
     matches!(
         value.kind(),
-        ValueKind::BuiltinObject { ops, .. } if builtin_ops_is::<MappingProxyOps>(ops)
+        ValueKind::BuiltinObject { ops, .. }
+            if is_exact_proxy_ops(ops) || is_object_proxy_ops(ops)
     )
 }
 
@@ -523,7 +574,7 @@ pub fn is_mapping_proxy(value: &Value) -> bool {
 pub fn as_class_rc(value: &Value) -> Option<Rc<RefCell<PyClass>>> {
     match borrow_source_of(value)? {
         MappingProxySource::Class(c) => Some(c),
-        MappingProxySource::Dict(_) => None,
+        MappingProxySource::Dict(_) | MappingProxySource::Object(_) => None,
     }
 }
 
@@ -532,7 +583,7 @@ pub fn as_class_rc(value: &Value) -> Option<Rc<RefCell<PyClass>>> {
 pub fn as_dict_rc(value: &Value) -> Option<Rc<RefCell<PyDict>>> {
     match borrow_source_of(value)? {
         MappingProxySource::Dict(d) => Some(d),
-        MappingProxySource::Class(_) => None,
+        MappingProxySource::Class(_) | MappingProxySource::Object(_) => None,
     }
 }
 
@@ -545,6 +596,7 @@ pub fn live_len(value: &Value) -> Option<usize> {
     match borrow_source_of(value)? {
         MappingProxySource::Class(cls) => Some(cls.borrow().attrs.len()),
         MappingProxySource::Dict(rc) => Some(rc.borrow().len()),
+        MappingProxySource::Object(_) => None,
     }
 }
 
@@ -552,18 +604,10 @@ fn borrow_source_of(value: &Value) -> Option<MappingProxySource> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if !builtin_ops_is::<MappingProxyOps>(ops) {
+    if !is_exact_proxy_ops(ops) && !is_object_proxy_ops(ops) {
         return None;
     }
     borrow_source(state)
-}
-
-/// Clone the proxied object out of the proxy state, if any.
-fn borrow_owner(state: &BuiltinState) -> Option<Value> {
-    let borrow = state.borrow();
-    borrow
-        .downcast_ref::<MappingProxyState>()
-        .and_then(|s| s.owner.clone())
 }
 
 /// Clone the live `Rc` out of the proxy state.  Both variants are cheap `Rc`
@@ -575,5 +619,6 @@ fn borrow_source(state: &BuiltinState) -> Option<MappingProxySource> {
         .map(|s| match &s.source {
             MappingProxySource::Class(c) => MappingProxySource::Class(Rc::clone(c)),
             MappingProxySource::Dict(d) => MappingProxySource::Dict(Rc::clone(d)),
+            MappingProxySource::Object(owner) => MappingProxySource::Object(owner.clone()),
         })
 }

@@ -46,15 +46,14 @@ impl Interpreter {
             receiver.list_extend(snapshot)?;
             return Ok(Value::none());
         }
-        // CPython's `list.extend` appends incrementally and keeps the partial
-        // progress when the iterator raises mid-iteration (#2531). For lazy
-        // iterables (generators, map/filter/zip, user `__iter__`/`__next__` or
-        // the legacy `__getitem__` protocol) whose iteration runs user code,
-        // turn the argument into an iterator via the `iter()` builtin — the same
-        // path `list()` / the `for`-loop use — and push each element onto the
-        // receiver as it arrives. Plain eager containers took the snapshot
-        // branch above; already-created iterator objects stay incremental.
-        let iterator = make_iterator(self, &iterable)?;
+        // CPython's list.extend appends incrementally and keeps partial
+        // progress when the iterator raises. An object-backed mappingproxy
+        // acquires the owner's iterator and probes the proxy length hint before
+        // the first item; every other lazy iterable uses the ordinary path.
+        let iterator = match self.mapping_proxy_iterator_with_length_hint(&iterable)? {
+            Some(iterator) => iterator,
+            None => make_iterator(self, &iterable)?,
+        };
         loop {
             match self.call_next(&iterator, None) {
                 Ok(item) => receiver.list_push(item)?,
@@ -98,8 +97,13 @@ impl Interpreter {
                 args.len()
             ));
         }
-        let needs_collect = match args[0].kind() {
-            ValueKind::Generator(_) => true,
+        let (needs_collect, proxy_length_hint) = match args[0].kind() {
+            ValueKind::Generator(_) => (true, false),
+            ValueKind::BuiltinObject { ops, .. }
+                if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) =>
+            {
+                (true, true)
+            }
             // A user-defined PyInstance is collected only when it is actually
             // iterable; a plain object falls through so the ops table picks the
             // canonical `can't extend bytearray with <type>` message (#2534).
@@ -112,13 +116,21 @@ impl Interpreter {
             // `can't extend bytearray with <type>` (matching CPython).
             ValueKind::PyInstance(inst) => {
                 let class = Rc::clone(&inst.borrow().class);
-                lookup_class_attr(&class, "__iter__").is_some()
-                    || lookup_class_attr(&class, "__getitem__").is_some()
+                (
+                    lookup_class_attr(&class, "__iter__").is_some()
+                        || lookup_class_attr(&class, "__getitem__").is_some(),
+                    false,
+                )
             }
-            _ => false,
+            _ => (false, false),
         };
         if needs_collect {
-            let snapshot = self.collect_iterable(&args[0])?;
+            let snapshot = if proxy_length_hint {
+                self.collect_mapping_proxy_with_length_hint(&args[0])?
+                    .expect("object mappingproxy classification")
+            } else {
+                self.collect_iterable(&args[0])?
+            };
             args[0] = Value::list(snapshot);
         }
         Ok(args)

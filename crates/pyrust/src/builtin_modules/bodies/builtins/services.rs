@@ -79,6 +79,12 @@ pyrust_module! {
                         // Dict-backed mappingproxy (`d.keys().mapping`, #2679):
                         // copy the parent dict's key/value pairs verbatim.
                         result.extend(dict_rc.borrow().clone());
+                    } else if let Some(pairs) =
+                        mapping_pairs_via_protocol(_interp, &arg.value)?
+                    {
+                        for (key, value) in pairs {
+                            _interp.dict_insert(&mut result, key, value)?;
+                        }
                     }
                 }
                 // PyInstance with a backing dict (dict subclass).

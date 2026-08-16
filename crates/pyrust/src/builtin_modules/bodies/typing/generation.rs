@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
-use crate::value::{PyClass, Value};
+use crate::value::{PyClass, PyInstance, Value};
 use indexmap::IndexMap;
 
 /// (method-short, registry-name) pairs for `_Any`.
@@ -56,18 +56,20 @@ struct TypingGeneration {
     protocol_class: Weak<RefCell<PyClass>>,
     namedtuple_marker_class: Weak<RefCell<PyClass>>,
     typeddict_marker_class: Weak<RefCell<PyClass>>,
+    annotated_marker: Weak<RefCell<PyInstance>>,
     special_forms: HashMap<&'static str, Weak<RefCell<PyClass>>>,
     legacy_aliases: HashMap<&'static str, Weak<RefCell<PyClass>>>,
 }
 
 impl TypingGeneration {
-    fn has_live_owned_class(&self) -> bool {
+    fn has_live_owned_value(&self) -> bool {
         self.any_class.strong_count() > 0
             || self.typing_alias_class.strong_count() > 0
             || self.generic_alias_class.strong_count() > 0
             || self.protocol_class.strong_count() > 0
             || self.namedtuple_marker_class.strong_count() > 0
             || self.typeddict_marker_class.strong_count() > 0
+            || self.annotated_marker.strong_count() > 0
             || self
                 .special_forms
                 .values()
@@ -92,7 +94,7 @@ pub(super) fn start_typing_generation() {
     let generic = stable_generic_class();
     TYPING_GENERATIONS.with(|generations| {
         let mut generations = generations.borrow_mut();
-        generations.retain(TypingGeneration::has_live_owned_class);
+        generations.retain(TypingGeneration::has_live_owned_value);
         generations.push(TypingGeneration {
             generic_class: Rc::downgrade(&generic),
             ..TypingGeneration::default()
@@ -245,7 +247,7 @@ pub(super) fn protocol_classes() -> Vec<Rc<RefCell<PyClass>>> {
             .iter()
             .filter_map(|generation| generation.protocol_class.upgrade())
             .collect();
-        generations.retain(TypingGeneration::has_live_owned_class);
+        generations.retain(TypingGeneration::has_live_owned_value);
         classes
     })
 }
@@ -275,6 +277,49 @@ pub(super) fn current_special_form_class(
         },
         build,
     )
+}
+
+/// True when `class` is a subscriptable special form from any live import.
+pub(super) fn is_special_form_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    TYPING_GENERATIONS.with(|generations| {
+        generations.borrow().iter().any(|generation| {
+            generation
+                .special_forms
+                .values()
+                .filter_map(Weak::upgrade)
+                .any(|registered| Rc::ptr_eq(&registered, class))
+        })
+    })
+}
+
+/// Record the Python-owned bare `typing.Annotated` marker for this import.
+pub(super) fn register_annotated_marker(value: &Value) {
+    let Some(instance) = value.as_py_instance_rc() else {
+        return;
+    };
+    ensure_typing_generation();
+    TYPING_GENERATIONS.with(|generations| {
+        let mut generations = generations.borrow_mut();
+        let generation = generations
+            .last_mut()
+            .expect("typing generation was ensured before Annotated injection");
+        generation.annotated_marker = Rc::downgrade(instance);
+    });
+}
+
+/// True when `value` is bare `typing.Annotated` from any live import.
+pub(super) fn is_annotated_marker(value: &Value) -> bool {
+    let Some(instance) = value.as_py_instance_rc() else {
+        return false;
+    };
+    TYPING_GENERATIONS.with(|generations| {
+        generations.borrow().iter().any(|generation| {
+            generation
+                .annotated_marker
+                .upgrade()
+                .is_some_and(|registered| Rc::ptr_eq(&registered, instance))
+        })
+    })
 }
 
 pub(super) fn paired_special_form_class(

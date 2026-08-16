@@ -62,6 +62,44 @@ pub(crate) use aliases::legacy_alias_delegate;
 pub(crate) use generation::{is_protocol_marker_class, is_protocol_subclass};
 pub(crate) use python_members::inject_python_members;
 
+enum MappingProxySubscriptPolicy {
+    Accept,
+    Reject(&'static str),
+}
+
+/// Return the CPython mapping-slot policy for synthetic bare `typing` values.
+///
+/// PyRust represents these values differently from CPython, so their visible
+/// class shape cannot by itself model `PyMapping_Check` or its error type name
+/// at this boundary.
+fn mapping_proxy_policy(value: &Value) -> Option<MappingProxySubscriptPolicy> {
+    if generation::is_annotated_marker(value) {
+        return Some(MappingProxySubscriptPolicy::Reject("type"));
+    }
+    let ValueKind::PyClass(class) = value.kind() else {
+        return None;
+    };
+    if generation::is_legacy_alias_class(class) || generation::is_special_form_class(class) {
+        return Some(MappingProxySubscriptPolicy::Accept);
+    }
+    None
+}
+
+pub(crate) fn mapping_proxy_subscript_policy(value: &Value) -> Option<bool> {
+    match mapping_proxy_policy(value) {
+        Some(MappingProxySubscriptPolicy::Accept) => Some(true),
+        Some(MappingProxySubscriptPolicy::Reject(_)) => Some(false),
+        None => None,
+    }
+}
+
+pub(crate) fn mapping_proxy_rejection_type_name(value: &Value) -> Option<&'static str> {
+    match mapping_proxy_policy(value) {
+        Some(MappingProxySubscriptPolicy::Reject(type_name)) => Some(type_name),
+        Some(MappingProxySubscriptPolicy::Accept) | None => None,
+    }
+}
+
 pyrust_module! {
     constants {
         // PEP 585: these names are deprecated aliases for built-in types

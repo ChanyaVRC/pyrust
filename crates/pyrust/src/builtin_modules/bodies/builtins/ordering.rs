@@ -37,7 +37,11 @@ pyrust_module! {
                 format!("{FN_NAME} expected 1 argument, got {}", positional.len()),
             ));
         }
-        let mut items = _interp.collect_iterable(&positional[0].value)?;
+        let source = &positional[0].value;
+        let mut items = match _interp.collect_mapping_proxy_with_length_hint(source)? {
+            Some(items) => items,
+            None => _interp.collect_iterable(source)?,
+        };
         if let Some(kfn) = key_fn {
             let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(items.len());
             for v in std::mem::take(&mut items) {

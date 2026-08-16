@@ -697,6 +697,23 @@ pub(crate) fn visit_mapping_pairs_via_protocol(
     mut visit: impl FnMut(&mut Interpreter, PyKey, Value) -> Result<()>,
 ) -> Result<bool> {
     let inst = match value.kind() {
+        // An object-backed mappingproxy is itself a BuiltinObject, but mapping
+        // consumers still call proxy.keys() and then proxy[key]. Exact proxies
+        // stay on raw fast paths in callers; classify only inside this existing
+        // kind dispatch so unrelated values pay no broad owner probe.
+        ValueKind::BuiltinObject { ops, .. }
+            if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) =>
+        {
+            let keys_method = interp.get_attr(value, "keys")?;
+            let keys_source = interp.call_function_expanded(keys_method, &[])?;
+            let keys = interp.collect_iterable(&keys_source)?;
+            for key_value in keys {
+                let item = interp.eval_index(value, key_value.clone())?;
+                let key = interp.value_to_pykey(&key_value)?;
+                visit(interp, key, item)?;
+            }
+            return Ok(true);
+        }
         ValueKind::PyInstance(inst) => Rc::clone(inst),
         _ => return Ok(false),
     };

@@ -444,27 +444,6 @@ impl Interpreter {
                 .expect("reversed must be in the registry");
             return dispatch(self, &[arg]);
         }
-        // issue #2936: `mappingproxy.copy()` delegates to the *proxied object*'s
-        // `copy`, so a proxy over an `OrderedDict` copies to an `OrderedDict`.
-        // Only owner-carrying proxies (a dict subclass or a nested proxy) need
-        // this; a proxy over a plain dict or a class `__dict__` has no separate
-        // object to delegate to and `mapping_proxy::call_method` handles it.
-        if !has_kw
-            && method == "copy"
-            && let Some(owner) = pyrust_builtins::mapping_proxy::owner_of(&receiver)
-        {
-            if !pos.is_empty() {
-                return Err(pyrust_core::type_err!(
-                    "mappingproxy.copy() takes no arguments ({} given)",
-                    pos.len()
-                ));
-            }
-            return self.call_bound_method_dispatch(
-                std::rc::Rc::new("copy".to_string()),
-                owner,
-                &[],
-            );
-        }
         enum Kind {
             Int,
             Float,

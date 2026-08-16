@@ -322,6 +322,7 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
         // is returned unchanged and shares position with the original — never
         // re-wrapped in a fresh `NativeIterFrame` (#2117).
         SelfIterator,
+        MappingProxy(Value),
         Other,
     }
     // A coroutine (`async def`, issue #1039) — and an async generator (#2280)
@@ -353,11 +354,24 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
         ValueKind::BigRange { start, stop, step } => {
             IterKind::BigRange(start.clone(), stop.clone(), step.clone())
         }
+        ValueKind::BuiltinObject { ops, state }
+            if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) =>
+        {
+            // mappingproxy.tp_iter is PyObject_GetIter on the proxied object.
+            // Returning that iterator directly also keeps the owner's native
+            // mutation guard. Classify inside the existing BuiltinObject arm
+            // so non-built-in iterable hot paths pay no extra proxy probe.
+            IterKind::MappingProxy(
+                pyrust_builtins::mapping_proxy::owner_from_state(state)
+                    .expect("object mappingproxy state"),
+            )
+        }
         ValueKind::BuiltinObject { ops, .. } if ops.is_iterator() => IterKind::SelfIterator,
         _ => IterKind::Other,
     };
     match kind {
         IterKind::Generator | IterKind::SelfIterator => Ok(v.clone()),
+        IterKind::MappingProxy(owner) => make_iterator(interp, &owner),
         IterKind::Range(cur, stop, step) => Ok(make_i64_range_iterator(cur, stop, step)),
         IterKind::BigRange(cur, stop, step) => {
             Ok(Value::generator(Box::new(BigRangeIter { cur, stop, step })))
