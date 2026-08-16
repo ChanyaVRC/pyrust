@@ -113,7 +113,9 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
         ValueKind::PyClass(class) => {
             let mut names: Vec<String> = Vec::new();
             collect_class_names(class, &mut names);
-            if NativeIteratorClass::from_class(class).is_some() {
+            if NativeIteratorClass::from_class(class)
+                .is_some_and(|kind| kind != NativeIteratorClass::Reversed)
+            {
                 names.retain(|name| name != "__getstate__");
             }
             names
@@ -179,7 +181,9 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
             if let Some(iterator_class) = native_iterator_class(value) {
                 let mut names = Vec::new();
                 collect_class_names(&iterator_class.singleton(), &mut names);
-                names.retain(|name| name != "__getstate__");
+                if iterator_class != NativeIteratorClass::Reversed {
+                    names.retain(|name| name != "__getstate__");
+                }
                 return names;
             }
 
@@ -251,11 +255,22 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
                 );
                 // Only the concrete built-in iterators carry a remaining-count
                 // slot (issue #2920); a real generator does not.
-                if cell
-                    .try_borrow()
-                    .is_ok_and(|state| builtin_iterator_has_length_hint(&**state))
-                {
-                    names.push("__length_hint__".to_string());
+                if let Ok(state) = cell.try_borrow() {
+                    if state.downcast_ref::<GetItemIter>().is_some() {
+                        names.extend(
+                            [
+                                "__getattribute__",
+                                "__reduce__",
+                                "__reduce_ex__",
+                                "__setstate__",
+                            ]
+                            .iter()
+                            .map(|name| (*name).to_string()),
+                        );
+                    }
+                    if builtin_iterator_has_length_hint(&**state) {
+                        names.push("__length_hint__".to_string());
+                    }
                 }
             }
             names

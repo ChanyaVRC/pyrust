@@ -31,6 +31,23 @@ impl Interpreter {
         // async generator to the plain-generator surface (#2978).
         let kind = cell.kind();
 
+        // Legacy `__getitem__` cursors share GeneratorCell storage but own the
+        // sequence-iterator reduction/state surface. Restrict the typed state
+        // probe to those cold attribute names so ordinary `next()` lookup is
+        // unchanged.
+        if matches!(
+            name,
+            "__getattribute__" | "__reduce__" | "__reduce_ex__" | "__setstate__"
+        ) && cell
+            .try_borrow()
+            .is_ok_and(|state| state.downcast_ref::<GetItemIter>().is_some())
+        {
+            return Ok(pyrust_builtins::bound_method::bound_method(
+                name.to_string(),
+                target.clone(),
+            ));
+        }
+
         // These iterators share GeneratorCell storage with real generators,
         // but their public surface belongs to their concrete built-in class.
         // Keep generator-only methods and gi_* attributes out of getattr,
@@ -43,7 +60,12 @@ impl Interpreter {
                         target.clone(),
                     ));
                 }
-                "__setstate__" if iterator_class == NativeIteratorClass::Bytearray => {
+                "__setstate__"
+                    if matches!(
+                        iterator_class,
+                        NativeIteratorClass::Bytearray | NativeIteratorClass::Reversed
+                    ) =>
+                {
                     return Ok(pyrust_builtins::bound_method::bound_method(
                         name.to_string(),
                         target.clone(),

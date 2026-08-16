@@ -416,6 +416,17 @@ thread_local! {
                     let qualified = registered_builtin_method_name(name, method);
                     attrs.insert(method.to_string(), Value::builtin_function(qualified));
                 }
+                if kind == BuiltinTypeClass::Reversed {
+                    for method in [
+                        "__getattribute__",
+                        "__length_hint__",
+                        "__reduce__",
+                        "__setstate__",
+                    ] {
+                        let qualified = registered_builtin_method_name(name, method);
+                        attrs.insert(method.to_string(), Value::builtin_function(qualified));
+                    }
+                }
             }
             let mut class = PyClass::new(name, name, Some(Rc::clone(&obj)), attrs);
             class.builtin_type_tag = Some(kind.tag());
@@ -693,6 +704,9 @@ thread_local! {
                     NativeIteratorClass::Bytearray => bytearray_iterator_ctor,
                     NativeIteratorClass::Deque => deque_iterator_ctor,
                     NativeIteratorClass::DequeReverse => deque_reverse_iterator_ctor,
+                    NativeIteratorClass::Reversed => {
+                        unreachable!("reversed reuses its public built-in class")
+                    }
                 };
                 cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
             }

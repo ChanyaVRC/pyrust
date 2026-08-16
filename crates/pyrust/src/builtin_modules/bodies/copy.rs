@@ -35,7 +35,7 @@ use std::rc::{Rc, Weak};
 use crate::error::{PyError, Result};
 use crate::interpreter::{
     ExpandedCallArg, effective_builtin_receiver, invoke_class_method, is_exception_class,
-    key_to_value, lookup_class_attr, make_iterator, restore_native_iterator_position,
+    key_to_value, lookup_class_attr, make_iterator, restore_reduced_iterator_position,
 };
 use crate::value::{
     InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, PyModule, PySet, Value, ValueKind,
@@ -459,6 +459,11 @@ fn shallow_copy_with_reconstruct(
             crate::interpreter::IteratorCopy::BytearrayReduction { carrier, position } => {
                 rebuild_reduced_iterator(carrier, position, interp)
             }
+            crate::interpreter::IteratorCopy::GetItemReduction {
+                constructor,
+                owner,
+                position,
+            } => rebuild_getitem_reduction(constructor, owner, position, interp),
             crate::interpreter::IteratorCopy::Unpicklable(noun) => Err(PyError::named(
                 "TypeError",
                 format!("cannot pickle '{noun}' object"),
@@ -476,6 +481,20 @@ fn shallow_copy_with_reconstruct(
                 let class = Rc::clone(&borrow.class);
                 drop(borrow);
                 lookup_class_attr(&class, "__copy__")
+            };
+            let dynamic_reversed_reduction =
+                copy_method.is_none() && crate::interpreter::is_reversed_iterator(&obj);
+            let iterator_reduction = if copy_method.is_none() && !dynamic_reversed_reduction {
+                match crate::interpreter::copy_iterator_object(&obj, false)? {
+                    crate::interpreter::IteratorCopy::GetItemReduction {
+                        constructor,
+                        owner,
+                        position,
+                    } => Some((constructor, owner, position)),
+                    _ => None,
+                }
+            } else {
+                None
             };
             if let Some(method) = copy_method.filter(|method| {
                 !method.is_none()
@@ -512,6 +531,27 @@ fn shallow_copy_with_reconstruct(
                 } else {
                     invoke_class_method(interp, method, instance, &[])
                 }
+            } else if dynamic_reversed_reduction {
+                let reduction = call_copy_reducer(&obj, interp)?;
+                if let Some(reconstruct) = reconstruct {
+                    interp.call_function_expanded(
+                        reconstruct.clone(),
+                        &[
+                            ExpandedCallArg {
+                                name: None,
+                                value: obj.clone(),
+                            },
+                            ExpandedCallArg {
+                                name: None,
+                                value: reduction,
+                            },
+                        ],
+                    )
+                } else {
+                    reconstruct_reduction_shallow(&obj, reduction, interp)
+                }
+            } else if let Some((constructor, owner, position)) = iterator_reduction {
+                rebuild_getitem_reduction(constructor, owner, position, interp)
             } else if let Some(reconstruct) = reconstruct
                 && let Some(reduce_method) = static_reduce_method(&rc)
             {
@@ -911,6 +951,23 @@ fn deep_copy(
                     }
                     return Ok(copy);
                 }
+                crate::interpreter::IteratorCopy::GetItemReduction {
+                    constructor,
+                    owner,
+                    position,
+                } => {
+                    // `copy._reconstruct` deep-copies the reduction arguments
+                    // before it invokes the reducer or memoises the outer
+                    // iterator. This ordering deliberately creates a distinct
+                    // inner cursor when the owner points back to the iterator.
+                    let copied_owner = deep_copy(owner, memo, interp)?;
+                    let copy = construct_getitem_reduction(constructor, copied_owner, interp)?;
+                    if let Some(id) = value_identity(&obj) {
+                        memo_insert(memo, id, copy.clone());
+                    }
+                    apply_getitem_reduction_state(&copy, position, interp)?;
+                    return Ok(copy);
+                }
                 crate::interpreter::IteratorCopy::Unpicklable(noun) => {
                     return Err(PyError::named(
                         "TypeError",
@@ -943,6 +1000,20 @@ fn deep_copy(
                 drop(borrow);
                 lookup_class_attr(&class, "__deepcopy__")
             };
+            let dynamic_reversed_reduction =
+                deepcopy_method.is_none() && crate::interpreter::is_reversed_iterator(&obj);
+            let iterator_reduction = if deepcopy_method.is_none() && !dynamic_reversed_reduction {
+                match crate::interpreter::copy_iterator_object(&obj, true)? {
+                    crate::interpreter::IteratorCopy::GetItemReduction {
+                        constructor,
+                        owner,
+                        position,
+                    } => Some((constructor, owner, position)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             if let Some(method) = deepcopy_method {
                 // Call `__deepcopy__(self, memo)` — forward the memo dict so
                 // user code receives a proper dict argument (CPython never
@@ -961,6 +1032,17 @@ fn deep_copy(
                     memo_insert(memo, id, result.clone());
                 }
                 Ok(result)
+            } else if dynamic_reversed_reduction {
+                let reduction = call_copy_reducer(&obj, interp)?;
+                reconstruct_reduction_deep(&obj, reduction, memo, interp)
+            } else if let Some((constructor, owner, position)) = iterator_reduction {
+                let copied_owner = deep_copy(owner, memo, interp)?;
+                let copy = construct_getitem_reduction(constructor, copied_owner, interp)?;
+                if let Some(id) = value_identity(&obj) {
+                    memo_insert(memo, id, copy.clone());
+                }
+                apply_getitem_reduction_state(&copy, position, interp)?;
+                Ok(copy)
             } else if is_exception_class(&rc.borrow().class) {
                 // #2360 / #2361: exceptions deep-copy via their `__reduce__`
                 // value — reconstruct `type(*args)` (recursing into args) and
@@ -999,11 +1081,303 @@ fn rebuild_reduced_iterator(
     interp: &mut crate::interpreter::Interpreter,
 ) -> Result<Value> {
     let rebuilt = make_iterator(interp, &carrier)?;
-    if restore_native_iterator_position(&rebuilt, position)? {
-        return Ok(rebuilt);
+    apply_getitem_reduction_state(&rebuilt, Some(position as i64), interp)?;
+    Ok(rebuilt)
+}
+
+/// Execute a legacy sequence cursor's typed reduction. The constructor call is
+/// intentionally dynamic: `iter(copied_owner)`, `reversed(copied_owner)`, or a
+/// `reversed` subclass may resolve to a different iterator type than the
+/// source cursor did. State is then applied to that result exactly as
+/// `copy._reconstruct` would.
+fn rebuild_getitem_reduction(
+    constructor: Value,
+    owner: Value,
+    position: Option<i64>,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<Value> {
+    let rebuilt = construct_getitem_reduction(constructor, owner, interp)?;
+    apply_getitem_reduction_state(&rebuilt, position, interp)?;
+    Ok(rebuilt)
+}
+
+fn construct_getitem_reduction(
+    constructor: Value,
+    owner: Value,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<Value> {
+    interp.call_function_expanded(
+        constructor,
+        &[ExpandedCallArg {
+            name: None,
+            value: owner,
+        }],
+    )
+}
+
+/// Resolve the same reducer that CPython's copy module asks an instance for.
+/// This is used only for genuine `reversed` subclasses, after their explicit
+/// copy hook has had priority; ordinary instances retain the existing copy
+/// protocol path.
+fn call_copy_reducer(obj: &Value, interp: &mut crate::interpreter::Interpreter) -> Result<Value> {
+    match interp.get_attr(obj, "__reduce_ex__") {
+        Ok(reducer) if !reducer.is_none() => {
+            return interp.call_function_expanded(
+                reducer,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: Value::int(4),
+                }],
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.class_name_is("AttributeError") => {}
+        Err(error) => return Err(error),
     }
-    let state = Value::int(position as i64);
-    match interp.get_attr(&rebuilt, "__setstate__") {
+    let reducer = interp.get_attr(obj, "__reduce__")?;
+    interp.call_function_expanded(reducer, &[])
+}
+
+fn reduction_parts(reduction: Value) -> Result<Vec<Value>> {
+    reduction
+        .as_tuple()
+        .map(|parts| parts.to_vec())
+        .ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "copy reduction must return a string or tuple".to_string(),
+            )
+        })
+}
+
+fn reduction_pair(
+    entry: &Value,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<[Value; 2]> {
+    let iterator = make_iterator(interp, entry)?;
+    let first = match interp.call_next(&iterator, None) {
+        Ok(value) => value,
+        Err(error) if crate::interpreter::is_stop_iteration_error(&error) => {
+            return Err(pyrust_core::value_err!(
+                "not enough values to unpack (expected 2, got 0)"
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let second = match interp.call_next(&iterator, None) {
+        Ok(value) => value,
+        Err(error) if crate::interpreter::is_stop_iteration_error(&error) => {
+            return Err(pyrust_core::value_err!(
+                "not enough values to unpack (expected 2, got 1)"
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    match interp.call_next(&iterator, None) {
+        Err(error) if crate::interpreter::is_stop_iteration_error(&error) => Ok([first, second]),
+        Ok(_) => Err(pyrust_core::value_err!(
+            "too many values to unpack (expected 2)"
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn reconstruct_reduction_shallow(
+    original: &Value,
+    reduction: Value,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<Value> {
+    if reduction.as_str().is_some() {
+        return Ok(original.clone());
+    }
+    let parts = reduction_parts(reduction)?;
+    if !(2..=3).contains(&parts.len()) {
+        return Err(PyError::named(
+            "TypeError",
+            format!("copy reduction has invalid length {}", parts.len()),
+        ));
+    }
+    let args = parts[1].as_tuple().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            "copy reduction args must be a tuple".to_string(),
+        )
+    })?;
+    let call_args: Vec<ExpandedCallArg> = args
+        .iter()
+        .cloned()
+        .map(|value| ExpandedCallArg { name: None, value })
+        .collect();
+    let rebuilt = interp.call_function_expanded(parts[0].clone(), &call_args)?;
+    if let Some(state) = parts.get(2).filter(|state| !state.is_none()) {
+        apply_reduction_state(&rebuilt, state.clone(), interp)?;
+    }
+    Ok(rebuilt)
+}
+
+fn reconstruct_reduction_deep(
+    original: &Value,
+    reduction: Value,
+    memo: &Value,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<Value> {
+    if reduction.as_str().is_some() {
+        return Ok(original.clone());
+    }
+    let parts = reduction_parts(reduction)?;
+    if !(2..=5).contains(&parts.len()) {
+        return Err(PyError::named(
+            "TypeError",
+            format!("copy reduction has invalid length {}", parts.len()),
+        ));
+    }
+    let args = parts[1].as_tuple().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            "copy reduction args must be a tuple".to_string(),
+        )
+    })?;
+    let mut call_args = Vec::with_capacity(args.len());
+    for value in args {
+        call_args.push(ExpandedCallArg {
+            name: None,
+            value: deep_copy(value.clone(), memo, interp)?,
+        });
+    }
+    let rebuilt = interp.call_function_expanded(parts[0].clone(), &call_args)?;
+    if let Some(id) = value_identity(original) {
+        memo_insert(memo, id, rebuilt.clone());
+    }
+    if let Some(state) = parts.get(2).filter(|state| !state.is_none()) {
+        let copied_state = deep_copy(state.clone(), memo, interp)?;
+        apply_deep_reduction_state(&rebuilt, copied_state, interp)?;
+    }
+    if let Some(listiter) = parts.get(3).filter(|listiter| !listiter.is_none()) {
+        let iterator = make_iterator(interp, listiter)?;
+        loop {
+            let item = match interp.call_next(&iterator, None) {
+                Ok(item) => item,
+                Err(error) if crate::interpreter::is_stop_iteration_error(&error) => break,
+                Err(error) => return Err(error),
+            };
+            let copied_item = deep_copy(item, memo, interp)?;
+            let append = interp.get_attr(&rebuilt, "append")?;
+            interp.call_function_expanded(
+                append,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: copied_item,
+                }],
+            )?;
+        }
+    }
+    if let Some(dictiter) = parts.get(4).filter(|dictiter| !dictiter.is_none()) {
+        let iterator = make_iterator(interp, dictiter)?;
+        loop {
+            let entry = match interp.call_next(&iterator, None) {
+                Ok(entry) => entry,
+                Err(error) if crate::interpreter::is_stop_iteration_error(&error) => break,
+                Err(error) => return Err(error),
+            };
+            let [key, value] = reduction_pair(&entry, interp)?;
+            let copied_key = deep_copy(key, memo, interp)?;
+            let copied_value = deep_copy(value, memo, interp)?;
+            let setitem = interp.get_attr(&rebuilt, "__setitem__")?;
+            interp.call_function_expanded(
+                setitem,
+                &[
+                    ExpandedCallArg {
+                        name: None,
+                        value: copied_key,
+                    },
+                    ExpandedCallArg {
+                        name: None,
+                        value: copied_value,
+                    },
+                ],
+            )?;
+        }
+    }
+    Ok(rebuilt)
+}
+
+fn apply_deep_reduction_state(
+    rebuilt: &Value,
+    state: Value,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<()> {
+    match interp.get_attr(rebuilt, "__setstate__") {
+        Ok(setstate) => {
+            interp.call_function_expanded(
+                setstate,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: state,
+                }],
+            )?;
+        }
+        Err(error) if error.class_name_is("AttributeError") => {
+            let (dict_state, slot_state) = match state.as_tuple() {
+                Some(parts) if parts.len() == 2 => (parts[0].clone(), Some(parts[1].clone())),
+                _ => (state, None),
+            };
+            if !dict_state.is_none() {
+                let dict = interp.get_attr(rebuilt, "__dict__")?;
+                let update = interp.get_attr(&dict, "update")?;
+                interp.call_function_expanded(
+                    update,
+                    &[ExpandedCallArg {
+                        name: None,
+                        value: dict_state,
+                    }],
+                )?;
+            }
+            if let Some(slot_state) = slot_state.filter(|slot_state| !slot_state.is_none()) {
+                let items = interp.get_attr(&slot_state, "items")?;
+                let entries = interp.call_function_expanded(items, &[])?;
+                let iterator = make_iterator(interp, &entries)?;
+                loop {
+                    let entry = match interp.call_next(&iterator, None) {
+                        Ok(entry) => entry,
+                        Err(error) if crate::interpreter::is_stop_iteration_error(&error) => break,
+                        Err(error) => return Err(error),
+                    };
+                    let [name, value] = reduction_pair(&entry, interp)?;
+                    let name = name.as_str().ok_or_else(|| {
+                        pyrust_core::type_err!(
+                            "attribute name must be string, not '{}'",
+                            crate::interpreter::full_type_name_str(&name)
+                        )
+                    })?;
+                    interp.assign_attr(rebuilt.clone(), name, value)?;
+                }
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+fn apply_getitem_reduction_state(
+    rebuilt: &Value,
+    position: Option<i64>,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<()> {
+    let Some(position) = position else {
+        return Ok(());
+    };
+    if restore_reduced_iterator_position(rebuilt, position)? {
+        return Ok(());
+    }
+    apply_reduction_state(rebuilt, Value::int(position), interp)
+}
+
+fn apply_reduction_state(
+    rebuilt: &Value,
+    state: Value,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<()> {
+    match interp.get_attr(rebuilt, "__setstate__") {
         Ok(setstate) => {
             interp.call_function_expanded(
                 setstate,
@@ -1019,7 +1393,7 @@ fn rebuild_reduced_iterator(
         // TypeError for our integer reduction state on a normal instance and
         // AttributeError for a generator, which has no `__dict__`.
         Err(error) if error.class_name_is("AttributeError") => {
-            let dict = interp.get_attr(&rebuilt, "__dict__")?;
+            let dict = interp.get_attr(rebuilt, "__dict__")?;
             let update = interp.get_attr(&dict, "update")?;
             interp.call_function_expanded(
                 update,
@@ -1031,7 +1405,7 @@ fn rebuild_reduced_iterator(
         }
         Err(error) => return Err(error),
     }
-    Ok(rebuilt)
+    Ok(())
 }
 
 /// Default deep-copy path for an instance: build a bare instance, memoise it

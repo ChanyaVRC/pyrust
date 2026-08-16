@@ -29,7 +29,8 @@ use crate::interpreter::{
     dir_names, dispatch_numeric_binop, effective_builtin_receiver, extract_str_value,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
     float_divmod, float_to_bigint, format_bin_i64, format_oct_i64, full_type_name_str,
-    function_type_singleton, hash_value_with_interp, instance_builtin_data, invoke_class_method,
+    function_type_singleton, getitem_iterator_reduce, hash_value_with_interp,
+    instance_builtin_data, invoke_class_method, is_getitem_iterator, is_reversed_iterator,
     is_str_or_str_subclass, iter_values, lookup_class_attr, lookup_value_special_method,
     make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
     make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
@@ -38,9 +39,9 @@ use crate::interpreter::{
     native_iterator_reduce, normalize_complex_slot_result, normalize_float_slot_result,
     normalize_int_slot_result, primitive_class_by_name, primitive_class_dispatch, py_mod_i64,
     py_round_half_even_checked, reject_keyword_args_expanded, render_instance_str, render_key_repr,
-    render_value_repr, resolve_zero_arg_super, round_bigint_neg_ndigits, round_float_ndigits,
-    sync_module_env_to_globals_dict, type_class_singleton, unicode_exc_set_attrs, value_class,
-    value_to_float, value_type_name_str,
+    render_value_repr, resolve_zero_arg_super, reversed_iterator_reduce, round_bigint_neg_ndigits,
+    round_float_ndigits, sync_module_env_to_globals_dict, type_class_singleton,
+    unicode_exc_set_attrs, value_class, value_to_float, value_type_name_str,
 };
 use crate::value::{
     InstanceAttrs, PyBigInt, PyClass, PyDict, PyKey, PySet, PyToPrimitive, PyZero, SortKind,
@@ -96,7 +97,7 @@ mod iteration {
         iter_values, lookup_class_attr, make_iterator, make_reversed_dict_iter,
         make_reversed_getitem_iterator, make_reversed_mapping_snapshot_iter,
         make_reversed_range_iterator, make_reversed_sequence_iterator,
-        reject_keyword_args_expanded, value_type_name_str,
+        reject_keyword_args_expanded, reversed_iterator_reduce, value_type_name_str,
     };
     include!("builtins/iteration.rs");
 }
@@ -229,9 +230,10 @@ mod object_basics {
         ExpandedCallArg, FN_PREFIX, InstanceAttrs, MODULE_NAME, PyError, Rc, Result, Value,
         ValueKind, class_has_native_builtin_type_ancestor, dir_names,
         find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
-        hash_value_with_interp, instance_builtin_data, lookup_class_attr, native_iterator_class,
+        getitem_iterator_reduce, hash_value_with_interp, instance_builtin_data,
+        is_getitem_iterator, is_reversed_iterator, lookup_class_attr, native_iterator_class,
         native_iterator_reduce, reject_keyword_args_expanded, render_key_repr, render_value_repr,
-        value_class, value_type_name_str,
+        reversed_iterator_reduce, value_class, value_type_name_str,
     };
     include!("builtins/object_basics.rs");
 }

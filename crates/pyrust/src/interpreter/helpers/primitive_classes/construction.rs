@@ -185,7 +185,7 @@ fn builtin_type_class_for_isinstance(obj: &Value) -> Option<BuiltinTypeClass> {
                 return Some(BuiltinTypeClass::Reversed);
             }
             if let Some(iterator) = state.downcast_ref::<NativeIterFrame>()
-                && iterator.type_name == "reversed"
+                && iterator.class == Some(NativeIteratorClass::Reversed)
             {
                 return Some(BuiltinTypeClass::Reversed);
             }

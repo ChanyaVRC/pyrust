@@ -188,6 +188,12 @@ impl Interpreter {
             );
             if is_generator {
                 if !kw_map.is_empty() {
+                    let receiver = regs[obj as usize].as_some();
+                    let keyword_error = iterator_direct_method_keyword_error;
+                    let iterator_error = receiver.and_then(|value| keyword_error(value, method));
+                    if let Some(error) = iterator_error {
+                        return Err(error);
+                    }
                     return Err(pyrust_core::type_err!(
                         "generator.{method}() takes no keyword arguments"
                     ));

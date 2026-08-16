@@ -101,6 +101,25 @@ impl NativeIterFrame {
         }
     }
 
+    /// Construct the generic `reversed` cursor used by tuple, str, bytes and
+    /// bytearray. Its typed class provenance is distinct from specialised
+    /// reverse-indexed frames such as `list_reverseiterator`; `type_name`
+    /// remains presentation metadata only.
+    pub(crate) fn generic_reversed(source: Value, len: usize) -> Self {
+        NativeIterFrame {
+            source: NativeIterSource::ReverseIndexed {
+                value: source,
+                next_index: len,
+            },
+            pos: 0,
+            type_name: "reversed",
+            class: Some(NativeIteratorClass::Reversed),
+            guard: None,
+            exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
+        }
+    }
+
     /// Construct a descending walk over a live mapping's entries.
     pub(crate) fn reverse_dict(container: Value, kind: u8, type_name: &'static str) -> Self {
         NativeIterFrame {

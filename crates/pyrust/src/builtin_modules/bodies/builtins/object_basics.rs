@@ -319,6 +319,34 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__reduce_ex__", "object", method)
         })?;
+        if is_reversed_iterator(&self_val) || is_getitem_iterator(&self_val) {
+            if args.len() != 2 || args.iter().any(|arg| arg.name.is_some()) {
+                return Err(pyrust_core::type_err!(
+                    "object.__reduce_ex__() takes exactly one argument ({} given)",
+                    args.len().saturating_sub(1)
+                ));
+            }
+            let protocol = _interp.value_to_isize(
+                &args[1].value,
+                "Python int too large to convert to C int",
+            )?;
+            i32::try_from(protocol).map_err(|_| {
+                pyrust_core::overflow_err!("Python int too large to convert to C int")
+            })?;
+            return if is_reversed_iterator(&self_val) {
+                // A `reversed` subclass may replace `__reduce__`.  Resolve it
+                // normally so object.__reduce_ex__ preserves that protocol;
+                // exact native cursors retain the typed no-lookup path.
+                if matches!(self_val.kind(), ValueKind::PyInstance(_)) {
+                    let reducer = _interp.get_attr(&self_val, "__reduce__")?;
+                    _interp.call_function_expanded(reducer, &[])
+                } else {
+                    reversed_iterator_reduce(&self_val)
+                }
+            } else {
+                getitem_iterator_reduce(&self_val)
+            };
+        }
         if let Some(kind) = native_iterator_class(&self_val) {
             if args.len() != 2 || args.iter().any(|arg| arg.name.is_some()) {
                 return Err(pyrust_core::type_err!(

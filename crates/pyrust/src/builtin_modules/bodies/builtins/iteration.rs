@@ -22,15 +22,61 @@ fn builtin_iterator_backing(
     args: &[ExpandedCallArg],
     kind: BuiltinTypeClass,
     method: &str,
+    expected_args: usize,
 ) -> Result<(Value, Value)> {
     let Some((receiver_arg, rest)) = args
         .split_first()
         .filter(|(receiver_arg, _)| receiver_arg.name.is_none())
     else {
+        if matches!(kind, BuiltinTypeClass::Reversed)
+            && matches!(method, "__length_hint__" | "__reduce__" | "__setstate__")
+        {
+            return Err(pyrust_core::type_err!(
+                "unbound method reversed.{method}() needs an argument"
+            ));
+        }
         return Err(pyrust_core::type_err!(
             "descriptor '{method}' of '{}' object needs an argument",
             kind.class_name()
         ));
+    };
+    let receiver = receiver_arg.value.clone();
+    let backing = if let ValueKind::PyInstance(instance) = receiver.kind() {
+        let class = Rc::clone(&instance.borrow().class);
+        let base = kind.singleton();
+        if class_is_subclass_of(&class, &base)
+            && let Some(backing) = instance_builtin_data(instance)
+            && builtin_type_class_isinstance_fast(&backing, &base) == Some(true)
+        {
+            Some(backing)
+        } else {
+            None
+        }
+    } else {
+        let base = kind.singleton();
+        if builtin_type_class_isinstance_fast(&receiver, &base) == Some(true) {
+            Some(receiver.clone())
+        } else {
+            None
+        }
+    };
+
+    let Some(backing) = backing else {
+        return Err(
+            if !matches!(method, "__length_hint__" | "__reduce__" | "__setstate__") {
+                pyrust_core::type_err!(
+                    "descriptor '{method}' requires a '{}' object but received a '{}'",
+                    kind.class_name(),
+                    full_type_name_str(&receiver)
+                )
+            } else {
+                pyrust_core::type_err!(
+                    "descriptor '{method}' for '{}' objects doesn't apply to a '{}' object",
+                    kind.class_name(),
+                    full_type_name_str(&receiver)
+                )
+            },
+        );
     };
     if rest.iter().any(|arg| arg.name.is_some()) {
         return Err(pyrust_core::type_err!(
@@ -38,39 +84,35 @@ fn builtin_iterator_backing(
             kind.class_name()
         ));
     }
-    if !rest.is_empty() {
+    if rest.len() != expected_args {
+        if matches!(kind, BuiltinTypeClass::Reversed) {
+            return Err(match method {
+                "__length_hint__" | "__reduce__" => pyrust_core::type_err!(
+                    "reversed.{method}() takes no arguments ({} given)",
+                    rest.len()
+                ),
+                "__setstate__" => pyrust_core::type_err!(
+                    "reversed.__setstate__() takes exactly one argument ({} given)",
+                    rest.len()
+                ),
+                "__getattribute__" => {
+                    pyrust_core::type_err!("expected 1 argument, got {}", rest.len())
+                }
+                _ => {
+                    pyrust_core::type_err!("expected {expected_args} arguments, got {}", rest.len())
+                }
+            });
+        }
         return Err(pyrust_core::type_err!(
-            "expected 0 arguments, got {}",
+            "expected {expected_args} arguments, got {}",
             rest.len()
         ));
     }
-
-    let receiver = receiver_arg.value.clone();
-    if let ValueKind::PyInstance(instance) = receiver.kind() {
-        let class = Rc::clone(&instance.borrow().class);
-        let base = kind.singleton();
-        if class_is_subclass_of(&class, &base)
-            && let Some(backing) = instance_builtin_data(instance)
-            && builtin_type_class_isinstance_fast(&backing, &base) == Some(true)
-        {
-            return Ok((receiver.clone(), backing));
-        }
-    } else {
-        let base = kind.singleton();
-        if builtin_type_class_isinstance_fast(&receiver, &base) == Some(true) {
-            return Ok((receiver.clone(), receiver));
-        }
-    }
-
-    Err(pyrust_core::type_err!(
-        "descriptor '{method}' requires a '{}' object but received a '{}'",
-        kind.class_name(),
-        full_type_name_str(&receiver)
-    ))
+    Ok((receiver, backing))
 }
 
 fn builtin_iterator_iter(args: &[ExpandedCallArg], kind: BuiltinTypeClass) -> Result<Value> {
-    let (receiver, _) = builtin_iterator_backing(args, kind, "__iter__")?;
+    let (receiver, _) = builtin_iterator_backing(args, kind, "__iter__", 0)?;
     Ok(receiver)
 }
 
@@ -79,7 +121,7 @@ fn builtin_iterator_next(
     args: &[ExpandedCallArg],
     kind: BuiltinTypeClass,
 ) -> Result<Value> {
-    let (_, backing) = builtin_iterator_backing(args, kind, "__next__")?;
+    let (_, backing) = builtin_iterator_backing(args, kind, "__next__", 0)?;
     interp.call_next(&backing, None)
 }
 
@@ -211,6 +253,65 @@ pyrust_module! {
     #[py_name = "reversed.__next__"]
     fn reversed_next(args) -> Result<Value> {
         builtin_iterator_next(_interp, args, BuiltinTypeClass::Reversed)
+    }
+
+    #[py_name = "reversed.__getattribute__"]
+    fn reversed_getattribute(args) -> Result<Value> {
+        let (receiver, _) = builtin_iterator_backing(
+            args,
+            BuiltinTypeClass::Reversed,
+            "__getattribute__",
+            1,
+        )?;
+        let name = args[1].value.as_str().ok_or_else(|| {
+            pyrust_core::type_err!(
+                "attribute name must be string, not '{}'",
+                full_type_name_str(&args[1].value)
+            )
+        })?;
+        match receiver.kind() {
+            ValueKind::PyInstance(instance) => {
+                _interp.get_attr_instance_raw(Rc::clone(instance), name)
+            }
+            _ => _interp.get_attr(&receiver, name),
+        }
+    }
+
+    #[py_name = "reversed.__length_hint__"]
+    fn reversed_length_hint(args) -> Result<Value> {
+        let (_, backing) = builtin_iterator_backing(
+            args,
+            BuiltinTypeClass::Reversed,
+            "__length_hint__",
+            0,
+        )?;
+        _interp.call_generator_method(backing, "__length_hint__", Vec::new())
+    }
+
+    #[py_name = "reversed.__reduce__"]
+    fn reversed_reduce(args) -> Result<Value> {
+        let (receiver, _) = builtin_iterator_backing(
+            args,
+            BuiltinTypeClass::Reversed,
+            "__reduce__",
+            0,
+        )?;
+        reversed_iterator_reduce(&receiver)
+    }
+
+    #[py_name = "reversed.__setstate__"]
+    fn reversed_setstate(args) -> Result<Value> {
+        let (_, backing) = builtin_iterator_backing(
+            args,
+            BuiltinTypeClass::Reversed,
+            "__setstate__",
+            1,
+        )?;
+        _interp.call_generator_method(
+            backing,
+            "__setstate__",
+            vec![args[1].value.clone()],
+        )
     }
 
     /// CPython: enumerate(iterable, start=0) — enumerate iterator.

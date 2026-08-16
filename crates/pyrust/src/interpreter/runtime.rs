@@ -122,12 +122,12 @@ mod builtin_methods {
         value_iterable_needs_runtime_key_semantics,
     };
     use super::{
-        BUILTIN_DATA_ATTR, BinaryOp, ExpandedArgBuf, ExpandedCallArg, GeneratorKind, IndexMap,
-        Interpreter, NativeIterFrame, NativeIteratorClass, PrimitiveClassKind, PrintOptions,
-        PyBigInt, PyClass, PyDict, PyError, PyInstance, PyKey, PySet, PyToPrimitive, Rc, RefCell,
-        RegSlice, Result, Value, ValueKind, apply_format_spec, bind_class_level_method_wrapper,
-        builtin_data_backing, builtin_iterator_has_length_hint, c3_linearize_classes,
-        call_bytes_method_coerced_prevalidated, canonical_class_by_tag,
+        BUILTIN_DATA_ATTR, BinaryOp, ExpandedArgBuf, ExpandedCallArg, GeneratorKind, GetItemIter,
+        IndexMap, Interpreter, NativeIterFrame, NativeIteratorClass, PrimitiveClassKind,
+        PrintOptions, PyBigInt, PyClass, PyDict, PyError, PyInstance, PyKey, PySet, PyToPrimitive,
+        Rc, RefCell, RegSlice, Result, Value, ValueKind, apply_format_spec,
+        bind_class_level_method_wrapper, builtin_data_backing, builtin_iterator_has_length_hint,
+        c3_linearize_classes, call_bytes_method_coerced_prevalidated, canonical_class_by_tag,
         class_descriptor_display_name, class_direct_subclasses, class_is_subclass_of,
         class_mro_items, coerce_bytes_subclass_arg, coerce_bytes_subclass_join_iterable,
         coerce_bytes_subclass_method_args, coerce_bytes_subclass_method_kwargs,
@@ -135,9 +135,9 @@ mod builtin_methods {
         coerce_str_subclass_method_args, coerce_subclass_backing, dict_view_class_by_name,
         dispatch_property_method, effective_builtin_receiver, eval_builtin_unary,
         extract_optional_string, format_dunder_owner, format_dunder_spec_arg, full_type_name_str,
-        hash_value_with_interp, instance_builtin_data, invoke_class_method,
-        is_ordered_dict_class_or_subclass, is_primitive_class, is_stop_iteration_error,
-        lookup_class_attr, make_iterator, native_iterator_class,
+        hash_value_with_interp, instance_builtin_data, invoke_class_method, is_getitem_iterator,
+        is_ordered_dict_class_or_subclass, is_primitive_class, is_reversed_iterator,
+        is_stop_iteration_error, lookup_class_attr, make_iterator, native_iterator_class,
         native_iterator_object_method_arity, ordered_dict_owner, primitive_class_by_name,
         primitive_class_dispatch, primitive_class_kind, reject_keyword_args_expanded,
         render_instance_repr, type_class_singleton, value_class, value_from_bigint,
@@ -183,7 +183,9 @@ mod collection_ops {
 use collection_ops::mapping_entries_for_expansion;
 
 mod fast_path {
-    use super::builtin_methods::{BuiltinContainerKind, ResolvedMethodCallShape};
+    use super::builtin_methods::{
+        BuiltinContainerKind, ResolvedMethodCallShape, iterator_direct_method_keyword_error,
+    };
     use super::execution::vm_read;
     use super::{
         BigRangeState, BinaryOp, CallBuiltinCacheEntry, ExpandedCallArg, GlobalCacheEntry,
@@ -300,17 +302,17 @@ mod pattern_matching {
 
 mod iteration {
     use super::{
-        AsyncGenASend, ExpandedArgBuf, ExpandedCallArg, GenDriving, GeneratorCell, GeneratorFrame,
-        Interpreter, NativeIteratorClass, PyBigInt, PyBigIntSign, PyClass, PyError, PyInstance,
-        PyKey, Rc, RefCell, Result, Value, ValueKind, bind_class_level_method_wrapper,
-        builtin_data_backing, call_descriptor_get, call_slot_value_unbound,
-        effective_builtin_receiver, effective_user_iter, full_type_name_str,
-        i64_range_native_cursor_safe, instance_builtin_data, invoke_class_method,
-        is_coroutine_value, is_inherited_builtin_iter_sentinel, is_sequence_iter_terminator,
-        is_stop_iteration_error, key_ref_to_value, key_to_value, lookup_class_attr,
-        lookup_value_special_method, metaclass_dunder, metaclass_dunder_for_call, range_len,
-        slot_supports_descriptor_get, value_class, value_from_bigint, value_to_bigint,
-        value_type_name_str,
+        AsyncGenASend, BuiltinTypeClass, ExpandedArgBuf, ExpandedCallArg, GenDriving,
+        GeneratorCell, GeneratorFrame, Interpreter, NativeIteratorClass, PyBigInt, PyBigIntSign,
+        PyClass, PyError, PyInstance, PyKey, Rc, RefCell, Result, Value, ValueKind,
+        bind_class_level_method_wrapper, builtin_data_backing, call_descriptor_get,
+        call_slot_value_unbound, class_is_subclass_of, effective_builtin_receiver,
+        effective_user_iter, full_type_name_str, i64_range_native_cursor_safe,
+        instance_builtin_data, invoke_class_method, is_coroutine_value,
+        is_inherited_builtin_iter_sentinel, is_sequence_iter_terminator, is_stop_iteration_error,
+        key_ref_to_value, key_to_value, lookup_class_attr, lookup_value_special_method,
+        metaclass_dunder, metaclass_dunder_for_call, range_len, slot_supports_descriptor_get,
+        value_class, value_from_bigint, value_to_bigint, value_type_name_str,
     };
     include!("runtime/iteration.rs");
 }
@@ -319,13 +321,15 @@ pub(crate) use iteration::{
     GetItemIter, IterCacheBuf, IterFallback, IterSrcBuf, IterState, IteratorCopy, ItersBuf,
     LiveDictViewItem, LoopIteratorAdvance, MapIter, NativeIterFrame, OrderedIterationWatch,
     ProviderIterator, RangeIter, ResolvedIterSlot, ZipIter, builtin_iterator_has_length_hint,
-    copy_iterator_object, indexed_sequence_item, iter_values, iterator_retained_values,
-    live_collection_len, live_dict_view_item, make_getitem_iterator, make_iterator,
-    make_reversed_dict_iter, make_reversed_getitem_iterator, make_reversed_mapping_snapshot_iter,
-    make_reversed_range_iterator, make_reversed_sequence_iterator,
-    native_bytearray_iterator_setstate, native_iterator_class, native_iterator_object_method_arity,
-    native_iterator_reduce, ordered_mapping_guard_outcome, resolve_iter_fallback,
-    resolve_metaclass_iter_slot, resolve_value_iter_slot, restore_native_iterator_position,
+    copy_iterator_object, getitem_iterator_reduce, getitem_iterator_setstate,
+    indexed_sequence_item, is_getitem_iterator, is_reversed_iterator, iter_values,
+    iterator_retained_values, live_collection_len, live_dict_view_item, make_getitem_iterator,
+    make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
+    make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
+    make_reversed_sequence_iterator, native_bytearray_iterator_setstate, native_iterator_class,
+    native_iterator_object_method_arity, native_iterator_reduce, ordered_mapping_guard_outcome,
+    resolve_iter_fallback, resolve_metaclass_iter_slot, resolve_value_iter_slot,
+    restore_reduced_iterator_position, reversed_iterator_reduce, reversed_iterator_setstate,
     set_iterator_retained_values, validate_iterator_result, value_has_length_hint,
 };
 
@@ -384,10 +388,12 @@ mod generator_protocols {
         AsyncGenASend, CoroStep, ExpandedCallArg, GenDriving, GeneratorCell, GeneratorFrame,
         GeneratorKind, GetItemIter, Interpreter, NativeIterFrame, NativeIteratorClass, PyError, Rc,
         Result, Value, ValueKind, class_is_builtin_exception_subclass, class_is_subclass_of,
-        effective_builtin_receiver, full_type_name_str, instantiate_exception, invoke_class_method,
-        lookup_class_attr, lookup_exc_class, native_bytearray_iterator_setstate,
-        native_iterator_class, native_iterator_object_method_arity, native_iterator_reduce,
-        value_has_length_hint, value_type_name_str,
+        effective_builtin_receiver, full_type_name_str, getitem_iterator_reduce,
+        getitem_iterator_setstate, instance_builtin_data, instantiate_exception,
+        invoke_class_method, is_getitem_iterator, is_reversed_iterator, lookup_class_attr,
+        lookup_exc_class, native_bytearray_iterator_setstate, native_iterator_class,
+        native_iterator_object_method_arity, native_iterator_reduce, reversed_iterator_reduce,
+        reversed_iterator_setstate, value_has_length_hint, value_type_name_str,
     };
     include!("runtime/generator_protocols.rs");
 }
