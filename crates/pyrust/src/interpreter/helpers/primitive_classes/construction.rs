@@ -126,6 +126,27 @@ fn deque_reverse_iterator_ctor(
     crate::builtin_modules::collections::deque_iterator_constructor(interp, args, true)
 }
 
+/// Whether `class` is an exact canonical collections.deque class.
+///
+/// The built-in module owns the reload-aware identity registry; runtime
+/// protocol consumers use this typed interpreter facade instead of reaching
+/// into a concrete module implementation.
+pub(crate) fn is_canonical_deque_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    crate::builtin_modules::collections::is_canonical_deque_class(class)
+}
+
+/// Preserve the module-owned, reload-aware identity policy for synthetic
+/// `typing` values without exposing that implementation to runtime consumers.
+pub(crate) fn mapping_proxy_typing_subscript_policy(value: &Value) -> Option<bool> {
+    crate::builtin_modules::typing::mapping_proxy_subscript_policy(value)
+}
+
+/// Return a CPython-facing type name when a synthetic `typing` value's native
+/// representation differs from the object CPython rejects.
+pub(crate) fn mapping_proxy_typing_rejection_type_name(value: &Value) -> Option<&'static str> {
+    crate::builtin_modules::typing::mapping_proxy_rejection_type_name(value)
+}
+
 /// Identify one of the iterator/slice values migrated to a real built-in class
 /// in issue #3000 without materialising the class as a `Value`.
 ///

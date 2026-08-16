@@ -123,24 +123,22 @@ impl Interpreter {
         }
 
         // BuiltinObject: delegate to ops.get_item with a slice value (issue #847).
-        // This mirrors what eval_index does when a runtime slice object is used
-        // as a subscript, and lets BuiltinObject types opt into slice subscripting
-        // via BuiltinTypeOps::get_item.  bytearray's receiver-only get_item can't
-        // reach user dunders, so resolve any __index__ bounds here first (#1908);
-        // other BuiltinObject types resolve internally so are passed raw.
-        if let ValueKind::BuiltinObject { ops, .. } = target.kind()
-            && ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray)
-        {
-            let lo = self.resolve_slice_bound_val(lo)?;
-            let hi = self.resolve_slice_bound_val(hi)?;
-            let st = self.resolve_slice_bound_val(st)?;
-            let slice_val = make_slice_value(lo, hi, st);
-            let ValueKind::BuiltinObject { ops, state } = target.kind() else {
-                unreachable!("target kind checked above");
-            };
-            return ops.get_item(state, &slice_val);
-        }
+        // Object-backed mappingproxies first forward the complete slice to their
+        // authoritative owner. Every other built-in stays on its receiver-only
+        // operation; bytearray resolves user __index__ bounds before entering it.
         if let ValueKind::BuiltinObject { ops, state } = target.kind() {
+            if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) {
+                let owner = pyrust_builtins::mapping_proxy::owner_from_state(state)
+                    .expect("object mappingproxy state");
+                return self.eval_slice(&owner, lo, hi, st);
+            }
+            if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) {
+                let lo = self.resolve_slice_bound_val(lo)?;
+                let hi = self.resolve_slice_bound_val(hi)?;
+                let st = self.resolve_slice_bound_val(st)?;
+                let slice_val = make_slice_value(lo, hi, st);
+                return ops.get_item(state, &slice_val);
+            }
             let slice_val = make_slice_value(lo, hi, st);
             return ops.get_item(state, &slice_val);
         }
@@ -464,11 +462,15 @@ impl Interpreter {
             ValueKind::List(_) | ValueKind::Tuple(_) => unreachable!("handled above"),
             ValueKind::Set(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
-                // bytearray accepts any bytes-like object (bytes subclass,
-                // bytearray) as the left operand of `in` (#1928).  Coerce the
-                // item for bytearray; other BuiltinObjects (frozenset) keep the
-                // original value so their hashing / equality is unaffected.
-                if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) {
+                if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) {
+                    let owner = pyrust_builtins::mapping_proxy::owner_from_state(state)
+                        .expect("object mappingproxy state");
+                    self.eval_in(owner, item)
+                } else if ops.canonical_class_tag()
+                    == Some(pyrust_core::CanonicalClassTag::Bytearray)
+                {
+                    // bytearray accepts any bytes-like object (bytes subclass,
+                    // bytearray) as the left operand of `in` (#1928).
                     let item = coerce_bytes_subclass_arg(item);
                     ops.contains(state, &item).map(Value::bool_)
                 } else {

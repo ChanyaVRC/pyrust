@@ -199,14 +199,19 @@ impl Interpreter {
             }
             ValueKind::Dict(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
-                // Built-in object types opt in to subscripting via
-                // `BuiltinTypeOps::get_item`.  The default impl returns a
-                // TypeError shaped like the legacy "object is not
-                // subscriptable" message, so non-subscriptable types
-                // don't need per-type plumbing.  bytearray's __index__ subscript
-                // resolution is handled by callers (exec_get_item and the slice
-                // redirect above) so the int-index hot path stays untouched.
-                ops.get_item(state, &index)
+                // Object-backed mappingproxies need interpreter protocol
+                // dispatch; every exact proxy and other built-in stays on the
+                // original receiver-only operation.
+                if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) {
+                    let owner = pyrust_builtins::mapping_proxy::owner_from_state(state)
+                        .expect("object mappingproxy state");
+                    self.eval_index(&owner, index)
+                } else {
+                    // Built-in object types opt in to subscripting via
+                    // `BuiltinTypeOps::get_item`. The default implementation
+                    // keeps non-subscriptable types on the legacy TypeError.
+                    ops.get_item(state, &index)
+                }
             }
             ValueKind::PyClass(class_rc) => {
                 let class = Rc::clone(class_rc);

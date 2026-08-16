@@ -45,18 +45,26 @@ pyrust_module! {
                     }
                 }
             }
-            ValueKind::BuiltinObject { ops, state } => match ops.len(state) {
-                Some(n) => n as i64,
-                None => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "object of type '{}' has no len()",
-                            ops.display_error_name_for(state)
-                        ),
-                    ));
+            ValueKind::BuiltinObject { ops, state } => {
+                if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) {
+                    let owner = pyrust_builtins::mapping_proxy::owner_from_state(state)
+                        .expect("object mappingproxy state");
+                    _interp.object_len(&owner)?
+                } else {
+                    match ops.len(state) {
+                        Some(n) => n as i64,
+                        None => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "object of type '{}' has no len()",
+                                    ops.display_error_name_for(state)
+                                ),
+                            ));
+                        }
+                    }
                 }
-            },
+            }
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 // Always check for a user-defined __len__ override first.

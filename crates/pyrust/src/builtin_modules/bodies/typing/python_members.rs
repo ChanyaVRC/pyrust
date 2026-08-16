@@ -82,6 +82,9 @@ pub(crate) fn inject_python_members(
 
     for name in exports {
         if let Some(value) = dict.get(&PyKey::str_from(name)) {
+            if name == "Annotated" {
+                super::generation::register_annotated_marker(value);
+            }
             if matches!(name, "ParamSpecArgs" | "ParamSpecKwargs")
                 && let ValueKind::PyClass(class) = value.kind()
             {

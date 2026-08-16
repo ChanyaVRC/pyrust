@@ -149,7 +149,7 @@ impl Interpreter {
 
     /// `len(value)` through the registered builtin, so the hint protocol and
     /// the `len()` builtin cannot disagree about what has a length.
-    fn object_len(&mut self, value: &Value) -> Result<i64> {
+    pub(crate) fn object_len(&mut self, value: &Value) -> Result<i64> {
         let dispatch = crate::builtin_registry::lookup("len").expect("len must be in the registry");
         let result = dispatch(
             self,

@@ -9,6 +9,32 @@ impl Interpreter {
         let ValueKind::BuiltinObject { ops, state } = receiver.kind() else {
             unreachable!("receiver family checked by bound method dispatcher");
         };
+        if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops)
+            && matches!(
+                method,
+                "keys" | "values" | "items" | "get" | "copy" | "__reversed__"
+            )
+        {
+            // Validate the mappingproxy wrapper before owner lookup, then use
+            // ordinary attribute lookup/call so instance attributes, dynamic
+            // __getattribute__, and missing owner methods remain visible.
+            // Clone state data before any user callback runs.
+            pyrust_builtins::mapping_proxy::validate_method_call(
+                method,
+                pos.len(),
+                !kw.is_empty(),
+            )?;
+            let owner = pyrust_builtins::mapping_proxy::owner_from_state(state)
+                .expect("object mappingproxy state");
+            let mut forwarded = ExpandedArgBuf::with_capacity(pos.len());
+            forwarded.extend(
+                pos.iter()
+                    .cloned()
+                    .map(|value| ExpandedCallArg { name: None, value }),
+            );
+            let callable = self.get_attr(&owner, method)?;
+            return self.call_function_expanded(callable, &forwarded);
+        }
         // Validate before bytearray join/extend can consume an iterable. The
         // concrete type modules own the method-name policy; this adapter only
         // selects them by stable runtime identity.

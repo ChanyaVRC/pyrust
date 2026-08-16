@@ -405,12 +405,20 @@ pyrust_module! {
             let frame = make_reversed_mapping_snapshot_iter(items, seq.0.clone());
             return Ok(Value::generator(Box::new(frame)));
         }
-        // BuiltinObject types that implement `__reversed__` (e.g. mappingproxy,
-        // issue #2684) dispatch to it directly, matching CPython's protocol
-        // step 1.  `call_method` already returns the reverse-order iterator.
+        // BuiltinObject types that implement `__reversed__` dispatch to it
+        // directly, matching CPython's protocol step 1. Exact mappingproxies
+        // were handled above so they retain their guarded reverse snapshot.
+        // An object-backed proxy instead calls the named owner method; using
+        // reversed(owner) would incorrectly activate the sequence fallback.
         if let ValueKind::BuiltinObject { ops, state } = seq.0.kind()
             && uses_special_method
         {
+            if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) {
+                let owner = pyrust_builtins::mapping_proxy::owner_from_state(state)
+                    .expect("object mappingproxy state");
+                let method = _interp.get_attr(&owner, "__reversed__")?;
+                return _interp.call_function_expanded(method, &[]);
+            }
             return ops.call_method(state, "__reversed__", Vec::new(), &indexmap::IndexMap::new());
         }
         // Non-PyInstance: only sequence types and Range are reversible.
