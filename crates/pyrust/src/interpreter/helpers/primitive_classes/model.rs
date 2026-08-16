@@ -62,9 +62,17 @@ pub(crate) enum NativeIteratorClass {
     Bytearray,
     Deque,
     DequeReverse,
+    /// The generic reverse-sequence cursor uses the already-public
+    /// [`BuiltinTypeClass::Reversed`] singleton rather than owning another
+    /// native-only class object. Keeping it in this typed provenance field
+    /// distinguishes it from `list_reverseiterator` without consulting the
+    /// presentation-only frame type name.
+    Reversed,
 }
 
 impl NativeIteratorClass {
+    /// Iterator classes that own entries in `NATIVE_ITERATOR_CLASSES`.
+    /// `Reversed` reuses `BuiltinTypeClass::Reversed` instead.
     pub(crate) const ALL: [Self; 3] = [Self::Bytearray, Self::Deque, Self::DequeReverse];
 
     pub(crate) const fn full_type_name(self) -> &'static str {
@@ -72,6 +80,7 @@ impl NativeIteratorClass {
             Self::Bytearray => "bytearray_iterator",
             Self::Deque => "collections._deque_iterator",
             Self::DequeReverse => "collections._deque_reverse_iterator",
+            Self::Reversed => "reversed",
         }
     }
 
@@ -80,6 +89,7 @@ impl NativeIteratorClass {
             Self::Bytearray => "bytearray_iterator",
             Self::Deque => "_deque_iterator",
             Self::DequeReverse => "_deque_reverse_iterator",
+            Self::Reversed => "reversed",
         }
     }
 
@@ -87,15 +97,22 @@ impl NativeIteratorClass {
         match self {
             Self::Bytearray => "builtins",
             Self::Deque | Self::DequeReverse => "collections",
+            Self::Reversed => "builtins",
         }
     }
 
     pub(crate) fn singleton(self) -> Rc<RefCell<PyClass>> {
-        NATIVE_ITERATOR_CLASSES.with(|classes| Rc::clone(&classes[self as usize]))
+        match self {
+            Self::Reversed => BuiltinTypeClass::Reversed.singleton(),
+            _ => NATIVE_ITERATOR_CLASSES.with(|classes| Rc::clone(&classes[self as usize])),
+        }
     }
 
     pub(crate) fn from_class(class: &Rc<RefCell<PyClass>>) -> Option<Self> {
         let ptr = Rc::as_ptr(class);
+        if ptr == Rc::as_ptr(&BuiltinTypeClass::Reversed.singleton()) {
+            return Some(Self::Reversed);
+        }
         NATIVE_ITERATOR_CLASSES.with(|classes| {
             Self::ALL
                 .into_iter()

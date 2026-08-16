@@ -22,6 +22,7 @@ fn builtin_iterator_backing(
     args: &[ExpandedCallArg],
     kind: BuiltinTypeClass,
     method: &str,
+    expected_args: usize,
 ) -> Result<(Value, Value)> {
     let Some((receiver_arg, rest)) = args
         .split_first()
@@ -38,9 +39,9 @@ fn builtin_iterator_backing(
             kind.class_name()
         ));
     }
-    if !rest.is_empty() {
+    if rest.len() != expected_args {
         return Err(pyrust_core::type_err!(
-            "expected 0 arguments, got {}",
+            "expected {expected_args} arguments, got {}",
             rest.len()
         ));
     }
@@ -70,7 +71,7 @@ fn builtin_iterator_backing(
 }
 
 fn builtin_iterator_iter(args: &[ExpandedCallArg], kind: BuiltinTypeClass) -> Result<Value> {
-    let (receiver, _) = builtin_iterator_backing(args, kind, "__iter__")?;
+    let (receiver, _) = builtin_iterator_backing(args, kind, "__iter__", 0)?;
     Ok(receiver)
 }
 
@@ -79,7 +80,7 @@ fn builtin_iterator_next(
     args: &[ExpandedCallArg],
     kind: BuiltinTypeClass,
 ) -> Result<Value> {
-    let (_, backing) = builtin_iterator_backing(args, kind, "__next__")?;
+    let (_, backing) = builtin_iterator_backing(args, kind, "__next__", 0)?;
     interp.call_next(&backing, None)
 }
 
@@ -211,6 +212,65 @@ pyrust_module! {
     #[py_name = "reversed.__next__"]
     fn reversed_next(args) -> Result<Value> {
         builtin_iterator_next(_interp, args, BuiltinTypeClass::Reversed)
+    }
+
+    #[py_name = "reversed.__getattribute__"]
+    fn reversed_getattribute(args) -> Result<Value> {
+        let (receiver, _) = builtin_iterator_backing(
+            args,
+            BuiltinTypeClass::Reversed,
+            "__getattribute__",
+            1,
+        )?;
+        let name = args[1].value.as_str().ok_or_else(|| {
+            pyrust_core::type_err!(
+                "attribute name must be string, not '{}'",
+                full_type_name_str(&args[1].value)
+            )
+        })?;
+        match receiver.kind() {
+            ValueKind::PyInstance(instance) => {
+                _interp.get_attr_instance_raw(Rc::clone(instance), name)
+            }
+            _ => _interp.get_attr(&receiver, name),
+        }
+    }
+
+    #[py_name = "reversed.__length_hint__"]
+    fn reversed_length_hint(args) -> Result<Value> {
+        let (_, backing) = builtin_iterator_backing(
+            args,
+            BuiltinTypeClass::Reversed,
+            "__length_hint__",
+            0,
+        )?;
+        _interp.call_generator_method(backing, "__length_hint__", Vec::new())
+    }
+
+    #[py_name = "reversed.__reduce__"]
+    fn reversed_reduce(args) -> Result<Value> {
+        let (receiver, _) = builtin_iterator_backing(
+            args,
+            BuiltinTypeClass::Reversed,
+            "__reduce__",
+            0,
+        )?;
+        reversed_iterator_reduce(&receiver)
+    }
+
+    #[py_name = "reversed.__setstate__"]
+    fn reversed_setstate(args) -> Result<Value> {
+        let (_, backing) = builtin_iterator_backing(
+            args,
+            BuiltinTypeClass::Reversed,
+            "__setstate__",
+            1,
+        )?;
+        _interp.call_generator_method(
+            backing,
+            "__setstate__",
+            vec![args[1].value.clone()],
+        )
     }
 
     /// CPython: enumerate(iterable, start=0) — enumerate iterator.

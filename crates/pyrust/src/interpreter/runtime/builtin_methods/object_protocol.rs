@@ -251,11 +251,22 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
                 );
                 // Only the concrete built-in iterators carry a remaining-count
                 // slot (issue #2920); a real generator does not.
-                if cell
-                    .try_borrow()
-                    .is_ok_and(|state| builtin_iterator_has_length_hint(&**state))
-                {
-                    names.push("__length_hint__".to_string());
+                if let Ok(state) = cell.try_borrow() {
+                    if state.downcast_ref::<GetItemIter>().is_some() {
+                        names.extend(
+                            [
+                                "__getattribute__",
+                                "__reduce__",
+                                "__reduce_ex__",
+                                "__setstate__",
+                            ]
+                            .iter()
+                            .map(|name| (*name).to_string()),
+                        );
+                    }
+                    if builtin_iterator_has_length_hint(&**state) {
+                        names.push("__length_hint__".to_string());
+                    }
                 }
             }
             names

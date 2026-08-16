@@ -120,6 +120,9 @@ impl Interpreter {
                         args.len()
                     ));
                 }
+                if is_getitem_iterator(&receiver) {
+                    return getitem_iterator_reduce(&receiver);
+                }
                 let kind = native_iterator_class(&receiver).ok_or_else(|| {
                     PyError::attribute_error(
                         format!(
@@ -145,6 +148,9 @@ impl Interpreter {
                 i32::try_from(protocol).map_err(|_| {
                     pyrust_core::overflow_err!("Python int too large to convert to C int")
                 })?;
+                if is_getitem_iterator(&receiver) {
+                    return getitem_iterator_reduce(&receiver);
+                }
                 let kind = native_iterator_class(&receiver).ok_or_else(|| {
                     PyError::attribute_error(
                         format!(
@@ -157,10 +163,16 @@ impl Interpreter {
                 })?;
                 native_iterator_reduce(&receiver, kind)
             }
-            "__setstate__" if native_class == Some(NativeIteratorClass::Bytearray) => {
+            "__setstate__"
+                if matches!(
+                    native_class,
+                    Some(NativeIteratorClass::Bytearray) | Some(NativeIteratorClass::Reversed)
+                ) || is_getitem_iterator(&receiver) =>
+            {
                 if args.len() != 1 {
                     return Err(pyrust_core::type_err!(
-                        "bytearray_iterator.__setstate__() takes exactly one argument ({} given)",
+                        "{}.__setstate__() takes exactly one argument ({} given)",
+                        full_type_name_str(&receiver),
                         args.len()
                     ));
                 }
@@ -181,11 +193,16 @@ impl Interpreter {
                         .ok_or_else(|| pyrust_core::type_err!("an integer is required"))?
                 };
                 let position = self
-                    .value_to_isize(&normalized, "Python int too large to convert to C ssize_t")?
-                    .max(0) as usize;
-                native_bytearray_iterator_setstate(&receiver, position)
+                    .value_to_isize(&normalized, "Python int too large to convert to C ssize_t")?;
+                if is_getitem_iterator(&receiver) {
+                    getitem_iterator_setstate(self, &receiver, position)
+                } else if native_class == Some(NativeIteratorClass::Reversed) {
+                    reversed_iterator_setstate(self, &receiver, position)
+                } else {
+                    native_bytearray_iterator_setstate(&receiver, position.max(0) as usize)
+                }
             }
-            "__getattribute__" if native_class.is_some() => {
+            "__getattribute__" if native_class.is_some() || is_getitem_iterator(&receiver) => {
                 if args.len() != 1 {
                     return Err(pyrust_core::type_err!(
                         "expected 1 argument, got {}",
@@ -198,7 +215,12 @@ impl Interpreter {
                         full_type_name_str(&args[0])
                     )
                 })?;
-                self.get_attr(&receiver, name)
+                match receiver.kind() {
+                    ValueKind::PyInstance(instance) => {
+                        self.get_attr_instance_raw(Rc::clone(instance), name)
+                    }
+                    _ => self.get_attr(&receiver, name),
+                }
             }
             "close" => {
                 if !args.is_empty() {

@@ -1,5 +1,29 @@
 // Bound-method adaptation belongs to the built-in method boundary, not to the
 // generic callable router.
+
+/// CPython-shaped no-keyword error for the reduction/state surface carried by
+/// a legacy sequence cursor or a genuine `reversed` instance. The register
+/// fast path asks this typed boundary only after observing a keyword, keeping
+/// concrete API names and iterator backing classification out of the VM.
+pub(crate) fn iterator_method_keyword_error(receiver: &Value, method: &str) -> Option<PyError> {
+    if !is_getitem_iterator(receiver) && !is_reversed_iterator(receiver) {
+        return None;
+    }
+    match method {
+        "__getattribute__" => Some(pyrust_core::type_err!(
+            "wrapper __getattribute__() takes no keyword arguments"
+        )),
+        "__reduce_ex__" => Some(pyrust_core::type_err!(
+            "object.__reduce_ex__() takes no keyword arguments"
+        )),
+        "__length_hint__" | "__reduce__" | "__setstate__" => Some(pyrust_core::type_err!(
+            "{}.{method}() takes no keyword arguments",
+            full_type_name_str(receiver)
+        )),
+        _ => None,
+    }
+}
+
 impl Interpreter {
     /// Bind an unbound `super(cls)` (#2704) to `obj` via the descriptor
     /// protocol, mirroring CPython's `super_descr_get` / `supercheck`.  A None
@@ -264,6 +288,23 @@ impl Interpreter {
                     | "__reduce_ex__"
                     | "__setstate__"
             )
+        {
+            if has_kw {
+                return Err(pyrust_core::type_err!(
+                    "{}.{method}() takes no keyword arguments",
+                    full_type_name_str(&receiver)
+                ));
+            }
+            return self.call_generator_method(receiver, method, std::mem::take(pos));
+        }
+
+        // Legacy sequence cursors add only their reduction/state descriptors
+        // here. `__next__` and `__length_hint__` retain their existing generic
+        // route, so the per-element bound-next path gains no new state probe.
+        if matches!(
+            method,
+            "__getattribute__" | "__reduce__" | "__reduce_ex__" | "__setstate__"
+        ) && is_getitem_iterator(&receiver)
         {
             if has_kw {
                 return Err(pyrust_core::type_err!(

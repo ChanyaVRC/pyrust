@@ -148,7 +148,24 @@ impl Interpreter {
         let snapshot: Option<(Value, Value, i64, i64)> = {
             let borrow = state_rc.borrow();
             if let Some(it) = borrow.downcast_ref::<GetItemIter>() {
-                if it.exhausted || it.remaining == Some(0) {
+                if it.exhausted {
+                    return Ok(None);
+                }
+                if it.remaining == Some(0) {
+                    // Forward `__setstate__` uses the existing remaining
+                    // slot as a countdown to PY_SSIZE_T_MAX. Keeping the
+                    // sentinel here avoids adding an overflow branch to every
+                    // ordinary legacy-iterator step.
+                    if it.step > 0 && it.index == i64::MAX {
+                        return Err(pyrust_core::overflow_err!("iter index too large"));
+                    }
+                    drop(borrow);
+                    if let Some(it) = state_rc.borrow_mut().downcast_mut::<GetItemIter>() {
+                        it.exhausted = true;
+                        it.obj = Value::tuple(Vec::new());
+                        it.method = Value::none();
+                        it.length_method = None;
+                    }
                     return Ok(None);
                 }
                 Some((it.obj.clone(), it.method.clone(), it.index, it.step))
@@ -177,6 +194,9 @@ impl Interpreter {
             Err(e) if is_sequence_iter_terminator(self, &e) => {
                 if let Some(it) = state_rc.borrow_mut().downcast_mut::<GetItemIter>() {
                     it.exhausted = true;
+                    it.obj = Value::tuple(Vec::new());
+                    it.method = Value::none();
+                    it.length_method = None;
                 }
                 Ok(None)
             }

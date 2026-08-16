@@ -123,15 +123,15 @@ pub(crate) fn make_reversed_range_iterator(range: &Value) -> Result<Value> {
 /// Construct CPython's fixed-initial-length, live-index reverse iterator for
 /// native sequence values.
 pub(crate) fn make_reversed_sequence_iterator(sequence: &Value) -> Result<Value> {
-    let (len, type_name) = match sequence.kind() {
-        ValueKind::List(items) => (items.len(), "list_reverseiterator"),
-        ValueKind::Tuple(items) => (items.len(), "reversed"),
-        ValueKind::Str(_) => (sequence.str_codepoint_len_for_index(), "reversed"),
-        ValueKind::Bytes(bytes) => (bytes.len(), "reversed"),
+    let (len, generic_reversed) = match sequence.kind() {
+        ValueKind::List(items) => (items.len(), false),
+        ValueKind::Tuple(items) => (items.len(), true),
+        ValueKind::Str(_) => (sequence.str_codepoint_len_for_index(), true),
+        ValueKind::Bytes(bytes) => (bytes.len(), true),
         ValueKind::BuiltinObject { ops, state }
             if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) =>
         {
-            (ops.len(state).unwrap_or(0), "reversed")
+            (ops.len(state).unwrap_or(0), true)
         }
         _ => {
             return Err(PyError::Runtime(
@@ -139,9 +139,12 @@ pub(crate) fn make_reversed_sequence_iterator(sequence: &Value) -> Result<Value>
             ));
         }
     };
-    Ok(Value::generator(Box::new(
-        NativeIterFrame::reverse_indexed(sequence.clone(), len, type_name),
-    )))
+    let frame = if generic_reversed {
+        NativeIterFrame::generic_reversed(sequence.clone(), len)
+    } else {
+        NativeIterFrame::reverse_indexed(sequence.clone(), len, "list_reverseiterator")
+    };
+    Ok(Value::generator(Box::new(frame)))
 }
 
 /// Construct the lazy reverse adapter for a user `__len__` + `__getitem__`
