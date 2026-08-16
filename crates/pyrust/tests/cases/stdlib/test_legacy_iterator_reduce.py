@@ -114,6 +114,55 @@ print("reversed reduce", reduction_summary(backward, owner))
 print("reversed reduce-ex", reduction_summary(backward, owner, True))
 print("forward keyword errors", direct_keyword_errors(forward))
 print("reversed keyword errors", direct_keyword_errors(backward))
+
+
+def saved_getattribute_keyword_error(iterator):
+    method = iterator.__getattribute__
+    try:
+        method(name="missing")
+    except Exception as error:
+        return (type(error).__name__, str(error))
+    return ("accepted",)
+
+
+class R(reversed):
+    pass
+
+
+def reduce_ex_keyword_errors(iterator):
+    rows = []
+    for saved in (False, True):
+        try:
+            if saved:
+                method = iterator.__reduce_ex__
+                method(protocol=4)
+            else:
+                iterator.__reduce_ex__(protocol=4)
+        except Exception as error:
+            rows.append((type(error).__name__, str(error)))
+        else:
+            rows.append(("accepted",))
+    return tuple(rows)
+
+
+print(
+    "saved getattribute keyword errors",
+    saved_getattribute_keyword_error(iter(Sequence([1]))),
+    saved_getattribute_keyword_error(reversed(Sequence([1]))),
+    saved_getattribute_keyword_error(reversed((1,))),
+)
+print(
+    "reduce-ex keyword errors",
+    tuple(
+        (label, reduce_ex_keyword_errors(iterator))
+        for label, iterator in (
+            ("forward", iter(Sequence([1]))),
+            ("legacy-reverse", reversed(Sequence([1]))),
+            ("optimized-reverse", reversed((1,))),
+            ("subclass", R((1,))),
+        )
+    ),
+)
 next(forward)
 next(backward)
 print("forward advanced", reduction_summary(forward, owner), forward.__length_hint__())
@@ -164,6 +213,107 @@ print(
     reversed_descriptor_rejections(list_reverse),
     type(subclass_passthrough).__name__,
     reversed_descriptor_rejections(subclass_passthrough),
+)
+
+
+def reversed_wrong_receiver_arity_errors():
+    rows = []
+    for method, args in (
+        (reversed.__reduce__, (1,)),
+        (reversed.__reduce__, (1, 0)),
+        (reversed.__length_hint__, (1,)),
+        (reversed.__length_hint__, (1, 0)),
+        (reversed.__setstate__, (1,)),
+        (reversed.__setstate__, (1, 0, 0)),
+        (reversed.__getattribute__, (1,)),
+        (reversed.__getattribute__, (1, "x", "y")),
+    ):
+        try:
+            method(*args)
+        except Exception as error:
+            rows.append((type(error).__name__, str(error)))
+        else:
+            rows.append(("accepted",))
+    return tuple(rows)
+
+
+print("reversed wrong receiver arity", reversed_wrong_receiver_arity_errors())
+
+
+def descriptor_call_error(method, args=(), kwargs=None):
+    try:
+        method(*args, **({} if kwargs is None else kwargs))
+    except Exception as error:
+        return (type(error).__name__, str(error))
+    return ("accepted",)
+
+
+descriptor_sample = reversed((1, 2, 3))
+print(
+    "reversed descriptor no self",
+    tuple(
+        descriptor_call_error(method)
+        for method in (
+            reversed.__reduce__,
+            reversed.__length_hint__,
+            reversed.__setstate__,
+            reversed.__getattribute__,
+        )
+    ),
+)
+print(
+    "reversed descriptor correct receiver arity",
+    descriptor_call_error(reversed.__reduce__, (descriptor_sample, 0)),
+    descriptor_call_error(reversed.__length_hint__, (descriptor_sample, 0)),
+    descriptor_call_error(reversed.__setstate__, (descriptor_sample,)),
+    descriptor_call_error(reversed.__getattribute__, (descriptor_sample,)),
+)
+print(
+    "reversed descriptor wrong receiver keyword",
+    descriptor_call_error(reversed.__reduce__, (1,), {"unused": 1}),
+    descriptor_call_error(reversed.__length_hint__, (1,), {"unused": 1}),
+    descriptor_call_error(reversed.__setstate__, (1,), {"state": 0}),
+    descriptor_call_error(reversed.__getattribute__, (1,), {"name": "x"}),
+)
+
+
+print("--- optimized reversed observed exhaustion ---")
+for label, owner in (
+    ("tuple", (1, 2)),
+    ("str", "ab"),
+    ("bytes", b"ab"),
+    ("bytearray", bytearray(b"ab")),
+):
+    source = reversed(owner)
+    list(source)
+    shallow = copy.copy(source)
+    deep = copy.deepcopy(source)
+    print(
+        "optimized exhausted",
+        label,
+        reduction_summary(source, owner),
+        reduction_summary(shallow, owner),
+        reduction_summary(deep, owner),
+        shallow.__length_hint__(),
+        deep.__length_hint__(),
+        list(shallow),
+        list(deep),
+    )
+
+cycle_holder = []
+cycle_owner = (cycle_holder,)
+cycle_source = reversed(cycle_owner)
+cycle_holder.append(cycle_source)
+cycle_deep = copy.deepcopy(cycle_source)
+cycle_deep_owner = cycle_deep.__reduce__()[1][0]
+cycle_linked = cycle_deep_owner[0][0]
+cycle_linked_owner = cycle_linked.__reduce__()[1][0]
+print(
+    "optimized reversed owner cycle",
+    cycle_linked is cycle_deep,
+    cycle_linked_owner is cycle_deep_owner,
+    cycle_deep.__reduce__()[2],
+    cycle_linked.__reduce__()[2],
 )
 
 
@@ -225,6 +375,187 @@ print("dynamic shallow", list(copy.copy(dynamic_forward)), list(copy.copy(dynami
 print("dynamic deep", list(copy.deepcopy(dynamic_forward)), list(copy.deepcopy(dynamic_backward)))
 
 
+print("--- reversed subclass custom reducers ---")
+
+
+class RegularReduceReversed(reversed):
+    calls = []
+
+    def __reduce__(self):
+        type(self).calls.append("reduce")
+        return (list, (("regular-reduce", self.payload),))
+
+
+class StaticReduceReversed(reversed):
+    calls = []
+
+    @staticmethod
+    def __reduce__():
+        StaticReduceReversed.calls.append("reduce")
+        return (list, (("static-reduce",),))
+
+
+class RegularReduceExReversed(reversed):
+    calls = []
+
+    def __reduce_ex__(self, protocol):
+        type(self).calls.append(protocol)
+        return (list, (("regular-reduce-ex", protocol, self.payload),))
+
+
+class StaticReduceExReversed(reversed):
+    calls = []
+
+    @staticmethod
+    def __reduce_ex__(protocol):
+        StaticReduceExReversed.calls.append(protocol)
+        return (list, (("static-reduce-ex", protocol),))
+
+
+for cls in (
+    RegularReduceReversed,
+    StaticReduceReversed,
+    RegularReduceExReversed,
+    StaticReduceExReversed,
+):
+    source = cls(Sequence([1, 2]))
+    source.payload = [[cls.__name__]]
+    direct = source.__reduce_ex__(2)
+    shallow = copy.copy(source)
+    deep = copy.deepcopy(source)
+    shallow_payload = shallow[-1] if isinstance(shallow, list) else None
+    deep_payload = deep[-1] if isinstance(deep, list) else None
+    print(
+        "custom reducer",
+        cls.__name__,
+        tuple(cls.calls),
+        direct[0] is list,
+        type(shallow).__name__,
+        type(deep).__name__,
+        shallow_payload is source.payload,
+        deep_payload is source.payload,
+    )
+
+
+print("--- reversed custom reduction reconstruction ---")
+
+
+class FourReductionReversed(reversed):
+    def __reduce_ex__(self, protocol):
+        return (list, (), None, iter((self.payload, self.payload)))
+
+
+four_source = FourReductionReversed((1,))
+four_source.payload = [four_source]
+four_shallow = copy.copy(four_source)
+four_deep = copy.deepcopy(four_source)
+print(
+    "custom four reduction",
+    len(four_shallow),
+    four_shallow[0] is four_source.payload,
+    four_shallow[0] is four_shallow[1],
+    len(four_deep),
+    four_deep[0] is four_deep[1],
+    four_deep[0] is four_source.payload,
+    four_deep[0][0] is four_deep,
+)
+
+
+class FiveReductionReversed(reversed):
+    def __reduce_ex__(self, protocol):
+        return (
+            dict,
+            (),
+            None,
+            None,
+            iter((("left", self.payload), ("right", self.payload))),
+        )
+
+
+five_source = FiveReductionReversed((1,))
+five_source.payload = [five_source]
+five_shallow = copy.copy(five_source)
+five_deep = copy.deepcopy(five_source)
+print(
+    "custom five reduction",
+    five_shallow["left"] is five_source.payload,
+    five_shallow["left"] is five_shallow["right"],
+    five_deep["left"] is five_deep["right"],
+    five_deep["left"] is five_source.payload,
+    five_deep["left"][0] is five_deep,
+)
+
+
+class SlotReductionTarget:
+    __slots__ = ("slot_value", "__dict__")
+
+
+class SlotStateReversed(reversed):
+    def __reduce_ex__(self, protocol):
+        return (
+            SlotReductionTarget,
+            (),
+            ({"dict_value": self.payload}, {"slot_value": self.payload}),
+        )
+
+
+slot_source = SlotStateReversed((1,))
+slot_source.payload = [slot_source]
+slot_shallow = copy.copy(slot_source)
+slot_deep = copy.deepcopy(slot_source)
+print(
+    "custom slot state",
+    slot_shallow.dict_value is slot_source.payload,
+    slot_shallow.dict_value is slot_shallow.slot_value,
+    slot_deep.dict_value is slot_deep.slot_value,
+    slot_deep.dict_value is slot_source.payload,
+    slot_deep.dict_value[0] is slot_deep,
+)
+
+
+class ReduceFallbackReversed(reversed):
+    __reduce_ex__ = None
+
+    def __reduce__(self):
+        return (list, (("reduce-fallback", self.payload),))
+
+
+fallback_source = ReduceFallbackReversed((1,))
+fallback_source.payload = []
+fallback_shallow = copy.copy(fallback_source)
+fallback_deep = copy.deepcopy(fallback_source)
+print(
+    "custom reducer fallback",
+    fallback_shallow[0],
+    fallback_shallow[1] is fallback_source.payload,
+    fallback_deep[0],
+    fallback_deep[1] is fallback_source.payload,
+)
+
+
+class ReduceAttributeFallbackReversed(reversed):
+    def __getattribute__(self, name):
+        if name == "__reduce_ex__":
+            raise AttributeError(name)
+        return super(ReduceAttributeFallbackReversed, self).__getattribute__(name)
+
+    def __reduce__(self):
+        return (list, (("attribute-fallback", self.payload),))
+
+
+attribute_fallback_source = ReduceAttributeFallbackReversed((1,))
+attribute_fallback_source.payload = []
+attribute_fallback_shallow = copy.copy(attribute_fallback_source)
+attribute_fallback_deep = copy.deepcopy(attribute_fallback_source)
+print(
+    "custom reducer attribute fallback",
+    attribute_fallback_shallow[0],
+    attribute_fallback_shallow[1] is attribute_fallback_source.payload,
+    attribute_fallback_deep[0],
+    attribute_fallback_deep[1] is attribute_fallback_source.payload,
+)
+
+
 class ReversedSubclass(reversed):
     pass
 
@@ -250,6 +581,11 @@ print(
             "__setstate__",
         )
     ),
+)
+print(
+    "reversed inherited getstate",
+    "__getstate__" in dir(reversed),
+    "__getstate__" in dir(object),
 )
 print(
     "reversed subclass reduction",
@@ -304,6 +640,46 @@ print(
 )
 reversed.__setstate__(optimized_subclass, 0)
 print("optimized reversed subclass setstate", list(optimized_subclass))
+
+
+class SavedOptimizedReversed(reversed):
+    pass
+
+
+saved_optimized = SavedOptimizedReversed((10, 20, 30))
+next(saved_optimized)
+saved_optimized_reduce = saved_optimized.__reduce__
+saved_optimized_hint = saved_optimized.__length_hint__
+saved_optimized_setstate = saved_optimized.__setstate__
+saved_optimized_getattribute = saved_optimized.__getattribute__
+SavedOptimizedReversed.__reduce__ = lambda self: (list, (("new-reduce",),))
+SavedOptimizedReversed.__length_hint__ = lambda self: 99
+SavedOptimizedReversed.__setstate__ = lambda self, state: "new-setstate"
+
+
+def saved_optimized_replacement_getattribute(self, name):
+    if name == "marker":
+        return "new-getattribute"
+    return super(SavedOptimizedReversed, self).__getattribute__(name)
+
+
+SavedOptimizedReversed.__getattribute__ = saved_optimized_replacement_getattribute
+try:
+    saved_optimized_marker = saved_optimized_getattribute("marker")
+except Exception as error:
+    saved_optimized_marker = type(error).__name__
+print(
+    "optimized reversed saved inherited",
+    saved_optimized.__reduce__()[0] is list,
+    saved_optimized_reduce()[0] is SavedOptimizedReversed,
+    saved_optimized.__length_hint__(),
+    saved_optimized_hint(),
+    saved_optimized.__setstate__(0),
+    saved_optimized_setstate(0),
+    list(saved_optimized),
+    saved_optimized.marker,
+    saved_optimized_marker,
+)
 
 
 class CustomGetattributeReversed(reversed):
@@ -388,6 +764,27 @@ print(
 
 
 print("--- setstate boundaries ---")
+
+
+class DeletedLenSequence:
+    def __getitem__(self, index):
+        if index < 2:
+            return index
+        raise IndexError
+
+    def __len__(self):
+        return 2
+
+
+deleted_len_owner = DeletedLenSequence()
+deleted_len_reversed = reversed(deleted_len_owner)
+del DeletedLenSequence.__len__
+try:
+    deleted_len_reversed.__setstate__(0)
+except Exception as error:
+    print("reversed setstate deleted len", type(error).__name__, str(error))
+else:
+    print("reversed setstate deleted len", "accepted")
 
 
 def setstate_summary(reverse, state):

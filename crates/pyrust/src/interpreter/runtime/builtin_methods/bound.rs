@@ -1,10 +1,8 @@
 // Bound-method adaptation belongs to the built-in method boundary, not to the
 // generic callable router.
 
-/// CPython-shaped no-keyword error for the reduction/state surface carried by
-/// a legacy sequence cursor or a genuine `reversed` instance. The register
-/// fast path asks this typed boundary only after observing a keyword, keeping
-/// concrete API names and iterator backing classification out of the VM.
+/// CPython-shaped no-keyword error for a saved reduction/state method carried
+/// by a legacy sequence cursor or a genuine `reversed` instance.
 pub(crate) fn iterator_method_keyword_error(receiver: &Value, method: &str) -> Option<PyError> {
     if !is_getitem_iterator(receiver) && !is_reversed_iterator(receiver) {
         return None;
@@ -13,15 +11,33 @@ pub(crate) fn iterator_method_keyword_error(receiver: &Value, method: &str) -> O
         "__getattribute__" => Some(pyrust_core::type_err!(
             "wrapper __getattribute__() takes no keyword arguments"
         )),
-        "__reduce_ex__" => Some(pyrust_core::type_err!(
-            "object.__reduce_ex__() takes no keyword arguments"
-        )),
-        "__length_hint__" | "__reduce__" | "__setstate__" => Some(pyrust_core::type_err!(
-            "{}.{method}() takes no keyword arguments",
-            full_type_name_str(receiver)
-        )),
+        "__length_hint__" | "__reduce__" | "__reduce_ex__" | "__setstate__" => {
+            let type_name = full_type_name_str(receiver);
+            Some(pyrust_core::type_err!(
+                "{type_name}.{method}() takes no keyword arguments"
+            ))
+        }
         _ => None,
     }
+}
+
+/// Direct `obj.__reduce_ex__(protocol=...)` is dispatched through object's
+/// inherited descriptor, while a previously saved bound method reports the
+/// concrete iterator type. Keep that presentation distinction at the two call
+/// boundaries without changing the typed iterator classification.
+pub(crate) fn iterator_direct_method_keyword_error(
+    receiver: &Value,
+    method: &str,
+) -> Option<PyError> {
+    if method != "__reduce_ex__" {
+        return iterator_method_keyword_error(receiver, method);
+    }
+    if !is_getitem_iterator(receiver) && !is_reversed_iterator(receiver) {
+        return None;
+    }
+    Some(pyrust_core::type_err!(
+        "object.__reduce_ex__() takes no keyword arguments"
+    ))
 }
 
 impl Interpreter {
@@ -275,14 +291,29 @@ impl Interpreter {
             );
         }
 
+        if has_kw {
+            let error = match origin {
+                pyrust_builtins::dict_views::DictViewBoundMethodOrigin::Direct => {
+                    iterator_direct_method_keyword_error(&receiver, method)
+                }
+                pyrust_builtins::dict_views::DictViewBoundMethodOrigin::Captured => {
+                    iterator_method_keyword_error(&receiver, method)
+                }
+            };
+            if let Some(error) = error {
+                return Err(error);
+            }
+        }
+
         // These concrete iterators use Generator as a storage carrier, but
         // their own reduction/state methods must win over the generic object
         // protocol interception below (notably for a method saved by getattr).
-        if native_iterator_class(&receiver).is_some()
+        if (native_iterator_class(&receiver).is_some() || is_reversed_iterator(&receiver))
             && matches!(
                 method,
                 "__iter__"
                     | "__next__"
+                    | "__getattribute__"
                     | "__length_hint__"
                     | "__reduce__"
                     | "__reduce_ex__"

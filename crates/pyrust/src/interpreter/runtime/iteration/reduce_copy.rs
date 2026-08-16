@@ -407,7 +407,12 @@ pub(crate) fn getitem_iterator_setstate(
     // Release the iterator state before calling user `__len__` code.
     let length_method = lookup_value_special_method(&object, "__len__")
         .transpose()?
-        .ok_or_else(|| PyError::Runtime("reversed iterator lost its length slot".to_string()))?;
+        .ok_or_else(|| {
+            pyrust_core::type_err!(
+                "object of type '{}' has no len()",
+                full_type_name_str(&object)
+            )
+        })?;
     let length_value = invoke_class_method(interp, length_method, object, &[])?;
     let length = interp.normalize_len_result(&length_value)?;
 
@@ -589,12 +594,11 @@ pub(crate) fn copy_iterator_object(value: &Value, deep: bool) -> Result<Iterator
             position,
         });
     }
-    // A `reversed` subclass backed by an optimised tuple/str/bytes/bytearray
-    // frame must still execute its class-preserving reduction dynamically.
-    // Exact native cursors keep the pre-existing native-copy path below.
-    if matches!(value.kind(), ValueKind::PyInstance(_))
-        && let Some((constructor, owner, position)) = reversed_iterator_reduction(value)?
-    {
+    // Every genuine `reversed` cursor copies through its dynamic reduction.
+    // In particular, an observed-exhausted native cursor reconstructs a fresh
+    // live empty cursor, and deepcopy must recurse into the owner before it
+    // memoises the outer iterator.
+    if let Some((constructor, owner, position)) = reversed_iterator_reduction(value)? {
         return Ok(IteratorCopy::GetItemReduction {
             constructor,
             owner,

@@ -334,7 +334,15 @@ pyrust_module! {
                 pyrust_core::overflow_err!("Python int too large to convert to C int")
             })?;
             return if is_reversed_iterator(&self_val) {
-                reversed_iterator_reduce(&self_val)
+                // A `reversed` subclass may replace `__reduce__`.  Resolve it
+                // normally so object.__reduce_ex__ preserves that protocol;
+                // exact native cursors retain the typed no-lookup path.
+                if matches!(self_val.kind(), ValueKind::PyInstance(_)) {
+                    let reducer = _interp.get_attr(&self_val, "__reduce__")?;
+                    _interp.call_function_expanded(reducer, &[])
+                } else {
+                    reversed_iterator_reduce(&self_val)
+                }
             } else {
                 getitem_iterator_reduce(&self_val)
             };

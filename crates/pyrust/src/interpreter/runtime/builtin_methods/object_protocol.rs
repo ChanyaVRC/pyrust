@@ -113,7 +113,9 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
         ValueKind::PyClass(class) => {
             let mut names: Vec<String> = Vec::new();
             collect_class_names(class, &mut names);
-            if NativeIteratorClass::from_class(class).is_some() {
+            if NativeIteratorClass::from_class(class)
+                .is_some_and(|kind| kind != NativeIteratorClass::Reversed)
+            {
                 names.retain(|name| name != "__getstate__");
             }
             names
@@ -179,7 +181,9 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
             if let Some(iterator_class) = native_iterator_class(value) {
                 let mut names = Vec::new();
                 collect_class_names(&iterator_class.singleton(), &mut names);
-                names.retain(|name| name != "__getstate__");
+                if iterator_class != NativeIteratorClass::Reversed {
+                    names.retain(|name| name != "__getstate__");
+                }
                 return names;
             }
 

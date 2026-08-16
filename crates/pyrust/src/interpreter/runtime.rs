@@ -184,7 +184,7 @@ use collection_ops::mapping_entries_for_expansion;
 
 mod fast_path {
     use super::builtin_methods::{
-        BuiltinContainerKind, ResolvedMethodCallShape, iterator_method_keyword_error,
+        BuiltinContainerKind, ResolvedMethodCallShape, iterator_direct_method_keyword_error,
     };
     use super::execution::vm_read;
     use super::{
@@ -389,9 +389,10 @@ mod generator_protocols {
         GeneratorKind, GetItemIter, Interpreter, NativeIterFrame, NativeIteratorClass, PyError, Rc,
         Result, Value, ValueKind, class_is_builtin_exception_subclass, class_is_subclass_of,
         effective_builtin_receiver, full_type_name_str, getitem_iterator_reduce,
-        getitem_iterator_setstate, instantiate_exception, invoke_class_method, is_getitem_iterator,
-        lookup_class_attr, lookup_exc_class, native_bytearray_iterator_setstate,
-        native_iterator_class, native_iterator_object_method_arity, native_iterator_reduce,
+        getitem_iterator_setstate, instance_builtin_data, instantiate_exception,
+        invoke_class_method, is_getitem_iterator, is_reversed_iterator, lookup_class_attr,
+        lookup_exc_class, native_bytearray_iterator_setstate, native_iterator_class,
+        native_iterator_object_method_arity, native_iterator_reduce, reversed_iterator_reduce,
         reversed_iterator_setstate, value_has_length_hint, value_type_name_str,
     };
     include!("runtime/generator_protocols.rs");
