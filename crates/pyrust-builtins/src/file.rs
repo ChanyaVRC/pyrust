@@ -310,7 +310,9 @@ fn decode_utf16(raw: &[u8]) -> Result<String> {
         (true, raw)
     };
     let words: Vec<u16> = payload
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| {
             if le {
                 u16::from_le_bytes([c[0], c[1]])
