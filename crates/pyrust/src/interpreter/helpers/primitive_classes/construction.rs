@@ -147,54 +147,88 @@ pub(crate) fn mapping_proxy_typing_rejection_type_name(value: &Value) -> Option<
     crate::builtin_modules::typing::mapping_proxy_rejection_type_name(value)
 }
 
-/// Identify one of the iterator/slice values migrated to a real built-in class
-/// in issue #3000 without materialising the class as a `Value`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuiltinTypeInstanceProbe {
+    Exact(BuiltinTypeClass),
+    FixedOther,
+    Dynamic,
+}
+
+/// Classify an object tested against issue #3000's six built-in classes.
 ///
-/// The caller only invokes the pointer table when this object-first probe
-/// succeeds.  Ordinary primitive and user values therefore do not acquire six
-/// more class-pointer comparisons on their `isinstance` miss path.
+/// `FixedOther` means the value's backing kind proves that none of the six can
+/// match. `Dynamic` retains the normal typed-class path for subclass carriers,
+/// provider iterators and class objects whose MRO or metatype is observable.
 #[inline]
-fn builtin_type_class_for_isinstance(obj: &Value) -> Option<BuiltinTypeClass> {
+fn builtin_type_instance_probe(obj: &Value) -> BuiltinTypeInstanceProbe {
     match obj.kind() {
+        ValueKind::PyInstance(_) | ValueKind::PyClass(_) => BuiltinTypeInstanceProbe::Dynamic,
         ValueKind::Generator(cell) => {
             // A running generator/coroutine frame owns a mutably-borrowed cell.
             // Its immutable kind tag proves it cannot be one of these built-in
             // iterators, so never inspect the state in that case (#2978).
             if cell.kind().frame_type_name().is_some() {
-                return None;
+                return BuiltinTypeInstanceProbe::FixedOther;
             }
             // Built-in iterators release their state before executing user
             // code, making this borrow safe under the same invariant as
             // `value_class`.
             let state = cell.borrow();
             if state.downcast_ref::<ZipIter>().is_some() {
-                return Some(BuiltinTypeClass::Zip);
+                return BuiltinTypeInstanceProbe::Exact(BuiltinTypeClass::Zip);
             }
             if state.downcast_ref::<MapIter>().is_some() {
-                return Some(BuiltinTypeClass::Map);
+                return BuiltinTypeInstanceProbe::Exact(BuiltinTypeClass::Map);
             }
             if state.downcast_ref::<FilterIter>().is_some() {
-                return Some(BuiltinTypeClass::Filter);
+                return BuiltinTypeInstanceProbe::Exact(BuiltinTypeClass::Filter);
             }
             if state.downcast_ref::<EnumerateIter>().is_some() {
-                return Some(BuiltinTypeClass::Enumerate);
+                return BuiltinTypeInstanceProbe::Exact(BuiltinTypeClass::Enumerate);
             }
-            if let Some(iterator) = state.downcast_ref::<GetItemIter>()
-                && iterator.step < 0
+            if state.downcast_ref::<ProviderIterator>().is_some() {
+                return BuiltinTypeInstanceProbe::Dynamic;
+            }
+            if let Some(iterator) = state.downcast_ref::<GetItemIter>() {
+                return if iterator.step < 0 {
+                    BuiltinTypeInstanceProbe::Exact(BuiltinTypeClass::Reversed)
+                } else {
+                    BuiltinTypeInstanceProbe::FixedOther
+                };
+            }
+            if let Some(iterator) = state.downcast_ref::<NativeIterFrame>() {
+                return if iterator.class == Some(NativeIteratorClass::Reversed) {
+                    BuiltinTypeInstanceProbe::Exact(BuiltinTypeClass::Reversed)
+                } else {
+                    BuiltinTypeInstanceProbe::FixedOther
+                };
+            }
+            if state.downcast_ref::<CallableIter>().is_some()
+                || state.downcast_ref::<RangeIter>().is_some()
+                || state.downcast_ref::<BigRangeIter>().is_some()
+                || state.downcast_ref::<AsyncGenASend>().is_some()
             {
-                return Some(BuiltinTypeClass::Reversed);
+                return BuiltinTypeInstanceProbe::FixedOther;
             }
-            if let Some(iterator) = state.downcast_ref::<NativeIterFrame>()
-                && iterator.class == Some(NativeIteratorClass::Reversed)
-            {
-                return Some(BuiltinTypeClass::Reversed);
-            }
-            None
+            // Unknown type-erased states are conservative: a future provider
+            // may retain a Python class even when this helper does not know its
+            // concrete cursor type yet.
+            BuiltinTypeInstanceProbe::Dynamic
         }
         ValueKind::BuiltinObject { ops, .. } if pyrust_builtins::slice::is_slice_ops(ops) => {
-            Some(BuiltinTypeClass::Slice)
+            BuiltinTypeInstanceProbe::Exact(BuiltinTypeClass::Slice)
         }
-        _ => None,
+        _ => BuiltinTypeInstanceProbe::FixedOther,
+    }
+}
+
+/// Preserve the existing low-level six-class probe contract for constructor
+/// and iterator callers: only an exact backing kind produces `Some`.
+#[inline]
+fn builtin_type_class_for_isinstance(obj: &Value) -> Option<BuiltinTypeClass> {
+    match builtin_type_instance_probe(obj) {
+        BuiltinTypeInstanceProbe::Exact(kind) => Some(kind),
+        BuiltinTypeInstanceProbe::FixedOther | BuiltinTypeInstanceProbe::Dynamic => None,
     }
 }
 
@@ -214,6 +248,126 @@ pub(crate) fn builtin_type_class_isinstance_fast(
     let expected_kind = BuiltinTypeClass::from_tag(cls.borrow().builtin_type_tag?);
     let actual_kind = builtin_type_class_for_isinstance(obj)?;
     Some(actual_kind == expected_kind)
+}
+
+#[inline]
+fn primitive_tag_isinstance(obj: &Value, tag: PrimitiveClassKind) -> bool {
+    match tag {
+        pyrust_core::CanonicalClassTag::Int => matches!(
+            obj.kind(),
+            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+        ),
+        pyrust_core::CanonicalClassTag::Bool => {
+            matches!(obj.kind(), ValueKind::Bool(_))
+        }
+        pyrust_core::CanonicalClassTag::Str => matches!(obj.kind(), ValueKind::Str(_)),
+        pyrust_core::CanonicalClassTag::Float => matches!(obj.kind(), ValueKind::Float(_)),
+        pyrust_core::CanonicalClassTag::List => matches!(obj.kind(), ValueKind::List(_)),
+        pyrust_core::CanonicalClassTag::Tuple => matches!(obj.kind(), ValueKind::Tuple(_)),
+        pyrust_core::CanonicalClassTag::Dict => matches!(obj.kind(), ValueKind::Dict(_)),
+        pyrust_core::CanonicalClassTag::Set => matches!(obj.kind(), ValueKind::Set(_)),
+        pyrust_core::CanonicalClassTag::Bytes => matches!(obj.kind(), ValueKind::Bytes(_)),
+        pyrust_core::CanonicalClassTag::Bytearray => matches!(
+            obj.kind(),
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.canonical_class_tag()
+                    == Some(pyrust_core::CanonicalClassTag::Bytearray)
+        ),
+        pyrust_core::CanonicalClassTag::Complex => {
+            matches!(obj.kind(), ValueKind::Complex(_, _))
+        }
+        pyrust_core::CanonicalClassTag::Frozenset => matches!(
+            obj.kind(),
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.canonical_class_tag()
+                    == Some(pyrust_core::CanonicalClassTag::Frozenset)
+        ),
+        pyrust_core::CanonicalClassTag::MappingProxy => matches!(
+            obj.kind(),
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.canonical_class_tag()
+                    == Some(pyrust_core::CanonicalClassTag::MappingProxy)
+        ),
+        pyrust_core::CanonicalClassTag::NoneType => matches!(obj.kind(), ValueKind::None),
+        pyrust_core::CanonicalClassTag::NotImplementedType => {
+            matches!(obj.kind(), ValueKind::NotImplemented)
+        }
+        pyrust_core::CanonicalClassTag::Ellipsis => {
+            matches!(obj.kind(), ValueKind::Ellipsis)
+        }
+        pyrust_core::CanonicalClassTag::Object
+        | pyrust_core::CanonicalClassTag::GenericAlias
+        | pyrust_core::CanonicalClassTag::TypeVar => false,
+    }
+}
+
+/// Primitive-only fast path retained for internal callers that enter
+/// `isinstance_single` without the public protocol preflight.
+#[inline]
+pub(crate) fn primitive_class_isinstance_fast(
+    obj: &Value,
+    cls: &Rc<RefCell<PyClass>>,
+) -> Option<bool> {
+    if matches!(obj.kind(), ValueKind::PyInstance(_) | ValueKind::PyClass(_)) {
+        return None;
+    }
+    let tag = cls
+        .borrow()
+        .canonical_tag
+        .filter(|tag| tag.is_primitive())?;
+    Some(primitive_tag_isinstance(obj, tag))
+}
+
+/// Fast `isinstance` check for every interpreter-owned class with immutable
+/// identity metadata.
+///
+/// Both class tags are read under one short borrow. Primitive classes answer
+/// from `ValueKind`; the six iterator/slice classes use a tri-state backing
+/// probe so fixed values settle while dynamic class carriers retain their MRO.
+#[inline]
+pub(crate) fn canonical_class_isinstance_fast(
+    obj: &Value,
+    cls: &Rc<RefCell<PyClass>>,
+) -> Option<bool> {
+    // A Python instance can subclass a primitive or one of the five
+    // subclassable iterator classes. A class object is an instance of its
+    // metatype. Both therefore require the typed-class path.
+    if matches!(obj.kind(), ValueKind::PyInstance(_) | ValueKind::PyClass(_)) {
+        return None;
+    }
+
+    let (canonical_tag, builtin_type_tag) = {
+        let borrowed = cls.borrow();
+        (borrowed.canonical_tag, borrowed.builtin_type_tag)
+    };
+    if let Some(tag) = canonical_tag.filter(|tag| tag.is_primitive()) {
+        return Some(primitive_tag_isinstance(obj, tag));
+    }
+    let expected = BuiltinTypeClass::from_tag(builtin_type_tag?);
+    match builtin_type_instance_probe(obj) {
+        BuiltinTypeInstanceProbe::Exact(actual) => Some(actual == expected),
+        BuiltinTypeInstanceProbe::FixedOther => Some(false),
+        BuiltinTypeInstanceProbe::Dynamic => None,
+    }
+}
+
+/// Fast `issubclass` check when `classinfo` is one of issue #3000's exact
+/// six built-in classes. Exact tagged candidates compare tags directly;
+/// ordinary Python subclasses retain the typed MRO walk.
+#[inline]
+pub(crate) fn builtin_type_class_issubclass_fast(
+    candidate: &Value,
+    classinfo: &Rc<RefCell<PyClass>>,
+) -> Option<bool> {
+    let expected = classinfo.borrow().builtin_type_tag?;
+    let ValueKind::PyClass(candidate) = candidate.kind() else {
+        return None;
+    };
+    let actual = candidate.borrow().builtin_type_tag;
+    Some(match actual {
+        Some(actual) => actual == expected,
+        None => class_is_subclass_of(candidate, classinfo),
+    })
 }
 
 /// Does this class inherit a native built-in layout whose allocator cannot be
@@ -243,97 +397,4 @@ pub(crate) fn class_has_native_builtin_type_ancestor(class: &Rc<RefCell<PyClass>
         .extra_bases
         .iter()
         .any(class_has_native_builtin_type_ancestor)
-}
-
-/// Fast `isinstance(obj, primitive_class)` — when `cls` is one of the
-/// canonical primitive class singletons, skip the `class_is_subclass_of`
-/// walk (which would require materialising `obj`'s class via
-/// `primitive_class_for_value`'s thread_local + Rc::clone) and do a
-/// direct `ValueKind` tag check.  `Some(true/false)` on a hit,
-/// `None` if `cls` isn't a primitive class — fall through to the
-/// general walk.  Issue #462 perf.
-#[inline]
-pub(crate) fn primitive_class_isinstance_fast(
-    obj: &Value,
-    cls: &Rc<RefCell<PyClass>>,
-) -> Option<bool> {
-    // Issue #976: a PyInstance may subclass a primitive.  Skip the fast-path
-    // tag check and return None so the caller falls through to the general
-    // `class_is_subclass_of` MRO walk, which correctly handles
-    // `isinstance(MyDict(), dict)` when MyDict inherits from dict.
-    if matches!(obj.kind(), ValueKind::PyInstance(_)) {
-        return None;
-    }
-    let cls_ptr = Rc::as_ptr(cls);
-    PRIMITIVE_CLASSES.with(|c| {
-        // bool ⊂ int: an int-class test matches both Int and Bool.
-        // Every other primitive is a tag identity.
-        if cls_ptr == Rc::as_ptr(&c.int_class) {
-            return Some(matches!(
-                obj.kind(),
-                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-            ));
-        }
-        if cls_ptr == Rc::as_ptr(&c.bool_class) {
-            return Some(matches!(obj.kind(), ValueKind::Bool(_)));
-        }
-        if cls_ptr == Rc::as_ptr(&c.str_class) {
-            return Some(matches!(obj.kind(), ValueKind::Str(_)));
-        }
-        if cls_ptr == Rc::as_ptr(&c.float_class) {
-            return Some(matches!(obj.kind(), ValueKind::Float(_)));
-        }
-        if cls_ptr == Rc::as_ptr(&c.list_class) {
-            return Some(matches!(obj.kind(), ValueKind::List(_)));
-        }
-        if cls_ptr == Rc::as_ptr(&c.tuple_class) {
-            return Some(matches!(obj.kind(), ValueKind::Tuple(_)));
-        }
-        if cls_ptr == Rc::as_ptr(&c.dict_class) {
-            return Some(matches!(obj.kind(), ValueKind::Dict(_)));
-        }
-        if cls_ptr == Rc::as_ptr(&c.set_class) {
-            return Some(matches!(obj.kind(), ValueKind::Set(_)));
-        }
-        if cls_ptr == Rc::as_ptr(&c.bytes_class) {
-            return Some(matches!(obj.kind(), ValueKind::Bytes(_)));
-        }
-        if cls_ptr == Rc::as_ptr(&c.bytearray_class) {
-            return Some(matches!(
-                obj.kind(),
-                ValueKind::BuiltinObject { ops, .. }
-                    if ops.canonical_class_tag()
-                        == Some(pyrust_core::CanonicalClassTag::Bytearray)
-            ));
-        }
-        if cls_ptr == Rc::as_ptr(&c.complex_class) {
-            return Some(matches!(obj.kind(), ValueKind::Complex(_, _)));
-        }
-        if cls_ptr == Rc::as_ptr(&c.frozenset_class) {
-            return Some(matches!(
-                obj.kind(),
-                ValueKind::BuiltinObject { ops, .. }
-                    if ops.canonical_class_tag()
-                        == Some(pyrust_core::CanonicalClassTag::Frozenset)
-            ));
-        }
-        if cls_ptr == Rc::as_ptr(&c.mappingproxy_class) {
-            return Some(matches!(
-                obj.kind(),
-                ValueKind::BuiltinObject { ops, .. }
-                    if ops.canonical_class_tag()
-                        == Some(pyrust_core::CanonicalClassTag::MappingProxy)
-            ));
-        }
-        if cls_ptr == Rc::as_ptr(&c.none_class) {
-            return Some(matches!(obj.kind(), ValueKind::None));
-        }
-        if cls_ptr == Rc::as_ptr(&c.notimplemented_class) {
-            return Some(matches!(obj.kind(), ValueKind::NotImplemented));
-        }
-        if cls_ptr == Rc::as_ptr(&c.ellipsis_class) {
-            return Some(matches!(obj.kind(), ValueKind::Ellipsis));
-        }
-        None
-    })
 }

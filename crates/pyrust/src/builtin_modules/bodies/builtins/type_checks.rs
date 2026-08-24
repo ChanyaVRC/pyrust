@@ -34,8 +34,8 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
         if Rc::ptr_eq(expected, &type_class_singleton()) {
             return matches!(obj.kind(), ValueKind::PyClass(_));
         }
-        // Fast path: canonical primitive classes answer from their backing
-        // kind, skipping the class materialisation and base-chain walk (#462).
+        // Internal callers that bypass `isinstance_check` still need the
+        // primitive backing-kind shortcut here.
         if let Some(hit) = crate::interpreter::primitive_class_isinstance_fast(obj, expected) {
             return hit;
         }
@@ -200,11 +200,11 @@ fn isinstance_check(
     // (e.g. all ABC classes). We look up the attr via get_attr so its explicit
     // classmethod descriptor binds the ABC before the hook is called.
     if let ValueKind::PyClass(cls_rc) = cls.kind() {
-        // Fast path: canonical primitive classes settle from their backing
-        // kind without the `metaclass_dunder` / `__instancecheck__` / Protocol
-        // probing below.  They cannot carry those hooks or be a Protocol
-        // subclass, so the hot primitive paths stay direct.
-        if let Some(hit) = crate::interpreter::primitive_class_isinstance_fast(obj, cls_rc) {
+        // Fast path: exact interpreter-owned primitive and iterator/slice
+        // classes settle from immutable tags before metaclass and Protocol
+        // scaffolding. Dynamic subclass, provider and metatype carriers return
+        // `None` and retain the normal typed-class path.
+        if let Some(hit) = crate::interpreter::canonical_class_isinstance_fast(obj, cls_rc) {
             return Ok(hit);
         }
         // Issue #1955: a metaclass `__instancecheck__` override takes
@@ -494,6 +494,13 @@ fn issubclass_check(
     // for `issubclass(UserClass, Iterable)` and tuple forms like
     // `issubclass(UserClass, (Iterable, Hashable))` (fixes #1799).
     if let ValueKind::PyClass(classinfo_rc) = classinfo.kind() {
+        // The six exact iterator/slice classes have immutable tags and cannot
+        // carry custom subclass hooks. Tagged siblings settle by identity;
+        // ordinary Python descendants use the typed MRO directly.
+        if let Some(hit) = crate::interpreter::builtin_type_class_issubclass_fast(cls, classinfo_rc)
+        {
+            return Ok(hit);
+        }
         // Issue #1955: a metaclass `__subclasscheck__` override takes
         // precedence, mirroring CPython's
         // `type(classinfo).__subclasscheck__(classinfo, cls)` dispatch.

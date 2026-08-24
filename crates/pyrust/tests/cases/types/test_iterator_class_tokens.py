@@ -53,6 +53,25 @@ print(isinstance(r, range), type(r) is range)
 print(isinstance(z, map), isinstance(m, zip), isinstance(s, enumerate))
 print(isinstance(1, zip), isinstance(z, int))
 
+# Issue #3018: the six canonical class fast paths must reject values whose
+# runtime kind has a fixed, unrelated class without materialising an MRO.
+six_types = (zip, map, filter, enumerate, slice, reversed)
+fixed_negatives = (
+    None,
+    1,
+    True,
+    1.0,
+    "x",
+    [],
+    (),
+    {},
+    set(),
+    b"x",
+    print,
+)
+for value in fixed_negatives:
+    print("fixed-negative", type(value).__name__, [isinstance(value, t) for t in six_types])
+
 
 class UserIteratorClass:
     pass
@@ -75,9 +94,81 @@ running_value = running_probe()
 running_holder["value"] = running_value
 print(next(running_value))
 
+# A provider iterator can retain a Python subclass as its real class.  It must
+# fall through to that class's MRO rather than being classified as a fixed miss.
+from itertools import chain
+
+
+class ChainSub(chain):
+    pass
+
+
+provider_value = ChainSub([1], [2])
+print(
+    "provider-class",
+    type(provider_value) is ChainSub,
+    isinstance(provider_value, ChainSub),
+    isinstance(provider_value, chain),
+    isinstance(provider_value, zip),
+)
+
+# Class objects use their metaclass as the actual class.  In particular, an
+# exact-six expected class must not make this dynamic carrier skip metatype
+# handling.
+class IteratorMeta(type):
+    pass
+
+
+class MetaOwned(metaclass=IteratorMeta):
+    pass
+
+
+print(
+    "metatype",
+    isinstance(MetaOwned, IteratorMeta),
+    isinstance(MetaOwned, type),
+    isinstance(MetaOwned, zip),
+    isinstance(zip, zip),
+)
+
+# User subclasses of the iterator classes can have a custom metaclass.  Their
+# hooks retain precedence because only the exact canonical class is fast.
+class HookMeta(type):
+    def __instancecheck__(cls, value):
+        print("instance-hook", cls.__name__, value == "hook")
+        return value == "hook"
+
+    def __subclasscheck__(cls, value):
+        print("subclass-hook", cls.__name__, value is int)
+        return value is int
+
+
+class HookZip(zip, metaclass=HookMeta):
+    pass
+
+
+print(isinstance("hook", HookZip), isinstance("miss", HookZip))
+print(issubclass(int, HookZip), issubclass(str, HookZip))
+
+# Tuple validation is lazy: a hit before an invalid leaf suppresses the error,
+# while a miss exposes it.  Nested tuples follow the same left-to-right rule.
+def report_tuple_result(label, thunk):
+    try:
+        print(label, thunk())
+    except TypeError as exc:
+        print(label, type(exc).__name__)
+
+
+report_tuple_result("instance-tuple-early", lambda: isinstance(z, (zip, 1)))
+report_tuple_result("instance-tuple-late", lambda: isinstance(z, (map, 1)))
+report_tuple_result("instance-tuple-nested", lambda: isinstance(z, (map, (zip, 1))))
+
 # The classes are usable as `issubclass` arguments in both directions.
 print(issubclass(zip, object), issubclass(object, zip))
 print(issubclass(slice, object), issubclass(slice, slice))
+report_tuple_result("subclass-tuple-early", lambda: issubclass(zip, (zip, 1)))
+report_tuple_result("subclass-tuple-late", lambda: issubclass(zip, (map, 1)))
+report_tuple_result("subclass-tuple-nested", lambda: issubclass(zip, (map, (zip, 1))))
 
 # `reversed(x)` returns a type-specific cursor, exactly as in CPython: `list`
 # and `range` have their own reverse-iterator types, while every other sequence
