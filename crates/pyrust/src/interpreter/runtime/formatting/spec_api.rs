@@ -118,20 +118,36 @@ pub(crate) enum FmtSpecCacheEntry {
     },
 }
 
+/// Typed identity of a callable handled by the registered-builtin call cache.
+///
+/// Registry names identify `ValueKind::BuiltinFunction`; weak class identities
+/// identify every exact singleton in the primitive-constructor dispatch map.
+/// Keeping the namespaces distinct prevents a same-named user class from
+/// reusing a builtin-function entry.
+#[derive(Clone, Debug)]
+pub(crate) enum CallBuiltinCacheKey {
+    RegistryName(&'static str),
+    PrimitiveClass(
+        /// A weak allocation identity prevents ABA reuse while adding no
+        /// Python-visible owner and requiring no upgrade on a warm hit.
+        std::rc::Weak<std::cell::RefCell<pyrust_core::PyClass>>,
+    ),
+}
+
 /// Per-call-site inline cache for a registered built-in callee, so hot calls
-/// such as `len(x)` and `math.sqrt(x)` skip `call_function_expanded` and the
-/// registry binary search on every iteration.  Cacheability follows immutable
-/// registry membership; punctuation in the internal dispatch key carries no
-/// callable-category semantics.  `Copy` (a `&'static str` and fn pointers) so
-/// the `Vec` initialises with `vec![Empty; n]`.
-#[derive(Clone, Copy, Debug)]
+/// such as `len(x)`, `math.sqrt(x)`, and `zip(a, b)` skip generic call routing
+/// and the registry binary search on every iteration. Cacheability follows
+/// immutable registry membership or a canonical built-in-class identity.
+/// `Clone` lets the `Vec` initialise with `vec![Empty; n]`; class entries are
+/// deliberately not `Copy` because their weak allocation identity owns a
+/// control-block reference.
+#[derive(Clone, Debug)]
 pub(crate) enum CallBuiltinCacheEntry {
     Empty,
     Cached {
-        /// Canonical name that resolved to `dispatch`; compared by content so a
-        /// polymorphic call site (`(len if c else ord)(x)`) re-resolves when the
-        /// callee changes rather than mis-dispatching.
-        name: &'static str,
+        /// Immutable identity that resolved to `dispatch`; polymorphic sites
+        /// re-resolve and overwrite the entry when this key changes.
+        key: CallBuiltinCacheKey,
         dispatch: crate::builtin_registry::BuiltinDispatchFn,
         /// Optional "vectorcall" fast entry + inclusive positional-arity bounds
         /// `(min, max)`.  When present and the call's `argc` is in range, the VM
@@ -139,6 +155,13 @@ pub(crate) enum CallBuiltinCacheEntry {
         /// `ExpandedCallArg` buffer + kwarg/arity validation entirely.
         fast: Option<(crate::builtin_registry::BuiltinFastDispatchFn, u8, u8)>,
     },
+    /// Exact class identity already proved absent from
+    /// `PRIMITIVE_CLASS_DISPATCH`. A warm hit skips only that identity-map
+    /// lookup and still enters the shared typing/adapter/generic-class tail.
+    ClassAfterPrimitiveMiss(
+        /// Weak identity prevents both ownership extension and allocator ABA.
+        std::rc::Weak<std::cell::RefCell<pyrust_core::PyClass>>,
+    ),
 }
 
 /// Apply a (usually constant) f-string format spec to `value`, consulting a

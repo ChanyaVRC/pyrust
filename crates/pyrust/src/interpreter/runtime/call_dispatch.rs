@@ -31,10 +31,10 @@ impl Interpreter {
         // ordinary `Class(...)` call.
         if let ValueKind::PyClass(class) = function.kind() {
             let class = Rc::clone(class);
-            if let Some(value) = self.try_call_builtin_class(&class, args)? {
-                return Ok(value);
+            if let Some(dispatch) = primitive_class_dispatch(&class) {
+                return dispatch(self, args);
             }
-            return self.call_class_expanded(class, args);
+            return self.call_class_after_primitive_miss(class, args);
         }
 
         // These ordinary callable representations likewise cannot be one of

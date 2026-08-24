@@ -14,6 +14,18 @@ pub(crate) fn primitive_class_dispatch(
     PRIMITIVE_CLASS_DISPATCH.with(|m| m.borrow().get(&ptr).copied())
 }
 
+/// Read the optional immutable identity carried by the six canonical iterator
+/// classes without conflating an ordinary untagged class with a borrow
+/// conflict. Call-cache code may still dispatch an exact primitive identity
+/// during a conflict, but deliberately declines to retain metadata it could
+/// not inspect.
+#[inline]
+pub(crate) fn try_builtin_type_class_tag(
+    class: &Rc<RefCell<PyClass>>,
+) -> std::result::Result<Option<pyrust_core::BuiltinTypeClassTag>, std::cell::BorrowError> {
+    class.try_borrow().map(|class| class.builtin_type_tag)
+}
+
 /// Construct the backing value for a primitive subclass from its immutable
 /// canonical identity.
 ///

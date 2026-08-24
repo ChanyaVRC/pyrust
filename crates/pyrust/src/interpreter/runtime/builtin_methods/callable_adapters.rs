@@ -131,26 +131,26 @@ impl Interpreter {
         matches!(function.kind(), ValueKind::BuiltinFunction("id")).then(|| argument.object_id())
     }
 
-    /// Handle the concrete class objects supplied by the builtin layer.
+    /// Continue class dispatch after the caller has proved that the exact
+    /// identity is absent from `PRIMITIVE_CLASS_DISPATCH`.
     ///
-    /// Generic call routing owns the `PyClass` classification and ordinary
-    /// class construction; exact builtin identities and constructors remain
-    /// confined to this adapter.
+    /// Both generic calls and the per-PC call cache use this one continuation,
+    /// so a cache miss never probes the primitive map twice. The ordering of
+    /// typing markers, MappingProxyType, GenericAlias, and ordinary Python
+    /// construction remains the pre-cache ordering.
     #[inline]
-    pub(super) fn try_call_builtin_class(
+    pub(super) fn call_class_after_primitive_miss(
         &mut self,
-        class: &Rc<RefCell<PyClass>>,
+        class: Rc<RefCell<PyClass>>,
         args: &[ExpandedCallArg],
-    ) -> Result<Option<Value>> {
-        if let Some(dispatch) = primitive_class_dispatch(class) {
-            return dispatch(self, args).map(Some);
+    ) -> Result<Value> {
+        if let Some(value) = self.try_call_typing_marker(&class, args)? {
+            return Ok(value);
         }
-        if let Some(value) = self.try_call_typing_marker(class, args)? {
-            return Ok(Some(value));
-        }
-        match class.borrow().canonical_tag {
+        let canonical_tag = class.borrow().canonical_tag;
+        match canonical_tag {
             Some(pyrust_core::CanonicalClassTag::MappingProxy) => {
-                return construct_mapping_proxy(args).map(Some);
+                return construct_mapping_proxy(args);
             }
             Some(pyrust_core::CanonicalClassTag::GenericAlias) => {
                 if args.iter().any(|arg| arg.name.is_some()) {
@@ -171,13 +171,13 @@ impl Interpreter {
                 } else {
                     Value::tuple(vec![index])
                 };
-                return Ok(Some(pyrust_builtins::generic_alias::generic_alias(
+                return Ok(pyrust_builtins::generic_alias::generic_alias(
                     origin, type_args,
-                )));
+                ));
             }
             _ => {}
         }
-        Ok(None)
+        self.call_class_expanded(class, args)
     }
 
     /// Invoke a native classmethod recovered from a validated attribute-cache

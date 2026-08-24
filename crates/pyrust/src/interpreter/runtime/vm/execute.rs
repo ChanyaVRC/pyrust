@@ -1,3 +1,12 @@
+enum PlainCallProbe {
+    Identity(Value),
+    Fast(BuiltinVectorcallDispatch),
+    Slow {
+        function: Value,
+        cache_probe: BuiltinCallProbe,
+    },
+}
+
 impl Interpreter {
     #[allow(clippy::too_many_arguments)]
     fn run_bytecode_inner_impl(
@@ -1238,25 +1247,60 @@ impl Interpreter {
 
                 // ── Calls ────────────────────────────────────────────────
                 Insn::Call(func_reg, argc) => {
-                    let func_val = vm_try!(vm_read(&regs, *func_reg, num_locals));
-                    if *argc == 1
-                        && let Some(argument) = regs.get((*func_reg + 1) as usize)
-                        && let Some(identity) = Self::try_identity_builtin_call(&func_val, argument)
-                    {
-                        regs[*func_reg as usize] = identity;
-                        continue 'vm;
+                    if regs[*func_reg as usize].is_unset() {
+                        let owned = vm_read(&regs, *func_reg, num_locals);
+                        vm_try!(owned);
+                        unreachable!();
                     }
-                    let argument_base = (*func_reg + 1) as usize;
-                    let argument_end = argument_base + *argc as usize;
-                    if let Some(result) = self.try_builtin_vectorcall(
-                        code,
-                        pc - 1,
-                        &func_val,
-                        &(*regs)[argument_base..argument_end],
-                    ) {
-                        regs[*func_reg as usize] = vm_try!(result);
-                        continue 'vm;
-                    }
+
+                    let probe = {
+                        let function = &regs[*func_reg as usize];
+                        if *argc == 1
+                            && let Some(argument) = regs.get((*func_reg + 1) as usize)
+                            && let Some(identity) =
+                                Self::try_identity_builtin_call(function, argument)
+                        {
+                            PlainCallProbe::Identity(identity)
+                        } else {
+                            let argument_base = (*func_reg + 1) as usize;
+                            let argument_end = argument_base + *argc as usize;
+                            let cache_probe = Self::probe_builtin_vectorcall(
+                                code,
+                                pc - 1,
+                                function,
+                                &(*regs)[argument_base..argument_end],
+                            );
+                            match cache_probe {
+                                BuiltinCallProbe::Vector(dispatch) => {
+                                    PlainCallProbe::Fast(dispatch)
+                                }
+                                cache_probe => PlainCallProbe::Slow {
+                                    function: function.clone(),
+                                    cache_probe,
+                                },
+                            }
+                        }
+                    };
+                    let (func_val, cache_probe) = match probe {
+                        PlainCallProbe::Identity(identity) => {
+                            regs[*func_reg as usize] = identity;
+                            continue 'vm;
+                        }
+                        PlainCallProbe::Fast(dispatch) => {
+                            let argument_base = (*func_reg + 1) as usize;
+                            let argument_end = argument_base + *argc as usize;
+                            let result = {
+                                let arguments = &(*regs)[argument_base..argument_end];
+                                dispatch(self, arguments)
+                            };
+                            regs[*func_reg as usize] = vm_try!(result);
+                            continue 'vm;
+                        }
+                        PlainCallProbe::Slow {
+                            function,
+                            cache_probe,
+                        } => (function, cache_probe),
+                    };
                     tramp_try!(*func_reg, *argc, func_val);
                     // Bound-method trampoline (#2345): `f = o.m; f()` calls a
                     // BoundMethod through Insn::Call.  Trampoline the underlying
@@ -1278,6 +1322,7 @@ impl Interpreter {
                         code,
                         pc - 1,
                         cur_line,
+                        PositionalCallCacheProbe::Probed(cache_probe),
                     ));
                 }
 
@@ -1311,6 +1356,7 @@ impl Interpreter {
                                 code,
                                 pc - 1,
                                 cur_line,
+                                PositionalCallCacheProbe::Unprobed,
                             ));
                         }
                     }
