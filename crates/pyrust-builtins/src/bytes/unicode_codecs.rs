@@ -223,14 +223,18 @@ fn decode_utf16(
             "ignore" => {
                 // Drop the trailing byte and decode the rest.
                 let units: Vec<u16> = bytes[..bytes.len() - 1]
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| to_u16([c[0], c[1]]))
                     .collect();
                 return decode_utf16_units(&units, original_bytes, bom_offset, codec_name, errors);
             }
             "replace" => {
                 let units: Vec<u16> = bytes[..bytes.len() - 1]
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| to_u16([c[0], c[1]]))
                     .collect();
                 let mut s = decode_utf16_units_to_string(
@@ -245,7 +249,9 @@ fn decode_utf16(
             }
             "backslashreplace" => {
                 let units: Vec<u16> = bytes[..bytes.len() - 1]
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| to_u16([c[0], c[1]]))
                     .collect();
                 let mut s = decode_utf16_units_to_string(
@@ -277,7 +283,9 @@ fn decode_utf16(
         }
     }
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| to_u16([c[0], c[1]]))
         .collect();
     decode_utf16_units(&units, original_bytes, bom_offset, codec_name, errors)
@@ -551,10 +559,9 @@ fn decode_utf32(
     } else {
         u32::from_le_bytes
     };
-    let chunks = bytes.chunks_exact(4);
-    let remainder = chunks.remainder();
+    let (chunks, remainder) = bytes.as_chunks::<4>();
     let mut out = String::with_capacity(bytes.len() / 4);
-    for (i, chunk) in chunks.enumerate() {
+    for (i, chunk) in chunks.iter().enumerate() {
         let cp = to_u32([chunk[0], chunk[1], chunk[2], chunk[3]]);
         match char::from_u32(cp) {
             Some(c) => out.push(c),
