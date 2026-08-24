@@ -22,6 +22,32 @@ pub(super) enum MemoCallProbe {
     Miss(MemoKey),
 }
 
+pub(super) type BuiltinVectorcallDispatch = crate::builtin_registry::BuiltinFastDispatchFn;
+
+#[derive(Clone, Copy)]
+pub(super) enum BuiltinCallCacheMiss {
+    Registry,
+    Class,
+}
+
+/// Execution-free result of the single call-site cache probe.
+#[derive(Clone, Copy)]
+pub(super) enum BuiltinCallProbe {
+    Uncacheable,
+    Vector(BuiltinVectorcallDispatch),
+    Expanded(crate::builtin_registry::BuiltinDispatchFn),
+    ClassAfterPrimitiveMiss,
+    EligibleMiss(BuiltinCallCacheMiss),
+}
+
+/// Plain `Call` carries an already-probed token. `CallMemo` bypasses have not
+/// visited this independent cache and request exactly one internal probe.
+#[derive(Clone, Copy)]
+pub(super) enum PositionalCallCacheProbe {
+    Probed(BuiltinCallProbe),
+    Unprobed,
+}
+
 impl Interpreter {
     /// Probe the adaptive result cache without executing the callee.
     ///
@@ -153,81 +179,160 @@ impl Interpreter {
         }
     }
 
-    /// Dispatch a warm positional built-in call without constructing an
-    /// expanded-argument buffer.
+    /// Probe a positional built-in call without executing the callee.
+    ///
+    /// Value kinds outside the registry/class cache domain return before the
+    /// RefCell borrow. Eligible values read the cache exactly once and return a
+    /// copied token that is consumed only after every cache/register borrow has
+    /// ended.
     #[inline]
-    pub(super) fn try_builtin_vectorcall(
-        &mut self,
+    pub(super) fn probe_builtin_vectorcall(
         code: &crate::bytecode::FnCode,
         call_site: usize,
         function: &Value,
         arguments: &[Value],
-    ) -> Option<Result<Value>> {
-        let ValueKind::BuiltinFunction(name) = function.kind() else {
-            return None;
-        };
-        let dispatch = {
-            let cache = code.call_builtin_cache.borrow();
-            match cache.get(call_site)? {
-                CallBuiltinCacheEntry::Cached {
-                    name: cached_name,
-                    fast: Some((dispatch, minimum, maximum)),
-                    ..
-                } if *cached_name == name
-                    && (*minimum..=*maximum).contains(&(arguments.len() as u8)) =>
-                {
-                    *dispatch
-                }
-                _ => return None,
-            }
-        };
-        if arguments.iter().any(Value::is_unset) {
-            return None;
-        }
-        Some(dispatch(self, arguments))
+    ) -> BuiltinCallProbe {
+        Self::probe_builtin_call_cache(code, call_site, function, Some(arguments))
     }
 
-    /// Use the monomorphic per-call-site registry cache, populating it for a
-    /// plain built-in on the first miss.
+    #[inline]
+    fn cached_builtin_call_probe(
+        dispatch: crate::builtin_registry::BuiltinDispatchFn,
+        fast: Option<(BuiltinVectorcallDispatch, u8, u8)>,
+        arguments: Option<&[Value]>,
+    ) -> BuiltinCallProbe {
+        if let (Some((fast, minimum, maximum)), Some(arguments)) = (fast, arguments)
+            && (minimum..=maximum).contains(&(arguments.len() as u8))
+            && !arguments.iter().any(Value::is_unset)
+        {
+            BuiltinCallProbe::Vector(fast)
+        } else {
+            BuiltinCallProbe::Expanded(dispatch)
+        }
+    }
+
+    #[inline]
+    fn probe_builtin_call_cache(
+        code: &crate::bytecode::FnCode,
+        call_site: usize,
+        function: &Value,
+        vector_arguments: Option<&[Value]>,
+    ) -> BuiltinCallProbe {
+        match function.kind() {
+            ValueKind::BuiltinFunction(name) => {
+                let cache = code.call_builtin_cache.borrow();
+                match cache.get(call_site) {
+                    Some(CallBuiltinCacheEntry::Cached {
+                        key: super::formatting::CallBuiltinCacheKey::RegistryName(cached_name),
+                        dispatch,
+                        fast,
+                    }) if *cached_name == name => {
+                        Self::cached_builtin_call_probe(*dispatch, *fast, vector_arguments)
+                    }
+                    _ => BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::Registry),
+                }
+            }
+            ValueKind::PyClass(class) => {
+                let cache = code.call_builtin_cache.borrow();
+                match cache.get(call_site) {
+                    Some(CallBuiltinCacheEntry::Cached {
+                        key: super::formatting::CallBuiltinCacheKey::PrimitiveClass(cached_class),
+                        dispatch,
+                        fast,
+                    }) if cached_class.as_ptr() == std::rc::Rc::as_ptr(class) => {
+                        Self::cached_builtin_call_probe(*dispatch, *fast, vector_arguments)
+                    }
+                    Some(CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(cached_class))
+                        if cached_class.as_ptr() == std::rc::Rc::as_ptr(class) =>
+                    {
+                        BuiltinCallProbe::ClassAfterPrimitiveMiss
+                    }
+                    _ => BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::Class),
+                }
+            }
+            _ => BuiltinCallProbe::Uncacheable,
+        }
+    }
+
+    /// Consume one execution-free probe token, populating a cacheable miss
+    /// without reading the call-site cache a second time.
     fn call_with_builtin_site_cache(
         &mut self,
         code: &crate::bytecode::FnCode,
         call_site: usize,
         function: Value,
         arguments: &[ExpandedCallArg],
+        probe: BuiltinCallProbe,
     ) -> Result<Value> {
-        if let ValueKind::BuiltinFunction(name) = function.kind() {
-            let cached = {
-                let cache = code.call_builtin_cache.borrow();
-                match cache.get(call_site) {
-                    Some(CallBuiltinCacheEntry::Cached {
-                        name: cached_name,
-                        dispatch,
-                        ..
-                    }) if *cached_name == name => Some(*dispatch),
-                    _ => None,
-                }
-            };
-            if let Some(dispatch) = cached {
-                return dispatch(self, arguments);
+        match probe {
+            BuiltinCallProbe::Uncacheable => self.call_function_expanded(function, arguments),
+            BuiltinCallProbe::Vector(_) => {
+                unreachable!("vector tokens are consumed by the opcode loop")
             }
-            // Registry membership, not punctuation in the internal dispatch
-            // key, determines cacheability.  Module functions such as
-            // `math.sqrt` use a dotted key just like type descriptors, but
-            // still have an immutable dispatcher and vectorcall entry.
-            if let Some(registration) = crate::builtin_registry::lookup_registration(name) {
-                let dispatch = registration.dispatch;
-                code.call_builtin_cache.borrow_mut()[call_site] = CallBuiltinCacheEntry::Cached {
-                    name,
-                    dispatch,
-                    fast: registration
-                        .fast
-                        .map(|fast| (fast, registration.min_arity, registration.max_arity)),
+            BuiltinCallProbe::Expanded(dispatch) => dispatch(self, arguments),
+            BuiltinCallProbe::ClassAfterPrimitiveMiss => {
+                let ValueKind::PyClass(class) = function.kind() else {
+                    unreachable!("a negative class token must retain its class callee")
                 };
-                return dispatch(self, arguments);
+                self.call_class_after_primitive_miss(std::rc::Rc::clone(class), arguments)
+            }
+            BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::Registry) => {
+                let ValueKind::BuiltinFunction(name) = function.kind() else {
+                    unreachable!("a registry miss token must retain its registry callee")
+                };
+                let Some(registration) = crate::builtin_registry::lookup_registration(name) else {
+                    return self.call_function_expanded(function, arguments);
+                };
+                let fast = registration
+                    .fast
+                    .map(|fast| (fast, registration.min_arity, registration.max_arity));
+                code.call_builtin_cache.borrow_mut()[call_site] = CallBuiltinCacheEntry::Cached {
+                    key: super::formatting::CallBuiltinCacheKey::RegistryName(name),
+                    dispatch: registration.dispatch,
+                    fast,
+                };
+                (registration.dispatch)(self, arguments)
+            }
+            BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::Class) => {
+                let ValueKind::PyClass(class) = function.kind() else {
+                    unreachable!("a class miss token must retain its class callee")
+                };
+                let class = std::rc::Rc::clone(class);
+
+                // This is the sole primitive-map probe on a cold class miss.
+                let Some(dispatch) = super::primitive_class_dispatch(&class) else {
+                    code.call_builtin_cache.borrow_mut()[call_site] =
+                        CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(std::rc::Rc::downgrade(
+                            &class,
+                        ));
+                    return self.call_class_after_primitive_miss(class, arguments);
+                };
+
+                // Positive dispatch is safe during an internal class borrow
+                // conflict, but metadata observed under that conflict must not
+                // be retained.
+                let builtin_type_tag = match super::try_builtin_type_class_tag(&class) {
+                    Ok(tag) => tag,
+                    Err(_) => return dispatch(self, arguments),
+                };
+                let fast = builtin_type_tag.and_then(|tag| {
+                    let name = super::BuiltinTypeClass::from_tag(tag).class_name();
+                    crate::builtin_registry::lookup_registration(name).and_then(|registration| {
+                        registration
+                            .fast
+                            .map(|fast| (fast, registration.min_arity, registration.max_arity))
+                    })
+                });
+                code.call_builtin_cache.borrow_mut()[call_site] = CallBuiltinCacheEntry::Cached {
+                    key: super::formatting::CallBuiltinCacheKey::PrimitiveClass(
+                        std::rc::Rc::downgrade(&class),
+                    ),
+                    dispatch,
+                    fast,
+                };
+                dispatch(self, arguments)
             }
         }
-        self.call_function_expanded(function, arguments)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -241,6 +346,7 @@ impl Interpreter {
         code: &crate::bytecode::FnCode,
         call_site: usize,
         current_line: u32,
+        probe: PositionalCallCacheProbe,
     ) -> Result<Value> {
         let argument_base = (function_register + 1) as usize;
         let argument_end = argument_base + argument_count as usize;
@@ -292,8 +398,14 @@ impl Interpreter {
             return Err(error);
         }
 
+        let probe = match probe {
+            PositionalCallCacheProbe::Probed(probe) => probe,
+            PositionalCallCacheProbe::Unprobed => {
+                Self::probe_builtin_call_cache(code, call_site, &function, None)
+            }
+        };
         Self::publish_frame_line_for_builtin(&function, current_line);
-        let result = self.call_with_builtin_site_cache(code, call_site, function, &buffer);
+        let result = self.call_with_builtin_site_cache(code, call_site, function, &buffer, probe);
 
         if lend_by_move {
             for (offset, argument) in buffer.drain(..).enumerate() {

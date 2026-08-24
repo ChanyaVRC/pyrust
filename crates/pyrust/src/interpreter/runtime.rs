@@ -97,7 +97,7 @@ use calls::{
 mod call_dispatch {
     use super::{
         ExpandedCallArg, Interpreter, Rc, Result, Value, ValueKind, invoke_class_method,
-        lookup_class_attr,
+        lookup_class_attr, primitive_class_dispatch,
     };
     include!("runtime/call_dispatch.rs");
 }
@@ -139,9 +139,9 @@ mod builtin_methods {
         is_ordered_dict_class_or_subclass, is_primitive_class, is_reversed_iterator,
         is_stop_iteration_error, lookup_class_attr, make_iterator, native_iterator_class,
         native_iterator_object_method_arity, ordered_dict_owner, primitive_class_by_name,
-        primitive_class_dispatch, primitive_class_kind, reject_keyword_args_expanded,
-        render_instance_repr, type_class_singleton, value_class, value_from_bigint,
-        value_to_bigint, value_type_name_str, values_are_identical,
+        primitive_class_kind, reject_keyword_args_expanded, render_instance_repr,
+        type_class_singleton, value_class, value_from_bigint, value_to_bigint, value_type_name_str,
+        values_are_identical,
     };
     include!("runtime/builtin_methods.rs");
 }
@@ -359,7 +359,8 @@ pub(crate) fn is_ordered_dict_class_or_subclass(class: &Rc<RefCell<PyClass>>) ->
 
 mod execution {
     use super::fast_path::{
-        LoopFastOutcome, MemoCallProbe, advance_loop_fast_state, build_string_fast,
+        BuiltinCallProbe, BuiltinVectorcallDispatch, LoopFastOutcome, MemoCallProbe,
+        PositionalCallCacheProbe, advance_loop_fast_state, build_string_fast,
         iter_slot_is_indexed_sequence, iter_slot_is_int_range, iter_slot_is_int_range_exact,
         list_reserve_hint, try_builtin_sequence_len, try_constant_compare_fast,
         try_indexed_sequence_int_element, try_inline_leaf_binop, try_integer_compare_fast,

@@ -415,6 +415,78 @@ fn execution_and_expression_domains_do_not_borrow_register_values() {
 }
 
 #[test]
+fn plain_call_builtin_probe_is_execution_free_and_borrow_scoped() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/interpreter/runtime");
+    let support_path = source_root.join("fast_path/call_cache_support.rs");
+    let support = std::fs::read_to_string(&support_path)
+        .unwrap_or_else(|error| panic!("{} must be readable: {error}", support_path.display()));
+    let support = support.replace("\r\n", "\n");
+    assert!(
+        support.contains("fn probe_builtin_vectorcall("),
+        "the plain Call fast path must use an execution-free cache probe"
+    );
+    assert!(
+        support.contains(
+            "pub(super) fn probe_builtin_vectorcall(\n        code: &crate::bytecode::FnCode,"
+        ),
+        "the cache probe must not borrow Interpreter or execute a dispatcher"
+    );
+    let cache_probe_start = support
+        .find("fn probe_builtin_call_cache(")
+        .expect("the typed cache probe helper must exist");
+    let cache_probe_end = support[cache_probe_start..]
+        .find("/// Consume one execution-free probe token")
+        .map(|offset| cache_probe_start + offset)
+        .expect("the probe helper must precede its token consumer");
+    let cache_probe = &support[cache_probe_start..cache_probe_end];
+    assert!(
+        cache_probe.find("match function.kind()") < cache_probe.find("call_builtin_cache.borrow()"),
+        "callable category selection must begin before any cache borrow"
+    );
+    assert!(
+        cache_probe.contains("_ => BuiltinCallProbe::Uncacheable"),
+        "unrelated ValueKinds must have an explicit cache-free probe result"
+    );
+    let consumer_start = support
+        .find("fn call_with_builtin_site_cache(")
+        .expect("the probe token consumer must exist");
+    let consumer_end = support[consumer_start..]
+        .find("pub(super) fn call_positional_cached(")
+        .map(|offset| consumer_start + offset)
+        .expect("the token consumer must precede positional call setup");
+    assert!(
+        !support[consumer_start..consumer_end].contains("call_builtin_cache.borrow()"),
+        "a copied probe token must prevent a second cache read"
+    );
+
+    let execute_path = source_root.join("vm/execute.rs");
+    let execute = std::fs::read_to_string(&execute_path)
+        .unwrap_or_else(|error| panic!("{} must be readable: {error}", execute_path.display()));
+    let call_start = execute
+        .find("Insn::Call(func_reg, argc) => {")
+        .expect("execute.rs must contain the plain Call arm");
+    let call_end = execute[call_start..]
+        .find("Insn::CallMemo(func_reg, argc) => {")
+        .map(|offset| call_start + offset)
+        .expect("CallMemo must follow the plain Call arm");
+    let call_arm = &execute[call_start..call_end];
+    assert!(
+        !call_arm.contains("let func_val = vm_try!(vm_read"),
+        "plain Call must not eagerly clone its callee before the cache probe"
+    );
+    let probe = call_arm
+        .find("Self::probe_builtin_vectorcall")
+        .expect("plain Call must invoke the execution-free probe");
+    let owned_miss = call_arm
+        .find("function.clone()")
+        .expect("the probe miss must take one owned fallback clone");
+    assert!(
+        probe < owned_miss,
+        "the borrowed cache probe must run before the one owned miss clone"
+    );
+}
+
+#[test]
 fn vm_opcode_loop_does_not_own_concrete_iteration_adapters() {
     let vm_opcode_loop = include_graph(&["runtime/vm/execute.rs"]);
     for adapter in [
