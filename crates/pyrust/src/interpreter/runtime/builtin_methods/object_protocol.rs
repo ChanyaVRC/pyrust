@@ -334,6 +334,7 @@ fn builtin_object_method_names(ops: &dyn pyrust_core::BuiltinTypeOps) -> Vec<Str
         Some(pyrust_core::CanonicalClassTag::Bytearray) => builtin_method_names("bytearray"),
         Some(pyrust_core::CanonicalClassTag::Dict) => builtin_method_names("dict"),
         Some(pyrust_core::CanonicalClassTag::Frozenset) => builtin_method_names("frozenset"),
+        Some(pyrust_core::CanonicalClassTag::MappingProxy) => builtin_method_names("mappingproxy"),
         _ if pyrust_builtins::slice::is_slice_ops(ops) => builtin_method_names("slice"),
         _ => Vec::new(),
     }

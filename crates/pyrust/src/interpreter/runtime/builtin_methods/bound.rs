@@ -375,7 +375,7 @@ impl Interpreter {
             if !matches!(receiver.kind(), ValueKind::PyInstance(_))
                 && crate::interpreter::is_object_protocol_method(&receiver, method)
             {
-                return Ok(self.object_protocol_method_result(method, &receiver));
+                return self.object_protocol_method_result(method, &receiver);
             }
             // #2191: `__format__` bound on a built-in data value
             // (`(5).__format__('x')`, `"hi".__format__('>5')`,
@@ -515,6 +515,15 @@ impl Interpreter {
             let dispatch = crate::builtin_registry::lookup("reversed")
                 .expect("reversed must be in the registry");
             return dispatch(self, &[arg]);
+        }
+        // Object-backed mappingproxy `__reversed__` must delegate to the
+        // owner's `__reversed__` attribute rather than the generic protocol
+        // arm below (which routes through the `reversed` builtin).
+        if method == "__reversed__"
+            && matches!(receiver.kind(), ValueKind::BuiltinObject { ops, .. }
+                if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops))
+        {
+            return self.call_builtin_object_bound_method(&receiver, method, pos, &kw);
         }
         enum Kind {
             Int,

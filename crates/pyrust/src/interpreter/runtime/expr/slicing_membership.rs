@@ -466,6 +466,27 @@ impl Interpreter {
                     let owner = pyrust_builtins::mapping_proxy::owner_from_state(state)
                         .expect("object mappingproxy state");
                     self.eval_in(owner, item)
+                } else if pyrust_builtins::mapping_proxy::is_exact_proxy_ops(ops) {
+                    if let Some(dict_rc) = pyrust_builtins::mapping_proxy::as_dict_rc(&container) {
+                        self.eval_in(Value::dict_shared(dict_rc), item)
+                    } else if let Some(class_rc) =
+                        pyrust_builtins::mapping_proxy::as_class_rc(&container)
+                    {
+                        if let Some(s) = item.as_str() {
+                            Ok(Value::bool_(class_rc.borrow().attrs.contains_key(s)))
+                        } else {
+                            let key = self.value_to_pykey(&item)?;
+                            let found = match key {
+                                PyKey::Str(s) => s
+                                    .as_str()
+                                    .is_some_and(|name| class_rc.borrow().attrs.contains_key(name)),
+                                _ => false,
+                            };
+                            Ok(Value::bool_(found))
+                        }
+                    } else {
+                        ops.contains(state, &item).map(Value::bool_)
+                    }
                 } else if ops.canonical_class_tag()
                     == Some(pyrust_core::CanonicalClassTag::Bytearray)
                 {

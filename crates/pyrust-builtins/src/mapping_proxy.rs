@@ -18,6 +18,14 @@ use pyrust_core::{
 
 pub const TYPE_NAME: &str = "mappingproxy";
 
+/// Public instance methods exposed on `types.MappingProxyType`.
+pub const METHODS: &[&str] = &["keys", "values", "items", "get", "copy"];
+
+/// Provider-owned primitive class attributes for `types.MappingProxyType` (#3019).
+pub const CLASS_ATTRS: crate::primitive_class_attrs::PrimitiveClassAttrs =
+    crate::primitive_class_attrs::PrimitiveClassAttrs::new(TYPE_NAME, METHODS)
+        .with_flags(crate::primitive_class_attrs::PrimitiveClassFlags::NONE.with_class_getitem());
+
 /// What a `mappingproxy` is proxying. Exact dicts and class namespaces retain
 /// their direct-storage fast paths; every other object is authoritative and
 /// must be read through the interpreter's normal mapping protocols.
@@ -227,9 +235,12 @@ impl BuiltinTypeOps for MappingProxyOps {
                     .ok_or_else(|| PyError::key_error(key.clone()))
             }
             MappingProxySource::Dict(rc) => {
-                let pk = key
-                    .to_key()
-                    .ok_or_else(|| PyError::named("TypeError", "unhashable type".to_string()))?;
+                let pk = key.to_key().ok_or_else(|| {
+                    PyError::named(
+                        "TypeError",
+                        format!("unhashable type: '{}'", pyrust_core::builtin_type_name(key)),
+                    )
+                })?;
                 rc.borrow()
                     .get(&pk)
                     .cloned()
@@ -257,7 +268,13 @@ impl BuiltinTypeOps for MappingProxyOps {
             }
             MappingProxySource::Dict(rc) => match item.to_key() {
                 Some(pk) => Ok(rc.borrow().contains_key(&pk)),
-                None => Ok(false),
+                None => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "unhashable type: '{}'",
+                        pyrust_core::builtin_type_name(item)
+                    ),
+                )),
             },
             MappingProxySource::Object(_) => Err(PyError::Runtime(
                 "internal: mappingproxy object membership requires interpreter dispatch"
@@ -289,17 +306,44 @@ impl BuiltinTypeOps for MappingProxyOps {
             ));
         }
         match method {
-            "keys" => Ok(crate::dict_views::dict_keys(source_dict_rc(&src))),
-            "values" => Ok(crate::dict_views::dict_values(source_dict_rc(&src))),
-            "items" => Ok(crate::dict_views::dict_items(source_dict_rc(&src))),
+            "keys" => Ok(match &src {
+                MappingProxySource::Class(cls) => {
+                    crate::dict_views::dict_keys_for_class(source_dict_rc(&src), Rc::clone(cls))
+                }
+                _ => crate::dict_views::dict_keys(source_dict_rc(&src)),
+            }),
+            "values" => Ok(match &src {
+                MappingProxySource::Class(cls) => {
+                    crate::dict_views::dict_values_for_class(source_dict_rc(&src), Rc::clone(cls))
+                }
+                _ => crate::dict_views::dict_values(source_dict_rc(&src)),
+            }),
+            "items" => Ok(match &src {
+                MappingProxySource::Class(cls) => {
+                    crate::dict_views::dict_items_for_class(source_dict_rc(&src), Rc::clone(cls))
+                }
+                _ => crate::dict_views::dict_items(source_dict_rc(&src)),
+            }),
             "get" => {
                 let default = || args.get(1).cloned().unwrap_or(Value::none());
                 match &src {
                     MappingProxySource::Class(cls) => {
                         let key_str = match args[0].kind() {
                             ValueKind::Str(s) => s.to_string(),
-                            // Non-string keys are never in a class dict.
-                            _ => return Ok(default()),
+                            // Non-string keys are never in a class dict, but
+                            // unhashable keys must still raise TypeError.
+                            _ => {
+                                if args[0].to_key().is_none() {
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "unhashable type: '{}'",
+                                            pyrust_core::builtin_type_name(&args[0])
+                                        ),
+                                    ));
+                                }
+                                return Ok(default());
+                            }
                         };
                         let value = cls.borrow().attrs.get(&key_str).cloned();
                         Ok(value
@@ -308,7 +352,13 @@ impl BuiltinTypeOps for MappingProxyOps {
                     }
                     MappingProxySource::Dict(rc) => match args[0].to_key() {
                         Some(pk) => Ok(rc.borrow().get(&pk).cloned().unwrap_or_else(default)),
-                        None => Ok(default()),
+                        None => Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "unhashable type: '{}'",
+                                pyrust_core::builtin_type_name(&args[0])
+                            ),
+                        )),
                     },
                     MappingProxySource::Object(_) => unreachable!(),
                 }
@@ -362,7 +412,17 @@ impl BuiltinTypeOps for MappingProxyObjectOps {
     }
 
     fn eq(&self, state: &BuiltinState, other: &Value) -> bool {
-        MAPPING_PROXY_OPS.eq(state, other)
+        // Reflexive identity equality keeps `PyKey::Object` lookup sound for
+        // hashable object-backed proxies (e.g. `MappingProxyType(HashableDict())`
+        // as a dict/set key, #3019); non-identical comparisons go through the
+        // interpreter's `values_user_eq` / `eval_binary` rich-compare path.
+        matches!(
+            other.kind(),
+            ValueKind::BuiltinObject {
+                ops,
+                state: rhs_state,
+            } if is_object_proxy_ops(ops) && Rc::ptr_eq(state, rhs_state)
+        )
     }
 
     fn len(&self, state: &BuiltinState) -> Option<usize> {
@@ -550,6 +610,46 @@ pub fn proxied_of(value: &Value) -> Option<Value> {
     // is as deep as the nesting the program wrote, and ends at the first
     // non-proxy (or owner-less) value.
     while let Some(next) = owner_of(&proxied) {
+        proxied = next;
+    }
+    Some(proxied)
+}
+
+/// Expose a raw class-namespace value as it appears through `C.__dict__`.
+#[inline]
+pub fn expose_class_attr(value: &Value) -> Value {
+    expose_class_value(value)
+}
+
+/// Unwrap ONE layer of any `mappingproxy` (dict-backed, class-backed, or
+/// object-backed) into its proxied mapping `Value`.
+///
+/// Keeping one-hop unwrapping lets ordering comparisons mirror CPython's
+/// `mappingproxy_richcompare` + reflected-operand dispatch (so `p < q` unwraps
+/// `p` first and then triggers `q`'s reflected `>`, reporting `'>'` in the
+/// TypeError rather than `'<'`, issue #3019).
+#[inline]
+pub fn unwrap_one(value: &Value) -> Option<Value> {
+    if !value.is_builtin_object() {
+        return None;
+    }
+    let src = borrow_source_of(value)?;
+    Some(match src {
+        MappingProxySource::Object(owner) => owner,
+        MappingProxySource::Dict(rc) => Value::dict_shared(rc),
+        MappingProxySource::Class(_) => Value::dict_shared(source_dict_rc(&src)),
+    })
+}
+
+/// Unwrap any `mappingproxy` (dict-backed, class-backed, or object-backed)
+/// through arbitrary nesting to its underlying mapping `Value` (#3019).
+#[inline]
+pub fn proxied_value(value: &Value) -> Option<Value> {
+    if !value.is_builtin_object() {
+        return None;
+    }
+    let mut proxied = unwrap_one(value)?;
+    while let Some(next) = unwrap_one(&proxied) {
         proxied = next;
     }
     Some(proxied)
