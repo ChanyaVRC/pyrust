@@ -448,6 +448,12 @@ fn shallow_copy_with_reconstruct(
         // how to detach its backing; types that are safe to share (immutable
         // or identity-like) return None and are returned unchanged.
         ValueKind::BuiltinObject { ops, state } => {
+            if pyrust_builtins::mapping_proxy::is_mapping_proxy(&obj) {
+                return Err(PyError::named(
+                    "TypeError",
+                    "cannot pickle 'mappingproxy' object".to_string(),
+                ));
+            }
             Ok(ops.copy_storage(state).unwrap_or_else(|| obj.clone()))
         }
 
@@ -897,6 +903,12 @@ fn deep_copy(
         // detached storage is memoised first so a cycle running back through
         // its elements terminates.
         ValueKind::BuiltinObject { ops, state } => {
+            if pyrust_builtins::mapping_proxy::is_mapping_proxy(&obj) {
+                return Err(PyError::named(
+                    "TypeError",
+                    "cannot pickle 'mappingproxy' object".to_string(),
+                ));
+            }
             let Some(copied) = ops.copy_storage(state) else {
                 return Ok(obj.clone());
             };

@@ -199,13 +199,38 @@ impl Interpreter {
             }
             ValueKind::Dict(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
-                // Object-backed mappingproxies need interpreter protocol
-                // dispatch; every exact proxy and other built-in stays on the
-                // original receiver-only operation.
+                // Object-backed mappingproxies delegate directly to the owner;
+                // dict-backed and class-backed proxies route through key
+                // conversion so unhashable keys raise CPython's TypeError and
+                // custom `__hash__`/`__eq__` keys work (#3019).
                 if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) {
                     let owner = pyrust_builtins::mapping_proxy::owner_from_state(state)
                         .expect("object mappingproxy state");
                     self.eval_index(&owner, index)
+                } else if pyrust_builtins::mapping_proxy::is_exact_proxy_ops(ops) {
+                    if let Some(dict_rc) = pyrust_builtins::mapping_proxy::as_dict_rc(target) {
+                        let dict_val = Value::dict_shared(dict_rc);
+                        self.eval_index(&dict_val, index)
+                    } else if let Some(class_rc) =
+                        pyrust_builtins::mapping_proxy::as_class_rc(target)
+                    {
+                        if let Some(s) = index.as_str() {
+                            let val = class_rc.borrow().attrs.get(s).cloned();
+                            val.map(|v| pyrust_builtins::mapping_proxy::expose_class_attr(&v))
+                                .ok_or_else(|| PyError::key_error(index))
+                        } else {
+                            let key = self.value_to_pykey(&index)?;
+                            if let PyKey::Str(s) = key
+                                && let Some(name) = s.as_str()
+                                && let Some(v) = class_rc.borrow().attrs.get(name).cloned()
+                            {
+                                return Ok(pyrust_builtins::mapping_proxy::expose_class_attr(&v));
+                            }
+                            Err(PyError::key_error(index))
+                        }
+                    } else {
+                        ops.get_item(state, &index)
+                    }
                 } else {
                     // Built-in object types opt in to subscripting via
                     // `BuiltinTypeOps::get_item`. The default implementation

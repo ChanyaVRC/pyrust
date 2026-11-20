@@ -406,6 +406,21 @@ impl Interpreter {
             // operator hot paths untouched.
             "__eq__" | "__ne__" | "__lt__" | "__le__" | "__gt__" | "__ge__" => {
                 let other = args.pop().unwrap();
+                // Issue #3019: CPython's `mappingproxy_richcompare` calls
+                // `PyObject_RichCompare(pp->mapping, other, op)` directly —
+                // so `p.__eq__(1)` returns `False` (not `NotImplemented`) and
+                // `p.__lt__(1)` raises `TypeError` (not `NotImplemented`).
+                if pyrust_builtins::mapping_proxy::is_mapping_proxy(&receiver) {
+                    let op = match method {
+                        "__eq__" => crate::ast::BinaryOp::Eq,
+                        "__ne__" => crate::ast::BinaryOp::Ne,
+                        "__lt__" => crate::ast::BinaryOp::Lt,
+                        "__le__" => crate::ast::BinaryOp::Le,
+                        "__gt__" => crate::ast::BinaryOp::Gt,
+                        _ => crate::ast::BinaryOp::Ge,
+                    };
+                    return self.eval_binary(receiver, op, other);
+                }
                 match pyrust_builtins::dict_views::view_kind(&receiver) {
                     Some(pyrust_builtins::dict_views::DictViewKind::Values) => {
                         return Ok(match method {
@@ -688,6 +703,21 @@ impl Interpreter {
                     None => Ok(receiver),
                 }
             }
+            // Issue #3019: CPython's `mappingproxy_or` calls
+            // `PyNumber_Or(pp->mapping, other)` directly (so `p.__or__(1)`
+            // raises `TypeError: unsupported operand type(s) for |: 'dict' and 'int'`,
+            // not `NotImplemented`); `mappingproxy.__ior__` always rejects `|=`.
+            "__or__" if &*type_name == "mappingproxy" => {
+                let other = args.pop().unwrap();
+                self.eval_binary(receiver, crate::ast::BinaryOp::BitOr, other)
+            }
+            "__ror__" if &*type_name == "mappingproxy" => {
+                let other = args.pop().unwrap();
+                self.eval_binary(other, crate::ast::BinaryOp::BitOr, receiver)
+            }
+            "__ior__" if &*type_name == "mappingproxy" => Err(pyrust_core::type_err!(
+                "'|=' is not supported by mappingproxy; use '|' instead"
+            )),
             // Issue #2387: str/bytes/bytearray `%` formatting slots, exposed as
             // method-wrappers (`'%s'.__mod__('x')`, `hasattr(bytes, '__mod__')`).
             // `a.__rmod__(b)` computes `b % a` (swapped operands).  Both delegate

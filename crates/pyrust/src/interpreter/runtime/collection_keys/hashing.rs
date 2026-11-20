@@ -115,16 +115,26 @@ fn hash_value(value: &Value) -> Result<i64> {
         // Note: slice is intercepted before this match in hash_value_with_interp;
         // reaching this arm for a slice correctly returns None (unhashable) because
         // SliceOps::hash was removed in PR #850.
-        ValueKind::BuiltinObject { ops, state } => match ops.hash(state) {
-            Some(h) => Ok(h as i64),
-            None => {
-                let type_name = ops.display_error_name_for(state);
-                Err(PyError::named(
+        ValueKind::BuiltinObject { ops, state } => {
+            if pyrust_builtins::mapping_proxy::is_exact_proxy_ops(ops)
+                || pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops)
+            {
+                return Err(PyError::named(
                     "TypeError",
-                    format!("unhashable type: '{type_name}'"),
-                ))
+                    "unhashable type: 'dict'".to_string(),
+                ));
             }
-        },
+            match ops.hash(state) {
+                Some(h) => Ok(h as i64),
+                None => {
+                    let type_name = ops.display_error_name_for(state);
+                    Err(PyError::named(
+                        "TypeError",
+                        format!("unhashable type: '{type_name}'"),
+                    ))
+                }
+            }
+        }
         // PyInstance arriving here means either the caller didn't intercept
         // it for __hash__ dispatch (e.g. a tuple element), or no __hash__
         // method exists.  Use the actual class name rather than the generic
@@ -225,6 +235,12 @@ pub(crate) fn value_needs_interp(v: &Value) -> bool {
     match v.kind() {
         ValueKind::PyInstance(_) => true,
         ValueKind::Tuple(inner) => tuple_needs_interp(inner),
+        ValueKind::BuiltinObject { ops, .. }
+            if pyrust_builtins::mapping_proxy::is_exact_proxy_ops(ops)
+                || pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) =>
+        {
+            true
+        }
         ValueKind::BuiltinObject { ops, state } if pyrust_builtins::slice::is_slice_ops(ops) => {
             let borrow = state.borrow();
             if let Some(s) = borrow.downcast_ref::<pyrust_builtins::slice::SliceState>() {
@@ -315,6 +331,16 @@ pub(crate) fn hash_value_with_interp(
     value: &Value,
 ) -> Result<i64> {
     match value.kind() {
+        // Issue #3019: CPython's `mappingproxy_hash` delegates to
+        // `PyObject_Hash(pp->mapping)` (raising `unhashable type: 'dict'` for
+        // dict/class proxies and calling `__hash__` on hashable custom mappings).
+        ValueKind::BuiltinObject { .. }
+            if pyrust_builtins::mapping_proxy::is_mapping_proxy(value) =>
+        {
+            let proxied = pyrust_builtins::mapping_proxy::proxied_value(value)
+                .expect("mappingproxy must yield proxied value");
+            hash_value_with_interp(interp, &proxied)
+        }
         ValueKind::Generator(_) if native_iterator_class(value).is_some() => Ok(value
             .object_id()
             .as_int()

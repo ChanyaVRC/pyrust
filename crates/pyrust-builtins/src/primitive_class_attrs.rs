@@ -246,6 +246,7 @@ pub fn lookup(type_name: &str) -> Option<&'static PrimitiveClassAttrs> {
         crate::string::TYPE_NAME => Some(&crate::string::CLASS_ATTRS),
         crate::bytes::TYPE_NAME => Some(&crate::bytes::CLASS_ATTRS),
         crate::bytearray::TYPE_NAME => Some(&crate::bytearray::CLASS_ATTRS),
+        crate::mapping_proxy::TYPE_NAME => Some(&crate::mapping_proxy::CLASS_ATTRS),
         "bool" => Some(&BOOL),
         _ => None,
     }

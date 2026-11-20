@@ -93,6 +93,20 @@ impl Interpreter {
                 args.to_vec(),
             ));
         }
+        if primitive_type == "dict"
+            && let Some(spec) = pyrust_builtins::dict::method_spec(primitive_method)
+            && spec.view_method().is_some()
+        {
+            if let Err(err) = spec.validate_positional_arity(args.len()) {
+                return Some(Err(err));
+            }
+            return Some(Self::dict_view_for_owner(
+                &backing,
+                spec.method().name(),
+                ordered,
+                Value::py_instance(Rc::clone(instance)),
+            ));
+        }
         Some(self.dispatch_backing_primitive_method(
             primitive_type,
             primitive_method,
@@ -155,7 +169,7 @@ impl Interpreter {
                         method
                     ));
                 }
-                return Ok(self.object_protocol_method_result(method, &receiver));
+                return self.object_protocol_method_result(method, &receiver);
             }
             // Issue #2191: `__format__` called directly via the method-call
             // opcode on a classified container (`"hi".__format__('>5')`,
@@ -370,24 +384,37 @@ impl Interpreter {
     /// fast path; mirrors the `object.__sizeof__`/`__dir__`/`__reduce*` and
     /// `NoneType.__bool__` registry handlers.  `method` must satisfy
     /// `is_object_protocol_method(receiver, method)`.
-    pub(crate) fn object_protocol_method_result(&self, method: &str, receiver: &Value) -> Value {
+    pub(crate) fn object_protocol_method_result(
+        &self,
+        method: &str,
+        receiver: &Value,
+    ) -> Result<Value> {
         match method {
             // Implementation-specific size; tests assert the int type only.
-            "__sizeof__" => Value::int(std::mem::size_of::<Value>() as i64),
+            "__sizeof__" => Ok(Value::int(std::mem::size_of::<Value>() as i64)),
             "__dir__" => {
                 let mut names = dir_names(receiver);
                 names.sort();
                 names.dedup();
-                Value::list(names.into_iter().map(Value::string).collect())
+                Ok(Value::list(names.into_iter().map(Value::string).collect()))
             }
             // A tuple of the correct shape (`(class, ())`); pyrust does not
             // model copyreg, so the exact pickle reduction is not reproduced.
+            // mappingproxy is unpicklable in CPython 3.12 (#3019).
             "__reduce__" | "__reduce_ex__" => {
-                Value::tuple(vec![value_class(receiver), Value::tuple(Vec::new())])
+                if pyrust_builtins::mapping_proxy::is_mapping_proxy(receiver) {
+                    return Err(pyrust_core::type_err!(
+                        "cannot pickle 'mappingproxy' object"
+                    ));
+                }
+                Ok(Value::tuple(vec![
+                    value_class(receiver),
+                    Value::tuple(Vec::new()),
+                ]))
             }
-            "__bool__" => Value::bool_(false),
+            "__bool__" => Ok(Value::bool_(false)),
             // `__getstate__()` returns None for objects with no instance state.
-            "__getstate__" => Value::none(),
+            "__getstate__" => Ok(Value::none()),
             _ => unreachable!("is_object_protocol_method guard"),
         }
     }
@@ -646,6 +673,25 @@ impl Interpreter {
             "keys" => pyrust_builtins::dict_views::dict_keys_tagged(rc, ordered),
             "values" => pyrust_builtins::dict_views::dict_values_tagged(rc, ordered),
             _ => pyrust_builtins::dict_views::dict_items_tagged(rc, ordered),
+        })
+    }
+
+    /// Like [`dict_view_for_backing`], preserving the dict-subclass owner so
+    /// `.mapping` wraps that owner rather than stripping it to a plain dict (#3019).
+    pub(crate) fn dict_view_for_owner(
+        backing: &Value,
+        method: &str,
+        ordered: bool,
+        owner: Value,
+    ) -> Result<Value> {
+        let rc = backing
+            .get_dict_rc()
+            .ok_or_else(|| PyError::Runtime("internal: expected dict backing".to_string()))?
+            .clone();
+        Ok(match method {
+            "keys" => pyrust_builtins::dict_views::dict_keys_for_owner(rc, ordered, owner),
+            "values" => pyrust_builtins::dict_views::dict_values_for_owner(rc, ordered, owner),
+            _ => pyrust_builtins::dict_views::dict_items_for_owner(rc, ordered, owner),
         })
     }
 }
