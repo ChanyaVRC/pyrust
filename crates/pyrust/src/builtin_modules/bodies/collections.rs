@@ -113,6 +113,23 @@ pub(crate) fn inject_python_members(
         _ => None,
     };
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
+    // Ensure `collections.abc` is loaded (and its concrete mixin methods
+    // injected onto the canonical ABC classes) before defining `ChainMap`,
+    // `UserDict`, `UserList`, and `UserString` which inherit from them.
+    let abc_module = interp.load_module("collections.abc")?;
+    if let ValueKind::PyModule(abc_mod) = abc_module.kind() {
+        let abc_attrs = abc_mod.borrow();
+        for (src_name, dst_name) in [
+            ("Mapping", "_Mapping"),
+            ("MutableMapping", "_MutableMapping"),
+            ("MutableSequence", "_MutableSequence"),
+            ("Sequence", "_Sequence"),
+        ] {
+            if let Some(val) = abc_attrs.attrs.get(src_name).cloned() {
+                ns.dict_insert(PyKey::str_from(dst_name), val)?;
+            }
+        }
+    }
     // `OrderedDict.move_to_end` is a Python method for normal signature and
     // descriptor handling, backed by this native exact-entry relink helper.
     // Seed its globals explicitly; the throwaway exec namespace otherwise
@@ -208,7 +225,8 @@ fn tag_public_classes(
                     }
                 }
                 "deque" => {
-                    register_canonical_collection_class(CanonicalCollectionKind::Deque, cls_rc)
+                    register_canonical_collection_class(CanonicalCollectionKind::Deque, cls_rc);
+                    super::collections_abc::register_virtual_mutable_sequence(cls_rc);
                 }
                 _ => {}
             }
