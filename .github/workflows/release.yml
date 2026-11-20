@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             artifact_name: pyrust-linux-x86_64
             artifact_path: target/release/pyrust
           - os: windows-latest

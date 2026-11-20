@@ -148,8 +148,29 @@ class ScriptResult:
         return self.rs_avg_ms - self.base_avg_ms
 
 
+def _extract_entry_times(entry: dict) -> list[float]:
+    """Extract per-run wall-clock times (seconds) from a hyperfine v1 or v2 entry."""
+    if "measurements" in entry:
+        times = [
+            m["time_wall_clock"]["value"]
+            for m in entry["measurements"]
+            if isinstance(m, dict)
+            and isinstance(m.get("time_wall_clock"), dict)
+            and "value" in m["time_wall_clock"]
+        ]
+        if times:
+            return times
+    summary = entry.get("summary")
+    if isinstance(summary, dict) and isinstance(summary.get("time_wall_clock"), dict):
+        mean = summary["time_wall_clock"].get("mean")
+        if mean is not None:
+            return [mean]
+    # Hyperfine 1.x schema: top-level "times" array or scalar "mean".
+    return entry.get("times") or [entry["mean"]]
+
+
 def _parse_hyperfine_json(path: Path, config: BenchConfig) -> "ScriptResult | None":
-    """Parse one per-script hyperfine JSON file.
+    """Parse one per-script hyperfine JSON file (supports hyperfine 1.x and 2.x).
 
     Command names written by bench.sh follow the convention:
         python:<rel>   pyrust:<rel>   base:<rel>
@@ -160,16 +181,23 @@ def _parse_hyperfine_json(path: Path, config: BenchConfig) -> "ScriptResult | No
     rel: "str | None" = None
 
     for entry in data.get("results", []):
-        cmd: str = entry["command"]
-        # Use raw times when available; fall back to the scalar mean hyperfine reports.
-        times: list[float] = entry.get("times", [entry["mean"]])
+        # Hyperfine 2.0 puts --command-name in "name" (leaving "command" as the
+        # raw shell string); hyperfine 1.x stores --command-name in "command".
+        name = entry.get("name") or ""
+        cmd = entry.get("command", "")
+        label = (
+            name
+            if name.startswith(("python:", "pyrust:", "base:"))
+            else cmd
+        )
+        times: list[float] = _extract_entry_times(entry)
 
-        if cmd.startswith("python:"):
-            rel = cmd[len("python:"):]
+        if label.startswith("python:"):
+            rel = label[len("python:"):]
             py_times = times
-        elif cmd.startswith("pyrust:"):
+        elif label.startswith("pyrust:"):
             rs_times = times
-        elif cmd.startswith("base:"):
+        elif label.startswith("base:"):
             base_times = times
 
     if rel is None or py_times is None or rs_times is None:
