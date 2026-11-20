@@ -89,6 +89,13 @@ impl Interpreter {
                 value: value.clone(),
             });
         }
+        if let Some(proxied) = pyrust_builtins::mapping_proxy::proxied_value(value) {
+            let hash = hash_value_with_interp(self, &proxied)? as u64;
+            return Ok(PyKey::Object {
+                hash,
+                value: value.clone(),
+            });
+        }
         if let Some(k) = value.to_key() {
             return Ok(k);
         }

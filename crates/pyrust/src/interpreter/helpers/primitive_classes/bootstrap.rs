@@ -59,6 +59,7 @@ fn build_primitive_classes() -> PrimitiveClasses {
     let complex_class = make("complex", Some(Rc::clone(&obj)));
     let frozenset_class = make("frozenset", Some(Rc::clone(&obj)));
     let float_class = make("float", Some(Rc::clone(&obj)));
+    let mappingproxy_class = make("mappingproxy", Some(Rc::clone(&obj)));
     // Attribute spelling and descriptor category are owned by each primitive's
     // provider metadata in pyrust-builtins.  This bootstrap only associates
     // those immutable specifications with the per-thread class identities.
@@ -72,6 +73,10 @@ fn build_primitive_classes() -> PrimitiveClasses {
         (&frozenset_class, &pyrust_builtins::frozenset::CLASS_ATTRS),
         (&int_class, &pyrust_builtins::int::CLASS_ATTRS),
         (&list_class, &pyrust_builtins::list::CLASS_ATTRS),
+        (
+            &mappingproxy_class,
+            &pyrust_builtins::mapping_proxy::CLASS_ATTRS,
+        ),
         (&set_class, &pyrust_builtins::set::CLASS_ATTRS),
         (&str_class, &pyrust_builtins::string::CLASS_ATTRS),
         (&tuple_class, &pyrust_builtins::tuple::CLASS_ATTRS),
@@ -93,7 +98,7 @@ fn build_primitive_classes() -> PrimitiveClasses {
         float_class,
         frozenset_class,
         list_class,
-        mappingproxy_class: make("mappingproxy", Some(Rc::clone(&obj))),
+        mappingproxy_class,
         none_class: {
             let c = make("NoneType", Some(Rc::clone(&obj)));
             // `None.__bool__()` returns False; `__bool__` is NoneType-specific

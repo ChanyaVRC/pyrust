@@ -34,11 +34,9 @@ impl Interpreter {
         ) {
             return Ok(Value::string(render_value_repr(self, value)?));
         }
-        // Issue #2936: `str(mappingproxy)` is `str(proxied)`, which needs
-        // interpreter dispatch when the proxied object is a dict subclass
-        // instance.  Only owner-carrying proxies are affected, and the
-        // `BuiltinObject` test keeps every other kind on the path below.
-        if value.is_builtin_object() && pyrust_builtins::mapping_proxy::owner_of(value).is_some() {
+        // Issue #2936 / #3019: `str(mappingproxy)` is `str(proxied)` for every
+        // mappingproxy (dict-, class-, and object-backed).
+        if value.is_builtin_object() && pyrust_builtins::mapping_proxy::is_mapping_proxy(value) {
             return Ok(Value::string(render_instance_str(self, value)?));
         }
         // Issue #2771: a bare `{cls}` field is `format(cls, "")`, which runs
@@ -73,7 +71,7 @@ impl Interpreter {
             matches!(value.kind(), ValueKind::PyClass(class) if class.borrow().metatype.is_some());
         let owner_carrying_mappingproxy = spec.is_empty()
             && value.is_builtin_object()
-            && pyrust_builtins::mapping_proxy::owner_of(value).is_some();
+            && pyrust_builtins::mapping_proxy::is_mapping_proxy(value);
         let bound_method_empty_spec = spec.is_empty()
             && matches!(
                 value.kind(),
@@ -171,7 +169,7 @@ impl Interpreter {
         // non-empty spec still raises through `apply_format_spec` below.
         if spec.is_empty()
             && value.is_builtin_object()
-            && pyrust_builtins::mapping_proxy::owner_of(value).is_some()
+            && pyrust_builtins::mapping_proxy::is_mapping_proxy(value)
         {
             return Ok(Value::string(render_instance_str(self, value)?));
         }

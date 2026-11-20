@@ -141,15 +141,13 @@ impl Interpreter {
                 self.modulo(left, right)
             }
             BinaryOp::Eq => {
-                // Issue #2936: CPython's `mappingproxy_richcompare` compares
-                // the *proxied object*, so `mappingproxy(od) == od` is
-                // `od == od`.  Only proxies built over a separate object (a
-                // dict subclass, or another proxy) carry an owner; a proxy over
-                // a plain dict or a class `__dict__` compares through its own
-                // ops table as before.  `proxied_of` follows a nested chain to
-                // its end — the forwarding is recursive in CPython.
-                let left = pyrust_builtins::mapping_proxy::proxied_of(&left).unwrap_or(left);
-                let right = pyrust_builtins::mapping_proxy::proxied_of(&right).unwrap_or(right);
+                // Issue #2936 / #3019: CPython's `mappingproxy_richcompare`
+                // compares the *proxied mapping* (`PyObject_RichCompare(pp->mapping,
+                // other, op)`), so dict-backed, class-backed, and object-backed
+                // proxies all delegate to their proxied mapping (allowing
+                // reflected `__eq__` such as `OrderedDict.__eq__` to run).
+                let left = pyrust_builtins::mapping_proxy::proxied_value(&left).unwrap_or(left);
+                let right = pyrust_builtins::mapping_proxy::proxied_value(&right).unwrap_or(right);
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
                     return r;
                 }
@@ -161,10 +159,10 @@ impl Interpreter {
                 Ok(Value::bool_(self.values_user_eq(&left, &right)?))
             }
             BinaryOp::Ne => {
-                // Issue #2936: as for `Eq`, an owner-carrying `mappingproxy`
-                // compares as the object it proxies.
-                let left = pyrust_builtins::mapping_proxy::proxied_of(&left).unwrap_or(left);
-                let right = pyrust_builtins::mapping_proxy::proxied_of(&right).unwrap_or(right);
+                // Issue #2936 / #3019: as for `Eq`, any `mappingproxy` compares
+                // as the mapping it proxies.
+                let left = pyrust_builtins::mapping_proxy::proxied_value(&left).unwrap_or(left);
+                let right = pyrust_builtins::mapping_proxy::proxied_value(&right).unwrap_or(right);
                 // CPython's `slot_tp_richcompare` derives `__ne__` as the logical
                 // negation of `__eq__` whenever a class does not define its own
                 // `__ne__` (issue #2645).  pyrust resolves the inherited
@@ -222,8 +220,22 @@ impl Interpreter {
                 Ok(Value::bool_(!self.values_user_eq(&left, &right)?))
             }
             BinaryOp::Lt => {
+                // Issue #3019: delegate ordering one mappingproxy layer at a
+                // time so reflected comparisons mirror CPython (`p < q` calls
+                // `p.mapping < q`, which falls back to `q.mapping > p.mapping`
+                // and reports `'>'`, not `'<'`).
+                if left.is_builtin_object()
+                    && let Some(left_proxied) = pyrust_builtins::mapping_proxy::unwrap_one(&left)
+                {
+                    return self.eval_binary(left_proxied, BinaryOp::Lt, right);
+                }
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__lt__", "__gt__") {
                     return r;
+                }
+                if right.is_builtin_object()
+                    && let Some(right_proxied) = pyrust_builtins::mapping_proxy::unwrap_one(&right)
+                {
+                    return self.eval_binary(right_proxied, BinaryOp::Gt, left);
                 }
                 if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Lt) {
                     return r;
@@ -231,8 +243,18 @@ impl Interpreter {
                 self.compare(left, right, BinaryOp::Lt, "<", |o| o.is_lt())
             }
             BinaryOp::Le => {
+                if left.is_builtin_object()
+                    && let Some(left_proxied) = pyrust_builtins::mapping_proxy::unwrap_one(&left)
+                {
+                    return self.eval_binary(left_proxied, BinaryOp::Le, right);
+                }
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__le__", "__ge__") {
                     return r;
+                }
+                if right.is_builtin_object()
+                    && let Some(right_proxied) = pyrust_builtins::mapping_proxy::unwrap_one(&right)
+                {
+                    return self.eval_binary(right_proxied, BinaryOp::Ge, left);
                 }
                 if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Le) {
                     return r;
@@ -240,8 +262,18 @@ impl Interpreter {
                 self.compare(left, right, BinaryOp::Le, "<=", |o| o.is_le())
             }
             BinaryOp::Gt => {
+                if left.is_builtin_object()
+                    && let Some(left_proxied) = pyrust_builtins::mapping_proxy::unwrap_one(&left)
+                {
+                    return self.eval_binary(left_proxied, BinaryOp::Gt, right);
+                }
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__gt__", "__lt__") {
                     return r;
+                }
+                if right.is_builtin_object()
+                    && let Some(right_proxied) = pyrust_builtins::mapping_proxy::unwrap_one(&right)
+                {
+                    return self.eval_binary(right_proxied, BinaryOp::Lt, left);
                 }
                 if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Gt) {
                     return r;
@@ -249,8 +281,18 @@ impl Interpreter {
                 self.compare(left, right, BinaryOp::Gt, ">", |o| o.is_gt())
             }
             BinaryOp::Ge => {
+                if left.is_builtin_object()
+                    && let Some(left_proxied) = pyrust_builtins::mapping_proxy::unwrap_one(&left)
+                {
+                    return self.eval_binary(left_proxied, BinaryOp::Ge, right);
+                }
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__ge__", "__le__") {
                     return r;
+                }
+                if right.is_builtin_object()
+                    && let Some(right_proxied) = pyrust_builtins::mapping_proxy::unwrap_one(&right)
+                {
+                    return self.eval_binary(right_proxied, BinaryOp::Le, left);
                 }
                 if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Ge) {
                     return r;
@@ -317,15 +359,13 @@ impl Interpreter {
                 ))
             }
             BinaryOp::BitOr => {
-                // Issue #2936: CPython's `mappingproxy_or` merges the *proxied
-                // object*, so `mappingproxy(od) | other` is `od | other` and
-                // keeps `od`'s type.  Owner-less proxies (plain dict / class
-                // `__dict__`) keep merging as `dict` through the entries path
-                // below.  `proxied_of` follows a nested chain to its end so
-                // `mappingproxy(mappingproxy(counter)) | other` still runs
-                // `Counter.__or__` rather than the inner proxy's dict merge.
-                let left = pyrust_builtins::mapping_proxy::proxied_of(&left).unwrap_or(left);
-                let right = pyrust_builtins::mapping_proxy::proxied_of(&right).unwrap_or(right);
+                // Issue #2936 / #3019: CPython's `mappingproxy_or` merges the
+                // *proxied mapping* (`PyNumber_Or(pp->mapping, other)`), so
+                // dict-backed, class-backed, and object-backed proxies all
+                // delegate to their proxied mapping (allowing `OrderedDict.__ror__`
+                // and custom mapping `__or__`/`__ror__` to run).
+                let left = pyrust_builtins::mapping_proxy::proxied_value(&left).unwrap_or(left);
+                let right = pyrust_builtins::mapping_proxy::proxied_value(&right).unwrap_or(right);
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__or__", "__ror__") {
                     return r;
                 }
