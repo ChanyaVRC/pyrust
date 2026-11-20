@@ -125,6 +125,7 @@ impl Interpreter {
                     return Err(pyrust_core::py_err!("AttributeError", "readonly attribute"));
                 }
                 let module = Rc::clone(module);
+                self.ensure_module_namespace_synced(&module);
                 module.borrow_mut().insert_attr(name.to_string(), value);
                 Ok(())
             }

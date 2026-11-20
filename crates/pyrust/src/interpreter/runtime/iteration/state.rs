@@ -35,6 +35,7 @@ pub(crate) enum NativeIterSource {
         proxy: Value,
         recorded_len: usize,
         size_changed: bool,
+        reverse: bool,
     },
     /// Live list/tuple source with CPython-compatible index-walk mutation
     /// behavior.
