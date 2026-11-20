@@ -363,6 +363,41 @@ pub fn sort_no_key(receiver: &Value, reverse: bool) -> Result<Value> {
     sort_by_cmp(receiver, reverse)
 }
 
+/// Restore `sorted` into `receiver` after an out-of-place sort (where the
+/// receiver's items were temporarily stolen via `std::mem::take`, mirroring
+/// CPython's `list_sort_impl` setting `ob_item = NULL`).
+///
+/// - If `err` is `Some`, the items are restored and `err` takes precedence over
+///   any mutation that occurred during the sort (matching CPython 3.12).
+/// - Otherwise, if any operation allocated or pushed into the temporarily empty
+///   receiver (`!items.is_empty() || items.capacity() != 0`), the sorted items
+///   are restored and `ValueError: list modified during sort` is raised.
+pub fn restore_sorted_list(
+    receiver: &Value,
+    sorted: Vec<Value>,
+    err: Option<PyError>,
+) -> Result<Value> {
+    let was_modified = receiver
+        .list_with_mut(|items| {
+            let modified = !items.is_empty() || items.capacity() != 0;
+            *items = sorted;
+            modified
+        })
+        .ok_or_else(|| {
+            PyError::named("TypeError", "list.sort receiver is not a list".to_string())
+        })?;
+    if let Some(error) = err {
+        return Err(error);
+    }
+    if was_modified {
+        return Err(PyError::named(
+            "ValueError",
+            "list modified during sort".to_string(),
+        ));
+    }
+    Ok(Value::none())
+}
+
 fn sort_by_cmp(receiver: &Value, reverse: bool) -> Result<Value> {
     let (kind, len) = receiver
         .list_with(|items| (classify_sort(items.iter()), items.len()))
@@ -396,17 +431,16 @@ fn sort_by_cmp(receiver: &Value, reverse: bool) -> Result<Value> {
         SortKind::HasInstance | SortKind::General => {}
     }
 
-    // Snapshot the items into an owned Vec.  The comparator may call
-    // user `__lt__` which can re-enter the same list — by working on
-    // a snapshot we keep the receiver's borrow unscoped during the
-    // sort, then write the result back inside a `list_with_mut`
-    // borrow_mut window.  Matches the previous `items.clone() →
-    // sort_by → restore on err` shape.
-    let mut snapshot = receiver.list_with(|items| items.clone()).ok_or_else(|| {
+    // Steal the items into an owned Vec so the receiver appears empty during
+    // comparisons (mirroring CPython's `list_sort_impl` `ob_item = NULL`).
+    // Any mutation during comparison allocates into the empty receiver and is
+    // reported as `ValueError: list modified during sort` once the elements are
+    // restored.
+    let mut saved = receiver.list_with_mut(std::mem::take).ok_or_else(|| {
         PyError::named("TypeError", "list.sort receiver is not a list".to_string())
     })?;
     let mut err: Option<PyError> = None;
-    snapshot.sort_by(|a, b| {
+    saved.sort_by(|a, b| {
         if err.is_some() {
             return std::cmp::Ordering::Equal;
         }
@@ -419,11 +453,7 @@ fn sort_by_cmp(receiver: &Value, reverse: bool) -> Result<Value> {
             }
         }
     });
-    if let Some(e) = err {
-        return Err(e);
-    }
-    receiver.list_with_mut(|items| *items = snapshot);
-    Ok(Value::none())
+    restore_sorted_list(receiver, saved, err)
 }
 
 /// Sort items using precomputed keys (one key per item in the same order).
@@ -433,11 +463,18 @@ pub fn sort_with_precomputed_keys(
     keys: Vec<Value>,
     reverse: bool,
 ) -> Result<Value> {
-    let snapshot = receiver.list_with(|items| items.clone()).ok_or_else(|| {
+    let saved = receiver.list_with_mut(std::mem::take).ok_or_else(|| {
         PyError::named("TypeError", "list.sort receiver is not a list".to_string())
     })?;
-    debug_assert_eq!(snapshot.len(), keys.len());
-    let mut keyed: Vec<(Value, Value)> = keys.into_iter().zip(snapshot).collect();
+    if saved.len() != keys.len() {
+        receiver.list_with_mut(|items| *items = saved);
+        return Err(PyError::named(
+            "ValueError",
+            "list modified during sort".to_string(),
+        ));
+    }
+    let mut keyed: Vec<(Value, Value)> = keys.into_iter().zip(saved).collect();
+    let mut sort_err: Option<PyError> = None;
     // Classify by key: homogeneous all-int / all-str keys sort with a native
     // comparator; everything else keeps the general registry comparator.
     match classify_sort(keyed.iter().map(|(k, _)| k)) {
@@ -450,7 +487,6 @@ pub fn sort_with_precomputed_keys(
             lhs.as_str().unwrap_or("").cmp(rhs.as_str().unwrap_or(""))
         }),
         _ => {
-            let mut sort_err: Option<PyError> = None;
             keyed.sort_by(|(ka, _), (kb, _)| {
                 if sort_err.is_some() {
                     return std::cmp::Ordering::Equal;
@@ -464,12 +500,8 @@ pub fn sort_with_precomputed_keys(
                     }
                 }
             });
-            if let Some(e) = sort_err {
-                return Err(e);
-            }
         }
     }
     let new_items: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
-    receiver.list_with_mut(|items| *items = new_items);
-    Ok(Value::none())
+    restore_sorted_list(receiver, new_items, sort_err)
 }
