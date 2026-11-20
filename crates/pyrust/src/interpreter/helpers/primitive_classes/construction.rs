@@ -219,6 +219,7 @@ fn builtin_type_instance_probe(obj: &Value) -> BuiltinTypeInstanceProbe {
                 || state.downcast_ref::<RangeIter>().is_some()
                 || state.downcast_ref::<BigRangeIter>().is_some()
                 || state.downcast_ref::<AsyncGenASend>().is_some()
+                || state.downcast_ref::<AnextAwaitable>().is_some()
             {
                 return BuiltinTypeInstanceProbe::FixedOther;
             }

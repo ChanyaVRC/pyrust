@@ -48,6 +48,9 @@ pub(crate) fn full_type_name_str(value: &Value) -> std::borrow::Cow<'static, str
         if state.downcast_ref::<AsyncGenASend>().is_some() {
             return std::borrow::Cow::Borrowed("async_generator_asend");
         }
+        if state.downcast_ref::<AnextAwaitable>().is_some() {
+            return std::borrow::Cow::Borrowed("anext_awaitable");
+        }
     }
     value_type_name_str(value)
 }

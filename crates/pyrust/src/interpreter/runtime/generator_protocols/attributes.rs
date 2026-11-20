@@ -31,6 +31,29 @@ impl Interpreter {
         // async generator to the plain-generator surface (#2978).
         let kind = cell.kind();
 
+        // Two-argument `anext(aiter, default)` awaitable (#2983): exposes only
+        // the awaitable/coroutine-iterator methods and no `gi_*` attributes.
+        if cell
+            .try_borrow()
+            .is_ok_and(|state| state.downcast_ref::<AnextAwaitable>().is_some())
+        {
+            match name {
+                "__await__" | "__iter__" | "__next__" | "send" | "throw" | "close" => {
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        name.to_string(),
+                        target.clone(),
+                    ));
+                }
+                _ => {
+                    return Err(PyError::attribute_error(
+                        format!("'anext_awaitable' object has no attribute '{name}'"),
+                        Some(name.to_string()),
+                        Some(target.clone()),
+                    ));
+                }
+            }
+        }
+
         // Legacy `__getitem__` cursors share GeneratorCell storage but own the
         // sequence-iterator reduction/state surface. Restrict the typed state
         // probe to those cold attribute names so ordinary `next()` lookup is
