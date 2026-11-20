@@ -175,6 +175,22 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
             with_object_dunders(builtin_object_method_names(ops))
         }
         ValueKind::Generator(cell) => {
+            if let Ok(state) = cell.try_borrow()
+                && state.downcast_ref::<AnextAwaitable>().is_some()
+            {
+                return [
+                    "__await__",
+                    "__class__",
+                    "__iter__",
+                    "__next__",
+                    "close",
+                    "send",
+                    "throw",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            }
             // A small set of concrete built-in iterator classes use a
             // GeneratorCell only as their storage carrier. Their dir()
             // surface comes from the real class MRO, not from generator's

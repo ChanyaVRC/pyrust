@@ -118,6 +118,12 @@ impl Interpreter {
                 return self.resume_generator(frame);
             }
         }
+        if state.borrow().is::<AsyncGenASend>() {
+            return self.step_async_gen_asend(state, Value::none(), true);
+        }
+        if state.borrow().is::<AnextAwaitable>() {
+            return self.step_anext_awaitable_send(state, Value::none());
+        }
         if state.borrow().is::<GetItemIter>() {
             return self
                 .step_getitem_iter(state)

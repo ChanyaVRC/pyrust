@@ -124,10 +124,10 @@ mod builtin_methods {
         value_iterable_needs_runtime_key_semantics,
     };
     use super::{
-        BinaryOp, CanonicalSlot, ExpandedArgBuf, ExpandedCallArg, GeneratorKind, GetItemIter,
-        IndexMap, Interpreter, NativeIterFrame, NativeIteratorClass, PrimitiveClassKind,
-        PrintOptions, PyBigInt, PyClass, PyDict, PyError, PyInstance, PyKey, PySet, PyToPrimitive,
-        Rc, RefCell, RegSlice, Result, Value, ValueKind, apply_format_spec,
+        AnextAwaitable, BinaryOp, CanonicalSlot, ExpandedArgBuf, ExpandedCallArg, GeneratorKind,
+        GetItemIter, IndexMap, Interpreter, NativeIterFrame, NativeIteratorClass,
+        PrimitiveClassKind, PrintOptions, PyBigInt, PyClass, PyDict, PyError, PyInstance, PyKey,
+        PySet, PyToPrimitive, Rc, RefCell, RegSlice, Result, Value, ValueKind, apply_format_spec,
         apply_format_spec_named, bind_class_level_method_wrapper, builtin_data_backing,
         builtin_iterator_has_length_hint, c3_linearize_classes,
         call_bytes_method_coerced_prevalidated, call_module_init, call_module_repr,
@@ -306,9 +306,9 @@ mod pattern_matching {
 
 mod iteration {
     use super::{
-        AsyncGenASend, BuiltinTypeClass, ExpandedArgBuf, ExpandedCallArg, GenDriving,
-        GeneratorCell, GeneratorFrame, Interpreter, NativeIteratorClass, PyBigInt, PyBigIntSign,
-        PyClass, PyError, PyInstance, PyKey, Rc, RefCell, Result, Value, ValueKind,
+        AnextAwaitable, AsyncGenASend, BuiltinTypeClass, ExpandedArgBuf, ExpandedCallArg,
+        GenDriving, GeneratorCell, GeneratorFrame, Interpreter, NativeIteratorClass, PyBigInt,
+        PyBigIntSign, PyClass, PyError, PyInstance, PyKey, Rc, RefCell, Result, Value, ValueKind,
         bind_class_level_method_wrapper, builtin_data_backing, call_descriptor_get,
         call_slot_value_unbound, class_is_subclass_of, effective_builtin_receiver,
         effective_user_iter, full_type_name_str, i64_range_native_cursor_safe,
@@ -339,10 +339,10 @@ pub(crate) use iteration::{
 
 mod type_objects {
     use super::{
-        AsyncGenASend, BigRangeIter, BuiltinTypeClass, CallableIter, EnumerateIter, FilterIter,
-        GetItemIter, IndexMap, InstanceAttrs, MapIter, NativeIterFrame, NativeIteratorClass,
-        ProviderIterator, PyClass, PyError, PyInstance, RangeIter, Rc, RefCell, Result,
-        UserFunctionKind, Value, ValueKind, ZipIter, builtin_type_class_by_name,
+        AnextAwaitable, AsyncGenASend, BigRangeIter, BuiltinTypeClass, CallableIter, EnumerateIter,
+        FilterIter, GetItemIter, IndexMap, InstanceAttrs, MapIter, NativeIterFrame,
+        NativeIteratorClass, ProviderIterator, PyClass, PyError, PyInstance, RangeIter, Rc,
+        RefCell, Result, UserFunctionKind, Value, ValueKind, ZipIter, builtin_type_class_by_name,
         function_type_singleton, generic_alias_class_singleton, method_type_singleton,
         module_type_singleton, primitive_class_for_value, type_class_singleton,
         value_type_name_str,
@@ -385,19 +385,20 @@ mod execution {
     include!("runtime/vm/tests.rs");
 }
 pub(crate) use execution::{
-    AsyncGenASend, CoroStep, ExcHandlersBuf, GeneratorFrame, HandledExcBuf, RegsBuf,
+    AnextAwaitable, AsyncGenASend, CoroStep, ExcHandlersBuf, GeneratorFrame, HandledExcBuf, RegsBuf,
 };
 use execution::{GenDriving, vm_read};
 
 mod generator_protocols {
     use super::{
-        AsyncGenASend, CoroStep, ExpandedCallArg, GenDriving, GeneratorCell, GeneratorFrame,
-        GeneratorKind, GetItemIter, Interpreter, NativeIterFrame, NativeIteratorClass, PyError, Rc,
-        Result, Value, ValueKind, class_is_builtin_exception_subclass, class_is_subclass_of,
-        effective_builtin_receiver, full_type_name_str, getitem_iterator_reduce,
-        getitem_iterator_setstate, instance_builtin_data, instantiate_exception,
-        invoke_class_method, is_getitem_iterator, is_reversed_iterator, lookup_class_attr,
-        lookup_exc_class, native_bytearray_iterator_setstate, native_iterator_class,
+        AnextAwaitable, AsyncGenASend, CoroStep, ExpandedCallArg, GenDriving, GeneratorCell,
+        GeneratorFrame, GeneratorKind, GetItemIter, Interpreter, NativeIterFrame,
+        NativeIteratorClass, PyError, Rc, Result, Value, ValueKind,
+        class_is_builtin_exception_subclass, class_is_subclass_of, effective_builtin_receiver,
+        full_type_name_str, getitem_iterator_reduce, getitem_iterator_setstate,
+        instance_builtin_data, instantiate_exception, invoke_class_method, is_getitem_iterator,
+        is_reversed_iterator, lookup_class_attr, lookup_exc_class, metaclass_dunder,
+        native_bytearray_iterator_setstate, native_iterator_class,
         native_iterator_object_method_arity, native_iterator_reduce, reversed_iterator_reduce,
         reversed_iterator_setstate, value_has_length_hint, value_type_name_str,
     };
