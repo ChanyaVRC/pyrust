@@ -108,6 +108,24 @@ impl PyModule {
         )));
     }
 
+    /// Attach the top-level `__main__` module to the script's root environment
+    /// without forcing eager globals mirroring (#2957).
+    ///
+    /// Unlike an imported filesystem module (which runs under `SharedGlobals`),
+    /// `__main__` runs with `FastLocals` registers. Keeping eager mirroring off
+    /// preserves full register speed when `__main__` is never inspected, while
+    /// first observation of `__main__` attributes or `__dict__` flushes and
+    /// exposes the exact same live globals dict (`sys.modules['__main__'].__dict__
+    /// is globals()`).
+    pub fn attach_main_namespace(&mut self, environment: &EnvRef) {
+        let globals = environment.borrow().namespace_globals();
+        self.attrs.clear();
+        self.filesystem_namespace = Some(Box::new(FilesystemModuleNamespace::new(
+            environment,
+            globals,
+        )));
+    }
+
     #[inline]
     pub fn filesystem_namespace(&self) -> Option<FilesystemModuleNamespace> {
         self.filesystem_namespace.as_deref().cloned()
