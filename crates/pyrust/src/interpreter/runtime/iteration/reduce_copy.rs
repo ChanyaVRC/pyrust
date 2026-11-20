@@ -991,10 +991,12 @@ impl NativeIterFrame {
                 proxy,
                 recorded_len,
                 size_changed,
+                reverse,
             } => NativeIterSource::InstanceDict {
                 proxy: proxy.clone(),
                 recorded_len: *recorded_len,
                 size_changed: *size_changed,
+                reverse: *reverse,
             },
             NativeIterSource::ReverseDict(cursor) => {
                 NativeIterSource::ReverseDict(Box::new((**cursor).clone()))

@@ -57,9 +57,31 @@ impl NativeIterFrame {
                 proxy,
                 recorded_len,
                 size_changed: false,
+                reverse: false,
             },
             pos: 0,
             type_name: "dict_keyiterator",
+            class: None,
+            guard: None,
+            exhausted: false,
+            copy_policy: NativeIterCopyPolicy::Reducible,
+        }
+    }
+
+    /// Construct an independent live reverse iterator over an `instance_dict`
+    /// proxy (`reversed(obj.__dict__)`, `reversed(vars(obj))`, issue #2957).
+    pub(crate) fn reverse_instance_dict(proxy: Value) -> Self {
+        let recorded_len = pyrust_builtins::instance_dict::iter_visible_len(&proxy)
+            .expect("instance_dict reverse iterator requires an instance_dict proxy");
+        NativeIterFrame {
+            source: NativeIterSource::InstanceDict {
+                proxy,
+                recorded_len,
+                size_changed: false,
+                reverse: true,
+            },
+            pos: 0,
+            type_name: "dict_reversekeyiterator",
             class: None,
             guard: None,
             exhausted: false,
@@ -405,6 +427,7 @@ impl NativeIterFrame {
                 proxy,
                 recorded_len,
                 size_changed,
+                reverse,
             } => {
                 let live_len =
                     pyrust_builtins::instance_dict::iter_visible_len(proxy).ok_or_else(|| {
@@ -416,8 +439,17 @@ impl NativeIterFrame {
                         "dictionary changed size during iteration".to_string(),
                     ));
                 }
+                let target_index = if *reverse {
+                    let Some(rev_idx) = (*recorded_len).checked_sub(index + 1) else {
+                        return Ok(None);
+                    };
+                    rev_idx
+                } else {
+                    index
+                };
                 Ok(pyrust_builtins::instance_dict::iter_visible_key_at(
-                    proxy, index,
+                    proxy,
+                    target_index,
                 ))
             }
             NativeIterSource::Indexed(value) => match value.kind() {
