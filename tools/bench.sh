@@ -26,9 +26,26 @@
 #   PYRUST_BENCH_TIMEOUT_S  wall-clock cap per benchmark case (default 300;
 #                           0 disables)
 #
+# Platform policy (#3022):
+#   Unix/Linux-only.  Benchmarking relies on POSIX `ulimit -v/-d`, GNU
+#   `timeout`, and `/usr/bin/time -v`, which have no working equivalents in
+#   Windows bash shells (Git Bash / MSYS2 / Cygwin).  Rather than silently
+#   running benchmark children uncapped on Windows, this script refuses to run
+#   under Windows shells; run benchmarks on Linux or WSL2 instead.
+#
 # Requires: hyperfine  (cargo install hyperfine  or  apt install hyperfine)
 
 set -euo pipefail
+
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "error: tools/bench.sh is Unix/Linux-only by policy (issue #3022)." >&2
+    echo "       Windows bash shells cannot enforce ulimit memory caps, so running" >&2
+    echo "       benchmarks here would leave child processes uncapped." >&2
+    echo "       Run benchmarks on Linux or inside WSL2 instead." >&2
+    exit 2
+    ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

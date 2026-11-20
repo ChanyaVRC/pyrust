@@ -1,184 +1,15 @@
+#[path = "support/child_limits.rs"]
+mod child_limits;
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
 use std::thread;
 
-/// Address-space cap for each interpreter child (bytes).  An adversarial
-/// fixture or repro must never be able to out-allocate the host: a runaway
-/// interpreter (unbounded native recursion, allocation storms) has taken down
-/// the whole WSL2 VM.  Override with PYRUST_PARITY_MEM_MB when a fixture
-/// legitimately needs more.
-#[cfg(unix)]
-fn child_address_space_limit() -> u64 {
-    let mb = env::var("PYRUST_PARITY_MEM_MB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(4096);
-    mb * 1024 * 1024
-}
-
-/// Wall-clock cap for each interpreter child (seconds).  Override with
-/// PYRUST_PARITY_TIMEOUT_S.
-fn child_timeout_secs() -> u64 {
-    env::var("PYRUST_PARITY_TIMEOUT_S")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(120)
-}
-
-/// Cap on how much of one child pipe the harness keeps in memory.  The rlimits
-/// above bound each *child*; this bounds the harness process, which runs
-/// uncapped — a fixture stuck in a `print` loop would otherwise stream
-/// gigabytes into this process before the wall-clock kill fires, which is the
-/// same host-exhaustion failure the caps exist to prevent.
-const MAX_CAPTURED_BYTES: u64 = 64 * 1024 * 1024;
-
-/// How long to wait for a drain thread to hand over its buffer once the child
-/// is gone.  Bounded rather than a plain `join` so that a grandchild holding
-/// the pipe open cannot hang the harness: a truncated capture surfaces as a
-/// loud parity mismatch, a hang surfaces as nothing at all.
-const DRAIN_HANDOVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Drain one child pipe on a helper thread, so the wait loop below never
-/// blocks on a child that has filled its pipe buffer.
-fn drain_pipe<R: std::io::Read + Send + 'static>(mut pipe: R) -> mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let _ = (&mut pipe).take(MAX_CAPTURED_BYTES).read_to_end(&mut buf);
-        if buf.len() as u64 >= MAX_CAPTURED_BYTES {
-            buf.extend_from_slice(
-                format!(
-                    "\n<parity harness: output truncated at {} MiB>\n",
-                    MAX_CAPTURED_BYTES / (1024 * 1024)
-                )
-                .as_bytes(),
-            );
-            // Keep draining into the void so the child never blocks on a full
-            // pipe; the wall-clock kill is what stops it.
-            let _ = std::io::copy(&mut pipe, &mut std::io::sink());
-        }
-        let _ = tx.send(buf);
-    });
-    rx
-}
-
-fn collect_drained(rx: &mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
-    rx.recv_timeout(DRAIN_HANDOVER_TIMEOUT).unwrap_or_default()
-}
-
-/// The tail of a killed child's output — the only clue about where a hanging
-/// fixture got stuck.  Capped so a chatty child cannot bury the report.
-fn output_tail(stdout: &[u8], stderr: &[u8]) -> String {
-    const TAIL: usize = 20;
-    let mut merged = String::from_utf8_lossy(stdout).into_owned();
-    merged.push_str(&String::from_utf8_lossy(stderr));
-    let lines: Vec<&str> = merged.lines().collect();
-    if lines.is_empty() {
-        return "(no output before the kill)".to_string();
-    }
-    let start = lines.len().saturating_sub(TAIL);
-    let mut out = format!(
-        "--- last {} of {} captured output line(s) before the kill ---\n",
-        lines.len() - start,
-        lines.len()
-    );
-    out.push_str(&lines[start..].join("\n"));
-    out
-}
-
-fn run_and_capture(program: &Path, args: &[&Path]) -> Result<String, String> {
-    let mut command = Command::new(program);
-    command.args(args).env("PYTHONIOENCODING", "utf-8");
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let limit = child_address_space_limit();
-        // SAFETY: the closure runs between fork and exec, where only
-        // async-signal-safe work is allowed.  `setrlimit` is not on the POSIX
-        // async-signal-safe list, but the libc entry point is a bare syscall
-        // wrapper on both glibc and musl: it allocates nothing, takes no lock,
-        // and touches no state the parent could have been holding at fork.
-        unsafe {
-            command.pre_exec(move || {
-                let rlim = libc::rlimit {
-                    rlim_cur: limit as libc::rlim_t,
-                    rlim_max: limit as libc::rlim_t,
-                };
-                libc::setrlimit(libc::RLIMIT_AS, &rlim);
-                libc::setrlimit(libc::RLIMIT_DATA, &rlim);
-                Ok(())
-            });
-        }
-    }
-    let mut child = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to run {}: {e}", program.display()))?;
-
-    // Drain the pipes on threads so a chatty child cannot dead-lock against
-    // the wait loop below.
-    let stdout_rx = drain_pipe(child.stdout.take().expect("stdout piped"));
-    let stderr_rx = drain_pipe(child.stderr.take().expect("stderr piped"));
-
-    // Poll with a short backoff that grows to 10 ms: a typical fixture exits in
-    // single-digit milliseconds, and a fixed 10 ms tick would spend most of that
-    // asleep across ~3k child runs.
-    let timeout_secs = child_timeout_secs();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    let mut poll = std::time::Duration::from_micros(200);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "{} timed out after {timeout_secs}s (killed; raise PYRUST_PARITY_TIMEOUT_S if legitimate)\n{}",
-                        program.display(),
-                        output_tail(&collect_drained(&stdout_rx), &collect_drained(&stderr_rx))
-                    ));
-                }
-                thread::sleep(poll);
-                poll = (poll * 2).min(std::time::Duration::from_millis(10));
-            }
-            Err(e) => return Err(format!("failed to wait on {}: {e}", program.display())),
-        }
-    };
-    let stdout = collect_drained(&stdout_rx);
-    let stderr = collect_drained(&stderr_rx);
-    let output = std::process::Output {
-        status,
-        stdout,
-        stderr,
-    };
-
-    let mut merged = String::new();
-    merged.push_str(&String::from_utf8_lossy(&output.stdout));
-    merged.push_str(&String::from_utf8_lossy(&output.stderr));
-
-    if output.status.success() {
-        Ok(merged)
-    } else {
-        Err(format!(
-            "{} exited with status {}\n{}",
-            program.display(),
-            output
-                .status
-                .code()
-                .map_or_else(|| "<signal>".to_string(), |c| c.to_string()),
-            merged
-        ))
-    }
-}
+use child_limits::{ChildLimits, run_and_capture_with_limits};
 
 fn find_python_executable(root: &Path) -> PathBuf {
     if let Some(python) = env::var_os("PYRUST_PYTHON") {
@@ -447,6 +278,10 @@ fn compare_against_python_reference_for_all_py_tests() {
         .clamp(1, 32)
         .min(scripts.len());
 
+    // Validate environment overrides once up front so a bad PYRUST_PARITY_MEM_MB
+    // or PYRUST_PARITY_TIMEOUT_S fails immediately rather than per-worker.
+    let child_limits = ChildLimits::from_env();
+
     let next = AtomicUsize::new(0);
     let failures: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
@@ -465,7 +300,12 @@ fn compare_against_python_reference_for_all_py_tests() {
                         .unwrap_or("<unknown>")
                         .to_string();
 
-                    let py_out = match run_and_capture(&python, &[script.as_path()]) {
+                    let py_out = match run_and_capture_with_limits(
+                        &python,
+                        &[script.as_path()],
+                        &[],
+                        child_limits,
+                    ) {
                         Ok(out) => out,
                         Err(err) => {
                             failures.lock().unwrap().push((
@@ -475,7 +315,12 @@ fn compare_against_python_reference_for_all_py_tests() {
                             continue;
                         }
                     };
-                    let rust_out = match run_and_capture(&pyrust_bin, &[script.as_path()]) {
+                    let rust_out = match run_and_capture_with_limits(
+                        &pyrust_bin,
+                        &[script.as_path()],
+                        &[],
+                        child_limits,
+                    ) {
                         Ok(out) => out,
                         Err(err) => {
                             failures.lock().unwrap().push((
