@@ -17,9 +17,10 @@
 #     already being insertion-ordered; it only re-implements the
 #     order-aware operations (`move_to_end`, `popitem(last=)`,
 #     `__reversed__`, order-sensitive `__eq__`, `__or__`/`__ror__`/`__ior__`).
-#   - `ChainMap` / `UserDict` / `UserList` / `UserString` are plain `object`
-#     subclasses with the full public method set spelled out (pyrust's
-#     `collections.abc` mixins do not yet supply the concrete mixin methods).
+#   - `ChainMap` / `UserDict` inherit from `collections.abc.MutableMapping`,
+#     `UserList` inherits from `collections.abc.MutableSequence`, and
+#     `UserString` inherits from `collections.abc.Sequence`, matching CPython
+#     3.12's exact MRO and mixin inheritance (`Mapping.__eq__`, etc.).
 
 _sys_maxsize = 9223372036854775807
 
@@ -284,7 +285,7 @@ class OrderedDict(dict):
         return self
 
 
-class ChainMap:
+class ChainMap(_MutableMapping):
     '''A ChainMap groups multiple dicts (or other mappings) together
     to create a single, updateable view.
     '''
@@ -375,47 +376,19 @@ class ChainMap:
         'Clear maps[0], leaving maps[1:] intact.'
         self.maps[0].clear()
 
-    def keys(self):
-        return list(self)
-
-    def values(self):
-        return [self[k] for k in self]
-
-    def items(self):
-        return [(k, self[k]) for k in self]
-
-    def setdefault(self, key, default=None):
-        if key not in self:
-            self[key] = default
-        return self[key]
-
-    def update(self, *args, **kwargs):
-        self.maps[0].update(*args, **kwargs)
-
-    def __eq__(self, other):
-        if isinstance(other, ChainMap):
-            return self.maps == other.maps
-        return NotImplemented
-
-    def __ne__(self, other):
-        result = self.__eq__(other)
-        if result is NotImplemented:
-            return result
-        return not result
-
     def __ior__(self, other):
         self.maps[0].update(other)
         return self
 
     def __or__(self, other):
-        if not isinstance(other, dict):
+        if not isinstance(other, _Mapping):
             return NotImplemented
         m = self.copy()
         m.maps[0].update(other)
         return m
 
     def __ror__(self, other):
-        if not isinstance(other, dict):
+        if not isinstance(other, _Mapping):
             return NotImplemented
         m = dict(other)
         for child in reversed(self.maps):
@@ -423,7 +396,7 @@ class ChainMap:
         return self.__class__(m)
 
 
-class UserDict:
+class UserDict(_MutableMapping):
     """A more or less complete user-defined wrapper around dictionary objects."""
 
     def __init__(self, dict=None, /, **kwargs):
@@ -455,47 +428,10 @@ class UserDict:
     def __contains__(self, key):
         return key in self.data
 
-    def keys(self):
-        return self.data.keys()
-
-    def values(self):
-        return self.data.values()
-
-    def items(self):
-        return self.data.items()
-
     def get(self, key, default=None):
         if key in self:
             return self[key]
         return default
-
-    def pop(self, key, *args):
-        return self.data.pop(key, *args)
-
-    def popitem(self):
-        return self.data.popitem()
-
-    def setdefault(self, key, default=None):
-        if key not in self:
-            self[key] = default
-        return self[key]
-
-    def clear(self):
-        self.data.clear()
-
-    def update(self, *args, **kwargs):
-        if len(args) > 1:
-            raise TypeError(f'update expected at most 1 argument, got {len(args)}')
-        if args:
-            other = args[0]
-            if hasattr(other, 'keys'):
-                for k in other.keys():
-                    self[k] = other[k]
-            else:
-                for k, v in other:
-                    self[k] = v
-        for k in kwargs:
-            self[k] = kwargs[k]
 
     def __repr__(self):
         return repr(self.data)
@@ -536,7 +472,7 @@ class UserDict:
         return d
 
 
-class UserList:
+class UserList(_MutableSequence):
     """A more or less complete user-defined wrapper around list objects."""
 
     def __init__(self, initlist=None):
@@ -657,7 +593,7 @@ class UserList:
             self.data.extend(other)
 
 
-class UserString:
+class UserString(_Sequence):
     """A more or less complete user-defined wrapper around string objects."""
 
     def __init__(self, seq):

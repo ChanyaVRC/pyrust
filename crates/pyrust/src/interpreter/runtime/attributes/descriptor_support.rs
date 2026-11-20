@@ -402,11 +402,17 @@ fn call_descriptor_delete(
 /// Used by both `__mro__` (returns a tuple) and `mro()` (returns a list).
 pub(super) fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Result<Vec<Value>> {
     /// Compute L[c] recursively.  Returns a `Vec` of class pointers in MRO
-    /// order; the first element is always `c` itself.
+    /// order; the first element is always `c` itself and the last element is
+    /// always `object`.
     fn c3_linearize(
         c: &Rc<RefCell<PyClass>>,
+        obj: &Rc<RefCell<PyClass>>,
         obj_ptr: *const RefCell<PyClass>,
     ) -> Result<Vec<Rc<RefCell<PyClass>>>> {
+        if Rc::as_ptr(c) == obj_ptr {
+            return Ok(vec![Rc::clone(obj)]);
+        }
+
         let (base, extra_bases) = {
             let borrowed = c.borrow();
             (borrowed.base.clone(), borrowed.extra_bases.clone())
@@ -422,15 +428,14 @@ pub(super) fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Result<Vec<Value>
         }
 
         if all_bases.is_empty() {
-            // No explicit bases: just [c].  The object singleton will be
-            // appended by the outer function after the merge.
-            return Ok(vec![Rc::clone(c)]);
+            // No explicit bases: implicitly inherits from `object`, so L[c] = [c, object].
+            return Ok(vec![Rc::clone(c), Rc::clone(obj)]);
         }
 
         // Build the lists to merge: L[B1], L[B2], ..., [B1, B2, ...]
         let mut lists: Vec<Vec<Rc<RefCell<PyClass>>>> = Vec::new();
         for b in &all_bases {
-            lists.push(c3_linearize(b, obj_ptr)?);
+            lists.push(c3_linearize(b, obj, obj_ptr)?);
         }
         // The final list is the sequence of direct bases.
         lists.push(all_bases.clone());
@@ -445,22 +450,11 @@ pub(super) fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Result<Vec<Value>
             }
 
             // Find a good head: first element of some list that does not
-            // appear in the tail of any other list.
-            //
-            // `object` is deferred: it is the universal root, so it must never
-            // be chosen while any non-`object` head is still available.  pyrust
-            // represents the implicit `object` base inconsistently — primitive
-            // classes carry an explicit `object` base (so their inner
-            // linearization ends in `object`) while base-less user classes do
-            // not — which can otherwise let `object` win ahead of a sibling
-            // user base when mixing the two (`class E(int, UserBase)` would
-            // linearize as `[E, int, object, UserBase]` instead of the correct
-            // `[E, int, UserBase, object]`).  Deferring `object` restores the
-            // correct order without forcing `object` into every inner list
-            // (which would create spurious conflicts for the abc-`extra_bases`
-            // carried by `dict`/`list`/… — issue #2611).
+            // appear in the tail of any other list.  Because L[object] = [object]
+            // and every other class's linearization ends with `object`, standard
+            // C3 merge guarantees `object` is always chosen last and rejects
+            // inconsistent hierarchies such as `(object, Sub)`.
             let mut chosen: Option<Rc<RefCell<PyClass>>> = None;
-            let mut deferred_object: Option<Rc<RefCell<PyClass>>> = None;
             'outer: for list in &lists {
                 let head_ptr = Rc::as_ptr(&list[0]);
                 // Check that head_ptr does not appear in the tail of any list.
@@ -471,29 +465,16 @@ pub(super) fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Result<Vec<Value>
                         }
                     }
                 }
-                if head_ptr == obj_ptr {
-                    // Valid head, but defer it in case a non-object head exists.
-                    deferred_object = Some(Rc::clone(&list[0]));
-                    continue;
-                }
                 chosen = Some(Rc::clone(&list[0]));
                 break;
-            }
-            // No non-object head was found: fall back to a deferred `object`.
-            if chosen.is_none() {
-                chosen = deferred_object;
             }
 
             let chosen = match chosen {
                 Some(c) => c,
                 None => {
                     // No consistent linearization exists.
-                    // Collect base names for the error message (skip object).
-                    let base_names: Vec<String> = all_bases
-                        .iter()
-                        .filter(|b| Rc::as_ptr(b) != obj_ptr)
-                        .map(|b| b.borrow().name.clone())
-                        .collect();
+                    let base_names: Vec<String> =
+                        all_bases.iter().map(|b| b.borrow().name.clone()).collect();
                     let bases_str = base_names.join(", ");
                     return Err(pyrust_core::type_err!(
                         "Cannot create a consistent method resolution\norder (MRO) for bases {bases_str}"
@@ -516,12 +497,11 @@ pub(super) fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Result<Vec<Value>
 
     let obj = object_class_singleton();
     let obj_ptr = Rc::as_ptr(&obj);
-    let mut mro = c3_linearize(class, obj_ptr)?;
-
-    // Append the `object` singleton if it is not already present.
-    if !mro.iter().any(|c| Rc::as_ptr(c) == obj_ptr) {
-        mro.push(obj);
-    }
+    let mro = c3_linearize(class, &obj, obj_ptr)?;
+    debug_assert!(
+        mro.last().is_some_and(|c| Rc::as_ptr(c) == obj_ptr),
+        "C3 linearization must always place `object` last"
+    );
 
     Ok(mro.into_iter().map(Value::py_class).collect())
 }

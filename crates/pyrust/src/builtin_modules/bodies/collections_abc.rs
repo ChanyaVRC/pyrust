@@ -28,12 +28,21 @@
 //    check.  Walks the class MRO for user instances, or uses the hardcoded
 //    primitive protocol table for built-in values.
 //
-// 3. **`extra_bases` registration** (legacy / complex ABCs): on first module
-//    load, `register_abc_extra_bases()` links each ABC that lacks a direct
-//    structural hook (Sequence, MutableSequence, Set, MutableSet, Mapping,
-//    MutableMapping) into the `extra_bases` of the relevant primitive class
-//    singletons.  The Callable ABC is also registered here for user-defined
-//    functions and classes.
+// 3. **Virtual subclass registration** (`VIRTUAL_REGISTRATIONS`): on first
+//    module load, `init_abc_hierarchy_and_registry()` wires the real
+//    inheritance hierarchy among the `collections.abc` classes themselves
+//    (`Mapping(Collection)`, `MutableMapping(Mapping)`,
+//    `Sequence(Reversible, Collection)`, …) and records the CPython virtual
+//    registrations (`dict` → `MutableMapping`, `list` → `MutableSequence`,
+//    `mappingproxy` → `Mapping`, …) in a thread-local registry.  Registered
+//    ABCs are NEVER spliced into a concrete class's `extra_bases` or `__mro__`
+//    — registration affects `isinstance` / `issubclass` only, matching CPython.
+//
+// 4. **Concrete mixin methods** (`collections_abc_py.py`): injected once per
+//    thread via `@inject` onto the canonical ABC `PyClass` singletons so
+//    subclasses like `UserDict`, `ChainMap`, `UserList`, and `UserString`
+//    inherit `Mapping.__eq__`, `MutableMapping.update`, `Sequence.__iter__`,
+//    etc. directly through their MRO.
 //
 // ## Which ABCs have structural hooks (mirrors CPython)?
 //
@@ -75,13 +84,27 @@
 // Reference: <https://docs.python.org/3/library/collections.abc.html>
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{DictViewClass, ExpandedCallArg, class_is_subclass_of};
-use crate::value::{PyClass, Value, ValueKind};
+use crate::interpreter::{DictViewClass, ExpandedCallArg, Interpreter, class_is_subclass_of};
+use crate::value::{PyClass, PyKey, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
+
+/// Python-source definitions for the concrete mixin methods of `collections.abc`
+/// (`Mapping.__eq__`, `MutableMapping`, `Sequence`, `MutableSequence`, `Set`,
+/// `MutableSet`, `MappingView`/`KeysView`/`ItemsView`/`ValuesView`, `Iterator`,
+/// `Generator`).
+const COLLECTIONS_ABC_PY_SOURCE: &str = include_str!("collections_abc_py.py");
+
+/// A virtual subclass registration: `registered` was virtually registered on
+/// `abc` (matching CPython's `ABCMeta.register()`).  Stored out-of-band so
+/// registered ABCs NEVER appear in `registered.__bases__` or `__mro__`.
+struct VirtualEntry {
+    abc: Rc<RefCell<PyClass>>,
+    registered: Weak<RefCell<PyClass>>,
+}
 
 // ── ABC class singletons ──────────────────────────────────────────────────────
 //
@@ -103,6 +126,7 @@ thread_local! {
     static ABC_REVERSIBLE:       Rc<RefCell<PyClass>> = abc_class!("Reversible");
     static ABC_GENERATOR:        Rc<RefCell<PyClass>> = abc_class!("Generator");
     static ABC_SIZED:            Rc<RefCell<PyClass>> = abc_class!("Sized");
+    static ABC_COLLECTION:       Rc<RefCell<PyClass>> = abc_class!("Collection");
     static ABC_CALLABLE:         Rc<RefCell<PyClass>> = abc_class!("Callable");
     static ABC_SEQUENCE:         Rc<RefCell<PyClass>> = abc_class!("Sequence");
     static ABC_MUTABLE_SEQUENCE: Rc<RefCell<PyClass>> = abc_class!("MutableSequence");
@@ -121,8 +145,14 @@ thread_local! {
     static ABC_ASYNC_GENERATOR:  Rc<RefCell<PyClass>> = abc_class!("AsyncGenerator");
     static ABC_BUFFER:           Rc<RefCell<PyClass>> = abc_class!("Buffer");
 
-    // Once-per-thread flag: `true` after `register_abc_extra_bases` has run.
+    // Once-per-thread flag: `true` after `init_abc_hierarchy_and_registry` has run.
     static ABC_REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    // Once-per-thread flag: `true` after `collections_abc_py.py` mixins are installed.
+    static ABC_MIXINS_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    // Out-of-band virtual subclass registrations (CPython `ABCMeta.register()`).
+    static VIRTUAL_REGISTRATIONS: RefCell<Vec<VirtualEntry>> = const { RefCell::new(Vec::new()) };
 }
 
 // ── Required-method table (mirrors CPython's __subclasshook__ impls) ──────────
@@ -130,7 +160,7 @@ thread_local! {
 // Each entry maps an ABC name to the slice of method names that must all be
 // present and non-None on a class for `isinstance(x, ABC)` to return True.
 // ABCs that lack a direct structural hook (Sequence, Mapping, Set, …) are NOT
-// in this table; they fall through to the `extra_bases` / MRO path.
+// in this table; they fall through to the MRO / virtual registry path.
 
 const ABC_REQUIRED_METHODS: &[(&str, &[&str])] = &[
     ("Hashable", &["__hash__"]),
@@ -143,6 +173,7 @@ const ABC_REQUIRED_METHODS: &[(&str, &[&str])] = &[
     ),
     ("Sized", &["__len__"]),
     ("Container", &["__contains__"]),
+    ("Collection", &["__len__", "__iter__", "__contains__"]),
     ("Callable", &["__call__"]),
     ("Buffer", &["__buffer__"]),
     ("Awaitable", &["__await__"]),
@@ -185,6 +216,7 @@ fn canonical_structural_abc_name(class: &Rc<RefCell<PyClass>>) -> Option<&'stati
         ABC_GENERATOR => "Generator",
         ABC_SIZED => "Sized",
         ABC_CONTAINER => "Container",
+        ABC_COLLECTION => "Collection",
         ABC_CALLABLE => "Callable",
         ABC_BUFFER => "Buffer",
         ABC_AWAITABLE => "Awaitable",
@@ -207,6 +239,7 @@ fn dict_view_is_virtual_abc(kind: DictViewClass, abc: &Rc<RefCell<PyClass>>) -> 
             is(&ABC_MAPPING_VIEW)
                 || is(&ABC_KEYS_VIEW)
                 || is(&ABC_SET)
+                || is(&ABC_COLLECTION)
                 || is(&ABC_ITERABLE)
                 || is(&ABC_SIZED)
                 || is(&ABC_CONTAINER)
@@ -216,6 +249,7 @@ fn dict_view_is_virtual_abc(kind: DictViewClass, abc: &Rc<RefCell<PyClass>>) -> 
             is(&ABC_MAPPING_VIEW)
                 || is(&ABC_ITEMS_VIEW)
                 || is(&ABC_SET)
+                || is(&ABC_COLLECTION)
                 || is(&ABC_ITERABLE)
                 || is(&ABC_SIZED)
                 || is(&ABC_CONTAINER)
@@ -224,6 +258,7 @@ fn dict_view_is_virtual_abc(kind: DictViewClass, abc: &Rc<RefCell<PyClass>>) -> 
         DictViewClass::Values | DictViewClass::OrderedValues => {
             is(&ABC_MAPPING_VIEW)
                 || is(&ABC_VALUES_VIEW)
+                || is(&ABC_COLLECTION)
                 || is(&ABC_ITERABLE)
                 || is(&ABC_SIZED)
                 || is(&ABC_CONTAINER)
@@ -332,6 +367,14 @@ fn primitive_value_has_dunder(value: &Value, dunder: &str) -> bool {
             } else if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) {
                 // frozenset: iterable, sized, contains, hashable, NOT reversed
                 matches!(dunder, "__iter__" | "__len__" | "__contains__" | "__hash__")
+            } else if ops.canonical_class_tag()
+                == Some(pyrust_core::CanonicalClassTag::MappingProxy)
+            {
+                // mappingproxy: iterable, sized, contains, reversed, NOT hashable
+                matches!(
+                    dunder,
+                    "__iter__" | "__len__" | "__contains__" | "__reversed__"
+                )
             } else if pyrust_builtins::bound_method::is_bound_method(value) {
                 // Built-in bound methods are callable and hashable
                 matches!(dunder, "__call__" | "__hash__")
@@ -373,12 +416,60 @@ fn primitive_value_has_dunder(value: &Value, dunder: &str) -> bool {
 // are correctly treated as Hashable by default.
 
 fn class_mro_has_method(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<bool> {
-    use crate::interpreter::lookup_class_attr;
+    use crate::interpreter::{class_hash_inherits_builtin_none, lookup_class_attr};
+    if name == "__hash__" && class_hash_inherits_builtin_none(class) {
+        return Some(false);
+    }
     match lookup_class_attr(class, name) {
         Some(v) if v.is_none() => Some(false),
         Some(_) => Some(true),
         None => None,
     }
+}
+
+/// Register `registered` as a virtual subclass of `abc` without mutating
+/// `registered.extra_bases` or `abc.subclasses`.
+fn register_virtual_subclass(abc: &Rc<RefCell<PyClass>>, registered: &Rc<RefCell<PyClass>>) {
+    VIRTUAL_REGISTRATIONS.with(|regs| {
+        let mut regs = regs.borrow_mut();
+        regs.retain(|entry| entry.registered.strong_count() > 0);
+        if regs.iter().any(|entry| {
+            Rc::ptr_eq(&entry.abc, abc)
+                && entry
+                    .registered
+                    .upgrade()
+                    .is_some_and(|existing| Rc::ptr_eq(&existing, registered))
+        }) {
+            return;
+        }
+        regs.push(VirtualEntry {
+            abc: Rc::clone(abc),
+            registered: Rc::downgrade(registered),
+        });
+    });
+}
+
+/// Register a class (e.g. `collections.deque`) as a virtual subclass of
+/// `collections.abc.MutableSequence`.
+pub(crate) fn register_virtual_mutable_sequence(class: &Rc<RefCell<PyClass>>) {
+    ensure_abc_initialized();
+    let mut_seq = ABC_MUTABLE_SEQUENCE.with(Rc::clone);
+    register_virtual_subclass(&mut_seq, class);
+}
+
+/// True iff `cls` is a virtual subclass of `abc` via `VIRTUAL_REGISTRATIONS`
+/// (including subclasses of registered types and super-ABCs of the ABC on
+/// which the type was registered).
+fn is_virtual_subclass(cls: &Rc<RefCell<PyClass>>, abc: &Rc<RefCell<PyClass>>) -> bool {
+    VIRTUAL_REGISTRATIONS.with(|regs| {
+        let mut regs = regs.borrow_mut();
+        regs.retain(|entry| entry.registered.strong_count() > 0);
+        regs.iter().any(|entry| {
+            entry.registered.upgrade().is_some_and(|registered| {
+                class_is_subclass_of(&entry.abc, abc) && class_is_subclass_of(cls, &registered)
+            })
+        })
+    })
 }
 
 // ── Public structural subtyping hook ─────────────────────────────────────────
@@ -393,7 +484,7 @@ fn class_mro_has_method(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<bool
 ///   `Some(true)`  — all required methods present; `isinstance` should return True.
 ///   `Some(false)` — a required method is explicitly None; isinstance returns False.
 ///   `None`        — ABC not in our structural table, or check inconclusive;
-///                   fall through to the `extra_bases` / MRO path.
+///                   fall through to the MRO / virtual registry path.
 pub(crate) fn abc_subclasshook(abc_name: &str, value: &Value) -> Option<bool> {
     let required = required_methods(abc_name)?;
 
@@ -405,7 +496,7 @@ pub(crate) fn abc_subclasshook(abc_name: &str, value: &Value) -> Option<bool> {
                 match class_mro_has_method(&class, method) {
                     Some(true) => {}                   // present and non-None; continue
                     Some(false) => return Some(false), // explicitly None
-                    None => return Some(false),        // method absent from entire MRO
+                    None => return None, // absent → fall through to MRO / virtual registry
                 }
             }
             Some(true)
@@ -464,6 +555,7 @@ pyrust_module! {
         "Reversible"       => Value::py_class(ABC_REVERSIBLE.with(Rc::clone)),
         "Generator"        => Value::py_class(ABC_GENERATOR.with(Rc::clone)),
         "Sized"            => Value::py_class(ABC_SIZED.with(Rc::clone)),
+        "Collection"       => Value::py_class(ABC_COLLECTION.with(Rc::clone)),
         "Callable"         => Value::py_class(ABC_CALLABLE.with(Rc::clone)),
         "Sequence"         => Value::py_class(ABC_SEQUENCE.with(Rc::clone)),
         "MutableSequence"  => Value::py_class(ABC_MUTABLE_SEQUENCE.with(Rc::clone)),
@@ -537,7 +629,10 @@ pyrust_module! {
         };
 
         if let Some(actual) = actual_class {
-            return Ok(Value::bool_(class_is_subclass_of(&actual, &abc_class)));
+            return Ok(Value::bool_(
+                class_is_subclass_of(&actual, &abc_class)
+                    || is_virtual_subclass(&actual, &abc_class),
+            ));
         }
 
         Ok(Value::bool_(false))
@@ -621,78 +716,71 @@ pyrust_module! {
                 {
                     return Ok(Value::bool_(result));
                 }
-                // Step 2: MRO / extra_bases fallback.
-                Ok(Value::bool_(class_is_subclass_of(c_rc, &abc_class)))
+                // Step 2: MRO / virtual registry fallback.
+                Ok(Value::bool_(
+                    class_is_subclass_of(c_rc, &abc_class)
+                        || is_virtual_subclass(c_rc, &abc_class),
+                ))
             }
             _ => Ok(Value::bool_(false)),
         }
     }
 }
 
-// `make_abc_module` is called for the "Container" constant to trigger
-// registration once.  It returns the Container PyClass value and, as a side
-// effect, calls `register_abc_extra_bases()` if this is the first call on
-// this thread.
-fn make_abc_module() -> Value {
+/// Ensure the canonical ABC hierarchy and virtual registrations have been
+/// initialised once on this thread.
+fn ensure_abc_initialized() {
     if !ABC_REGISTERED.with(|f| f.get()) {
-        register_abc_extra_bases();
+        init_abc_hierarchy_and_registry();
         ABC_REGISTERED.with(|f| f.set(true));
     }
+}
+
+// `make_abc_module` is called for the "Container" constant to trigger
+// initialisation once.  It returns the Container PyClass value and, as a side
+// effect, calls `ensure_abc_initialized()` if this is the first call on this
+// thread.
+fn make_abc_module() -> Value {
+    ensure_abc_initialized();
     Value::py_class(ABC_CONTAINER.with(Rc::clone))
 }
 
-/// Register each ABC as an `extra_base` on the relevant primitive class(es),
-/// and add `__instancecheck__`, `__subclasshook__`, and `__subclasscheck__`
-/// as `BuiltinFunction` attrs on every ABC class.
+/// Wire the real inheritance hierarchy among the `collections.abc` classes
+/// themselves, attach `__instancecheck__`/`__subclasshook__`/`__subclasscheck__`
+/// to every canonical ABC, and populate the out-of-band `VIRTUAL_REGISTRATIONS`
+/// table matching CPython 3.12's `Lib/_collections_abc.py`.
 ///
-/// Called once per thread on first module load.  Mutates `extra_bases`
-/// on the per-thread primitive class singletons so that
-/// `class_is_subclass_of(list_class, sequence_class)` returns `true`.
-///
-/// This handles the complex ABCs that do NOT have direct structural hooks
-/// (Sequence, MutableSequence, Set, MutableSet, Mapping, MutableMapping),
-/// as well as Callable for user-defined functions / classes.
-///
-/// The simple ABCs (Hashable, Iterable, Sized, Container, etc.) are now
-/// handled by `__instancecheck__` / `__subclasscheck__` for all value kinds.
-/// The `extra_bases` entries are kept for the primitive class singletons so
-/// that `issubclass(list, Iterable)` etc. still works via the class MRO.
-///
-/// CPython registration table (from Lib/_collections_abc.py):
-///
-///   Hashable:        int, float, complex, str, bytes, tuple, frozenset,
-///                    bool, NoneType, NotImplementedType, ellipsis
-///   Iterable:        str, bytes, list, tuple, dict, set, frozenset, bytearray
-///   Container:       str, bytes, list, tuple, dict, set, frozenset, bytearray
-///   Sized:           str, bytes, list, tuple, dict, set, frozenset, bytearray
-///   Reversible:      str, bytes, list, tuple, dict, bytearray
-///   Sequence:        str, bytes, list, tuple, bytearray
-///   MutableSequence: list, bytearray
-///   Set:             set, frozenset
-///   MutableSet:      set
-///   Mapping:         dict
-///   MutableMapping:  dict
-///   Callable:        function, method, type  (+ BuiltinFunction / BuiltinObject
-///                    bound methods — now handled via __instancecheck__)
-fn register_abc_extra_bases() {
+/// Crucially, registered built-in types (`dict`, `list`, `tuple`, `str`, …)
+/// are NEVER added to `extra_bases` — virtual registration affects
+/// `isinstance` / `issubclass` only and leaves every class's `__bases__` and
+/// `__mro__` untouched (with `object` always last).
+fn init_abc_hierarchy_and_registry() {
     use crate::interpreter::{
         function_type_singleton, method_type_singleton, object_class_singleton,
         primitive_class_by_name, range_class_singleton, type_class_singleton,
     };
 
-    // Helper: add `abc` to `prim`'s extra_bases, and add `prim` to
-    // `abc`'s subclasses list so the relationship is discoverable.
-    fn link(prim: &Rc<RefCell<PyClass>>, abc: &Rc<RefCell<PyClass>>) {
-        // Avoid duplicates if called more than once (safety belt).
-        let already = prim.borrow().extra_bases.iter().any(|b| Rc::ptr_eq(b, abc));
-        if already {
+    // Set the real Python bases on an ABC class and record `sub` in each
+    // parent's `__subclasses__()` weak list.
+    fn set_bases(sub: &Rc<RefCell<PyClass>>, bases: &[&Rc<RefCell<PyClass>>]) {
+        let Some((first, rest)) = bases.split_first() else {
             return;
+        };
+        {
+            let mut borrowed = sub.borrow_mut();
+            borrowed.base = Some(Rc::clone(first));
+            borrowed.extra_bases = rest.iter().map(|b| Rc::clone(b)).collect();
         }
-        prim.borrow_mut().extra_bases.push(Rc::clone(abc));
-        abc.borrow()
-            .subclasses
-            .borrow_mut()
-            .push(Rc::downgrade(prim));
+        for parent in bases {
+            let parent_borrowed = parent.borrow();
+            let mut subs = parent_borrowed.subclasses.borrow_mut();
+            if !subs.iter().any(|w| {
+                w.upgrade()
+                    .is_some_and(|existing| Rc::ptr_eq(&existing, sub))
+            }) {
+                subs.push(Rc::downgrade(sub));
+            }
+        }
     }
 
     // `collections.abc` is a Python-library surface: CPython stores these
@@ -736,6 +824,7 @@ fn register_abc_extra_bases() {
     let reversible = ABC_REVERSIBLE.with(Rc::clone);
     let generator = ABC_GENERATOR.with(Rc::clone);
     let sized = ABC_SIZED.with(Rc::clone);
+    let collection = ABC_COLLECTION.with(Rc::clone);
     let callable = ABC_CALLABLE.with(Rc::clone);
     let sequence = ABC_SEQUENCE.with(Rc::clone);
     let mut_sequence = ABC_MUTABLE_SEQUENCE.with(Rc::clone);
@@ -754,6 +843,25 @@ fn register_abc_extra_bases() {
     let async_generator = ABC_ASYNC_GENERATOR.with(Rc::clone);
     let buffer = ABC_BUFFER.with(Rc::clone);
 
+    // ── Real ABC-to-ABC inheritance hierarchy (CPython 3.12) ─────────────────
+    set_bases(&coroutine, &[&awaitable]);
+    set_bases(&async_iterator, &[&async_iterable]);
+    set_bases(&async_generator, &[&async_iterator]);
+    set_bases(&iterator, &[&iterable]);
+    set_bases(&reversible, &[&iterable]);
+    set_bases(&generator, &[&iterator]);
+    set_bases(&collection, &[&sized, &iterable, &container]);
+    set_bases(&set_abc, &[&collection]);
+    set_bases(&mut_set, &[&set_abc]);
+    set_bases(&mapping, &[&collection]);
+    set_bases(&mut_mapping, &[&mapping]);
+    set_bases(&mapping_view, &[&sized]);
+    set_bases(&keys_view, &[&mapping_view, &set_abc]);
+    set_bases(&items_view, &[&mapping_view, &set_abc]);
+    set_bases(&values_view, &[&mapping_view, &collection]);
+    set_bases(&sequence, &[&reversible, &collection]);
+    set_bases(&mut_sequence, &[&sequence]);
+
     pyrust_builtins::abc_marker::register(&mapping, pyrust_builtins::abc_marker::AbcKind::Mapping);
 
     // Add __instancecheck__ / __subclasshook__ / __subclasscheck__ to every ABC.
@@ -765,6 +873,7 @@ fn register_abc_extra_bases() {
         &reversible,
         &generator,
         &sized,
+        &collection,
         &callable,
         &sequence,
         &mut_sequence,
@@ -786,168 +895,175 @@ fn register_abc_extra_bases() {
         add_dunder_methods(abc);
     }
 
-    // Resolve primitive classes.
-    macro_rules! prim {
-        ($name:expr) => {
-            match primitive_class_by_name($name) {
-                Some(cls) => cls,
-                None => return, // defensive; should never happen
-            }
-        };
-    }
-
-    let list_cls = prim!("list");
-    let tuple_cls = prim!("tuple");
-    let str_cls = prim!("str");
-    let bytes_cls = prim!("bytes");
-    let bytearray_cls = prim!("bytearray");
-    let dict_cls = prim!("dict");
-    let set_cls = prim!("set");
-    let frozenset_cls = prim!("frozenset");
-    let int_cls = prim!("int");
-    let float_cls = prim!("float");
-    let complex_cls = prim!("complex");
-    let bool_cls = prim!("bool");
-    let none_cls = prim!("NoneType");
-
-    // ── Singleton class objects ──────────────────────────────────────────────
+    // ── Virtual subclass registrations (CPython Lib/_collections_abc.py) ─────
+    // Stored out-of-band in `VIRTUAL_REGISTRATIONS` (never in `extra_bases`).
+    let _obj_cls = object_class_singleton();
     let fn_type = function_type_singleton();
     let meth_type = method_type_singleton();
     let type_cls = type_class_singleton();
     let range_cls = range_class_singleton();
-    let _obj_cls = object_class_singleton(); // ensure singleton initialised
 
-    // ── Sequence ────────────────────────────────────────────────────────────
-    // list, tuple, str, bytes, bytearray, range are Sequences.
-    // CPython: Sequence.register(range) in Lib/_collections_abc.py (issue #1800).
-    for cls in [
-        &list_cls,
-        &tuple_cls,
-        &str_cls,
-        &bytes_cls,
-        &bytearray_cls,
-        &range_cls,
+    let reg_prim = |abc: &Rc<RefCell<PyClass>>, name: &str| {
+        if let Some(cls) = primitive_class_by_name(name) {
+            register_virtual_subclass(abc, &cls);
+        }
+    };
+
+    // MutableMapping: dict (inherits Mapping → Collection → Sized/Iterable/Container).
+    reg_prim(&mut_mapping, "dict");
+
+    // Mapping: mappingproxy (read-only mapping; not MutableMapping).
+    reg_prim(&mapping, "mappingproxy");
+
+    // Reversible: dict and mappingproxy (Sequence types already inherit Reversible).
+    reg_prim(&reversible, "dict");
+    reg_prim(&reversible, "mappingproxy");
+
+    // MutableSequence: list, bytearray (inherits Sequence → Reversible/Collection).
+    reg_prim(&mut_sequence, "list");
+    reg_prim(&mut_sequence, "bytearray");
+
+    // Sequence: tuple, str, bytes, range (inherits Reversible/Collection).
+    reg_prim(&sequence, "tuple");
+    reg_prim(&sequence, "str");
+    reg_prim(&sequence, "bytes");
+    register_virtual_subclass(&sequence, &range_cls);
+
+    // MutableSet: set (inherits Set → Collection).
+    reg_prim(&mut_set, "set");
+
+    // Set: frozenset (inherits Collection).
+    reg_prim(&set_abc, "frozenset");
+
+    // Hashable: immutable primitives + range + function/method/type.
+    for name in [
+        "int",
+        "float",
+        "complex",
+        "str",
+        "bytes",
+        "tuple",
+        "frozenset",
+        "bool",
+        "NoneType",
+        "NotImplementedType",
+        "ellipsis",
     ] {
-        link(cls, &sequence);
+        reg_prim(&hashable, name);
+    }
+    register_virtual_subclass(&hashable, &range_cls);
+    register_virtual_subclass(&hashable, &fn_type);
+    register_virtual_subclass(&hashable, &meth_type);
+    register_virtual_subclass(&hashable, &type_cls);
+
+    // Callable: function, method, type.
+    register_virtual_subclass(&callable, &fn_type);
+    register_virtual_subclass(&callable, &meth_type);
+    register_virtual_subclass(&callable, &type_cls);
+}
+
+/// Install the concrete Python mixin methods from `collections_abc_py.py` onto
+/// the canonical `collections.abc` `PyClass` singletons once per thread.
+///
+/// Called from `post_load_inject` on `import collections.abc`.  After copying
+/// each mixin carrier's methods onto its canonical singleton, the carrier's
+/// module-global names (`Mapping`, `Set`, `Iterable`, `KeysView`, …) are
+/// rebound in the exec namespace to the canonical singletons so every mixin
+/// method resolves canonical identities (surviving `del sys.modules["collections.abc"]`).
+pub(crate) fn inject_python_members(
+    interp: &mut Interpreter,
+    module: &Rc<RefCell<crate::value::PyModule>>,
+) -> Result<Option<Value>> {
+    ensure_abc_initialized();
+    if ABC_MIXINS_INSTALLED.with(|f| f.get()) {
+        return Ok(None);
     }
 
-    // ── MutableSequence ─────────────────────────────────────────────────────
-    // list and bytearray.
-    for cls in [&list_cls, &bytearray_cls] {
-        link(cls, &mut_sequence);
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
+    interp.exec_source(COLLECTIONS_ABC_PY_SOURCE, Some(ns.clone()), None)?;
+
+    let mixin_targets: [(&str, Rc<RefCell<PyClass>>); 12] = [
+        ("Iterator", ABC_ITERATOR.with(Rc::clone)),
+        ("Generator", ABC_GENERATOR.with(Rc::clone)),
+        ("MappingView", ABC_MAPPING_VIEW.with(Rc::clone)),
+        ("KeysView", ABC_KEYS_VIEW.with(Rc::clone)),
+        ("ItemsView", ABC_ITEMS_VIEW.with(Rc::clone)),
+        ("ValuesView", ABC_VALUES_VIEW.with(Rc::clone)),
+        ("Mapping", ABC_MAPPING.with(Rc::clone)),
+        ("MutableMapping", ABC_MUTABLE_MAPPING.with(Rc::clone)),
+        ("Set", ABC_SET.with(Rc::clone)),
+        ("MutableSet", ABC_MUTABLE_SET.with(Rc::clone)),
+        ("Sequence", ABC_SEQUENCE.with(Rc::clone)),
+        ("MutableSequence", ABC_MUTABLE_SEQUENCE.with(Rc::clone)),
+    ];
+
+    {
+        let dict = ns
+            .as_dict()
+            .ok_or_else(|| PyError::Runtime("collections.abc: exec namespace not a dict".into()))?;
+        for (name, target) in &mixin_targets {
+            if let Some(carrier_val) = dict.get(&PyKey::str_from(*name))
+                && let ValueKind::PyClass(carrier_cls) = carrier_val.kind()
+            {
+                let copied: Vec<(String, Value)> = carrier_cls
+                    .borrow()
+                    .attrs
+                    .iter()
+                    .filter(|(k, _)| {
+                        !matches!(
+                            k.as_str(),
+                            "__module__"
+                                | "__doc__"
+                                | "__dict__"
+                                | "__weakref__"
+                                | "__annotations__"
+                        )
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let mut target_mut = target.borrow_mut();
+                for (k, v) in copied {
+                    target_mut.attrs.insert(k, v);
+                }
+                target_mut.bump_mutation_version();
+            }
+        }
     }
 
-    // ── Reversible ──────────────────────────────────────────────────────────
-    // list, tuple, str, bytes, dict, bytearray, range
-    // (not set, frozenset in CPython).
-    // dict became Reversible in Python 3.8 (dict keys preserve insertion order).
-    // CPython: Reversible.register(range) in Lib/_collections_abc.py (issue #1800).
-    for cls in [
-        &list_cls,
-        &tuple_cls,
-        &str_cls,
-        &bytes_cls,
-        &dict_cls,
-        &bytearray_cls,
-        &range_cls,
-    ] {
-        link(cls, &reversible);
+    // Rebind every ABC name in the exec namespace to the canonical singleton so
+    // mixin bodies (`isinstance(other, Mapping)`, `KeysView(self)`, …) resolve
+    // the real canonical classes.
+    let canonical_bindings: [(&str, Rc<RefCell<PyClass>>); 25] = [
+        ("Container", ABC_CONTAINER.with(Rc::clone)),
+        ("Hashable", ABC_HASHABLE.with(Rc::clone)),
+        ("Iterable", ABC_ITERABLE.with(Rc::clone)),
+        ("Iterator", ABC_ITERATOR.with(Rc::clone)),
+        ("Reversible", ABC_REVERSIBLE.with(Rc::clone)),
+        ("Generator", ABC_GENERATOR.with(Rc::clone)),
+        ("Sized", ABC_SIZED.with(Rc::clone)),
+        ("Collection", ABC_COLLECTION.with(Rc::clone)),
+        ("Callable", ABC_CALLABLE.with(Rc::clone)),
+        ("Sequence", ABC_SEQUENCE.with(Rc::clone)),
+        ("MutableSequence", ABC_MUTABLE_SEQUENCE.with(Rc::clone)),
+        ("Set", ABC_SET.with(Rc::clone)),
+        ("MutableSet", ABC_MUTABLE_SET.with(Rc::clone)),
+        ("Mapping", ABC_MAPPING.with(Rc::clone)),
+        ("MutableMapping", ABC_MUTABLE_MAPPING.with(Rc::clone)),
+        ("MappingView", ABC_MAPPING_VIEW.with(Rc::clone)),
+        ("KeysView", ABC_KEYS_VIEW.with(Rc::clone)),
+        ("ItemsView", ABC_ITEMS_VIEW.with(Rc::clone)),
+        ("ValuesView", ABC_VALUES_VIEW.with(Rc::clone)),
+        ("Awaitable", ABC_AWAITABLE.with(Rc::clone)),
+        ("Coroutine", ABC_COROUTINE.with(Rc::clone)),
+        ("AsyncIterable", ABC_ASYNC_ITERABLE.with(Rc::clone)),
+        ("AsyncIterator", ABC_ASYNC_ITERATOR.with(Rc::clone)),
+        ("AsyncGenerator", ABC_ASYNC_GENERATOR.with(Rc::clone)),
+        ("Buffer", ABC_BUFFER.with(Rc::clone)),
+    ];
+    for (name, cls) in canonical_bindings {
+        ns.dict_insert(PyKey::str_from(name), Value::py_class(cls))?;
     }
 
-    // ── Set ─────────────────────────────────────────────────────────────────
-    // set and frozenset.
-    for cls in [&set_cls, &frozenset_cls] {
-        link(cls, &set_abc);
-    }
-
-    // ── MutableSet ──────────────────────────────────────────────────────────
-    // Only set (frozenset is immutable).
-    link(&set_cls, &mut_set);
-
-    // ── Mapping ─────────────────────────────────────────────────────────────
-    // dict.
-    link(&dict_cls, &mapping);
-
-    // ── MutableMapping ──────────────────────────────────────────────────────
-    // dict.
-    link(&dict_cls, &mut_mapping);
-
-    // ── Container ───────────────────────────────────────────────────────────
-    // str, bytes, list, tuple, dict, set, frozenset, bytearray, range.
-    for cls in [
-        &str_cls,
-        &bytes_cls,
-        &list_cls,
-        &tuple_cls,
-        &dict_cls,
-        &set_cls,
-        &frozenset_cls,
-        &bytearray_cls,
-        &range_cls,
-    ] {
-        link(cls, &container);
-    }
-
-    // ── Sized ───────────────────────────────────────────────────────────────
-    // str, bytes, list, tuple, dict, set, frozenset, bytearray, range.
-    for cls in [
-        &str_cls,
-        &bytes_cls,
-        &list_cls,
-        &tuple_cls,
-        &dict_cls,
-        &set_cls,
-        &frozenset_cls,
-        &bytearray_cls,
-        &range_cls,
-    ] {
-        link(cls, &sized);
-    }
-
-    // ── Iterable ────────────────────────────────────────────────────────────
-    // str, bytes, list, tuple, dict, set, frozenset, bytearray, range.
-    for cls in [
-        &str_cls,
-        &bytes_cls,
-        &list_cls,
-        &tuple_cls,
-        &dict_cls,
-        &set_cls,
-        &frozenset_cls,
-        &bytearray_cls,
-        &range_cls,
-    ] {
-        link(cls, &iterable);
-    }
-
-    // ── Hashable ────────────────────────────────────────────────────────────
-    // int, float, complex, str, bytes, tuple, frozenset, bool, NoneType, range.
-    // Also: user-defined functions and bound methods (issue #1793) — they are
-    // hashable by identity in CPython.  The structural hook already returns
-    // Some(true) for instances, but `issubclass(type(f), Hashable)` goes through
-    // the extra_bases MRO path, so we must link the function/method class here.
-    // (list, dict, set are NOT hashable)
-    for cls in [
-        &int_cls,
-        &float_cls,
-        &complex_cls,
-        &str_cls,
-        &bytes_cls,
-        &tuple_cls,
-        &frozenset_cls,
-        &bool_cls,
-        &none_cls,
-        &range_cls,
-        &fn_type,
-        &meth_type,
-    ] {
-        link(cls, &hashable);
-    }
-
-    // ── Callable ────────────────────────────────────────────────────────────
-    // function, method, type.  BuiltinFunction and BuiltinObject bound methods
-    // are handled via __instancecheck__ using the primitive protocol table.
-    for cls in [&fn_type, &meth_type, &type_cls] {
-        link(cls, &callable);
-    }
+    ABC_MIXINS_INSTALLED.with(|f| f.set(true));
+    Ok(None)
 }
