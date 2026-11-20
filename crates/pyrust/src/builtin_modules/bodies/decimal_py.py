@@ -715,12 +715,7 @@ class Decimal(object):
                 sign = 1
             n, d = abs(f).as_integer_ratio()
             k = d.bit_length() - 1
-            # pyrust note: `5**k` is written `pow(5, k)` to dodge an optimizer
-            # miscompile (issue #2824) -- when `k` is also assigned a constant
-            # `0` in the sibling `isinstance(f, int)` branch, the
-            # algebraic-simplify pass wrongly folds `5 ** k` to `1` here.
-            # `pow()` is unaffected.
-            coeff = str(n * pow(5, k))
+            coeff = str(n * 5**k)
         else:
             raise TypeError("argument must be int or float.")
 

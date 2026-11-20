@@ -1396,4 +1396,89 @@ fn thread_jumps_no_change_when_no_chains() {
     assert_eq!(out.len(), insns.len());
 }
 
+// ── Issue #2824: conditional-const binop must not fold across branches ────
+
+#[test]
+fn conditional_const_pow_after_merge_retains_dynamic_binop() {
+    for c in ["0", "1"] {
+        let src = format!(
+            "def g(f, cond):\n    if cond:\n        k = {c}\n    else:\n        k = f\n    return 5 ** k\n"
+        );
+        let optimized = optimize(compile_fn(&src));
+        let inner = &optimized.fn_protos[0].code;
+        let has_dynamic_pow = inner
+            .insns
+            .iter()
+            .any(|insn| matches!(insn, Insn::BinOp(_, _, crate::ast::BinaryOp::Pow, _)));
+        assert!(
+            has_dynamic_pow,
+            "5 ** k with sibling k = {c} must keep dynamic BinOp(Pow); got {:?}",
+            inner.insns
+        );
+        let has_const_pow = inner.insns.iter().any(|insn| {
+            matches!(
+                insn,
+                Insn::BinOpConst(_, _, crate::ast::BinaryOp::Pow, _, _)
+            )
+        });
+        assert!(
+            !has_const_pow,
+            "5 ** k with sibling k = {c} must not fuse RHS into BinOpConst; got {:?}",
+            inner.insns
+        );
+    }
+}
+
+#[test]
+fn conditional_const_sibling_ops_retain_dynamic_binop() {
+    for (op_str, expected_op, const_val) in [
+        ("**", crate::ast::BinaryOp::Pow, "0"),
+        ("+", crate::ast::BinaryOp::Add, "0"),
+        ("-", crate::ast::BinaryOp::Sub, "0"),
+        ("*", crate::ast::BinaryOp::Mul, "1"),
+        ("*", crate::ast::BinaryOp::Mul, "0"),
+    ] {
+        let src = format!(
+            "def g(base, f, cond):\n    if cond:\n        k = {const_val}\n        res = base\n    elif not cond:\n        k = f\n        res = base {op_str} k\n    else:\n        res = 0\n    return res\n"
+        );
+        let optimized = optimize(compile_fn(&src));
+        let inner = &optimized.fn_protos[0].code;
+        let has_dynamic_op = inner
+            .insns
+            .iter()
+            .any(|insn| matches!(insn, Insn::BinOp(_, _, op, _) if *op == expected_op));
+        assert!(
+            has_dynamic_op,
+            "base {op_str} k with sibling k = {const_val} must keep dynamic BinOp; got {:?}",
+            inner.insns
+        );
+    }
+}
+
+#[test]
+fn genuine_const_pow_still_folds() {
+    for (expr, expected) in [("5 ** 0", 1_i64), ("5 ** 1", 5_i64), ("5 ** 2", 25_i64)] {
+        let src = format!("def f():\n    return {expr}\n");
+        let optimized = optimize(compile_fn(&src));
+        let inner = &optimized.fn_protos[0].code;
+        let has_pow = inner.insns.iter().any(|insn| {
+            matches!(
+                insn,
+                Insn::BinOp(_, _, crate::ast::BinaryOp::Pow, _)
+                    | Insn::BinOpConst(_, _, crate::ast::BinaryOp::Pow, _, _)
+            )
+        });
+        assert!(
+            !has_pow,
+            "genuine constant {expr} should fold at compile time; got {:?}",
+            inner.insns
+        );
+        let has_expected_const = inner.consts.iter().any(|v| v.as_int() == Some(expected));
+        assert!(
+            has_expected_const,
+            "folded constant pool for {expr} should contain {expected}"
+        );
+    }
+}
+
 // ── pass_dead_code ────────────────────────────────────────────────────────
