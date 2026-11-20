@@ -784,6 +784,17 @@ fn tz_info() -> TzInfo {
     }
 }
 
+#[cfg(not(unix))]
+fn tz_info() -> TzInfo {
+    TzInfo {
+        timezone: 0,
+        altzone: 0,
+        daylight: 0,
+        std_name: "UTC".to_string(),
+        dst_name: "UTC".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod monotonic_tests {
     use super::monotonic_secs;
@@ -797,16 +808,5 @@ mod monotonic_tests {
 
         assert!(from_new_thread > before);
         assert!(from_new_thread <= after);
-    }
-}
-
-#[cfg(not(unix))]
-fn tz_info() -> TzInfo {
-    TzInfo {
-        timezone: 0,
-        altzone: 0,
-        daylight: 0,
-        std_name: "UTC".to_string(),
-        dst_name: "UTC".to_string(),
     }
 }

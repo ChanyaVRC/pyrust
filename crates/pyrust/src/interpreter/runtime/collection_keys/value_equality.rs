@@ -485,12 +485,8 @@ impl Interpreter {
                         return Ok(false);
                     }
                 }
-                if list_pair
-                    && (a.list_len() != Some(expected_len) || b.list_len() != Some(expected_len))
-                {
-                    return Ok(false);
-                }
-                Ok(true)
+                Ok(!(list_pair
+                    && (a.list_len() != Some(expected_len) || b.list_len() != Some(expected_len))))
             });
         }
 
