@@ -437,13 +437,20 @@ impl Interpreter {
             None => false,
         };
         if let Some(key_fn_val) = key_fn {
-            // Compute keys via the interpreter, then delegate sorting to builtins.
-            let items_snapshot: Vec<Value> = receiver
-                .list_with(|items| items.to_vec())
+            // Steal the list's items into an owned Vec so the receiver appears
+            // empty during `key=` evaluation and comparisons, mirroring CPython's
+            // `list_sort_impl` (`ob_item = NULL`).  Any mutation during sort
+            // allocates into the empty Vec and is caught by `restore_sorted_list`
+            // without panicking or losing the original elements.
+            let saved: Vec<Value> = receiver
+                .list_with_mut(std::mem::take)
                 .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
-            let mut keys: Vec<Value> = Vec::with_capacity(items_snapshot.len());
-            for item in &items_snapshot {
-                let key_val = {
+            if saved.is_empty() {
+                return Ok(Value::none());
+            }
+            let mut keys: Vec<Value> = Vec::with_capacity(saved.len());
+            for item in &saved {
+                let key_res = {
                     let mut buf = std::mem::take(&mut self.call_arg_buf);
                     buf.clear();
                     buf.push(ExpandedCallArg {
@@ -452,42 +459,51 @@ impl Interpreter {
                     });
                     let r = self.call_function_expanded(key_fn_val.clone(), &buf);
                     self.call_arg_buf = buf;
-                    r?
+                    r
                 };
-                keys.push(key_val);
-            }
-            if matches!(
-                pyrust_core::classify_sort(keys.iter()),
-                pyrust_core::SortKind::AllInt | pyrust_core::SortKind::AllStr
-            ) {
-                return pyrust_builtins::list::sort_with_precomputed_keys(receiver, keys, reverse);
-            }
-            let mut keyed: Vec<(Value, Value)> = keys.into_iter().zip(items_snapshot).collect();
-            let mut sort_err: Option<PyError> = None;
-            keyed.sort_by(|(left_key, _), (right_key, _)| {
-                if sort_err.is_some() {
-                    return std::cmp::Ordering::Equal;
-                }
-                let (lhs, rhs) = if reverse {
-                    (right_key, left_key)
-                } else {
-                    (left_key, right_key)
-                };
-                match self.richcmp_order(lhs, rhs) {
-                    Ok(order) => order,
-                    Err(error) => {
-                        sort_err = Some(error);
-                        std::cmp::Ordering::Equal
+                match key_res {
+                    Ok(key_val) => keys.push(key_val),
+                    Err(err) => {
+                        receiver.list_with_mut(|items| *items = saved);
+                        return Err(err);
                     }
                 }
-            });
-            if let Some(error) = sort_err {
-                return Err(error);
             }
-            receiver.list_with_mut(|items| {
-                *items = keyed.into_iter().map(|(_, value)| value).collect();
-            });
-            return Ok(Value::none());
+            let mut keyed: Vec<(Value, Value)> = keys.into_iter().zip(saved).collect();
+            let mut sort_err: Option<PyError> = None;
+            if keyed.len() >= 2 {
+                match pyrust_core::classify_sort(keyed.iter().map(|(k, _)| k)) {
+                    pyrust_core::SortKind::AllInt => keyed.sort_by(|(ka, _), (kb, _)| {
+                        let (lhs, rhs) = if reverse { (kb, ka) } else { (ka, kb) };
+                        lhs.as_int().unwrap_or(0).cmp(&rhs.as_int().unwrap_or(0))
+                    }),
+                    pyrust_core::SortKind::AllStr => keyed.sort_by(|(ka, _), (kb, _)| {
+                        let (lhs, rhs) = if reverse { (kb, ka) } else { (ka, kb) };
+                        lhs.as_str().unwrap_or("").cmp(rhs.as_str().unwrap_or(""))
+                    }),
+                    pyrust_core::SortKind::HasInstance | pyrust_core::SortKind::General => {
+                        keyed.sort_by(|(left_key, _), (right_key, _)| {
+                            if sort_err.is_some() {
+                                return std::cmp::Ordering::Equal;
+                            }
+                            let (lhs, rhs) = if reverse {
+                                (right_key, left_key)
+                            } else {
+                                (left_key, right_key)
+                            };
+                            match self.richcmp_order(lhs, rhs) {
+                                Ok(order) => order,
+                                Err(error) => {
+                                    sort_err = Some(error);
+                                    std::cmp::Ordering::Equal
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            let sorted_items: Vec<Value> = keyed.into_iter().map(|(_, value)| value).collect();
+            return pyrust_builtins::list::restore_sorted_list(receiver, sorted_items, sort_err);
         }
         // No key.  Pre-scan: if any element is a user instance, comparisons
         // may dispatch `__lt__` (and the reflected `__gt__`), which the
@@ -496,9 +512,12 @@ impl Interpreter {
         // through the interpreter-aware `richcmp_order`, exactly as `sorted()`
         // does.  All-primitive lists keep the in-crate fast sort: no perf
         // regression on the common int/str/float case.
-        let sort_kind = receiver
-            .list_with(|items| pyrust_core::classify_sort(items.iter()))
-            .unwrap_or(pyrust_core::SortKind::General);
+        let (sort_kind, len) = receiver
+            .list_with(|items| (pyrust_core::classify_sort(items.iter()), items.len()))
+            .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
+        if len < 2 {
+            return Ok(Value::none());
+        }
         if matches!(
             sort_kind,
             pyrust_core::SortKind::AllInt | pyrust_core::SortKind::AllStr
@@ -510,15 +529,14 @@ impl Interpreter {
             // list/str/object — diverging from `sorted()` and CPython.
             return pyrust_builtins::list::sort_no_key(receiver, reverse);
         }
-        // Snapshot the items so the comparator (which may re-enter the same
-        // list via user `__lt__`) does not straddle the receiver's borrow.
-        // Write the sorted result back inside a `list_with_mut` window, mirroring
-        // `pyrust_builtins::list::sort_by_cmp`.
-        let mut snapshot: Vec<Value> = receiver
-            .list_with(|items| items.clone())
+        // Steal the items so the list appears empty during comparisons (mirroring
+        // CPython's `list_sort_impl` `ob_item = NULL`), detect any mutation during
+        // sort, and always restore the elements even if `__lt__` raises.
+        let mut saved: Vec<Value> = receiver
+            .list_with_mut(std::mem::take)
             .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
         let mut sort_err: Option<PyError> = None;
-        snapshot.sort_by(|a, b| {
+        saved.sort_by(|a, b| {
             if sort_err.is_some() {
                 return std::cmp::Ordering::Equal;
             }
@@ -531,11 +549,7 @@ impl Interpreter {
                 }
             }
         });
-        if let Some(e) = sort_err {
-            return Err(e);
-        }
-        receiver.list_with_mut(|items| *items = snapshot);
-        Ok(Value::none())
+        pyrust_builtins::list::restore_sorted_list(receiver, saved, sort_err)
     }
 
     /// `str.format` / `str.format_map` / `str.maketrans` — the templating
