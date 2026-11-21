@@ -283,8 +283,20 @@ if [[ "$MEASURE_MEMORY" -eq 1 ]]; then
   else
     MEMORY_DIR=$(mktemp -d)
     echo "Measuring peak RSS..."
+    _is_timed_out() {
+      local needle="$1"
+      local t
+      for t in "${TIMED_OUT[@]}"; do
+        [[ "$t" == "$needle" ]] && return 0
+      done
+      return 1
+    }
     for script in "${SCRIPTS[@]}"; do
       rel="${script#"$CASES_DIR/"}"
+      if [[ ${#TIMED_OUT[@]} -gt 0 ]] && _is_timed_out "$rel"; then
+        echo "  [skip memory] $rel (timed out during timing pass)" >&2
+        continue
+      fi
       name="${rel//\//__}"
       name="${name%.py}"
 
@@ -331,6 +343,12 @@ REPORT_ARGS=(
 [[ -n "$SVG_OUT"              ]] && REPORT_ARGS+=(--svg-out              "$SVG_OUT")
 [[ -n "$MARKDOWN_OUT"         ]] && REPORT_ARGS+=(--markdown-out         "$MARKDOWN_OUT")
 [[ -n "$JSON_OUT"             ]] && REPORT_ARGS+=(--json-out             "$JSON_OUT")
+if [[ ${#TIMED_OUT[@]} -gt 0 ]]; then
+  REPORT_ARGS+=(--timeout-s "$BENCH_TIMEOUT_S")
+  for t in "${TIMED_OUT[@]}"; do
+    REPORT_ARGS+=(--timed-out "$t")
+  done
+fi
 
 "$PYTHON" "$REPORT_PY" "${REPORT_ARGS[@]}"
 
