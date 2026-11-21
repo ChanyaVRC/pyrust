@@ -691,4 +691,34 @@ pyrust_module! {
         _interp.call_next(&gen_val, default_val)
     }
 
+    /// CPython: anext(async_iterator[, default]) — return awaitable for next item.
+    /// <https://docs.python.org/3/library/functions.html#anext>
+    ///
+    /// Must stay in `(args)` dialect: `anext(ait, None)` is semantically
+    /// distinct from `anext(ait)` — the former wraps in `anext_awaitable` and
+    /// returns `None` on `StopAsyncIteration`, whereas the latter returns the
+    /// raw awaitable produced by `type(ait).__anext__(ait)`.
+    fn anext(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at least 1 argument, got 0"),
+            ));
+        }
+        if args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at most 2 arguments, got {}", args.len()),
+            ));
+        }
+        let aiter_val = args[0].value.clone();
+        let default_val = if args.len() == 2 {
+            Some(args[1].value.clone())
+        } else {
+            None
+        };
+        _interp.call_anext(&aiter_val, default_val)
+    }
+
 }

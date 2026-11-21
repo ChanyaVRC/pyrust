@@ -562,6 +562,26 @@ pub(crate) fn call_del_if_last_binding_in_env(
             }
             continue;
         }
+        if let Some(anext_aw) = state.downcast_ref::<AnextAwaitable>() {
+            observe_direct_binding(
+                &anext_aw.wrapped,
+                del_rc,
+                &mut target_alias_is_visible,
+                &mut visible_owner_worklist,
+                &mut discovered_owner_ids,
+            );
+            observe_direct_binding(
+                &anext_aw.default_value,
+                del_rc,
+                &mut target_alias_is_visible,
+                &mut visible_owner_worklist,
+                &mut discovered_owner_ids,
+            );
+            if target_alias_is_visible {
+                return;
+            }
+            continue;
+        }
         let Some(frame) = state.downcast_ref::<GeneratorFrame>() else {
             continue;
         };

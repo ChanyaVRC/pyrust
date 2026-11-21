@@ -157,6 +157,12 @@ impl Interpreter {
                 return self.step_async_gen_asend(&state_rc, Value::none(), true);
             }
 
+            // Two-argument `anext(aiter, default)` awaitable (#2983): implements
+            // `__iter__`/`__next__` by delegating to `send(None)`.
+            if tid == TypeId::of::<AnextAwaitable>() {
+                return self.step_anext_awaitable_send(&state_rc, Value::none());
+            }
+
             // GetItemIter path: drive one `__getitem__(i)` call lazily.
             // Borrow released by step_getitem_iter before invoking the
             // method (it would otherwise re-entrantly re-borrow).

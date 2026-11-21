@@ -24,6 +24,26 @@ pub(crate) fn is_stop_iteration_error(err: &PyError) -> bool {
     }
 }
 
+/// Returns `true` for any `PyError` variant that represents a
+/// `StopAsyncIteration` or subclass (used by two-argument `anext(aiter, default)`).
+#[inline]
+pub(crate) fn is_stop_async_iteration_error(err: &PyError) -> bool {
+    match err {
+        PyError::Named(cls, _) => cls.as_ref() == "StopAsyncIteration",
+        PyError::Class(cls, _) => class_is_builtin_exception_subclass(cls, "StopAsyncIteration"),
+        PyError::Raised(exc) => match exc.kind() {
+            ValueKind::PyInstance(inst) => {
+                class_is_builtin_exception_subclass(&inst.borrow().class, "StopAsyncIteration")
+            }
+            ValueKind::PyClass(cls) => {
+                class_is_builtin_exception_subclass(cls, "StopAsyncIteration")
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// Extract the `value` attribute from a `StopIteration` error (PEP 380 §3).
 ///
 /// In CPython, `StopIteration.value` is the first positional argument: when

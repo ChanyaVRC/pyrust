@@ -68,6 +68,32 @@ impl Interpreter {
             _ => {}
         }
         match method {
+            "__await__" => {
+                let is_anext_aw = matches!(
+                    receiver.kind(),
+                    ValueKind::Generator(rc)
+                        if rc
+                            .try_borrow()
+                            .is_ok_and(|b| b.downcast_ref::<AnextAwaitable>().is_some())
+                );
+                if is_anext_aw {
+                    if !args.is_empty() {
+                        return Err(pyrust_core::type_err!(
+                            "anext_awaitable.__await__() takes no arguments ({} given)",
+                            args.len()
+                        ));
+                    }
+                    return Ok(receiver);
+                }
+                Err(PyError::attribute_error(
+                    format!(
+                        "'{}' object has no attribute '__await__'",
+                        full_type_name_str(&receiver)
+                    ),
+                    Some("__await__".to_string()),
+                    Some(receiver),
+                ))
+            }
             "__iter__" => {
                 if !args.is_empty() {
                     return Err(pyrust_core::type_err!(
@@ -258,6 +284,14 @@ impl Interpreter {
                 self.generator_close(receiver)
             }
             "throw" => {
+                if let ValueKind::Generator(rc) = receiver.kind()
+                    && rc
+                        .try_borrow()
+                        .is_ok_and(|b| b.downcast_ref::<AnextAwaitable>().is_some())
+                {
+                    let rc = Rc::clone(rc);
+                    return self.step_anext_awaitable_throw(&rc, args);
+                }
                 if let Some(err) = Self::async_gen_asend_reuse_error(&receiver) {
                     return Err(err);
                 }
@@ -440,6 +474,10 @@ impl Interpreter {
             if let Some(asend) = borrow.downcast_mut::<AsyncGenASend>() {
                 asend.done = true;
                 return Ok(Value::none());
+            }
+            if borrow.downcast_ref::<AnextAwaitable>().is_some() {
+                drop(borrow);
+                return self.step_anext_awaitable_close(&state_rc);
             }
         }
 
@@ -679,6 +717,10 @@ impl Interpreter {
         if borrow.is::<AsyncGenASend>() {
             drop(borrow);
             return self.step_async_gen_asend(&state_rc, sent_value, true);
+        }
+        if borrow.is::<AnextAwaitable>() {
+            drop(borrow);
+            return self.step_anext_awaitable_send(&state_rc, sent_value);
         }
 
         // NativeIterFrame and GetItemIter do not support send().
