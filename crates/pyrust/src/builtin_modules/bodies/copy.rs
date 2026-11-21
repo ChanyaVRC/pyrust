@@ -471,16 +471,24 @@ fn shallow_copy_with_reconstruct(
             crate::interpreter::IteratorCopy::Unowned => Ok(obj.clone()),
         },
 
-        // PyInstance — check for __copy__ dunder first (MRO-aware).
+        // PyInstance — check for class-level __copy__ first (CPython Lib/copy.py).
         ValueKind::PyInstance(rc) => {
             let rc = Rc::clone(rc);
-            // Look up __copy__ on the class via MRO so inherited dunders
-            // are found.  Do not hold any borrow across the call.
-            let copy_method = {
+            let cls_val = {
                 let borrow = rc.borrow();
-                let class = Rc::clone(&borrow.class);
-                drop(borrow);
-                lookup_class_attr(&class, "__copy__")
+                Value::py_class(Rc::clone(&borrow.class))
+            };
+            // CPython's `copy.copy` resolves `__copy__` on `cls = type(x)`, NOT
+            // on the instance (`copier = getattr(cls, "__copy__", None)`), and
+            // invokes `copier(x)` when non-None.  Instance-dict `__copy__` is
+            // ignored, while class/metaclass descriptors follow class-level
+            // attribute resolution (`__get__(None, cls)` for class descriptors,
+            // `__get__(cls, metaclass)` for metaclass descriptors; issue #2987).
+            let copy_method = match interp.get_attr(&cls_val, "__copy__") {
+                Ok(v) if !v.is_none() => Some(v),
+                Ok(_) => None,
+                Err(e) if e.class_name_is("AttributeError") => None,
+                Err(e) => return Err(e),
             };
             let dynamic_reversed_reduction =
                 copy_method.is_none() && crate::interpreter::is_reversed_iterator(&obj);
@@ -496,41 +504,14 @@ fn shallow_copy_with_reconstruct(
             } else {
                 None
             };
-            if let Some(method) = copy_method.filter(|method| {
-                !method.is_none()
-                    && !pyrust_builtins::classmethod::as_static_method_any(method)
-                        .is_some_and(|wrapped| wrapped.is_none())
-            }) {
-                // Call `__copy__(self)` — use invoke_class_method so that
-                // UserFunction and BuiltinFunction are both handled and
-                // `self` is bound via the bound_prefix slot.
-                //
-                // CPython's `copy.copy` is pure Python and resolves the hook as
-                // a *class* attribute, then passes the object explicitly:
-                // `copier = getattr(cls, "__copy__", None); copier(x)`.  For a
-                // plain `def` that class-level lookup is unbound, so the single
-                // explicit argument lands on `self` — identical to prepending
-                // the receiver.  A `staticmethod` / `classmethod` hook, though,
-                // still receives `x` as a real argument *on top of* its own
-                // descriptor binding, so it needs one explicit positional
-                // (issue #2939 review).  Note `__deepcopy__` is different:
-                // `copy.deepcopy` uses an *instance* getattr and passes only
-                // `memo`, which the plain binding path already models.
-                let instance = Value::py_instance(Rc::clone(&rc));
-                let binds_own_receiver = matches!(
-                    method.kind(),
-                    ValueKind::UserFunction(f)
-                        if f.kind != pyrust_core::UserFunctionKind::Regular
-                );
-                if binds_own_receiver {
-                    let call_args = [ExpandedCallArg {
+            if let Some(copier) = copy_method {
+                interp.call_function_expanded(
+                    copier,
+                    &[ExpandedCallArg {
                         name: None,
-                        value: instance.clone(),
-                    }];
-                    invoke_class_method(interp, method, instance, &call_args)
-                } else {
-                    invoke_class_method(interp, method, instance, &[])
-                }
+                        value: obj.clone(),
+                    }],
+                )
             } else if dynamic_reversed_reduction {
                 let reduction = call_copy_reducer(&obj, interp)?;
                 if let Some(reconstruct) = reconstruct {
@@ -989,16 +970,17 @@ fn deep_copy(
             Ok(rebuilt)
         }
 
-        // PyInstance — check for __deepcopy__ dunder first (MRO-aware).
+        // PyInstance — check for __deepcopy__ via instance getattr (CPython Lib/copy.py).
         ValueKind::PyInstance(rc) => {
             let rc = Rc::clone(rc);
-            // Look up __deepcopy__ on the class via MRO so inherited
-            // dunders are found.  Do not hold any borrow across the call.
-            let deepcopy_method = {
-                let borrow = rc.borrow();
-                let class = Rc::clone(&borrow.class);
-                drop(borrow);
-                lookup_class_attr(&class, "__deepcopy__")
+            // CPython's `copy.deepcopy` uses `copier = getattr(x, "__deepcopy__", None);
+            // if copier is not None: y = copier(memo)` (unlike `copy.copy`, which
+            // resolves `__copy__` on `type(x)`).
+            let deepcopy_method = match interp.get_attr(&obj, "__deepcopy__") {
+                Ok(v) if !v.is_none() => Some(v),
+                Ok(_) => None,
+                Err(e) if e.class_name_is("AttributeError") => None,
+                Err(e) => return Err(e),
             };
             let dynamic_reversed_reduction =
                 deepcopy_method.is_none() && crate::interpreter::is_reversed_iterator(&obj);
@@ -1014,15 +996,9 @@ fn deep_copy(
             } else {
                 None
             };
-            if let Some(method) = deepcopy_method {
-                // Call `__deepcopy__(self, memo)` — forward the memo dict so
-                // user code receives a proper dict argument (CPython never
-                // passes None here).  invoke_class_method binds `self` via
-                // bound_prefix and appends the remaining args after.
-                let result = invoke_class_method(
-                    interp,
-                    method,
-                    Value::py_instance(Rc::clone(&rc)),
+            if let Some(copier) = deepcopy_method {
+                let result = interp.call_function_expanded(
+                    copier,
                     &[ExpandedCallArg {
                         name: None,
                         value: memo.clone(),

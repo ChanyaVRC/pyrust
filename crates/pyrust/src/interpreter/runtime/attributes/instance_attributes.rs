@@ -193,26 +193,15 @@ impl Interpreter {
         // instance as before.
         if let Some(value) = lookup_class_attr(&class, name) {
             // cached_property: non-data descriptor with caching.
-            // Must come before the general __get__ check because
-            // cached_property's result is stored back into
-            // instance.attrs for subsequent accesses.
-            if let Some((func, attr_name)) =
-                pyrust_builtins::cached_property::with_cached_property(&value, |s| {
-                    (s.func.clone(), s.attr_name.clone())
-                })
-            {
-                let result = self.call_function_expanded(
-                    func,
-                    &[ExpandedCallArg {
-                        name: None,
-                        value: Value::py_instance(Rc::clone(&instance)),
-                    }],
-                )?;
-                instance
-                    .borrow_mut()
-                    .attrs
-                    .insert(attr_name, result.clone());
-                return Ok(result);
+            // Delegate to the single shared helper so `__set_name__` and
+            // `__slots__` / `__dict__` checks stay identical across attribute
+            // access, dunder slots, and explicit `__get__` calls (issue #2987).
+            if pyrust_builtins::cached_property::is_cached_property(&value) {
+                return eval_cached_property(
+                    self,
+                    &value,
+                    Value::py_instance(Rc::clone(&instance)),
+                );
             }
             // General non-data descriptor: has __get__ but no __set__/__delete__.
             // Same AttributeError fallthrough to __getattr__ applies.

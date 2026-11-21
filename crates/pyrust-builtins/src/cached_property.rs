@@ -40,10 +40,10 @@ pub struct CachedPropertyState {
     /// access; the result is then stashed into the instance's __dict__
     /// under `attr_name` so subsequent reads bypass this descriptor.
     pub func: Value,
-    /// Attribute name used to stash the cached value.  Captured at
-    /// decoration time from `func.__name__` (pyrust doesn't yet
-    /// dispatch `__set_name__`, which is how CPython captures it).
-    pub attr_name: String,
+    /// Attribute name captured by `__set_name__(owner, name)`.  Starts as
+    /// `None` until `__set_name__` runs (matching CPython 3.12's
+    /// `cached_property.attrname`, issue #2987).
+    pub attr_name: Option<String>,
 }
 
 pub struct CachedPropertyOps;
@@ -63,6 +63,23 @@ impl BuiltinTypeOps for CachedPropertyOps {
         true
     }
 
+    fn getattr(&self, state: &BuiltinState, name: &str) -> Option<Value> {
+        let borrow = state.borrow();
+        let st = borrow.downcast_ref::<CachedPropertyState>()?;
+        match name {
+            "func" => Some(st.func.clone()),
+            "attrname" => Some(match &st.attr_name {
+                Some(attr) => Value::string(attr.clone()),
+                None => Value::none(),
+            }),
+            "__doc__" => Some(match st.func.kind() {
+                ValueKind::UserFunction(func) => func.doc.borrow().clone(),
+                _ => Value::none(),
+            }),
+            _ => None,
+        }
+    }
+
     fn call_method(
         &self,
         state: &BuiltinState,
@@ -71,29 +88,43 @@ impl BuiltinTypeOps for CachedPropertyOps {
         _kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
         match name {
-            // `__set_name__(owner, name)` — invoked by class-body
-            // machinery in CPython to capture the attribute name.
-            // pyrust doesn't dispatch it automatically, but accepting
-            // the explicit call lets user code that explicitly invokes
-            // it (often as a workaround for class-body decorator-scope
-            // limitations) round-trip cleanly.  We *do* honour the
-            // captured name here so the descriptor stashes under that
-            // attribute if it differs from the wrapped function's own
-            // name.
+            // `__set_name__(owner, name)` — invoked by class creation
+            // (`make_class_call_set_name`) or explicitly by user code.
+            // Mirrors CPython 3.12's `functools.cached_property.__set_name__`.
             "__set_name__" => {
                 if args.len() != 2 {
                     return Err(PyError::named(
                         "TypeError",
                         format!(
-                            "__set_name__() takes exactly 2 arguments, got {}",
-                            args.len()
+                            "cached_property.__set_name__() takes 3 positional arguments but {} were given",
+                            args.len() + 1
                         ),
                     ));
                 }
-                if let ValueKind::Str(s) = args[1].kind() {
-                    let mut borrow = state.borrow_mut();
-                    if let Some(st) = borrow.downcast_mut::<CachedPropertyState>() {
-                        st.attr_name = s.to_string();
+                let new_name = match args[1].kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "__set_name__() name must be a str".to_string(),
+                        ));
+                    }
+                };
+                let mut borrow = state.borrow_mut();
+                if let Some(st) = borrow.downcast_mut::<CachedPropertyState>() {
+                    match &st.attr_name {
+                        None => st.attr_name = Some(new_name),
+                        Some(existing) if existing == &new_name => {}
+                        Some(existing) => {
+                            let existing_repr = Value::string(existing.clone()).repr_raw();
+                            let new_repr = Value::string(new_name).repr_raw();
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "Cannot assign the same cached_property to two different names ({existing_repr} and {new_repr})."
+                                ),
+                            ));
+                        }
                     }
                 }
                 Ok(Value::none())
@@ -110,11 +141,23 @@ impl BuiltinTypeOps for CachedPropertyOps {
     }
 }
 
-/// Construct a new `cached_property` value.  `attr_name` is the slot
-/// used in the instance's `__dict__` to stash the computed value.
-pub fn cached_property(func: Value, attr_name: String) -> Value {
-    let state: Box<dyn Any> = Box::new(CachedPropertyState { func, attr_name });
+/// Construct a new `cached_property` value with `attrname = None` until
+/// `__set_name__(owner, name)` is called.
+pub fn cached_property(func: Value) -> Value {
+    let state: Box<dyn Any> = Box::new(CachedPropertyState {
+        func,
+        attr_name: None,
+    });
     Value::builtin_object(CACHED_PROPERTY_OPS, state)
+}
+
+/// True if `value` is a `functools.cached_property` descriptor.
+#[inline]
+pub fn is_cached_property(value: &Value) -> bool {
+    matches!(
+        value.kind(),
+        ValueKind::BuiltinObject { ops, .. } if builtin_ops_is::<CachedPropertyOps>(ops)
+    )
 }
 
 /// Run `f` with a borrow of the underlying [`CachedPropertyState`].

@@ -1,4 +1,79 @@
 // Shared descriptor invocation support.
+
+/// Evaluate `functools.cached_property.__get__(instance, owner)` (issue #2987).
+///
+/// Mirrors CPython 3.12's `functools.cached_property.__get__`:
+/// - `instance is None` returns the descriptor itself;
+/// - `attrname is None` raises `TypeError("Cannot use cached_property instance without calling __set_name__ on it.")`;
+/// - instances without a `__dict__` (e.g. `__slots__ = ()` or built-ins) raise
+///   `TypeError("No '__dict__' attribute on '<type>' instance to cache '<name>' property.")`;
+/// - consults `instance.__dict__[attrname]` first so dunder-slot and explicit
+///   `__get__` calls share the same cache without re-running `func`;
+/// - otherwise calls `func(instance)` and stores the result under `attrname`.
+pub(super) fn eval_cached_property(
+    interp: &mut Interpreter,
+    descriptor: &Value,
+    instance: Value,
+) -> Result<Value> {
+    if instance.is_none() {
+        return Ok(descriptor.clone());
+    }
+    let (func, attr_name_opt) =
+        pyrust_builtins::cached_property::with_cached_property(descriptor, |s| {
+            (s.func.clone(), s.attr_name.clone())
+        })
+        .ok_or_else(|| PyError::Runtime("invalid cached_property state".to_string()))?;
+    let Some(attr_name) = attr_name_opt else {
+        return Err(pyrust_core::type_err!(
+            "Cannot use cached_property instance without calling __set_name__ on it."
+        ));
+    };
+    let holder = match instance.kind() {
+        ValueKind::PyInstance(inst) => Some(Rc::clone(inst)),
+        _ => None,
+    };
+    if let Some(holder) = holder {
+        let inst_class = Rc::clone(&holder.borrow().class);
+        if class_suppresses_instance_dict(&inst_class) {
+            let class_name = inst_class.borrow().name.clone();
+            let class_repr = Value::string(class_name).repr_raw();
+            let attr_repr = Value::string(attr_name).repr_raw();
+            return Err(pyrust_core::type_err!(
+                "No '__dict__' attribute on {class_repr} instance to cache {attr_repr} property."
+            ));
+        }
+        if let Some(cached) = holder.borrow().attrs.get(attr_name.as_str()) {
+            return Ok(cached.clone());
+        }
+        let result = interp.call_function_expanded(
+            func,
+            &[ExpandedCallArg {
+                name: None,
+                value: instance,
+            }],
+        )?;
+        holder.borrow_mut().attrs.insert(attr_name, result.clone());
+        return Ok(result);
+    }
+    let type_name = value_type_name_str(&instance);
+    let type_repr = Value::string(type_name).repr_raw();
+    let attr_repr = Value::string(attr_name).repr_raw();
+    Err(pyrust_core::type_err!(
+        "No '__dict__' attribute on {type_repr} instance to cache {attr_repr} property."
+    ))
+}
+
+impl Interpreter {
+    /// Dispatch a direct `cached_property.__get__(instance[, owner])` call.
+    pub(crate) fn call_cached_property_get(
+        &mut self,
+        descriptor: &Value,
+        instance: Value,
+    ) -> Result<Value> {
+        eval_cached_property(self, descriptor, instance)
+    }
+}
+
 /// Handles both `property` (BuiltinObject with fget) and user-defined
 /// descriptors (PyInstance with a class `__get__` method).
 pub(crate) fn call_descriptor_get(
@@ -118,42 +193,11 @@ pub(crate) fn call_descriptor_get(
             )
         };
     }
-    // `functools.cached_property`: call the wrapped accessor with the instance
-    // and stash the result in the instance's __dict__ under the `__set_name__`
-    // name, so a later access resolves from instance storage instead of
-    // re-running the accessor.  The instance-attribute path pre-empts this
-    // branch with the same logic; the special-method path (`__len__ =
-    // cached_property(...)`, issue #2944) has no such pre-emption and reaches
-    // it here.
-    if let Some((func, attr_name)) =
-        pyrust_builtins::cached_property::with_cached_property(descriptor, |s| {
-            (s.func.clone(), s.attr_name.clone())
-        })
-    {
-        if instance.is_none() {
-            return Ok(descriptor.clone());
-        }
-        // CPython's `cached_property.__get__` consults the instance dict itself
-        // before calling the accessor, so a *slot* lookup — which always re-runs
-        // `__get__` because it never reads instance storage — still sees the
-        // cache: `len(obj)` runs the accessor once per instance, not per call.
-        if let ValueKind::PyInstance(inst) = instance.kind()
-            && let Some(cached) = inst.borrow().attrs.get(attr_name.as_str())
-        {
-            return Ok(cached.clone());
-        }
-        let holder = instance.clone();
-        let result = interp.call_function_expanded(
-            func,
-            &[ExpandedCallArg {
-                name: None,
-                value: instance,
-            }],
-        )?;
-        if let ValueKind::PyInstance(inst) = holder.kind() {
-            inst.borrow_mut().attrs.insert(attr_name, result.clone());
-        }
-        return Ok(result);
+    // `functools.cached_property`: validate `__set_name__` & instance `__dict__`,
+    // check cache first, then invoke the wrapped accessor and stash the result
+    // (issue #2944 / #2987).
+    if pyrust_builtins::cached_property::is_cached_property(descriptor) {
+        return eval_cached_property(interp, descriptor, instance);
     }
     // General user-defined descriptor: look up __get__ on the descriptor's class.
     if let ValueKind::PyInstance(inst) = descriptor.kind() {
