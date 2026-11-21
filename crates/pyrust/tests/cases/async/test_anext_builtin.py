@@ -60,7 +60,9 @@ class NonCallableAnext:
 
 
 show("non-callable __anext__ 1-arg", lambda: anext(NonCallableAnext()))
-show("non-callable __anext__ 2-arg", lambda: anext(NonCallableAnext(), "def"))
+# Note: 2-arg `anext(NonCallableAnext(), "def")` triggers a CPython 3.12.3
+# segfault (gh-131670, fixed in 3.12.10), so only the 1-arg form is exercised
+# in the CPython 3.12.3 parity suite.
 
 
 class NoneAnext:
