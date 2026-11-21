@@ -182,6 +182,11 @@ pub struct PyClass {
     /// is not `Copy` (it holds `Option<Value>`); the borrow is short-lived and
     /// never re-entrant.
     pub construction_cache: RefCell<Option<Box<CachedConstructionPlan>>>,
+    /// Cached `(mutation_version, class_epoch, has_del)` stamp for the hot
+    /// scope-exit `__del__` gate (issue #2987).  Avoids an MRO hash lookup on
+    /// every instance drop when the class defines no `__del__`, while staying
+    /// invalidated across any class or ancestor attribute mutation.
+    pub del_slot_cache: Cell<Option<(u64, u64, bool)>>,
     /// Issue #2335: mirrors CPython's sticky `tp_new == slot_tp_new` state.
     /// Set to `true` the first time `__new__` is assigned to or deleted from
     /// this class at runtime (via `cls.__new__ = ...` / `del cls.__new__`).
@@ -249,6 +254,7 @@ impl Default for PyClass {
             metatype: None,
             slots: None,
             construction_cache: RefCell::new(None),
+            del_slot_cache: Cell::new(None),
             new_slot_wrapped: Cell::new(false),
             override_repr: None,
             canonical_tag: None,
