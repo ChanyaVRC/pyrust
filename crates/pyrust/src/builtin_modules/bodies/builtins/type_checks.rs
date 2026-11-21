@@ -180,13 +180,14 @@ fn isinstance_check(
     // `(cls, obj)` argument pairing CPython uses.
     if let ValueKind::PyInstance(inst) = cls.kind() {
         let inst_class = Rc::clone(&inst.borrow().class);
-        if crate::interpreter::lookup_class_attr(&inst_class, "__instancecheck__").is_some() {
-            let ic_fn = interp.get_attr(cls, "__instancecheck__")?;
+        if let Some(ic_fn) = crate::interpreter::lookup_class_attr(&inst_class, "__instancecheck__")
+        {
             let call_args = [crate::interpreter::ExpandedCallArg {
                 name: None,
                 value: obj.clone(),
             }];
-            let result = interp.call_function_expanded(ic_fn, &call_args)?;
+            let result =
+                crate::interpreter::invoke_class_method(interp, ic_fn, cls.clone(), &call_args)?;
             return interp.truthy_value(&result);
         }
     }
@@ -207,23 +208,18 @@ fn isinstance_check(
         if let Some(hit) = crate::interpreter::canonical_class_isinstance_fast(obj, cls_rc) {
             return Ok(hit);
         }
-        // Issue #1955: a metaclass `__instancecheck__` override takes
-        // precedence, mirroring CPython's `type(cls).__instancecheck__(cls, x)`
-        // dispatch.  `metaclass_dunder` returns `Some` only for a user
-        // override, so ordinary classes skip this and keep the fast path.
-        //
-        // Issue #2939: bind through `invoke_class_method` so a `staticmethod`
-        // hook follows the same descriptor rules as every other implicit
-        // dunder instead of unconditionally receiving `cls`. Issue #2947:
-        // pre-bind a classmethod to the metaclass while preserving that direct
-        // hot-helper call site for every other slot shape.
+        // Issue #1955 / #2939 / #2947 / #2987: a metaclass `__instancecheck__`
+        // override takes precedence, mirroring CPython's
+        // `type(cls).__instancecheck__(cls, x)` dispatch.  `metaclass_dunder_for_call`
+        // returns `Some` only for a user override, so ordinary classes skip this
+        // and keep the fast path.  Every resolved slot shape (plain function,
+        // staticmethod, classmethod, property / user descriptor, cached_property,
+        // callable instance, or non-callable) flows through `invoke_class_method`
+        // so descriptors bind via `__get__(cls, metaclass)` and non-callable
+        // slots raise `TypeError` instead of silently falling back.
         if let Some(ic_fn) =
             crate::interpreter::metaclass_dunder_for_call(cls_rc, "__instancecheck__")
                 .transpose()?
-            && (matches!(
-                ic_fn.kind(),
-                ValueKind::UserFunction(_) | ValueKind::ClassBoundMethod { .. }
-            ) || crate::interpreter::is_class_bound_any_callable(&ic_fn))
         {
             let call_args = [crate::interpreter::ExpandedCallArg {
                 name: None,
@@ -501,20 +497,15 @@ fn issubclass_check(
         {
             return Ok(hit);
         }
-        // Issue #1955: a metaclass `__subclasscheck__` override takes
-        // precedence, mirroring CPython's
-        // `type(classinfo).__subclasscheck__(classinfo, cls)` dispatch.
-        // Issue #2939: bind through `invoke_class_method` so a `staticmethod`
-        // hook follows the same descriptor rules as every other implicit
-        // dunder instead of unconditionally receiving `classinfo`. Issue
-        // #2947 pre-binds a classmethod to the metaclass.
+        // Issue #1955 / #2939 / #2947 / #2987: a metaclass `__subclasscheck__`
+        // override takes precedence, mirroring CPython's
+        // `type(classinfo).__subclasscheck__(classinfo, cls)` dispatch.  Hand
+        // every resolved slot shape to `invoke_class_method` so descriptors
+        // bind via `__get__(classinfo, metaclass)` and non-callable slots raise
+        // `TypeError` instead of silently falling back.
         if let Some(sc_fn) =
             crate::interpreter::metaclass_dunder_for_call(classinfo_rc, "__subclasscheck__")
                 .transpose()?
-            && (matches!(
-                sc_fn.kind(),
-                ValueKind::UserFunction(_) | ValueKind::ClassBoundMethod { .. }
-            ) || crate::interpreter::is_class_bound_any_callable(&sc_fn))
         {
             let call_args = [crate::interpreter::ExpandedCallArg {
                 name: None,
@@ -554,13 +545,18 @@ fn issubclass_check(
     // `(classinfo, cls)` pairing CPython uses.
     if let ValueKind::PyInstance(inst) = classinfo.kind() {
         let inst_class = Rc::clone(&inst.borrow().class);
-        if crate::interpreter::lookup_class_attr(&inst_class, "__subclasscheck__").is_some() {
-            let sc_fn = interp.get_attr(classinfo, "__subclasscheck__")?;
+        if let Some(sc_fn) = crate::interpreter::lookup_class_attr(&inst_class, "__subclasscheck__")
+        {
             let call_args = [crate::interpreter::ExpandedCallArg {
                 name: None,
                 value: cls.clone(),
             }];
-            let result = interp.call_function_expanded(sc_fn, &call_args)?;
+            let result = crate::interpreter::invoke_class_method(
+                interp,
+                sc_fn,
+                classinfo.clone(),
+                &call_args,
+            )?;
             return interp.truthy_value(&result);
         }
     }
