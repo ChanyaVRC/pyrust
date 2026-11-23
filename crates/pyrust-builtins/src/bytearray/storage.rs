@@ -2,6 +2,13 @@
 //!
 //! These methods run before the read-method snapshot path in `ByteArrayOps`,
 //! keeping constant-time mutations from copying the complete bytearray.
+//!
+//! Note on buffer-export tracking (#2973): general external buffer-export
+//! tracking (`ob_exports` / raising `BufferError` when resizing a `bytearray`
+//! that has an active external buffer view) is deferred until `memoryview` and
+//! the Python buffer protocol are implemented. The self-aliasing `ba += ba`
+//! resize check is already enforced in
+//! `pyrust::interpreter::runtime::expr::binary_inplace`.
 
 use std::cell::RefCell;
 use std::rc::Rc;

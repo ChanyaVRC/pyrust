@@ -218,13 +218,7 @@ impl Interpreter {
                 )),
             },
             IterKind::MappingProxy(owner) => self.make_loop_iter_state(owner),
-            IterKind::BuiltinIterator => {
-                if pyrust_builtins::bytearray::iter_elements(&source).is_some() {
-                    Ok(IterState::Materialized(iter_values(&source)?, 0))
-                } else {
-                    Ok(IterState::UserDefined(source))
-                }
-            }
+            IterKind::BuiltinIterator => Ok(IterState::UserDefined(source)),
             IterKind::Other => self.make_builtin_loop_state(source),
         }
     }

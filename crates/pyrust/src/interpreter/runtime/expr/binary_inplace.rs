@@ -249,23 +249,12 @@ impl Interpreter {
             // also see the change.
             match op {
                 BinaryOp::Add => {
-                    // The RHS may itself be a bytes/bytearray subclass instance,
-                    // so unwrap its backing before extracting the byte slice.
-                    let rhs_val = coerce_operand_backing(right);
-                    let rhs = if let Some(rhs_data) =
-                        pyrust_builtins::bytearray::as_bytearray_snapshot(&rhs_val)
-                    {
-                        rhs_data
-                    } else if let ValueKind::Bytes(rc) = rhs_val.kind() {
-                        rc.as_slice().to_vec()
-                    } else {
-                        let type_name = value_type_name_str(right);
-                        return Err(pyrust_core::type_err!(
-                            "can't concat {type_name} to bytearray"
-                        ));
-                    };
-                    data_rc.borrow_mut().extend_from_slice(&rhs);
-                    return Ok(Some(left.clone()));
+                    return Ok(Some(bytearray_iadd_in_place(
+                        &data_rc,
+                        left,
+                        right,
+                        "bytearray",
+                    )?));
                 }
                 BinaryOp::Mul => {
                     let n = match right.kind() {
@@ -532,25 +521,11 @@ impl Interpreter {
         {
             match op {
                 BinaryOp::Add => {
-                    // The RHS may itself be a bytes/bytearray subclass instance,
-                    // so unwrap its backing before extracting the byte slice.
-                    let rhs_val = coerce_operand_backing(right);
-                    let rhs = if let Some(rhs_data) =
-                        pyrust_builtins::bytearray::as_bytearray_snapshot(&rhs_val)
-                    {
-                        rhs_data
-                    } else if let ValueKind::Bytes(rc) = rhs_val.kind() {
-                        rc.as_slice().to_vec()
-                    } else {
-                        // CPython names the LHS by its actual (subclass) type.
-                        let lhs_name = value_type_name_str(left);
-                        let type_name = value_type_name_str(right);
-                        return Err(pyrust_core::type_err!(
-                            "can't concat {type_name} to {lhs_name}"
-                        ));
-                    };
-                    data_rc.borrow_mut().extend_from_slice(&rhs);
-                    return Ok(Some(left.clone()));
+                    // CPython names the LHS by its actual (subclass) type.
+                    let lhs_name = value_type_name_str(left);
+                    return Ok(Some(bytearray_iadd_in_place(
+                        &data_rc, left, right, &lhs_name,
+                    )?));
                 }
                 BinaryOp::Mul => {
                     let n = match right.kind() {
@@ -665,6 +640,43 @@ impl Interpreter {
             .set_with_mut(|s| *s = out)
             .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))
     }
+}
+
+/// Perform in-place `bytearray += rhs`, enforcing CPython's self-resize
+/// `BufferError` when `right` aliases `data_rc` and the buffer is non-empty
+/// (issue #2973).  When the buffer is empty, no resize occurs and the operation
+/// is a no-op returning `left`.
+fn bytearray_iadd_in_place(
+    data_rc: &Rc<std::cell::RefCell<Vec<u8>>>,
+    left: &Value,
+    right: &Value,
+    lhs_type_name: &str,
+) -> Result<Value> {
+    // The RHS may itself be a bytes/bytearray subclass instance, so unwrap its
+    // backing before inspecting buffer identity or extracting bytes.
+    let rhs_val = coerce_operand_backing(right);
+    if let Some(rhs_rc) = pyrust_builtins::bytearray::as_bytearray_rc(&rhs_val) {
+        if Rc::ptr_eq(data_rc, &rhs_rc) {
+            if !data_rc.borrow().is_empty() {
+                return Err(pyrust_core::py_err!(
+                    "BufferError",
+                    "Existing exports of data: object cannot be re-sized"
+                ));
+            }
+            return Ok(left.clone());
+        }
+        let rhs = rhs_rc.borrow().clone();
+        data_rc.borrow_mut().extend_from_slice(&rhs);
+        return Ok(left.clone());
+    }
+    if let ValueKind::Bytes(rc) = rhs_val.kind() {
+        data_rc.borrow_mut().extend_from_slice(rc.as_slice());
+        return Ok(left.clone());
+    }
+    let type_name = value_type_name_str(right);
+    Err(pyrust_core::type_err!(
+        "can't concat {type_name} to {lhs_type_name}"
+    ))
 }
 
 /// The already-integral repetition count in `v`, if it has one.
