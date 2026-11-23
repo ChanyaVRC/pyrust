@@ -5,7 +5,11 @@
 pub(crate) type ItersBuf = smallvec::SmallVec<[Option<IterState>; 1]>;
 
 /// Per-slot cache of guarded `__next__` resolutions used by the loop opcode.
-pub(crate) type IterCacheBuf = smallvec::SmallVec<[Option<IterNextCacheEntry>; 4]>;
+///
+/// Entries are boxed so the common empty/non-user-iterator slot is a single
+/// null-niche pointer (`8 B` instead of `40 B`), keeping `IterCacheBuf` compact
+/// across generator drive-cycle frame swaps (#2906).
+pub(crate) type IterCacheBuf = smallvec::SmallVec<[Option<Box<IterNextCacheEntry>>; 4]>;
 
 /// A `ForIter` cache entry for a user iterator's unbound `__next__` method.
 ///
@@ -27,6 +31,80 @@ pub(crate) struct BigRangeState {
     pub(crate) cur: PyBigInt,
     pub(crate) stop: PyBigInt,
     pub(crate) step: PyBigInt,
+}
+
+/// Boxed payload for [`IterState::MaterializedGuarded`] so guarded snapshot
+/// metadata does not inflate `IterState` / `ItersBuf` (#2906).
+#[derive(Clone)]
+pub(crate) struct MaterializedGuardedState {
+    pub(crate) items: Vec<Value>,
+    pub(crate) pos: usize,
+    pub(crate) container: Value,
+    pub(crate) recorded_len: usize,
+    pub(crate) msg: &'static str,
+    /// Provider-tagged ordered mappings may test exhaustion first.
+    pub(crate) exhaust_first: bool,
+    /// Provider-owned guard state for a tagged ordered mapping; `None`
+    /// for every other guarded collection.
+    pub(crate) ordered_watch: Option<OrderedIterationWatch>,
+}
+
+/// Boxed payload for [`IterState::LiveKeysGuarded`] so the multi-field
+/// [`LiveKeyCursor`] does not inflate `IterState` / `ItersBuf` / `GenDriveFrame`
+/// (#2906). Recycled through a small per-thread free list to avoid per-loop
+/// allocation on small dict/set walks.
+#[derive(Clone)]
+pub(crate) struct LiveKeysGuardedState {
+    pub(crate) cursor: LiveKeyCursor,
+    pub(crate) container: Value,
+}
+
+/// Recycled `Box<LiveKeysGuardedState>` handle (`8 B`, zero null check on
+/// step via `ManuallyDrop<Box<_>>`, returning the allocation to the per-thread
+/// free list on `Drop`).
+pub(crate) struct LiveKeysGuardedBox(std::mem::ManuallyDrop<Box<LiveKeysGuardedState>>);
+
+impl LiveKeysGuardedBox {
+    #[inline]
+    pub(crate) fn new(container: Value, cursor: LiveKeyCursor) -> Self {
+        Self(std::mem::ManuallyDrop::new(take_live_keys_guarded_box(
+            container, cursor,
+        )))
+    }
+
+    #[inline(always)]
+    pub(crate) fn state_mut(&mut self) -> &mut LiveKeysGuardedState {
+        &mut self.0
+    }
+}
+
+impl Clone for LiveKeysGuardedBox {
+    fn clone(&self) -> Self {
+        let state = &*self.0;
+        Self::new(state.container.clone(), state.cursor.clone())
+    }
+}
+
+impl Drop for LiveKeysGuardedBox {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is never accessed again after `Drop::drop`.
+        let boxed = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
+        release_live_keys_guarded_box(boxed);
+    }
+}
+
+/// Boxed payload for [`IterState::DictViewGuarded`] so guarded dict-view
+/// metadata does not inflate `IterState` / `ItersBuf` (#2906).
+#[derive(Clone)]
+pub(crate) struct DictViewGuardedState {
+    pub(crate) keys: Vec<PyKey>,
+    pub(crate) kind: pyrust_builtins::dict_views::DictViewKind,
+    pub(crate) pos: usize,
+    pub(crate) container: Value,
+    pub(crate) recorded_len: usize,
+    pub(crate) msg: &'static str,
+    pub(crate) exhaust_first: bool,
+    pub(crate) ordered_watch: Option<OrderedIterationWatch>,
 }
 
 /// Canonical state consumed by the VM's `ForIter` instruction.
@@ -78,34 +156,11 @@ pub(crate) enum IterState {
     /// only.
     EnumerateElements(EnumerateElementCursor),
     /// Snapshot plus a live collection-size guard.
-    MaterializedGuarded {
-        items: Vec<Value>,
-        pos: usize,
-        container: Value,
-        recorded_len: usize,
-        msg: &'static str,
-        /// Provider-tagged ordered mappings may test exhaustion first.
-        exhaust_first: bool,
-        /// Provider-owned guard state for a tagged ordered mapping; `None`
-        /// for every other guarded collection.
-        ordered_watch: Option<OrderedIterationWatch>,
-    },
+    MaterializedGuarded(Box<MaterializedGuardedState>),
     /// Live key walk for plain dict/set containers and plain dict views.
-    LiveKeysGuarded {
-        cursor: LiveKeyCursor,
-        container: Value,
-    },
+    LiveKeysGuarded(LiveKeysGuardedBox),
     /// Dict-view key snapshot with live value lookup on each step.
-    DictViewGuarded {
-        keys: Vec<PyKey>,
-        kind: pyrust_builtins::dict_views::DictViewKind,
-        pos: usize,
-        container: Value,
-        recorded_len: usize,
-        msg: &'static str,
-        exhaust_first: bool,
-        ordered_watch: Option<OrderedIterationWatch>,
-    },
+    DictViewGuarded(Box<DictViewGuardedState>),
 }
 
 impl Interpreter {
@@ -285,29 +340,31 @@ impl Interpreter {
                     .map(|policy| (policy.mutation_message, policy.exhaust_first))
                     .unwrap_or(("dictionary changed size during iteration", false));
                 if ordered_policy.is_none() {
-                    return Ok(IterState::LiveKeysGuarded {
-                        cursor: LiveKeyCursor::dict(&source, 0, recorded_len)
-                            .with_size_change_message(msg),
-                        container: source,
-                    });
+                    let cursor =
+                        LiveKeyCursor::dict(&source, 0, recorded_len).with_size_change_message(msg);
+                    return Ok(IterState::LiveKeysGuarded(LiveKeysGuardedBox::new(
+                        source, cursor,
+                    )));
                 }
                 let items = iter_values(&backing)?;
                 let ordered_watch = Some(ordered_iteration_watch(&backing));
-                return Ok(IterState::MaterializedGuarded {
-                    items,
-                    pos: 0,
-                    container: source,
-                    recorded_len,
-                    msg,
-                    exhaust_first,
-                    ordered_watch,
-                });
+                return Ok(IterState::MaterializedGuarded(Box::new(
+                    MaterializedGuardedState {
+                        items,
+                        pos: 0,
+                        container: source,
+                        recorded_len,
+                        msg,
+                        exhaust_first,
+                        ordered_watch,
+                    },
+                )));
             }
             if backing.is_set() {
-                return Ok(IterState::LiveKeysGuarded {
-                    cursor: LiveKeyCursor::set(&source),
-                    container: source,
-                });
+                let cursor = LiveKeyCursor::set(&source);
+                return Ok(IterState::LiveKeysGuarded(LiveKeysGuardedBox::new(
+                    source, cursor,
+                )));
             }
             return Ok(IterState::Materialized(iter_values(&source)?, 0));
         }
@@ -347,17 +404,17 @@ impl Interpreter {
             return Ok(IterState::BytearrayIndexed { data, pos: 0 });
         }
         if let Some(recorded_len) = source.dict_len() {
-            return Ok(IterState::LiveKeysGuarded {
-                cursor: LiveKeyCursor::dict(&source, 0, recorded_len)
-                    .with_size_change_message("dictionary changed size during iteration"),
-                container: source,
-            });
+            let cursor = LiveKeyCursor::dict(&source, 0, recorded_len)
+                .with_size_change_message("dictionary changed size during iteration");
+            return Ok(IterState::LiveKeysGuarded(LiveKeysGuardedBox::new(
+                source, cursor,
+            )));
         }
         if source.set_len().is_some() {
-            return Ok(IterState::LiveKeysGuarded {
-                cursor: LiveKeyCursor::set(&source),
-                container: source,
-            });
+            let cursor = LiveKeyCursor::set(&source);
+            return Ok(IterState::LiveKeysGuarded(LiveKeysGuardedBox::new(
+                source, cursor,
+            )));
         }
 
         let items = iter_values(&source)?;
@@ -375,15 +432,17 @@ impl Interpreter {
         let ordered_watch = ordered_policy
             .is_some()
             .then(|| ordered_iteration_watch(&source));
-        Ok(IterState::MaterializedGuarded {
-            items,
-            pos: 0,
-            container: source,
-            recorded_len,
-            msg,
-            exhaust_first,
-            ordered_watch,
-        })
+        Ok(IterState::MaterializedGuarded(Box::new(
+            MaterializedGuardedState {
+                items,
+                pos: 0,
+                container: source,
+                recorded_len,
+                msg,
+                exhaust_first,
+                ordered_watch,
+            },
+        )))
     }
 
     fn make_dict_view_loop_state(&self, source: Value) -> IterState {
@@ -399,14 +458,12 @@ impl Interpreter {
         if ordered_policy.is_none() {
             // The live cursor owns its own key-order policy, so a plain view
             // must not pay for a key vector it would immediately discard.
-            return IterState::LiveKeysGuarded {
-                cursor: LiveKeyCursor::dict(&source, kind.live_cursor_code(), recorded_len),
-                container: source,
-            };
+            let cursor = LiveKeyCursor::dict(&source, kind.live_cursor_code(), recorded_len);
+            return IterState::LiveKeysGuarded(LiveKeysGuardedBox::new(source, cursor));
         }
         let keys = pyrust_builtins::dict_views::backing_keys(&dict);
         let ordered_watch = Some(ordered_iteration_watch(&source));
-        IterState::DictViewGuarded {
+        IterState::DictViewGuarded(Box::new(DictViewGuardedState {
             keys,
             kind,
             pos: 0,
@@ -415,7 +472,7 @@ impl Interpreter {
             msg,
             exhaust_first,
             ordered_watch,
-        }
+        }))
     }
 }
 

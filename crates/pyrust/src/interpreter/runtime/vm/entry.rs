@@ -385,10 +385,9 @@ impl Interpreter {
     /// `continue`s the loop in the generator; on `Err` (recursion limit) the
     /// caller routes it through the normal error path.
     ///
-    /// `#[cold]` + `#[inline(never)]` keeps this (one-off-per-drive-entry) setup
-    /// out of the hot `ForIter` arm so it doesn't bloat the dispatch frame or the
-    /// per-step iteration code.
-    #[cold]
+    /// `#[inline(never)]` keeps this setup out of the `ForIter` stack frame
+    /// without marking it `#[cold]` (which pushed hot generator-drive loops
+    /// into `.text.unlikely`, #2906).
     #[inline(never)]
     fn vm_enter_gen_drive(
         &mut self,
@@ -455,14 +454,22 @@ impl Interpreter {
             // See the native resume site above: no cache moves through this
             // trampoline's ordinary enter/yield path.
         });
-        let gen_code_rc = Rc::clone(&gframe.code);
-        let gen_code_ptr: *const crate::bytecode::FnCode = Rc::as_ptr(&gen_code_rc);
+        // SAFETY: `gframe` lives inside `GenDriveFrame::gframe` on
+        // `gen_drive_stack` for the entire drive (until `Yield`, `YieldFrom`,
+        // return, or unwind restores `saved_code_ptr`), keeping `gframe.code`
+        // alive without cloning and dropping its `Rc` on every drive cycle.
+        let gen_code_ptr: *const crate::bytecode::FnCode = Rc::as_ptr(&gframe.code);
         let gen_num_locals = gframe.code.num_locals;
         let gen_pc = gframe.pc;
         let gen_iters = std::mem::take(&mut gframe.iters);
         let gen_exc_handlers = std::mem::take(&mut gframe.exc_handlers);
         let gen_env = Rc::clone(&gframe.saved_env);
         let gen_iters_len = gen_iters.len();
+        let gen_iter_cache = if gen_iters_len == 0 {
+            IterCacheBuf::new()
+        } else {
+            smallvec::smallvec![None; gen_iters_len]
+        };
         st.gen_drive_stack.push(GenDriveFrame {
             _depth_guard: CallDepthGuard::enter(),
             state_rc,
@@ -480,17 +487,13 @@ impl Interpreter {
             saved_num_locals: *st.num_locals,
             saved_env: std::mem::replace(&mut self.env, gen_env),
             saved_iters: std::mem::replace(st.iters, gen_iters),
-            saved_iter_cache: std::mem::replace(
-                st.iter_next_cache,
-                smallvec::smallvec![None; gen_iters_len],
-            ),
+            saved_iter_cache: std::mem::replace(st.iter_next_cache, gen_iter_cache),
             saved_exc_handlers: std::mem::replace(st.exc_handlers, gen_exc_handlers),
             tramp_floor: st.tramp_stack.len(),
         });
         // Rebind the dispatch state to the generator.  `regs` / `iters` /
         // `iter_next_cache` / `exc_handlers` were swapped in place above.
         *st.code_ptr = gen_code_ptr;
-        *st.active_code_rc = Some(gen_code_rc);
         *st.num_locals = gen_num_locals;
         *st.tramp_active_base = usize::MAX;
         *st.pc = gen_pc;
