@@ -686,6 +686,74 @@ fn deque_from_items(
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
+fn validate_collection_no_arg_method(
+    args: &[ExpandedCallArg],
+    kind: CanonicalCollectionKind,
+    method: &str,
+    short_owner: &str,
+    full_owner: &str,
+) -> Result<Rc<RefCell<PyInstance>>> {
+    let first = args.first().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            format!("unbound method {short_owner}.{method}() needs an argument"),
+        )
+    })?;
+    let inst = match first.value.kind() {
+        ValueKind::PyInstance(rc)
+            if is_canonical_collection_class_or_subclass(&rc.borrow().class, kind) =>
+        {
+            Rc::clone(rc)
+        }
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "descriptor '{method}' for '{full_owner}' objects doesn't apply to a '{}' object",
+                    pyrust_core::error_type_name(&first.value)
+                ),
+            ));
+        }
+    };
+    if args.iter().skip(1).any(|a| a.name.is_some()) {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{short_owner}.{method}() takes no keyword arguments"),
+        ));
+    }
+    if args.len() != 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "{short_owner}.{method}() takes no arguments ({} given)",
+                args.len() - 1
+            ),
+        ));
+    }
+    Ok(inst)
+}
+
+fn deque_shallow_copy_instance(inst: &Rc<RefCell<PyInstance>>) -> Result<Value> {
+    let items = deque_items_snapshot(inst)?;
+    let maxlen_val = inst
+        .borrow()
+        .attrs
+        .get_slot("maxlen")
+        .cloned()
+        .unwrap_or_else(Value::none);
+    let class = Rc::clone(&inst.borrow().class);
+    let mut attrs = InstanceAttrs::new();
+    attrs.insert_slot(
+        "_items",
+        pyrust_builtins::deque_storage::deque_storage(items),
+    );
+    attrs.insert_slot("maxlen", maxlen_val);
+    Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
+        class,
+        attrs,
+    }))))
+}
+
 /// Shared body for direct deque `__mul__` / `__rmul__` dunder calls (#2011).
 /// Repeats the deque `n` times into a new deque; `n <= 0` yields empty.  The
 /// result inherits `self`'s maxlen (trimmed).  Direct dunder calls follow

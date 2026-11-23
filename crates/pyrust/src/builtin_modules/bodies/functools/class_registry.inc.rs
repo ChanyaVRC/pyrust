@@ -81,6 +81,9 @@ pub(crate) fn prepare_module_classes(module: &Value) {
             if name == "partial" {
                 class.error_name = Some("functools.partial");
             }
+            if name == "_cmp_key" {
+                class.slots = Some(["obj".to_string()].into_iter().collect());
+            }
         }
     }
 }

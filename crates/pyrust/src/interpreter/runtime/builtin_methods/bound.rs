@@ -436,7 +436,7 @@ impl Interpreter {
             if !matches!(receiver.kind(), ValueKind::PyInstance(_))
                 && crate::interpreter::is_object_protocol_method(&receiver, method)
             {
-                return self.object_protocol_method_result(method, &receiver);
+                return self.call_object_protocol_method(method, &receiver, pos, has_kw);
             }
             // #2191: `__format__` bound on a built-in data value
             // (`(5).__format__('x')`, `"hi".__format__('>5')`,

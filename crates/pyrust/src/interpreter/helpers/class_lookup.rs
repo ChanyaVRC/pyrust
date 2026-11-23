@@ -224,6 +224,7 @@ thread_local! {
             "__dir__",
             "__reduce__",
             "__reduce_ex__",
+            "__getstate__",
         ] {
             if matches!(*dunder, "__init_subclass__" | "__subclasshook__") {
                 continue;

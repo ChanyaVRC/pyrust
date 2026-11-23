@@ -11,6 +11,7 @@
 /// their native semantics without leaking the class objects.
 struct CanonicalCollectionClasses {
     counters: Vec<Weak<RefCell<PyClass>>>,
+    defaultdicts: Vec<Weak<RefCell<PyClass>>>,
     deques: Vec<Weak<RefCell<PyClass>>>,
     /// `collections` imports `itertools.chain` once per module generation.
     /// Preserve that association so reloading only `itertools` does not
@@ -30,6 +31,7 @@ struct CounterChainClass {
 #[derive(Copy, Clone)]
 enum CanonicalCollectionKind {
     Counter,
+    DefaultDict,
     Deque,
 }
 
@@ -37,6 +39,7 @@ thread_local! {
     static CANONICAL_COLLECTION_CLASSES: RefCell<CanonicalCollectionClasses> =
         const { RefCell::new(CanonicalCollectionClasses {
             counters: Vec::new(),
+            defaultdicts: Vec::new(),
             deques: Vec::new(),
             counter_chain_classes: Vec::new(),
         }) };
@@ -46,6 +49,7 @@ impl CanonicalCollectionClasses {
     fn classes_mut(&mut self, kind: CanonicalCollectionKind) -> &mut Vec<Weak<RefCell<PyClass>>> {
         match kind {
             CanonicalCollectionKind::Counter => &mut self.counters,
+            CanonicalCollectionKind::DefaultDict => &mut self.defaultdicts,
             CanonicalCollectionKind::Deque => &mut self.deques,
         }
     }
@@ -106,6 +110,11 @@ pub(crate) fn is_canonical_deque_class(class: &Rc<RefCell<PyClass>>) -> bool {
 /// ordering without relying on mutable class names, issue #2968).
 pub(crate) fn is_canonical_counter_class_or_subclass(class: &Rc<RefCell<PyClass>>) -> bool {
     is_canonical_collection_class_or_subclass(class, CanonicalCollectionKind::Counter)
+}
+
+#[allow(dead_code)]
+pub(crate) fn is_canonical_defaultdict_class_or_subclass(class: &Rc<RefCell<PyClass>>) -> bool {
+    is_canonical_collection_class_or_subclass(class, CanonicalCollectionKind::DefaultDict)
 }
 
 /// Return the canonical base class from a concrete receiver's generation.

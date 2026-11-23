@@ -323,6 +323,84 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
     out
 }
 
+fn collect_mro_member_slots(
+    class: &Rc<RefCell<PyClass>>,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<(String, pyrust_core::MemberSlotId)>,
+) {
+    let (members, base, extra_bases) = {
+        let borrowed = class.borrow();
+        let members: Vec<(String, pyrust_core::MemberSlotId)> = borrowed
+            .attrs
+            .iter()
+            .filter_map(|(name, desc)| {
+                pyrust_builtins::member_descriptor::as_member_descriptor_full(desc)
+                    .map(|info| (name.clone(), info.slot_id))
+            })
+            .collect();
+        (members, borrowed.base.clone(), borrowed.extra_bases.clone())
+    };
+    for (name, slot_id) in members {
+        if seen.insert(name.clone()) {
+            out.push((name, slot_id));
+        }
+    }
+    if let Some(b) = base {
+        collect_mro_member_slots(&b, seen, out);
+    }
+    for eb in &extra_bases {
+        collect_mro_member_slots(eb, seen, out);
+    }
+}
+
+/// Snapshot the user-visible instance `__dict__` and `__slots__` member slots
+/// used by CPython 3.12's `object.__getstate__` and the default copy protocol.
+/// Opaque built-in subclass backing (`builtin_data`) and internal C-style
+/// slots (`_items`, `maxlen`, `default_factory`, exception C slots) live
+/// outside the Python-visible attribute map and are never surfaced here.
+pub(crate) fn default_instance_state(rc: &Rc<RefCell<PyInstance>>) -> Value {
+    let class = Rc::clone(&rc.borrow().class);
+    let suppresses_dict = class_suppresses_instance_dict(&class);
+    let mut seen_slots = std::collections::HashSet::new();
+    let mut mro_slots = Vec::new();
+    collect_mro_member_slots(&class, &mut seen_slots, &mut mro_slots);
+
+    let borrow = rc.borrow();
+    let dict_state = if suppresses_dict {
+        None
+    } else {
+        let attrs = borrow.attrs.items_snapshot();
+        if attrs.is_empty() {
+            None
+        } else {
+            let mut dict: PyDict =
+                PyDict::with_capacity_and_hasher(attrs.len(), Default::default());
+            for (k, v) in attrs {
+                dict.insert(PyKey::str_from(k.as_ref()), v);
+            }
+            Some(Value::dict(dict))
+        }
+    };
+
+    let mut slot_dict: PyDict = PyDict::default();
+    for (name, slot_id) in mro_slots {
+        if let Some(val) = borrow.attrs.get_member_slot(slot_id) {
+            slot_dict.insert(PyKey::str_from(&name), val.clone());
+        }
+    }
+
+    if !slot_dict.is_empty() {
+        Value::tuple(vec![
+            dict_state.unwrap_or_else(Value::none),
+            Value::dict(slot_dict),
+        ])
+    } else if let Some(dict_val) = dict_state {
+        dict_val
+    } else {
+        Value::none()
+    }
+}
+
 /// Public method names for the canonical families represented through
 /// `BuiltinObject`.
 ///

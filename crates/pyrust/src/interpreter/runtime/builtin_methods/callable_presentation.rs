@@ -258,7 +258,12 @@ fn method_descriptor_parts(name: &str) -> Option<(&str, &str)> {
     if type_name == "object" {
         return matches!(
             method,
-            "__reduce__" | "__reduce_ex__" | "__sizeof__" | "__dir__" | "__format__"
+            "__reduce__"
+                | "__reduce_ex__"
+                | "__sizeof__"
+                | "__dir__"
+                | "__format__"
+                | "__getstate__"
         )
         .then_some((type_name, method));
     }

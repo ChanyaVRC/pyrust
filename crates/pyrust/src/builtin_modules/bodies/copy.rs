@@ -207,32 +207,25 @@ pyrust_module! {
 
 // ── identity / memo helpers ───────────────────────────────────────────────────
 
-/// Object identity used as the `memo` key (`id(x)`).  Mirrors the `id()`
-/// builtin: instances/classes/modules/functions use their `Rc` address;
-/// containers (list/dict/set/tuple) and other Rc-backed values use
-/// `Value::value_id`.  Returns `None` for atomic values that have no stable
-/// per-object identity worth memoising (those are returned as-is anyway).
+/// Object identity used as the `memo` key (`id(x)`).  Uses the single canonical
+/// `Value::object_id` encoding shared with Python's `id()` and `is`, so
+/// identity-proxied built-in views such as `obj.__dict__` (`InstanceDict`)
+/// memoise under a stable identity distinct from `obj` itself (#2946).
+/// Returns `None` for atomic scalar values that are returned as-is anyway.
 fn value_identity(obj: &Value) -> Option<i64> {
     match obj.kind() {
-        ValueKind::PyInstance(rc) => Some(Rc::as_ptr(rc) as i64),
-        ValueKind::PyClass(rc) => Some(Rc::as_ptr(rc) as i64),
-        ValueKind::PyModule(rc) => Some(Rc::as_ptr(rc) as i64),
-        ValueKind::UserFunction(rc) => Some(Rc::as_ptr(rc) as i64),
-        _ => obj.value_id(),
+        ValueKind::None
+        | ValueKind::Bool(_)
+        | ValueKind::Int(_)
+        | ValueKind::Float(_)
+        | ValueKind::Complex(_, _) => None,
+        _ => obj.object_id().as_int(),
     }
 }
 
 /// Did `deep_copy(orig)` leave the element unchanged (CPython's `k is j`)?
-/// Objects with a stable identity compare equal by that identity; atomic
-/// immutables (no `value_identity`) are returned as-is by `deep_copy`, so they
-/// always count as unchanged.  Used by the tuple arm to decide whether to
-/// return the original tuple (immutable-of-immutables) instead of a fresh one.
 fn deepcopy_kept_identity(orig: &Value, copied: &Value) -> bool {
-    match (value_identity(orig), value_identity(copied)) {
-        (Some(a), Some(b)) => a == b,
-        (None, None) => true,
-        _ => false,
-    }
+    orig.is_identical_to(copied)
 }
 
 /// Look up an already-copied object in the memo by identity.
@@ -263,28 +256,20 @@ fn capture_state(
     Ok(default_instance_state(rc))
 }
 
-/// Snapshot the instance attributes used by the default copy protocol, or
-/// return `None` when the instance carries no state.
+/// Snapshot the instance attributes and `__slots__` member slots used by the
+/// default copy protocol / `object.__getstate__`, or return `None` when the
+/// instance carries no state.
 ///
 /// Built-in subclass backing (`builtin_data`) and native C-style slots
 /// (`_cursor`, `_items`, `maxlen`, `default_factory`, …) live in physically
-/// separate `InstanceAttrs` storage outside the Python-visible mapping, so
-/// `items_snapshot()` contains only genuine user attributes (#2968).
+/// separate `InstanceAttrs` storage outside the Python-visible mapping (#2968).
 pub(crate) fn default_instance_state(rc: &Rc<RefCell<PyInstance>>) -> Value {
-    let borrow = rc.borrow();
-    let attrs = borrow.attrs.items_snapshot();
-    if attrs.is_empty() {
-        return Value::none();
-    }
-    let mut dict: PyDict = PyDict::with_capacity_and_hasher(attrs.len(), Default::default());
-    for (k, v) in attrs {
-        dict.insert(PyKey::str_from(k.as_ref()), v);
-    }
-    Value::dict(dict)
+    crate::interpreter::default_instance_state(rc)
 }
 
 /// Restore captured `state` onto the bare instance `rc`.  If the class defines
-/// `__setstate__`, call it; otherwise default to `__dict__.update(state)`.
+/// `__setstate__`, call it; otherwise default to `__dict__.update(state)` (and
+/// `setattr` for slot state when `state` is a `(dict_state, slot_state)` pair).
 fn restore_state(
     rc: &Rc<RefCell<PyInstance>>,
     state: Value,
@@ -312,17 +297,41 @@ fn restore_state(
     // Default object.__setstate__ semantics:
     //   - state is None            → no-op
     //   - state is a dict          → __dict__.update(state)
-    //   - state is (dict, slotdict)→ apply both as attributes (pyrust has no
-    //     __slots__ storage, so slot state becomes ordinary attributes too)
+    //   - state is (dict, slotdict)→ update __dict__ from first element,
+    //     apply second element via `setattr` so `__slots__` land in member_slots.
     match state.kind() {
         ValueKind::None => {}
         ValueKind::Tuple(items) if items.len() == 2 => {
             let dict_state = items[0].clone();
             let slot_state = items[1].clone();
             apply_state_dict(rc, &dict_state);
-            apply_state_dict(rc, &slot_state);
+            apply_slot_state(rc, &slot_state, interp)?;
         }
         _ => apply_state_dict(rc, &state),
+    }
+    Ok(())
+}
+
+/// Apply the str-keyed entries of `slot_state` via `assign_attr` so `__slots__`
+/// descriptors populate `member_slots` while unslotted classes still populate
+/// `__dict__`.
+fn apply_slot_state(
+    rc: &Rc<RefCell<PyInstance>>,
+    slot_state: &Value,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<()> {
+    let pairs: Option<Vec<(String, Value)>> = slot_state.dict_with(|d| {
+        d.iter()
+            .filter_map(|(k, v)| match k {
+                PyKey::Str(s) => s.as_str().map(|name| (name.to_string(), v.clone())),
+                _ => None,
+            })
+            .collect()
+    });
+    if let Some(pairs) = pairs {
+        for (name, val) in pairs {
+            interp.assign_attr(Value::py_instance(Rc::clone(rc)), &name, val)?;
+        }
     }
     Ok(())
 }
