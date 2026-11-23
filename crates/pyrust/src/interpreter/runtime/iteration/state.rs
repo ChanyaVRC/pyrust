@@ -453,10 +453,27 @@ pub(crate) struct FilterIter {
 pub(crate) type ProviderIteratorAdvance =
     fn(&mut Interpreter, &Rc<RefCell<Box<dyn std::any::Any>>>) -> Result<Option<Value>>;
 
+/// Type-erased copy/deepcopy hook owned by a standard-library `ProviderIterator`.
+///
+/// Arguments: `(orig, deep, copy_child, memo_get, memo_insert, outer_obj_id)`.
+/// Returning `Ok(Value)` builds a new iterator matching CPython's `__copy__` /
+/// `__reduce__` round-trip while allowing shared-state providers (like
+/// `itertools._tee`) to memoise their backing state across paired branches.
+pub(crate) type ProviderIteratorCopyFn = fn(
+    &ProviderIterator,
+    bool,
+    &mut dyn FnMut(Value) -> Result<Value>,
+    &mut dyn FnMut(i64) -> Option<Value>,
+    &mut dyn FnMut(i64, Value),
+    Option<i64>,
+) -> Result<Value>;
+
 /// Type-erased standard-library iterator adapter.
 pub(crate) struct ProviderIterator {
     state: Rc<RefCell<Box<dyn std::any::Any>>>,
     advance: ProviderIteratorAdvance,
+    copy_fn: Option<ProviderIteratorCopyFn>,
+    exposes_copy_method: bool,
     full_type_name: &'static str,
     fallback_class_name: &'static str,
     class: Option<Rc<RefCell<crate::value::PyClass>>>,
@@ -473,10 +490,22 @@ impl ProviderIterator {
         Self {
             state: Rc::new(RefCell::new(state)),
             advance,
+            copy_fn: None,
+            exposes_copy_method: false,
             full_type_name,
             fallback_class_name,
             class,
         }
+    }
+
+    pub(crate) fn with_copy_hook(
+        mut self,
+        copy_fn: ProviderIteratorCopyFn,
+        exposes_copy_method: bool,
+    ) -> Self {
+        self.copy_fn = Some(copy_fn);
+        self.exposes_copy_method = exposes_copy_method;
+        self
     }
 
     #[inline]
@@ -484,6 +513,21 @@ impl ProviderIterator {
         &self,
     ) -> (ProviderIteratorAdvance, Rc<RefCell<Box<dyn std::any::Any>>>) {
         (self.advance, Rc::clone(&self.state))
+    }
+
+    #[inline]
+    pub(crate) fn state_rc(&self) -> &Rc<RefCell<Box<dyn std::any::Any>>> {
+        &self.state
+    }
+
+    #[inline]
+    pub(crate) fn copy_fn(&self) -> Option<ProviderIteratorCopyFn> {
+        self.copy_fn
+    }
+
+    #[inline]
+    pub(crate) fn exposes_copy_method(&self) -> bool {
+        self.exposes_copy_method
     }
 
     #[inline]

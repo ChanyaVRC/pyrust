@@ -489,7 +489,20 @@ fn shallow_copy_with_reconstruct(
                 "TypeError",
                 format!("cannot pickle '{noun}' object"),
             )),
-            crate::interpreter::IteratorCopy::Unowned => Ok(obj.clone()),
+            crate::interpreter::IteratorCopy::Unowned => {
+                let mut id_copy = |v: Value| Ok(v);
+                let mut no_memo_get = |_: i64| None;
+                let mut no_memo_insert = |_: i64, _: Value| {};
+                Ok(crate::interpreter::copy_provider_iterator(
+                    &obj,
+                    false,
+                    &mut id_copy,
+                    &mut no_memo_get,
+                    &mut no_memo_insert,
+                    None,
+                )?
+                .unwrap_or_else(|| obj.clone()))
+            }
         },
 
         // PyInstance — CPython 3.12 copy.copy precedence:
@@ -549,6 +562,26 @@ fn shallow_copy_with_reconstruct(
                         // value — reconstruct `type(*args)` and re-apply the
                         // non-slot state. Shallow: share arg/state values.
                         copy_exception(&rc, interp, |v, _| Ok(v), |_| {})
+                    } else if crate::builtin_modules::itertools::is_unpicklable_itertools_class(
+                        &class,
+                    ) {
+                        let noun = pyrust_core::error_type_name(&obj);
+                        Err(PyError::named(
+                            "TypeError",
+                            format!("cannot pickle '{noun}' object"),
+                        ))
+                    } else if let Some(result) = {
+                        let mut id_copy = |v: Value, _: &mut crate::interpreter::Interpreter| Ok(v);
+                        let mut no_memo = |_: i64, _: Value| {};
+                        crate::builtin_modules::itertools::copy_groupby_or_grouper(
+                            &rc,
+                            interp,
+                            &mut id_copy,
+                            &mut no_memo,
+                            None,
+                        )
+                    } {
+                        result
                     } else {
                         // Default: copy protocol — capture state via
                         // __getstate__, build a bare instance, restore via
@@ -1063,7 +1096,21 @@ fn deep_copy_with_reconstruct(
                         format!("cannot pickle '{noun}' object"),
                     ));
                 }
-                crate::interpreter::IteratorCopy::Unowned => return Ok(obj.clone()),
+                crate::interpreter::IteratorCopy::Unowned => {
+                    let mut copy_child =
+                        |v: Value| deep_copy_with_reconstruct(v, memo, reconstruct, interp);
+                    let mut get_memo = |id: i64| memo_get(memo, id);
+                    let mut put_memo = |id: i64, v: Value| memo_insert(memo, id, v);
+                    return Ok(crate::interpreter::copy_provider_iterator(
+                        &obj,
+                        true,
+                        &mut copy_child,
+                        &mut get_memo,
+                        &mut put_memo,
+                        value_identity(&obj),
+                    )?
+                    .unwrap_or_else(|| obj.clone()));
+                }
             };
             if let Some(id) = value_identity(&obj) {
                 memo_insert(memo, id, rebuilt.clone());
@@ -1183,6 +1230,29 @@ fn deep_copy_with_reconstruct(
                                 }
                             },
                         )
+                    } else if crate::builtin_modules::itertools::is_unpicklable_itertools_class(
+                        &class,
+                    ) {
+                        let noun = pyrust_core::error_type_name(&obj);
+                        Err(PyError::named(
+                            "TypeError",
+                            format!("cannot pickle '{noun}' object"),
+                        ))
+                    } else if let Some(result) = {
+                        let mut copy_child =
+                            |v: Value, interp: &mut crate::interpreter::Interpreter| {
+                                deep_copy_with_reconstruct(v, memo, reconstruct, interp)
+                            };
+                        let mut put_memo = |id: i64, v: Value| memo_insert(memo, id, v);
+                        crate::builtin_modules::itertools::copy_groupby_or_grouper(
+                            &rc,
+                            interp,
+                            &mut copy_child,
+                            &mut put_memo,
+                            value_identity(&obj),
+                        )
+                    } {
+                        result
                     } else {
                         deep_copy_via_protocol(&rc, &obj, memo, reconstruct, interp)
                     }

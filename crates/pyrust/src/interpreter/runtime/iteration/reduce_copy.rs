@@ -702,6 +702,42 @@ pub(crate) fn copy_iterator_object(value: &Value, deep: bool) -> Result<Iterator
     Ok(IteratorCopy::Unowned)
 }
 
+/// Copy or deep-copy a standard-library [`ProviderIterator`] through its
+/// provider-registered copy hook (issue #2967).
+///
+/// Returns `Ok(None)` when `value` is not a `ProviderIterator` with a copy
+/// hook. The caller supplies `copy_child`, `memo_get`, and `memo_insert` so
+/// deep copies stay cycle-safe and shared-state providers (`itertools._tee`)
+/// can share their deep-copied backing across sibling branches.
+pub(crate) fn copy_provider_iterator(
+    value: &Value,
+    deep: bool,
+    copy_child: &mut dyn FnMut(Value) -> Result<Value>,
+    memo_get: &mut dyn FnMut(i64) -> Option<Value>,
+    memo_insert: &mut dyn FnMut(i64, Value),
+    outer_obj_id: Option<i64>,
+) -> Result<Option<Value>> {
+    let ValueKind::Generator(state_rc) = value.kind() else {
+        return Ok(None);
+    };
+    let borrow = state_rc.borrow();
+    let Some(provider) = borrow.downcast_ref::<ProviderIterator>() else {
+        return Ok(None);
+    };
+    let Some(copy_fn) = provider.copy_fn() else {
+        return Ok(None);
+    };
+    copy_fn(
+        provider,
+        deep,
+        copy_child,
+        memo_get,
+        memo_insert,
+        outer_obj_id,
+    )
+    .map(Some)
+}
+
 fn expect_state<T: 'static>(state: &dyn std::any::Any) -> Result<&T> {
     state
         .downcast_ref::<T>()

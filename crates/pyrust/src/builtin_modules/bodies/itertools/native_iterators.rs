@@ -14,23 +14,90 @@ use crate::interpreter::{Interpreter, NativeIterFrame, ProviderIterator, make_it
 use crate::value::{PyClass, Value, ValueKind};
 
 struct ChainFromIterableState {
-    outer: Value,
+    outer: Option<Value>,
     inner: Option<Value>,
     done: bool,
 }
 
 pub(crate) fn chain_from_outer(class: Option<Rc<RefCell<PyClass>>>, outer: Value) -> Value {
-    Value::generator(Box::new(ProviderIterator::new(
+    Value::generator(Box::new(
+        ProviderIterator::new(
+            Box::new(ChainFromIterableState {
+                outer: Some(outer),
+                inner: None,
+                done: false,
+            }),
+            advance_chain_from_iterable,
+            "itertools.chain",
+            "chain",
+            class,
+        )
+        .with_copy_hook(copy_chain_from_iterable, false),
+    ))
+}
+
+fn copy_chain_from_iterable(
+    orig: &ProviderIterator,
+    deep: bool,
+    copy_child: &mut dyn FnMut(Value) -> Result<Value>,
+    _memo_get: &mut dyn FnMut(i64) -> Option<Value>,
+    memo_insert: &mut dyn FnMut(i64, Value),
+    outer_obj_id: Option<i64>,
+) -> Result<Value> {
+    let (outer, inner, done) = {
+        let state = orig.state_rc().borrow();
+        let state = state
+            .downcast_ref::<ChainFromIterableState>()
+            .ok_or_else(|| {
+                PyError::Runtime(
+                    "internal: chain.from_iterable iterator state corrupted".to_string(),
+                )
+            })?;
+        (state.outer.clone(), state.inner.clone(), state.done)
+    };
+    if !deep {
+        return Ok(Value::generator(Box::new(
+            ProviderIterator::new(
+                Box::new(ChainFromIterableState { outer, inner, done }),
+                advance_chain_from_iterable,
+                orig.full_type_name(),
+                orig.fallback_class_name(),
+                orig.class(),
+            )
+            .with_copy_hook(copy_chain_from_iterable, false),
+        )));
+    }
+    let provider = ProviderIterator::new(
         Box::new(ChainFromIterableState {
-            outer,
+            outer: None,
             inner: None,
-            done: false,
+            done,
         }),
         advance_chain_from_iterable,
-        "itertools.chain",
-        "chain",
-        class,
-    )))
+        orig.full_type_name(),
+        orig.fallback_class_name(),
+        orig.class(),
+    )
+    .with_copy_hook(copy_chain_from_iterable, false);
+    let state_rc = Rc::clone(provider.state_rc());
+    let rebuilt = Value::generator(Box::new(provider));
+    if let Some(id) = outer_obj_id {
+        memo_insert(id, rebuilt.clone());
+    }
+    if !done {
+        let copied_outer = match outer {
+            Some(v) => Some(copy_child(v)?),
+            None => None,
+        };
+        let copied_inner = match inner {
+            Some(v) => Some(copy_child(v)?),
+            None => None,
+        };
+        let mut state = chain_state_mut(&state_rc)?;
+        state.outer = copied_outer;
+        state.inner = copied_inner;
+    }
+    Ok(rebuilt)
 }
 
 fn advance_chain_from_iterable(
@@ -80,7 +147,7 @@ fn advance_chain_from_iterable(
             }
         }
 
-        let outer = {
+        let Some(outer) = ({
             let state = state_rc.borrow();
             state
                 .downcast_ref::<ChainFromIterableState>()
@@ -91,17 +158,26 @@ fn advance_chain_from_iterable(
                 })?
                 .outer
                 .clone()
+        }) else {
+            chain_state_mut(state_rc)?.done = true;
+            return Ok(None);
         };
         let next_iterable = match interp.call_next(&outer, None) {
             Ok(value) => value,
             Err(error) if super::is_stop_iteration(&error) => {
-                chain_state_mut(state_rc)?.done = true;
+                let mut state = chain_state_mut(state_rc)?;
+                state.done = true;
+                state.outer = None;
+                state.inner = None;
                 return Ok(None);
             }
             Err(error) => {
                 // The outer source is permanently released after its first
                 // non-exhaustion failure, matching the previous lazy cursor.
-                chain_state_mut(state_rc)?.done = true;
+                let mut state = chain_state_mut(state_rc)?;
+                state.done = true;
+                state.outer = None;
+                state.inner = None;
                 return Err(error);
             }
         };
@@ -162,6 +238,115 @@ impl Drop for TeeCursor {
     }
 }
 
+fn make_tee_value(shared: Rc<RefCell<TeeSharedState>>, slot: usize) -> Value {
+    Value::generator(Box::new(
+        ProviderIterator::new(
+            Box::new(TeeCursor { shared, slot }),
+            advance_tee,
+            "itertools._tee",
+            "_tee",
+            None,
+        )
+        .with_copy_hook(copy_tee, true),
+    ))
+}
+
+fn clone_tee_slot(shared: &Rc<RefCell<TeeSharedState>>, pos: usize) -> Value {
+    let slot = {
+        let mut s = shared.borrow_mut();
+        let slot = s.positions.len();
+        s.positions.push(Some(pos));
+        slot
+    };
+    make_tee_value(Rc::clone(shared), slot)
+}
+
+fn tee_cursor_parts(value: &Value) -> Option<(Rc<RefCell<TeeSharedState>>, usize)> {
+    let ValueKind::Generator(gen_rc) = value.kind() else {
+        return None;
+    };
+    let borrow = gen_rc.borrow();
+    let provider = borrow.downcast_ref::<ProviderIterator>()?;
+    let state = provider.state_rc().borrow();
+    let cursor = state.downcast_ref::<TeeCursor>()?;
+    Some((Rc::clone(&cursor.shared), cursor.slot))
+}
+
+fn copy_tee(
+    orig: &ProviderIterator,
+    deep: bool,
+    copy_child: &mut dyn FnMut(Value) -> Result<Value>,
+    memo_get: &mut dyn FnMut(i64) -> Option<Value>,
+    memo_insert: &mut dyn FnMut(i64, Value),
+    outer_obj_id: Option<i64>,
+) -> Result<Value> {
+    let (shared_rc, slot) = {
+        let state = orig.state_rc().borrow();
+        let cursor = state.downcast_ref::<TeeCursor>().ok_or_else(|| {
+            PyError::Runtime("internal: itertools tee iterator state corrupted".to_string())
+        })?;
+        (Rc::clone(&cursor.shared), cursor.slot)
+    };
+    let position = shared_rc
+        .borrow()
+        .positions
+        .get(slot)
+        .and_then(|pos| *pos)
+        .ok_or_else(|| PyError::Runtime("inactive tee iterator".to_string()))?;
+    if !deep {
+        return Ok(clone_tee_slot(&shared_rc, position));
+    }
+    // Deep copy: share the deep-copied TeeSharedState across sibling branches
+    // within the same deepcopy memo (matching CPython's `_teedataobject`
+    // memoisation in `deepcopy((t1, t2))`).
+    let shared_id = Rc::as_ptr(&shared_rc) as i64;
+    if let Some(existing_tee) = memo_get(shared_id)
+        && let Some((copied_shared, _)) = tee_cursor_parts(&existing_tee)
+    {
+        let rebuilt = clone_tee_slot(&copied_shared, position);
+        if let Some(id) = outer_obj_id {
+            memo_insert(id, rebuilt.clone());
+        }
+        return Ok(rebuilt);
+    }
+    let (source, buffer_items, base, exhausted) = {
+        let shared = shared_rc.borrow();
+        (
+            shared.source.clone(),
+            shared.buffer.iter().cloned().collect::<Vec<_>>(),
+            shared.base,
+            shared.exhausted,
+        )
+    };
+    let new_shared = Rc::new(RefCell::new(TeeSharedState {
+        source: Value::none(),
+        buffer: VecDeque::new(),
+        base,
+        positions: vec![Some(position)],
+        exhausted,
+        advancing: false,
+    }));
+    let rebuilt = make_tee_value(Rc::clone(&new_shared), 0);
+    if let Some(id) = outer_obj_id {
+        memo_insert(id, rebuilt.clone());
+    }
+    memo_insert(shared_id, rebuilt.clone());
+    // CPython's `_teedataobject.__reduce__` retains the source iterator even
+    // after exhaustion, so deepcopying `tee(gen)` raises `cannot pickle
+    // 'generator' object` in both live and exhausted states.
+    let copied_source = copy_child(source)?;
+    let mut copied_buffer = VecDeque::with_capacity(buffer_items.len());
+    for item in buffer_items {
+        copied_buffer.push_back(copy_child(item)?);
+    }
+    {
+        let mut s = new_shared.borrow_mut();
+        s.source = copied_source;
+        s.buffer = copied_buffer;
+    }
+    Ok(rebuilt)
+}
+
 pub(super) fn tee_iterators(
     interp: &mut Interpreter,
     iterable: &Value,
@@ -169,6 +354,23 @@ pub(super) fn tee_iterators(
 ) -> Result<Vec<Value>> {
     if count == 0 {
         return Ok(Vec::new());
+    }
+    // CPython's `itertools.tee(existing_tee, n)` reuses `existing_tee` as the
+    // first output and calls `existing_tee.__copy__()` for the remaining `n-1`
+    // outputs so the existing buffer is shared instead of double-buffered.
+    if let Some((shared_rc, slot)) = tee_cursor_parts(iterable) {
+        let position = shared_rc
+            .borrow()
+            .positions
+            .get(slot)
+            .and_then(|pos| *pos)
+            .ok_or_else(|| PyError::Runtime("inactive tee iterator".to_string()))?;
+        let mut result = Vec::with_capacity(count);
+        result.push(iterable.clone());
+        for _ in 1..count {
+            result.push(clone_tee_slot(&shared_rc, position));
+        }
+        return Ok(result);
     }
     let source = make_iterator(interp, iterable)?;
     let shared = Rc::new(RefCell::new(TeeSharedState {
@@ -180,18 +382,7 @@ pub(super) fn tee_iterators(
         advancing: false,
     }));
     Ok((0..count)
-        .map(|slot| {
-            Value::generator(Box::new(ProviderIterator::new(
-                Box::new(TeeCursor {
-                    shared: Rc::clone(&shared),
-                    slot,
-                }),
-                advance_tee,
-                "itertools._tee",
-                "_tee",
-                None,
-            )))
-        })
+        .map(|slot| make_tee_value(Rc::clone(&shared), slot))
         .collect())
 }
 
