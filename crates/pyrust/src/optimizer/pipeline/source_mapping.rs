@@ -59,6 +59,8 @@ fn insn_anchor_by_discriminant(insn: &Insn) -> bool {
             | Insn::RaiseExceptStarResidual(_)
             | Insn::RaiseFrom(..)
             | Insn::RaiseAssert(_)
+            | Insn::GetIter(..)
+            | Insn::ForIter(..)
             | Insn::GetAwaitable(..)
             | Insn::YieldFrom { .. }
             | Insn::Yield { .. }
@@ -1015,7 +1017,7 @@ fn remap_lineno_and_col_tables_with_source_prefix(
                         let fused_origin = fused_origin
                             .or_else(|| suffix_binop_old_pos.get(&new_idx).copied())
                             .or_else(|| {
-                                insn_is_fused_binop(new_insn)
+                                (insn_is_fused_binop(new_insn) || is_cmp_jump(new_insn))
                                     .then(|| binop_derived_origin.get(&new_idx).copied())
                                     .flatten()
                             });

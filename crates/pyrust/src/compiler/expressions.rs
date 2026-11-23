@@ -430,9 +430,14 @@ impl Compiler {
                 dst
             }
             Expr::Lambda { params, body } => self.compile_lambda(params, body),
-            Expr::ListComp { elt, clauses } => self.compile_list_comp(elt, clauses),
-            Expr::DictComp { key, val, clauses } => self.compile_dict_comp(key, val, clauses),
-            Expr::SetComp { elt, clauses } => self.compile_set_comp(elt, clauses),
+            Expr::ListComp { elt, clauses, span } => self.compile_list_comp(elt, clauses, *span),
+            Expr::DictComp {
+                key,
+                val,
+                clauses,
+                span,
+            } => self.compile_dict_comp(key, val, clauses, *span),
+            Expr::SetComp { elt, clauses, span } => self.compile_set_comp(elt, clauses, *span),
             Expr::GenExp {
                 elt,
                 elt_lineno,

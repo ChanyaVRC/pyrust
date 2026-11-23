@@ -242,6 +242,10 @@ impl Interpreter {
                 )?;
                 self.truthy_value(&res)
             }
+            EgMatcher::LeafPtrSet(ptrs) => Ok(matches!(
+                exc.kind(),
+                ValueKind::PyInstance(inst) if ptrs.contains(&Rc::as_ptr(inst))
+            )),
         }
     }
 
@@ -435,14 +439,195 @@ impl Interpreter {
             )),
         }
     }
+    /// PEP 654 `except*` epilogue (`_PyExc_PrepReraiseStar`, issues #2755 /
+    /// #2993).
+    ///
+    /// Receives the 4-tuple `(orig, residual, raised_list, matched_list)` packed
+    /// by `compile_try_star`:
+    /// - `orig`: original exception caught by `try ... except*`
+    /// - `residual`: remaining unhandled exception/group (or `None`)
+    /// - `raised_list`: exceptions raised inside matched `except*` handlers
+    /// - `matched_list`: subgroups passed to each matched handler
+    ///
+    /// Reconstructs the exact exception/group CPython 3.12 re-raises:
+    /// - Plain unmatched exception -> re-raised unwrapped, untouched.
+    /// - Plain matched exception with bare `raise` -> wrapped `ExceptionGroup('', [orig])`.
+    /// - `ExceptionGroup` with bare `raise` + residual -> merged subgroup with `orig.message`.
+    /// - Single newly raised exception with no kept remainder -> raised directly.
+    /// - Multiple raised exceptions and/or kept remainder -> combined `ExceptionGroup('', items)`.
+    pub(crate) fn prepare_except_star_reraise(&mut self, packed: &Value) -> Result<Value> {
+        let Some(items) = packed.as_tuple() else {
+            self.prepare_exception_group_residual(packed);
+            return Ok(packed.clone());
+        };
+        if items.len() != 4 {
+            self.prepare_exception_group_residual(packed);
+            return Ok(packed.clone());
+        }
+        let orig = &items[0];
+        let residual = if items[1].is_none() {
+            None
+        } else {
+            Some(items[1].clone())
+        };
+        let raised_list: Vec<Value> = items[2].as_list().map(|l| l.to_vec()).unwrap_or_default();
+        let matched_list: Vec<Value> = items[3].as_list().map(|l| l.to_vec()).unwrap_or_default();
+
+        let orig_is_group = matches!(
+            orig.kind(),
+            ValueKind::PyInstance(i)
+                if pyrust_core::class_chain_contains_builtin_exception(
+                    &i.borrow().class,
+                    "BaseExceptionGroup",
+                )
+        );
+
+        // Partition `raised_list` into bare re-raises of a matched subgroup vs
+        // newly raised exceptions.
+        let mut bare_reraised: Vec<Value> = Vec::new();
+        let mut new_raised: Vec<Value> = Vec::new();
+        for raised in raised_list {
+            let is_matched_subgroup = matched_list
+                .iter()
+                .any(|m| Self::values_are_same_exception(&raised, m));
+            if is_matched_subgroup {
+                bare_reraised.push(raised);
+            } else {
+                new_raised.push(raised);
+            }
+        }
+
+        if !orig_is_group {
+            if new_raised.is_empty() {
+                if let Some(reraised_group) = bare_reraised.into_iter().next() {
+                    // Plain exception matched by `except*` and bare-reraised:
+                    // CPython surfaces the wrapped `ExceptionGroup('', [orig])`
+                    // with its own `__traceback__` left `None` (the inner `orig`
+                    // carries the original traceback).
+                    self.reraise_is_bare = true;
+                    self.reset_captured_frames_if_reraise(&reraised_group);
+                    return Ok(reraised_group);
+                }
+                // Plain exception unmatched by every `except*` clause: re-raise
+                // the original exception unwrapped without altering its
+                // `__suppress_context__`.
+                let exc = residual.unwrap_or_else(|| orig.clone());
+                self.reraise_is_bare = true;
+                self.reset_captured_frames_if_reraise(&exc);
+                return Ok(exc);
+            }
+            // Plain exception matched and handler raised a new exception.
+            let exc = new_raised.into_iter().next().unwrap();
+            self.reraise_is_bare = true;
+            self.reset_captured_frames_if_reraise(&exc);
+            return Ok(exc);
+        }
+
+        // `orig` is a BaseExceptionGroup.
+        let kept_group: Option<Value> = if bare_reraised.is_empty() {
+            residual
+        } else if residual.is_none() && bare_reraised.len() == 1 {
+            bare_reraised.into_iter().next()
+        } else {
+            // Merge bare-reraised subgroup(s) + residual back into one subgroup
+            // derived from `orig` (preserving `orig.message` and nesting).
+            let mut kept_ptrs: std::collections::HashSet<*const RefCell<PyInstance>> =
+                std::collections::HashSet::new();
+            for g in &bare_reraised {
+                collect_eg_leaf_ptrs(g, &mut kept_ptrs);
+            }
+            if let Some(res) = &residual {
+                collect_eg_leaf_ptrs(res, &mut kept_ptrs);
+            }
+            let matcher = EgMatcher::LeafPtrSet(kept_ptrs);
+            let (merged, _) = self.eg_split(orig, &matcher)?;
+            merged
+        };
+
+        if new_raised.is_empty() {
+            let kept = kept_group.unwrap_or_else(|| orig.clone());
+            // Only mark `__suppress_context__ = True` when a split/derivation
+            // happened (or `kept` is not identical to an untouched `orig` with
+            // no matched handlers); `prepare_exception_group_residual` handles
+            // the standard PEP 654 residual contract (#2755).
+            if matched_list.is_empty() && Self::values_are_same_exception(&kept, orig) {
+                self.reraise_is_bare = true;
+                self.reset_captured_frames_if_reraise(&kept);
+            } else {
+                self.prepare_exception_group_residual(&kept);
+            }
+            return Ok(kept);
+        }
+
+        if kept_group.is_none() && new_raised.len() == 1 {
+            let exc = new_raised.into_iter().next().unwrap();
+            self.reraise_is_bare = true;
+            self.reset_captured_frames_if_reraise(&exc);
+            return Ok(exc);
+        }
+
+        // Combine newly raised exceptions + optional kept residual into a fresh
+        // `ExceptionGroup('', items)` (or `BaseExceptionGroup` if any item is
+        // not an `Exception`).
+        let mut combined_items = new_raised;
+        if let Some(kept) = kept_group {
+            combined_items.push(kept);
+        }
+        let combined = self.make_derived_group(Value::string(String::new()), combined_items);
+        // Preserve any context that was active *before* entering `try...except*`
+        // (i.e. `orig`'s `__context__`), without attaching `orig` itself.
+        let prior_context = match orig.kind() {
+            ValueKind::PyInstance(i) => i.borrow().attrs.get_cloned_or_slot("__context__"),
+            _ => None,
+        };
+        if let Some(ctx) = prior_context
+            && !ctx.is_none()
+            && let ValueKind::PyInstance(inst) = combined.kind()
+        {
+            inst.borrow_mut().attrs.insert_slot("__context__", ctx);
+        }
+        self.reraise_is_bare = true;
+        pyrust_core::reset_captured_error_frames();
+        Ok(combined)
+    }
+}
+
+/// Collect raw `PyInstance` pointers of every leaf exception in `val` (recursing
+/// into nested `BaseExceptionGroup`s).
+fn collect_eg_leaf_ptrs(
+    val: &Value,
+    out: &mut std::collections::HashSet<*const RefCell<PyInstance>>,
+) {
+    let ValueKind::PyInstance(inst) = val.kind() else {
+        return;
+    };
+    let is_group = pyrust_core::class_chain_contains_builtin_exception(
+        &inst.borrow().class,
+        "BaseExceptionGroup",
+    );
+    if !is_group {
+        out.insert(Rc::as_ptr(inst));
+        return;
+    }
+    let children: Vec<Value> = inst
+        .borrow()
+        .attrs
+        .get_slot("exceptions")
+        .and_then(|v| v.as_tuple().map(|t| t.to_vec()))
+        .unwrap_or_default();
+    for child in &children {
+        collect_eg_leaf_ptrs(child, out);
+    }
 }
 
 /// A PEP 654 `subgroup`/`split` condition, classified into either an
-/// exception type / tuple-of-types (matched with `isinstance` semantics) or a
-/// callable predicate `(exc) -> bool`.
+/// exception type / tuple-of-types (matched with `isinstance` semantics), a
+/// callable predicate `(exc) -> bool`, or an internal leaf-pointer set used by
+/// `prepare_except_star_reraise`.
 enum EgMatcher {
     Type(Value),
     Predicate(Value),
+    LeafPtrSet(std::collections::HashSet<*const RefCell<PyInstance>>),
 }
 
 /// Validate an `except*` catch type (a single exception class or a tuple of

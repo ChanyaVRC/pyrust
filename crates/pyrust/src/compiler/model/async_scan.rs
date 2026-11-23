@@ -143,10 +143,12 @@ fn expr_has_async_collection_comp(expr: &Expr) -> bool {
         // A nested list/set/dict comprehension: it propagates if it is itself
         // async; otherwise descend into its parts (an async comp may be nested
         // deeper, e.g. inside its element wrapped in another expression).
-        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+        Expr::ListComp { elt, clauses, .. } | Expr::SetComp { elt, clauses, .. } => {
             collection_comp_is_async(&[elt], clauses) || comp_parts_have_async_comp(&[elt], clauses)
         }
-        Expr::DictComp { key, val, clauses } => {
+        Expr::DictComp {
+            key, val, clauses, ..
+        } => {
             collection_comp_is_async(&[key, val], clauses)
                 || comp_parts_have_async_comp(&[key, val], clauses)
         }

@@ -5,11 +5,12 @@ mod program_execution {
         CallDepthGuard, EnvRef, Environment, FrameKind, HashMap, IntMaxStrDigitsExecutionGuard,
         Interpreter, PyDict, PyError, PyKey, Rc, RegSlice, RegsBuf, Result, Stmt, StrKey, Value,
         ValueKind, VmFrameView, cached_builtins_module, exception_str_with_dispatch,
-        format_exc_chain_prefix, intern_string, module_env, render_instance_repr, smallvec,
+        format_exc_chain_prefix, format_exception_group_traceback, intern_string,
+        is_exception_group_value, module_env, render_instance_repr, smallvec,
     };
     include!("runtime/program_execution.rs");
 }
-pub(crate) use program_execution::lex_parse_to_exc;
+pub(crate) use program_execution::{lex_parse_to_exc, resolve_frame_source_line};
 
 mod value_protocols {
     use super::{
@@ -374,8 +375,8 @@ mod execution {
         call_depth, callable_error_name, duplicate_keyword_error, extract_stop_iteration_value,
         initialize_typevar_attr, intern_string_value, is_stop_iteration_error,
         keyword_mapping_operand_error, lookup_class_attr, make_slice_value,
-        make_type_alias_from_syntax, make_typevar_from_syntax, max_call_depth,
-        pep479_wrap_stop_iteration, star_operand_error, value_class_object, value_type_name_str,
+        make_type_alias_from_syntax, make_typevar_from_syntax, max_call_depth, star_operand_error,
+        value_class_object, value_type_name_str,
     };
     include!("runtime/vm.rs");
     include!("runtime/vm/tests.rs");
@@ -399,7 +400,7 @@ mod generator_protocols {
     };
     include!("runtime/generator_protocols.rs");
 }
-use generator_protocols::{extract_stop_iteration_value, pep479_wrap_stop_iteration};
+use generator_protocols::extract_stop_iteration_value;
 pub(crate) use generator_protocols::{
     is_async_generator_value, is_coroutine_value, is_stop_iteration_error,
 };
@@ -408,7 +409,8 @@ mod introspection {
     use super::{
         FrameKind, GeneratorFrame, Interpreter, PyDict, PyKey, Rc, UserFunction, Value, ValueKind,
         VmFrameCache, VmFrameView, class_frame_locals_value, compiler_owned_frame_local_keys,
-        lookup_enclosing_function_value, snapshot_view_locals, values_are_identical,
+        lookup_enclosing_function_value, resolve_frame_source_line, snapshot_view_locals,
+        values_are_identical,
     };
     include!("runtime/introspection.rs");
 }

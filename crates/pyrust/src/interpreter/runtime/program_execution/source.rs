@@ -35,6 +35,19 @@ impl Interpreter {
         globals_dict: Option<Value>,
         locals_dict: Option<Value>,
     ) -> Result<()> {
+        self.exec_source_with_filename(source, "<string>", globals_dict, locals_dict)
+    }
+
+    /// Execute a source string as statements with an explicit code-object
+    /// `filename` (e.g. `"<string>"` for `exec()`, or `"<frozen asyncio>"` for
+    /// bundled stdlib sources — issue #2993).
+    pub(crate) fn exec_source_with_filename(
+        &mut self,
+        source: &str,
+        filename: &str,
+        globals_dict: Option<Value>,
+        locals_dict: Option<Value>,
+    ) -> Result<()> {
         let _int_max_str_digits_guard = IntMaxStrDigitsExecutionGuard::enter(self);
         let (program, linenos) = Self::parse_source_to_stmts_with_linenos(source)?;
         match globals_dict {
@@ -71,7 +84,7 @@ impl Interpreter {
                         Rc::clone(&local_index),
                         false,
                         &linenos,
-                        "<string>",
+                        filename,
                     )?;
                     Rc::new(crate::optimizer::optimize(c))
                 };
@@ -107,7 +120,7 @@ impl Interpreter {
             Some(gdict) => {
                 // Explicit globals dict: seed a fresh env from the dict, run,
                 // then write all new/changed names back to the dict.
-                self.exec_in_dict_env(&program, &linenos, gdict, locals_dict)
+                self.exec_in_dict_env(&program, &linenos, filename, gdict, locals_dict)
             }
         }
     }

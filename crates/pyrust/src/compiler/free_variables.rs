@@ -344,8 +344,8 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
         // them like lambdas: compute the inner body's free-var reads, subtract
         // the names locally bound by the comprehension, then surface the
         // remainder as uses at the enclosing scope.
-        Expr::ListComp { elt, clauses }
-        | Expr::SetComp { elt, clauses }
+        Expr::ListComp { elt, clauses, .. }
+        | Expr::SetComp { elt, clauses, .. }
         | Expr::GenExp { elt, clauses, .. } => {
             // Outermost iterable is evaluated at this scope level.
             if let Some(first) = clauses.first() {
@@ -380,7 +380,9 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
                 }
             }
         }
-        Expr::DictComp { key, val, clauses } => {
+        Expr::DictComp {
+            key, val, clauses, ..
+        } => {
             if let Some(first) = clauses.first() {
                 collect_transitive_free_vars_in_expr(&first.iter, uses);
                 collect_free_var_reads_in_expr(&first.iter, uses);

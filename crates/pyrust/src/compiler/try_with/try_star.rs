@@ -78,10 +78,23 @@ impl Compiler {
         // ── Exception path ──
         self.patch_jump(inner_handler_patch);
 
-        // Load the active exception into a group register.
-        // This register will be narrowed by each MatchExceptStar.
+        // Allocate four contiguous temps packed into a 4-tuple for
+        // `RaiseExceptStarResidual`:
+        //   0: orig_reg         — original exception raised by the `try` body
+        //   1: group_reg        — remaining unhandled exceptions (narrowed per match)
+        //   2: raised_list_reg  — exceptions raised inside matched `except*` handlers
+        //   3: matched_list_reg — matched subgroups handed to each handler that ran
+        let orig_reg = self.alloc_temp();
         let group_reg = self.alloc_temp();
+        let raised_list_reg = self.alloc_temp();
+        let matched_list_reg = self.alloc_temp();
+        debug_assert_eq!(group_reg, orig_reg + 1);
+        debug_assert_eq!(raised_list_reg, orig_reg + 2);
+        debug_assert_eq!(matched_list_reg, orig_reg + 3);
+        self.emit(Insn::LoadExc(orig_reg));
         self.emit(Insn::LoadExc(group_reg));
+        self.emit(Insn::BuildList(raised_list_reg, 0, 0));
+        self.emit(Insn::BuildList(matched_list_reg, 0, 0));
 
         for handler in handlers {
             if let Some(kind_expr) = &handler.kind {
@@ -91,7 +104,9 @@ impl Compiler {
                     self.emit(Insn::MatchExceptStar(type_reg, group_reg, subgroup_reg, 0));
                 self.free_temp(type_reg);
 
-                // Bind the `as VAR` variable to the sub-group.
+                self.emit(Insn::ListAppend(matched_list_reg, subgroup_reg));
+
+                // Bind the `as VAR` variable to the matched sub-group.
                 let var_bind_cleanup = if let Some(var_name) = &handler.name {
                     if let Some(reg) = self.local_reg(var_name) {
                         self.emit(Insn::Move(reg, subgroup_reg));
@@ -116,12 +131,18 @@ impl Compiler {
                     None
                 };
 
-                // Pop outer finally handler before running handler body
-                if outer_finally_patch.is_some() {
-                    self.emit(Insn::PopExcept);
-                }
+                // PEP 654 (#2993): each `except*` handler executes with its
+                // matched `ExceptionGroup` installed as the active exception
+                // (so bare `raise` re-raises that group and new raises attach
+                // it as `__context__`), inside a handler-local catch that
+                // records any raised exception into `raised_list_reg` without
+                // aborting subsequent `except*` clauses.
+                let handler_catch_patch = self.emit(Insn::SetupExcept(0));
+                self.emit(Insn::PushExcContext(subgroup_reg));
 
-                // Register except-body cleanup for early exits.
+                // Register except-body cleanup for early exits (return/break/
+                // continue directly inside `except*` is a SyntaxError, but
+                // cleanup still guards nested constructs if any).
                 self.except_cleanups.push(EarlyExitCleanup::ExceptBody {
                     finally_stmts: finally_branch.map(|s| s.to_vec()),
                     as_var_delete: var_bind_cleanup.clone(),
@@ -136,9 +157,24 @@ impl Compiler {
                     return;
                 }
 
-                // PEP 3110-style cleanup: delete the `as VAR` binding.
+                // Normal completion of this handler body.
+                self.emit(Insn::PopExcContext);
+                self.emit(Insn::PopExcept);
+                self.emit_except_as_delete(var_bind_cleanup.clone());
+                let handler_done = self.emit(Insn::Jump(0));
+
+                // Handler raised an exception: collect it and keep running
+                // subsequent `except*` handlers against the remaining group.
+                self.patch_jump(handler_catch_patch);
+                let raised_reg = self.alloc_temp();
+                self.emit(Insn::LoadExc(raised_reg));
+                self.emit(Insn::ListAppend(raised_list_reg, raised_reg));
+                self.free_temp(raised_reg);
+                self.emit(Insn::EndExcept);
+                self.emit(Insn::PopExcContext);
                 self.emit_except_as_delete(var_bind_cleanup);
 
+                self.patch_jump(handler_done);
                 self.free_temp(subgroup_reg);
 
                 // `skip_patch` jumps here (no match → continue to next handler)
@@ -146,29 +182,35 @@ impl Compiler {
             }
         }
 
-        // After all handlers: check if group_reg has remaining exceptions.
-        // If group_reg is None (all matched), call EndExcept + jump to end.
-        // If group_reg is a group, re-raise it.
-        // We check by using JumpIfFalse on group_reg (None is falsy; a group is truthy).
-        let remaining_check = self.emit(Insn::JumpIfFalse(group_reg, 0));
-        // Remaining exceptions exist — re-raise the group.
-        // If no handler matched: the outer SetupExcept is still active and will
-        // catch this re-raise to run the finally block.
-        // If a handler matched but left some exceptions (partial match): the outer
-        // SetupExcept was already popped, so the finally will NOT run here; this
-        // is a known limitation (see follow-up issue for except*+finally+partial-match).
-        // Restore the try-body lineno so the re-raise is attributed to the
-        // failing statement in the try block, not to handler body code.
-        self.set_lineno(try_body_lineno_star);
-        // PEP 654 (#2755): re-raise the residual group without spurious
-        // implicit-context chaining or an extra epilogue traceback frame.
-        self.emit(Insn::RaiseExceptStarResidual(group_reg));
-        self.patch_jump(remaining_check);
+        // After all handlers: if any handler raised OR unhandled exceptions
+        // remain in `group_reg`, compute and raise the PEP 654 result via
+        // `RaiseExceptStarResidual`.
+        let no_raised = self.emit(Insn::JumpIfFalse(raised_list_reg, 0));
+        let do_reraise_from_raised = self.emit(Insn::Jump(0));
+        self.patch_jump(no_raised);
+        let all_handled = self.emit(Insn::JumpIfFalse(group_reg, 0));
+        self.patch_jump(do_reraise_from_raised);
 
-        // No remaining exceptions — clean up normally.
+        let pack_reg = self.alloc_temp();
+        self.emit(Insn::BuildTuple(pack_reg, orig_reg, 4));
+        // Restore the try-body lineno so a residual re-raise is attributed to
+        // the failing statement in the try block, not to handler body code.
+        self.set_lineno(try_body_lineno_star);
+        // PEP 654 (#2755 / #2993): combine/re-raise residual + raised groups.
+        self.emit(Insn::RaiseExceptStarResidual(pack_reg));
+        self.free_temp(pack_reg);
+        self.patch_jump(all_handled);
+
+        // No remaining exceptions and nothing raised — clean up normally.
+        self.free_temp(matched_list_reg);
+        self.free_temp(raised_list_reg);
         self.free_temp(group_reg);
+        self.free_temp(orig_reg);
         self.emit(Insn::EndExcept);
 
+        if outer_finally_patch.is_some() {
+            self.emit(Insn::PopExcept);
+        }
         if let Some(finally_stmts) = finally_branch {
             self.compile_block_with_linenos(finally_stmts, finally_linenos);
             if self.failed {

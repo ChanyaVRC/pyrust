@@ -483,6 +483,13 @@ impl Interpreter {
             Err(ref e) if is_aclose && e.class_name_is("GeneratorExit") => {
                 Err(self.make_stop_iteration())
             }
+            // PEP 479 / PEP 525: an explicit `StopAsyncIteration` raised inside
+            // an async generator body converts to `RuntimeError("async generator
+            // raised StopAsyncIteration")` with the original exception as
+            // `__cause__` / `__context__` (owning the async generator's frames).
+            Err(e) if is_stop_async_iteration_error(&e) => {
+                Err(self.pep479_wrap_stop_async_iteration(e))
+            }
             Err(e) => Err(e),
         };
         if result.is_err() {

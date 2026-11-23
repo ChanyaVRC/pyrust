@@ -247,4 +247,9 @@ struct Compiler {
     /// (`UnboundLocalError`) or a free variable owned by a grandparent scope
     /// (`NameError`) — see issue #2457.  `None` outside an inlined comp.
     comp_enclosing_locals: Option<Rc<HashSet<String>>>,
+    /// PEP 657 caret span covering an inlined comprehension (`[...]` / `{...}`),
+    /// attached to its outermost `.0` iteration (`GetIter`/`ForIter` or
+    /// `async for` await drive) so exceptions from iterating the comprehension
+    /// underline the comprehension expression in the enclosing frame (#2993).
+    comp_outer_for_span: Option<crate::ast::CaretSpan>,
 }

@@ -807,17 +807,20 @@ pub enum Expr {
     ListComp {
         elt: Box<Expr>,
         clauses: Vec<CompClause>,
+        span: Option<CaretSpan>,
     },
     /// `{key: val for target in iter ...}`
     DictComp {
         key: Box<Expr>,
         val: Box<Expr>,
         clauses: Vec<CompClause>,
+        span: Option<CaretSpan>,
     },
     /// `{elt for target in iter ...}`
     SetComp {
         elt: Box<Expr>,
         clauses: Vec<CompClause>,
+        span: Option<CaretSpan>,
     },
     /// `(elt for target in iter ...)` — generator expression
     GenExp {
@@ -952,8 +955,8 @@ impl Expr {
                     }
                 }
             }
-            Expr::ListComp { elt, clauses }
-            | Expr::SetComp { elt, clauses }
+            Expr::ListComp { elt, clauses, .. }
+            | Expr::SetComp { elt, clauses, .. }
             | Expr::GenExp { elt, clauses, .. } => {
                 elt.visit_enclosing_walrus_targets(visitor);
                 for clause in clauses {
@@ -963,7 +966,9 @@ impl Expr {
                     }
                 }
             }
-            Expr::DictComp { key, val, clauses } => {
+            Expr::DictComp {
+                key, val, clauses, ..
+            } => {
                 key.visit_enclosing_walrus_targets(visitor);
                 val.visit_enclosing_walrus_targets(visitor);
                 for clause in clauses {

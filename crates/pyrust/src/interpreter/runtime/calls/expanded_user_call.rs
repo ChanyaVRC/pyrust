@@ -434,28 +434,37 @@ impl Interpreter {
                 // when the body actually errored.  The no-exception common path
                 // does no allocation and touches no traceback thread-local.
                 if vm_result.is_err() {
-                    // Callee's own code-object filename (#2438): an imported
-                    // module's function reports its module's source file.
-                    let tb_filename = code.filename.clone();
-                    // Capture the source line in this callee where execution
-                    // stopped (the callee published it via `set_current_vm_line`
-                    // on the way out).  Surfaced to Python as `tb_lineno` /
-                    // `f_lineno`; 0 means "no line table" (kept as `None`).
-                    let tb_lineno = match pyrust_core::get_current_vm_line() {
-                        0 => None,
-                        n => Some(n),
-                    };
-                    pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
-                        filename: tb_filename,
-                        lineno: tb_lineno,
-                        source_line: None,
-                        funcname: std::sync::Arc::from(&function.name[..]),
-                        globals: Some(pyrust_core::FrameGlobals::for_environment(&function.env)),
-                        // This callee just escaped, so the published anchor
-                        // (#2411) is the col span of the instruction that
-                        // propagated the error within this frame.
-                        col_span: pyrust_core::get_current_vm_col_span(),
-                    });
+                    if code.is_inlined_comp {
+                        // PEP 709 (#2993): suppress `<listcomp>`/`<setcomp>`/`<dictcomp>`
+                        // frame and propagate the inner caret anchor to the caller.
+                        self.inlined_comp_escaped_span =
+                            Some(pyrust_core::get_current_vm_col_span());
+                    } else {
+                        // Callee's own code-object filename (#2438): an imported
+                        // module's function reports its module's source file.
+                        let tb_filename = code.filename.clone();
+                        // Capture the source line in this callee where execution
+                        // stopped (the callee published it via `set_current_vm_line`
+                        // on the way out).  Surfaced to Python as `tb_lineno` /
+                        // `f_lineno`; 0 means "no line table" (kept as `None`).
+                        let tb_lineno = match pyrust_core::get_current_vm_line() {
+                            0 => None,
+                            n => Some(n),
+                        };
+                        pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                            filename: tb_filename,
+                            lineno: tb_lineno,
+                            source_line: None,
+                            funcname: std::sync::Arc::from(&function.name[..]),
+                            globals: Some(pyrust_core::FrameGlobals::for_environment(
+                                &function.env,
+                            )),
+                            // This callee just escaped, so the published anchor
+                            // (#2411) is the col span of the instruction that
+                            // propagated the error within this frame.
+                            col_span: pyrust_core::get_current_vm_col_span(),
+                        });
+                    }
                 }
                 self.detach_vm_frame_view();
                 drop(regs);

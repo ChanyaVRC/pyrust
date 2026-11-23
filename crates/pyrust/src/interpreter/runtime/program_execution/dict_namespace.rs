@@ -5,6 +5,7 @@ impl Interpreter {
         &mut self,
         program: &[crate::ast::Stmt],
         linenos: &[u32],
+        filename: &str,
         globals_dict: Value,
         locals_dict: Option<Value>,
     ) -> Result<()> {
@@ -33,7 +34,7 @@ impl Interpreter {
                 Rc::clone(&local_index),
                 false,
                 linenos,
-                "<string>",
+                filename,
             )?;
             Rc::new(crate::optimizer::optimize(c))
         };

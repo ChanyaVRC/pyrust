@@ -365,24 +365,28 @@ impl Interpreter {
             // Lazy traceback: only build + record this frame's `FrameInfo`
             // when the body actually errored (see the simple-call path above).
             if vm_result.is_err() {
-                // Callee's own code-object filename (#2438): an imported module's
-                // function reports its module's source file.
-                let tb_filename = code.filename.clone();
-                let tb_lineno = match pyrust_core::get_current_vm_line() {
-                    0 => None,
-                    n => Some(n),
-                };
-                pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
-                    filename: tb_filename,
-                    lineno: tb_lineno,
-                    source_line: None,
-                    funcname: std::sync::Arc::from(&function.name[..]),
-                    globals: Some(pyrust_core::FrameGlobals::for_environment(&function.env)),
-                    // This callee just escaped, so the published anchor (#2411)
-                    // is the col span of the instruction that propagated the
-                    // error within this frame.
-                    col_span: pyrust_core::get_current_vm_col_span(),
-                });
+                if code.is_inlined_comp {
+                    self.inlined_comp_escaped_span = Some(pyrust_core::get_current_vm_col_span());
+                } else {
+                    // Callee's own code-object filename (#2438): an imported module's
+                    // function reports its module's source file.
+                    let tb_filename = code.filename.clone();
+                    let tb_lineno = match pyrust_core::get_current_vm_line() {
+                        0 => None,
+                        n => Some(n),
+                    };
+                    pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                        filename: tb_filename,
+                        lineno: tb_lineno,
+                        source_line: None,
+                        funcname: std::sync::Arc::from(&function.name[..]),
+                        globals: Some(pyrust_core::FrameGlobals::for_environment(&function.env)),
+                        // This callee just escaped, so the published anchor (#2411)
+                        // is the col span of the instruction that propagated the
+                        // error within this frame.
+                        col_span: pyrust_core::get_current_vm_col_span(),
+                    });
+                }
             }
             self.detach_vm_frame_view();
             drop(regs);
