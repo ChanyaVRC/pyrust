@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::environment::EnvRef;
+use crate::object_model::Value;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Traceback frame tracking
@@ -84,6 +85,13 @@ pub struct FrameInfo {
     /// leading whitespace is stripped for display; the formatter re-bases them
     /// against the dedented line when rendering.
     pub col_span: Option<(u32, u32, u32, u32)>,
+    /// Snapshotted Python-visible `f_locals` dict captured when this frame
+    /// unwound (issue #3029), or `None` for module / display-only frames.
+    pub locals: Option<Value>,
+    /// Already-materialised Python frame object if this unwinding activation
+    /// had been introspected via `sys._getframe()` (issue #3029), preserving
+    /// `tb.tb_frame` identity and synced `f_locals`.
+    pub frame: Option<Value>,
 }
 
 thread_local! {

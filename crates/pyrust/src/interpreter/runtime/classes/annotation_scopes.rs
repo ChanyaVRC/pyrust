@@ -9,6 +9,8 @@ impl Interpreter {
         num_class_regs: usize,
         has_type_alias: bool,
         qualname_slot: Option<crate::bytecode::Reg>,
+        class_name: std::sync::Arc<str>,
+        filename: std::sync::Arc<str>,
     ) {
         if !has_type_alias {
             self.class_annotation_scopes
@@ -17,6 +19,8 @@ impl Interpreter {
                     scopes: Vec::new(),
                     qualname_slot,
                     qualname_was_deleted: false,
+                    class_name,
+                    filename,
                     live_namespace: RefCell::new(None),
                 });
             return;
@@ -33,6 +37,8 @@ impl Interpreter {
                 scopes: Vec::new(),
                 qualname_slot,
                 qualname_was_deleted: false,
+                class_name,
+                filename,
                 live_namespace: RefCell::new(None),
             });
     }

@@ -458,6 +458,8 @@ fn chained_exc_frames(
                 // PEP 657 caret anchor recovered from the chained exception's
                 // traceback chain (#2411).
                 col_span,
+                locals: None,
+                frame: None,
             }
         })
         .collect();

@@ -505,6 +505,8 @@ impl Interpreter {
                 funcname: std::sync::Arc::from("<module>"),
                 globals: Some(pyrust_core::FrameGlobals::for_environment(&self.env)),
                 col_span,
+                locals: None,
+                frame: None,
             });
         }
         // Snapshot the traceback frame stack before the inner function frames
@@ -564,7 +566,7 @@ impl Interpreter {
                         None
                     };
                     let mut frames = vec![pyrust_core::FrameInfo {
-                        filename: filename.clone(),
+                        filename: owned_filename.clone(),
                         lineno: module_lineno,
                         source_line: module_source_line,
                         funcname: std::sync::Arc::from("<module>"),
@@ -573,6 +575,8 @@ impl Interpreter {
                         // the exception is caught.
                         globals: None,
                         col_span: module_col_span,
+                        locals: None,
+                        frame: None,
                     }];
                     // Issue #2404: a re-raised exception's `__traceback__` chain is
                     // the authoritative, Python-visible frame list — after #2367 the
@@ -588,7 +592,7 @@ impl Interpreter {
                         // formatter to drop the bare re-raise frame's own node.
                         self.uncaught_inner_frames_from_tb(
                             exc_val,
-                            filename,
+                            &owned_filename,
                             src,
                             &inner_frames,
                             self.reraise_is_bare,
@@ -653,7 +657,7 @@ impl Interpreter {
                                     fi.source_line = resolve_frame_source_line(
                                         &fi.filename,
                                         fi.lineno,
-                                        filename.as_ref(),
+                                        owned_filename.as_ref(),
                                         src,
                                     );
                                 }

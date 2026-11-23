@@ -309,6 +309,16 @@ fn merge_class_frame_view_into_dict(
     slot_names
 }
 
+/// Return `(co_name, co_filename)` for an active `FrameKind::Class` view.
+pub(crate) fn class_frame_identity(
+    interp: &Interpreter,
+    view: &VmFrameView,
+) -> Option<(std::sync::Arc<str>, std::sync::Arc<str>)> {
+    let class_index = active_class_index_for_view(interp, view)?;
+    let active = interp.class_annotation_scopes.get(class_index)?;
+    Some((active.class_name.clone(), active.filename.clone()))
+}
+
 /// Return the persistent live dict for one active class frame, materializing
 /// it from fastlocals only on the first introspection. Later stores synchronize
 /// through RecordClassStore; syntactic deletes operate on this dict directly.

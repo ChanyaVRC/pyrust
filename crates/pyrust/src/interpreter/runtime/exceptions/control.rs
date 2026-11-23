@@ -92,19 +92,25 @@ impl Interpreter {
         catch_lineno: u32,
         is_bare_reraise: bool,
     ) {
-        let ValueKind::PyInstance(instance) = exception.kind() else {
+        let Some(instance) = exception.as_py_instance_rc() else {
             return;
         };
-        let mut instance = instance.borrow_mut();
-        if let Some(slot) = instance.attrs.get_slot_mut("__traceback__") {
+        let existing = instance.borrow().attrs.get_slot("__traceback__").cloned();
+        if let Some(existing) = existing {
             if let Some(traceback) =
-                self.caught_traceback_value(slot, catch_lineno as i64, is_bare_reraise)
+                self.caught_traceback_value(&existing, catch_lineno as i64, is_bare_reraise)
             {
-                *slot = traceback;
+                instance
+                    .borrow_mut()
+                    .attrs
+                    .insert_slot("__traceback__", traceback);
             }
         } else {
             let traceback = self.build_deferred_traceback(catch_lineno as i64);
-            instance.attrs.insert_slot("__traceback__", traceback);
+            instance
+                .borrow_mut()
+                .attrs
+                .insert_slot("__traceback__", traceback);
         }
     }
 

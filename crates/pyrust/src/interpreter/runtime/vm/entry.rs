@@ -42,6 +42,40 @@ impl Interpreter {
         self.resume_generator_with_exc(frame, None, Value::none())
     }
 
+    /// Push a `VmFrameView` for an executing generator/coroutine frame.
+    fn push_generator_frame_view(
+        &mut self,
+        frame: &mut GeneratorFrame,
+    ) -> (std::ptr::NonNull<Value>, usize) {
+        let gen_nonlocal_names = {
+            let env = frame.saved_env.borrow();
+            if env.nonlocal_names.is_empty() {
+                None
+            } else {
+                Some(Rc::clone(&env.nonlocal_names))
+            }
+        };
+        let gen_env_opt = if gen_nonlocal_names.is_some() {
+            Some(Rc::clone(&frame.saved_env))
+        } else {
+            None
+        };
+        let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(frame.regs.as_mut_ptr()) };
+        let regs_len = frame.regs.len();
+        self.vm_frame_views.push(VmFrameView {
+            kind: FrameKind::Function,
+            regs_ptr,
+            regs_len,
+            local_index: Rc::clone(&frame.local_index),
+            nonlocal_names: gen_nonlocal_names,
+            env: gen_env_opt,
+            is_class_method: frame.code.is_class_method,
+            function: None,
+            gen_frame: Some(std::ptr::NonNull::from(&*frame)),
+        });
+        (regs_ptr, regs_len)
+    }
+
     /// Resume a generator with an explicit sent value, optionally injecting
     /// `inject_exc` as if it had been raised at the current yield point.
     /// Underpins `generator.close()` (inject `GeneratorExit`),
@@ -78,6 +112,10 @@ impl Interpreter {
         // and an exception is being injected (generator.throw() / generator.close()),
         // forward the exception to the sub-iterator rather than injecting it into our
         // own body.  This matches CPython's implementation of the PEP 380 algorithm.
+        //
+        // Push this delegating generator's `VmFrameView` around the forwarding
+        // call so `sys._getframe()` / `f_back` walks inside a sub-generator
+        // handler observe every delegator frame on the stack (issue #3029).
         if let Some(ref exc) = inject_exc
             && let Some(crate::bytecode::Insn::YieldFrom {
                 iter_reg,
@@ -89,7 +127,12 @@ impl Interpreter {
             let sent_reg = *sent_reg;
             let result_reg = *result_reg;
             let iter_val = frame.regs[iter_reg as usize].clone();
+            let previous_env = std::mem::replace(&mut self.env, Rc::clone(&frame.saved_env));
+            self.push_generator_frame_view(frame);
             let forward_result = self.yield_from_throw_forward(&iter_val, exc.clone());
+            self.sync_top_generator_frame_cache_if_present();
+            self.vm_frame_views.pop();
+            self.env = previous_env;
             match forward_result {
                 Ok(yielded) => {
                     // Sub-iterator caught the exception and yielded: yield this value
@@ -144,67 +187,9 @@ impl Interpreter {
         let gen_active = frame.active_exception.take();
         let gen_exc_saved_active = std::mem::take(&mut frame.exc_saved_active_slice);
 
-        // Issue #483 review: publish a Function frame view so `locals()`
-        // called inside the generator body sees the generator's own
-        // fastlocals instead of the caller's frame.  Popped immediately
-        // after `run_bytecode_inner` returns — including on yield, where
-        // the regs slice stays valid (it's owned by `frame.regs`) but
-        // the view is no longer the innermost frame from the caller's
-        // perspective.
-        // Issue #486: also capture nonlocal_names + env from the
-        // generator's saved_env so `locals()` can surface nonlocal
-        // bindings captured at generator-creation time.
-        let gen_nonlocal_names = {
-            let env = frame.saved_env.borrow();
-            if env.nonlocal_names.is_empty() {
-                None
-            } else {
-                Some(Rc::clone(&env.nonlocal_names))
-            }
-        };
-        let gen_env_opt = if gen_nonlocal_names.is_some() {
-            Some(Rc::clone(&frame.saved_env))
-        } else {
-            None
-        };
-        // Capture the raw pointer and length BEFORE constructing RegSlice so
-        // both the VmFrameView and the dispatch loop share the same raw pointer
-        // with no &mut [Value] in scope (eliminating the noalias UB, issue #547).
-        let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(frame.regs.as_mut_ptr()) };
-        let regs_len = frame.regs.len();
-        self.vm_frame_views.push(VmFrameView {
-            kind: FrameKind::Function,
-            // SAFETY: `GeneratorFrame` is heap-allocated inside a
-            // `Box<GeneratorFrame>` (owned by the generator `Value`).
-            // `regs` lives inside that boxed frame, so whether the
-            // SmallVec uses its inline storage (for <= VM_REGS_INLINE
-            // registers) or spills to a separate allocation, the
-            // pointer is stable across yields — the Box is not moved
-            // or dropped while the generator is alive.  SmallVec / Vec
-            // allocations are always non-null.  Popped immediately after
-            // `run_bytecode_inner` returns (including on yield).
-            regs_ptr,
-            regs_len,
-            local_index: Rc::clone(&frame.local_index),
-            nonlocal_names: gen_nonlocal_names,
-            env: gen_env_opt,
-            is_class_method: frame.code.is_class_method,
-            // Generator frames do not retain the originating `UserFunction`;
-            // traceback `tb_frame` for a generator-raised exception is built
-            // from the lazily-captured `FrameInfo` (which carries `fn_name`).
-            function: None,
-            // Issue #2445/#2471: store a pointer to this generator frame so a
-            // traceback built when an exception is *caught inside* the body
-            // (e.g. `generator.throw()`) can recover the generator's name +
-            // filename lazily on the cold path and attribute the catching frame
-            // to the generator instead of falling back to `<module>`.  `frame`
-            // is borrowed for the entire `run_bytecode_inner` call below, and
-            // the view is popped before that borrow ends, so the pointer stays
-            // valid for the view's lifetime.
-            gen_frame: Some(std::ptr::NonNull::from(&*frame)),
-            // Generator frame identity is cached persistently inside `frame`;
-            // the view reaches it through `gen_frame` only on introspection.
-        });
+        // Issue #483/#486/#547: publish this generator's `VmFrameView` before
+        // constructing `RegSlice`.
+        let (regs_ptr, regs_len) = self.push_generator_frame_view(frame);
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
         // frame.regs (which outlives this call).  No &mut [Value] referencing
         // frame.regs is held while the dispatch loop runs; RegSlice (raw
@@ -246,6 +231,7 @@ impl Interpreter {
                     0 => None,
                     n => Some(n),
                 };
+                let (tb_locals, tb_frame) = self.capture_unwinding_traceback_frame(tb_lineno);
                 pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
                     filename: tb_filename,
                     lineno: tb_lineno,
@@ -259,8 +245,12 @@ impl Interpreter {
                     // plain-function frame uses in `calls::user_frame`.  Generator
                     // frames used to hardcode `None` here and stayed caret-free.
                     col_span: pyrust_core::get_current_vm_col_span(),
+                    locals: tb_locals,
+                    frame: tb_frame,
                 });
             }
+        } else {
+            self.sync_top_generator_frame_cache_if_present();
         }
         self.vm_frame_views.pop();
 
@@ -563,6 +553,19 @@ impl Interpreter {
                         .copied()
                         .filter(|&s| s != (0, 0, 0, 0))
                 };
+                let tb_lineno = if line == 0 { None } else { Some(line) };
+                let top_is_inlined_comp = self
+                    .vm_frame_views
+                    .last()
+                    .and_then(|v| v.function.as_ref())
+                    .and_then(|f| f.precompiled_code.as_ref())
+                    .and_then(|rc| Rc::clone(rc).downcast::<crate::bytecode::FnCode>().ok())
+                    .is_some_and(|c| c.is_inlined_comp);
+                let (tb_locals, tb_frame) = if top_is_inlined_comp {
+                    (None, None)
+                } else {
+                    self.capture_unwinding_traceback_frame(tb_lineno)
+                };
                 let view = self.detach_vm_frame_view();
                 st.tramp_arena.truncate(*st.tramp_active_base);
                 *st.tramp_active_base = saved.saved_base;
@@ -592,11 +595,13 @@ impl Interpreter {
                             .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
                         pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
                             filename: file,
-                            lineno: if line == 0 { None } else { Some(line) },
+                            lineno: tb_lineno,
                             source_line: None,
                             funcname: std::sync::Arc::from(&func.name[..]),
                             globals: Some(pyrust_core::FrameGlobals::for_environment(&func.env)),
                             col_span: frame_col,
+                            locals: tb_locals,
+                            frame: tb_frame,
                         });
                     }
                 }
@@ -615,13 +620,15 @@ impl Interpreter {
             };
             // The error escaped the generator body: finalize it.
             gd.gframe.done = true;
+            let tb_lineno = if line == 0 { None } else { Some(line) };
+            let (tb_locals, tb_frame) = self.capture_unwinding_traceback_frame(tb_lineno);
             if self.vm_frame_views.pop().is_some() {
                 // Generator's own code-object filename (#2438): a generator from
                 // an imported module reports that module's source file.
                 let file = gd.gframe.code.filename.clone();
                 pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
                     filename: file,
-                    lineno: if line == 0 { None } else { Some(line) },
+                    lineno: tb_lineno,
                     source_line: None,
                     funcname: gd.gframe.fn_name.clone(),
                     globals: Some(pyrust_core::FrameGlobals::for_environment(
@@ -634,6 +641,8 @@ impl Interpreter {
                     // forward by the trampoline loop above (`yield f()`).  The
                     // gen-drive frame used to hardcode `None` and stayed caret-free.
                     col_span: innermost_col,
+                    locals: tb_locals,
+                    frame: tb_frame,
                 });
             }
             // Restore the consumer frame.

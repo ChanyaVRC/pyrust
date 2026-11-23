@@ -123,6 +123,32 @@ fn cached_function_locals(
     })
 }
 
+fn is_inlined_comprehension_view(view: &VmFrameView) -> bool {
+    if let Some(func) = &view.function {
+        if let Some(code_any) = func.precompiled_code.as_ref()
+            && let Ok(code) = Rc::clone(code_any).downcast::<crate::bytecode::FnCode>()
+            && code.is_inlined_comp
+        {
+            return true;
+        }
+        return matches!(
+            func.name.as_ref(),
+            "<listcomp>" | "<setcomp>" | "<dictcomp>"
+        );
+    }
+    if let Some(gen_frame) = view.gen_frame {
+        // SAFETY: `gen_frame` points to the live boxed `GeneratorFrame` for
+        // the lifetime of this active view on `vm_frame_views`.
+        let gframe = unsafe { gen_frame.as_ref() };
+        return gframe.code.is_inlined_comp
+            || matches!(
+                gframe.fn_name.as_ref(),
+                "<listcomp>" | "<setcomp>" | "<dictcomp>"
+            );
+    }
+    false
+}
+
 fn install_materialized_frame_cache(
     interp: &mut Interpreter,
     view_index: usize,
@@ -148,6 +174,7 @@ fn install_materialized_frame_cache(
                 function_locals,
                 persistent_function_locals: None,
                 function_local_names,
+                live_token: Rc::new(()),
             }));
         }
     });
@@ -176,6 +203,17 @@ impl Interpreter {
     /// (issue #3028).
     #[inline]
     pub(crate) fn detach_vm_frame_view(&mut self) -> Option<VmFrameView> {
+        let top_index = self.vm_frame_views.len().checked_sub(1)?;
+        // Flush any cached function-locals mapping (from `sys._getframe()`,
+        // `locals()`, or a caught traceback) one final time while this
+        // activation's register file is still live (issue #3029).
+        if self
+            .vm_frame_caches
+            .as_ref()
+            .is_some_and(|caches| caches.len() > top_index && caches[top_index].is_some())
+        {
+            self.sync_cached_function_locals_at(top_index);
+        }
         let view = self.vm_frame_views.pop()?;
         debug_assert!(
             view.gen_frame.is_none(),
@@ -276,6 +314,168 @@ impl Interpreter {
         }
     }
 
+    /// Flush a generator activation's cached `f_locals` dict before suspending
+    /// or completing, if that generator was ever introspected or caught an
+    /// exception (issue #3029). Ordinary un-introspected generators pay only
+    /// one `Option::is_some` check.
+    #[inline]
+    pub(crate) fn sync_top_generator_frame_cache_if_present(&mut self) {
+        let Some(view_index) = self.vm_frame_views.len().checked_sub(1) else {
+            return;
+        };
+        let has_cache = self.vm_frame_views[view_index]
+            .gen_frame
+            .is_some_and(|gen_frame| unsafe { gen_frame.as_ref() }.frame_cache.borrow().is_some());
+        if has_cache {
+            self.sync_cached_function_locals_at(view_index);
+        }
+    }
+
+    /// Translate logical `_getframe` depth (skipping PEP 709 inlined
+    /// comprehension views) to an index in `self.vm_frame_views`.
+    pub(super) fn visible_view_index_for_depth(&self, depth: usize) -> Option<usize> {
+        let mut remaining = depth;
+        for (idx, view) in self.vm_frame_views.iter().enumerate().rev() {
+            if is_inlined_comprehension_view(view) {
+                continue;
+            }
+            if remaining == 0 {
+                return Some(idx);
+            }
+            remaining -= 1;
+        }
+        None
+    }
+
+    fn enclosing_visible_view_index(&self, view_index: usize) -> Option<usize> {
+        self.vm_frame_views[..view_index]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, view)| !is_inlined_comprehension_view(view))
+            .map(|(idx, _)| idx)
+    }
+
+    fn ensure_live_frame_cache_token(&mut self, view_index: usize) -> std::rc::Weak<()> {
+        with_frame_cache_mut(self, view_index, |slot| {
+            let cache = slot.get_or_insert_with(|| {
+                Box::new(VmFrameCache {
+                    object: None,
+                    function_locals: None,
+                    persistent_function_locals: None,
+                    function_local_names: Vec::new(),
+                    live_token: Rc::new(()),
+                })
+            });
+            Rc::downgrade(&cache.live_token)
+        })
+    }
+
+    pub(super) fn frame_cache_matches_token(
+        &self,
+        view_index: usize,
+        token: &std::rc::Weak<()>,
+    ) -> bool {
+        let Some(expected) = token.upgrade() else {
+            return false;
+        };
+        if view_index >= self.vm_frame_views.len() {
+            return false;
+        }
+        with_frame_cache(self, view_index, |cache| {
+            cache.is_some_and(|cache| Rc::ptr_eq(&cache.live_token, &expected))
+        })
+    }
+
+    /// Capture `(locals, live_token)` for a catching frame at catch time so
+    /// deferred tracebacks preserve live identity while the frame runs and
+    /// preserve final locals if the exception escapes the catching frame
+    /// (issue #3029).
+    pub(super) fn capture_catching_frame_locals_and_token(
+        &mut self,
+        view_index: usize,
+    ) -> (Option<Value>, std::rc::Weak<()>) {
+        match self.vm_frame_views[view_index].kind {
+            FrameKind::Script => (None, self.ensure_live_frame_cache_token(view_index)),
+            FrameKind::Class => {
+                let locals = class_frame_locals_value(self, &self.vm_frame_views[view_index]);
+                let token = self.ensure_live_frame_cache_token(view_index);
+                (Some(locals), token)
+            }
+            FrameKind::Function => {
+                if let Some(locals) = cached_function_locals(self, view_index) {
+                    self.sync_cached_function_locals_at(view_index);
+                    let token = self.ensure_live_frame_cache_token(view_index);
+                    return (Some(Value::dict_shared(locals)), token);
+                }
+                let snapshot = snapshot_view_locals(self, &self.vm_frame_views[view_index]);
+                let function_local_names =
+                    initial_function_local_names(&self.vm_frame_views[view_index], &snapshot);
+                let locals_value = Value::dict(snapshot);
+                let weak_locals = Rc::downgrade(
+                    locals_value
+                        .get_dict_rc()
+                        .expect("function frame locals must be a dict"),
+                );
+                let token = with_frame_cache_mut(self, view_index, |slot| {
+                    if let Some(cache) = slot.as_deref_mut() {
+                        cache.function_locals = Some(weak_locals);
+                        cache.function_local_names = function_local_names;
+                        Rc::downgrade(&cache.live_token)
+                    } else {
+                        let live_token = Rc::new(());
+                        let weak_token = Rc::downgrade(&live_token);
+                        *slot = Some(Box::new(VmFrameCache {
+                            object: None,
+                            function_locals: Some(weak_locals),
+                            persistent_function_locals: None,
+                            function_local_names,
+                            live_token,
+                        }));
+                        weak_token
+                    }
+                });
+                (Some(locals_value), token)
+            }
+        }
+    }
+
+    /// Capture `(locals, cached_frame)` for the innermost active frame right
+    /// before it unwinds on an exception (issue #3029).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn capture_unwinding_traceback_frame(
+        &mut self,
+        lineno: Option<u32>,
+    ) -> (Option<Value>, Option<Value>) {
+        let Some(view_index) = self.vm_frame_views.len().checked_sub(1) else {
+            return (None, None);
+        };
+        let kind = self.vm_frame_views[view_index].kind;
+        if kind == FrameKind::Script {
+            return (None, None);
+        }
+        if kind == FrameKind::Function {
+            self.sync_cached_function_locals_at(view_index);
+        }
+        if let Some(frame) = cached_frame_object(self, view_index) {
+            refresh_cached_frame_state(&frame, lineno.map(|n| n as i64).unwrap_or(0));
+            return (None, Some(frame));
+        }
+        let locals = match kind {
+            FrameKind::Function => {
+                if let Some(locals) = cached_function_locals(self, view_index) {
+                    Value::dict_shared(locals)
+                } else {
+                    Value::dict(snapshot_view_locals(self, &self.vm_frame_views[view_index]))
+                }
+            }
+            FrameKind::Class => class_frame_locals_value(self, &self.vm_frame_views[view_index]),
+            FrameKind::Script => unreachable!("Script handled above"),
+        };
+        (Some(locals), None)
+    }
+
     fn sync_cached_function_locals_at(&mut self, view_index: usize) {
         let (cached_locals, compiler_owned_names) = {
             let view = &self.vm_frame_views[view_index];
@@ -345,6 +545,7 @@ impl Interpreter {
                     function_locals: Some(weak_locals),
                     persistent_function_locals: Some(locals),
                     function_local_names,
+                    live_token: Rc::new(()),
                 }));
             }
         });
@@ -370,44 +571,8 @@ impl Interpreter {
         self.sync_cached_function_locals_at(view_index);
     }
 
-    /// True when `view` is an implicit PEP 709 inlined comprehension helper
-    /// (`<listcomp>`/`<setcomp>`/`<dictcomp>`), which CPython 3.12 does not
-    /// expose as a separate frame to `sys._getframe()` (issue #2993).
-    fn view_is_inlined_comp(view: &VmFrameView) -> bool {
-        if let Some(func) = view.function.as_ref()
-            && let Some(code_any) = func.precompiled_code.as_ref()
-            && let Ok(code) = Rc::clone(code_any).downcast::<crate::bytecode::FnCode>()
-            && code.is_inlined_comp
-        {
-            return true;
-        }
-        if let Some(gen_frame) = view.gen_frame {
-            // SAFETY: `gen_frame` is alive while this view is on `vm_frame_views`.
-            if unsafe { gen_frame.as_ref() }.code.is_inlined_comp {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Translate a Python-visible frame depth `idx` (0 = innermost non-inlined
-    /// frame) into its index inside `self.vm_frame_views`.
-    fn visible_frame_view_index(&self, idx: usize) -> Option<usize> {
-        let mut remaining = idx;
-        for (view_index, view) in self.vm_frame_views.iter().enumerate().rev() {
-            if Self::view_is_inlined_comp(view) {
-                continue;
-            }
-            if remaining == 0 {
-                return Some(view_index);
-            }
-            remaining -= 1;
-        }
-        None
-    }
-
     /// Resolve `f_back` on demand for any live frame object (issues #2993,
-    /// #3028).
+    /// #3028, #3029).
     ///
     /// Returns `None` if `frame` is not currently active on `vm_frame_views`
     /// (unwound, suspended generator, or traceback frame), letting `FrameOps`
@@ -426,35 +591,41 @@ impl Interpreter {
                     .as_ref()
                     .is_some_and(|cached| values_are_identical(cached, frame))
             })?;
-        if view_index == 0 {
-            return Some(Value::none());
-        }
-        let visible_above = self.vm_frame_views[view_index + 1..]
-            .iter()
-            .filter(|v| !Self::view_is_inlined_comp(v))
-            .count();
         if self.vm_frame_views[view_index].gen_frame.is_some() {
-            return Some(self.build_frame_object(visible_above + 1, 0));
+            return Some(
+                self.enclosing_visible_view_index(view_index)
+                    .map(|parent_idx| self.build_frame_object_at_view(parent_idx, 0))
+                    .unwrap_or_else(Value::none),
+            );
         }
         if let Some(stored) = frame_obj::stored_back(frame)
             && !stored.is_none()
         {
             return Some(stored);
         }
-        let back = self.build_frame_object(visible_above + 1, 0);
+        let back = self
+            .enclosing_visible_view_index(view_index)
+            .map(|parent_idx| self.build_frame_object_at_view(parent_idx, 0))
+            .unwrap_or_else(Value::none);
         frame_obj::set_back(frame, back.clone());
         Some(back)
     }
 
     /// Build or reuse the single frame object at `idx` (zero is the innermost
-    /// frame).  `f_back` is initialized to `None` and resolved lazily on
-    /// attribute access (or on unwind if the frame escapes), keeping
-    /// `sys._getframe()` O(1) regardless of stack depth (issue #3028).
+    /// visible frame, skipping PEP 709 inlined comprehensions).  `f_back` is
+    /// initialized to `None` and resolved lazily on attribute access (or on
+    /// unwind if the frame escapes), keeping `sys._getframe()` O(1) regardless
+    /// of stack depth (issue #3028).
     pub(crate) fn build_frame_object(&mut self, idx: usize, lineno: i64) -> Value {
-        let Some(view_index) = self.visible_frame_view_index(idx) else {
+        let Some(view_index) = self.visible_view_index_for_depth(idx) else {
             return Value::none();
         };
+        self.build_frame_object_at_view(view_index, lineno)
+    }
 
+    /// Build or reuse the Python frame object for the concrete `VmFrameView`
+    /// at `view_index`.
+    pub(super) fn build_frame_object_at_view(&mut self, view_index: usize, lineno: i64) -> Value {
         // A live activation owns one Python frame identity. Upgrade the weak
         // value only on introspection; an ordinary call allocates no side
         // storage. A successful upgrade reconstructs a Value that shares the
@@ -474,23 +645,34 @@ impl Interpreter {
             Some(func) => self.build_code_object(func),
             None => {
                 if let Some(gen_frame) = view.gen_frame {
-                    // SAFETY: `gen_frame` points to the heap-stable
-                    // `GeneratorFrame` for the lifetime of this active view on
-                    // `vm_frame_views`.
-                    let gen_frame = unsafe { gen_frame.as_ref() };
+                    // Running generator / coroutine / async-generator frame
+                    // (including `yield from` / `await` delegation frames,
+                    // issue #3029): recover its real `FnCode` and `co_name`.
+                    // SAFETY: `gen_frame` points to the live boxed
+                    // `GeneratorFrame` for the lifetime of this view.
+                    let gframe = unsafe { gen_frame.as_ref() };
                     self.build_code_from_fncode(
-                        &gen_frame.code,
-                        gen_frame.fn_name.as_ref(),
-                        gen_frame.fn_name.as_ref(),
-                        &gen_frame.local_index,
+                        &gframe.code,
+                        gframe.fn_name.as_ref(),
+                        gframe.fn_name.as_ref(),
+                        &gframe.local_index,
+                    )
+                } else if view.kind == FrameKind::Class
+                    && let Some((class_name, filename)) = class_frame_identity(self, view)
+                {
+                    code_obj::code_with_loc(
+                        class_name.to_string(),
+                        0,
+                        Vec::new(),
+                        filename.to_string(),
+                        0,
                     )
                 } else {
-                    // Script / Class frame: synthesise a minimal code object
-                    // whose co_name matches CPython (`<module>` for module
-                    // scope). Carry the running script's path into
-                    // `co_filename` (#2438) so
-                    // `sys._getframe().f_code.co_filename` reports the source
-                    // file rather than `<unknown>`.
+                    // Script frame: synthesise a minimal code object whose
+                    // co_name matches CPython (`<module>` for module scope).
+                    // Carry the running script's path into `co_filename`
+                    // (#2438) so `sys._getframe().f_code.co_filename` reports
+                    // the source file rather than `<unknown>`.
                     let filename = self
                         .script_filename
                         .as_ref()
@@ -501,7 +683,14 @@ impl Interpreter {
             }
         };
 
-        let env = view.env.as_ref().unwrap_or(&self.env);
+        let env = view
+            .env
+            .as_ref()
+            .or_else(|| {
+                view.gen_frame
+                    .map(|gen_frame| &unsafe { gen_frame.as_ref() }.saved_env)
+            })
+            .unwrap_or(&self.env);
         let globals = self.globals_for_environment(env);
         // f_locals reads this frame's namespace — including for a suspended
         // *outer* frame, whose register file is still live on the call stack
@@ -645,6 +834,7 @@ impl Interpreter {
                 function_locals: Some(function_locals),
                 persistent_function_locals: None,
                 function_local_names: Vec::new(),
+                live_token: Rc::new(()),
             }));
         }
         frame_object
@@ -697,11 +887,14 @@ impl Interpreter {
         if fncode.is_generator {
             flags |= code_obj::CO_GENERATOR;
         }
-        let filename = self
-            .script_filename
-            .as_ref()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "<unknown>".to_string());
+        let filename = if !fncode.filename.is_empty() && fncode.filename.as_ref() != "<unknown>" {
+            fncode.filename.to_string()
+        } else {
+            self.script_filename
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string())
+        };
 
         code_obj::CodeBuild {
             name: name.to_string(),

@@ -13,39 +13,47 @@ impl Interpreter {
         // toward the front (outermost callee).
         for fi in captured.iter().rev() {
             let lineno = fi.lineno.map(|n| n as i64).unwrap_or(0);
-            // Carry the frame's own source filename into `f_code.co_filename`
-            // (#2438): a reconstructed traceback frame for an imported module's
-            // function must report that module's file, not `<unknown>`.
-            let co = code_obj::code_with_loc(
-                fi.funcname.to_string(),
-                0,
-                Vec::new(),
-                fi.filename.to_string(),
-                0,
-            );
-            // Each captured frame owns the root namespace in which that frame
-            // executed.  In particular, an imported callee must not inherit the
-            // globals of the frame that happened to catch its exception.
-            //
-            // A module-scope node keeps CPython's `tb_frame.f_locals is
-            // f_globals` identity (issue #2926).  A function frame has already
-            // unwound by the time the traceback materialises, so its register
-            // file is gone and its locals stay empty.
-            let (globals, locals) = match fi.globals.as_ref() {
-                Some(owner) if fi.funcname.as_ref() == "<module>" => (
-                    self.globals_for_environment(owner.environment()),
-                    self.frame_locals_for_module_environment(owner.environment()),
-                ),
-                Some(owner) => (
-                    self.globals_for_environment(owner.environment()),
-                    Value::dict(Default::default()),
-                ),
-                None => (
-                    Value::dict(Default::default()),
-                    Value::dict(Default::default()),
-                ),
+            let frame = if let Some(cached_frame) = fi.frame.clone() {
+                cached_frame
+            } else {
+                // Carry the frame's own source filename into `f_code.co_filename`
+                // (#2438): a reconstructed traceback frame for an imported module's
+                // function must report that module's file, not `<unknown>`.
+                let co = code_obj::code_with_loc(
+                    fi.funcname.to_string(),
+                    0,
+                    Vec::new(),
+                    fi.filename.to_string(),
+                    0,
+                );
+                // Each captured frame owns the root namespace in which that frame
+                // executed.  In particular, an imported callee must not inherit the
+                // globals of the frame that happened to catch its exception.
+                //
+                // A module-scope node keeps CPython's `tb_frame.f_locals is
+                // f_globals` identity (issue #2926).  Unwound function, generator,
+                // and class frames carry the locals snapshot captured at unwind
+                // time (issue #3029).
+                let (globals, locals) = match fi.globals.as_ref() {
+                    Some(owner) if fi.funcname.as_ref() == "<module>" => (
+                        self.globals_for_environment(owner.environment()),
+                        self.frame_locals_for_module_environment(owner.environment()),
+                    ),
+                    Some(owner) => (
+                        self.globals_for_environment(owner.environment()),
+                        fi.locals
+                            .clone()
+                            .unwrap_or_else(|| Value::dict(Default::default())),
+                    ),
+                    None => (
+                        Value::dict(Default::default()),
+                        fi.locals
+                            .clone()
+                            .unwrap_or_else(|| Value::dict(Default::default())),
+                    ),
+                };
+                frame_obj::frame(co, lineno, Value::none(), globals, locals)
             };
-            let frame = frame_obj::frame(co, lineno, Value::none(), globals, locals);
             // Carry the captured frame's PEP 657 caret anchor onto the node so a
             // re-raised / chained exception renders the same carets (#2411).
             node = tb_obj::traceback_node_with_col(frame, node, lineno, -1, fi.col_span);
@@ -56,7 +64,7 @@ impl Interpreter {
     /// Build the Python-visible traceback chain from captured frame metadata
     /// plus the catching frame.
     fn build_traceback_from_snapshot(
-        &self,
+        &mut self,
         captured: &[pyrust_core::FrameInfo],
         catch: TracebackCatchFrame<'_>,
         tail: Value,
@@ -74,20 +82,32 @@ impl Interpreter {
         let node = self.build_traceback_nodes_from_frames(captured, tail);
 
         // Finally, the catching frame as the outermost node.
-        let catch_env = catch.globals.environment();
-        let catch_globals = self.globals_for_environment(catch_env);
-        let catch_locals = if matches!(catch.code, TracebackCatchCodeSnapshot::Module { .. }) {
-            self.frame_locals_for_module_environment(catch_env)
+        // If the catching activation is still live on `vm_frame_views`, reuse
+        // its live frame object so `e.__traceback__.tb_frame is sys._getframe()`
+        // holds and `f_locals` reflects live updates inside `except` (issue #3029).
+        let catch_frame = if let Some((view_index, token)) = catch.live_view
+            && self.frame_cache_matches_token(*view_index, token)
+        {
+            self.build_frame_object_at_view(*view_index, catch.lineno)
         } else {
-            Value::dict(Default::default())
+            let catch_env = catch.globals.environment();
+            let catch_globals = self.globals_for_environment(catch_env);
+            let catch_locals = if matches!(catch.code, TracebackCatchCodeSnapshot::Module { .. }) {
+                self.frame_locals_for_module_environment(catch_env)
+            } else {
+                catch
+                    .locals
+                    .cloned()
+                    .unwrap_or_else(|| Value::dict(Default::default()))
+            };
+            frame_obj::frame(
+                catch_code,
+                catch.lineno,
+                Value::none(),
+                catch_globals,
+                catch_locals,
+            )
         };
-        let catch_frame = frame_obj::frame(
-            catch_code,
-            catch.lineno,
-            Value::none(),
-            catch_globals,
-            catch_locals,
-        );
         tb_obj::traceback_node_with_col(catch_frame, node, catch.lineno, -1, catch.col_span)
     }
 
@@ -105,7 +125,7 @@ impl Interpreter {
     /// [`Self::materialize_deferred_traceback`] and replaces the placeholder, so
     /// the Python-visible behaviour is identical to the eager build (issue
     /// #2351).
-    pub(crate) fn build_deferred_traceback(&self, catch_lineno: i64) -> Value {
+    pub(crate) fn build_deferred_traceback(&mut self, catch_lineno: i64) -> Value {
         self.build_deferred_traceback_with_tail(catch_lineno, Value::none())
     }
 
@@ -116,7 +136,7 @@ impl Interpreter {
     /// innermost node's `tb_next` is a real node with stable identity, matching
     /// CPython's prepend-and-reuse-tail behaviour.
     pub(crate) fn build_deferred_traceback_with_tail(
-        &self,
+        &mut self,
         catch_lineno: i64,
         tail: Value,
     ) -> Value {
@@ -132,7 +152,7 @@ impl Interpreter {
     /// (`captured.last()`, recorded first as the error propagated out), so it
     /// is dropped here; the remaining outer frames prepend onto `tail`.
     pub(crate) fn build_deferred_traceback_with_tail_drop_innermost(
-        &self,
+        &mut self,
         catch_lineno: i64,
         tail: Value,
     ) -> Value {
@@ -140,7 +160,7 @@ impl Interpreter {
     }
 
     fn build_deferred_traceback_with_tail_impl(
-        &self,
+        &mut self,
         catch_lineno: i64,
         tail: Value,
         drop_innermost: bool,
@@ -154,63 +174,83 @@ impl Interpreter {
         // Skip any PEP 709 inlined comprehension helper view (`<listcomp>` /
         // `<setcomp>` / `<dictcomp>`) so an internal `SetupExcept` inside an
         // async comprehension (`async for`) attributes the catch node to the
-        // enclosing real frame instead of `<listcomp>` (issue #2993).
-        let last_view = self
-            .vm_frame_views
-            .iter()
-            .rev()
-            .find(|view| !Self::view_is_inlined_comp(view));
-        let catch_func = last_view.and_then(|view| view.function.clone());
-        // Issue #2445: a generator body has no `UserFunction`; recover the
-        // generator's `(funcname, filename)` so the catching frame is attributed
-        // to the generator instead of `<module>`.  Issue #2471: the view stores
-        // only a pointer to the live `GeneratorFrame`; read the name/filename
-        // lazily here on the cold traceback-build path.
-        //
-        // SAFETY: `gen_frame` is non-null only while the generator frame is on
-        // the call stack (pushed/popped in lock-step with the view in
-        // `resume_generator_with_exc` / `vm_enter_gen_drive`).  This builder runs
-        // synchronously on that same stack while the frame is suspended, so the
-        // pointee is alive and no `&mut GeneratorFrame` to it is live.
-        let catch_gen_frame = if catch_func.is_none() {
-            last_view.and_then(|view| view.gen_frame.map(|p| unsafe { p.as_ref() }))
-        } else {
-            None
+        // enclosing real frame instead of `<listcomp>` (issues #2993, #3029).
+        let catch_view_index = self.visible_view_index_for_depth(0);
+        let (catch_code, catch_globals) = {
+            let last_view = catch_view_index.and_then(|idx| self.vm_frame_views.get(idx));
+            let catch_func = last_view.and_then(|view| view.function.clone());
+            // Issue #2445: a generator body has no `UserFunction`; recover the
+            // generator's `(funcname, filename)` so the catching frame is attributed
+            // to the generator instead of `<module>`.  Issue #2471: the view stores
+            // only a pointer to the live `GeneratorFrame`; read the name/filename
+            // lazily here on the cold traceback-build path.
+            //
+            // SAFETY: `gen_frame` is non-null only while the generator frame is on
+            // the call stack (pushed/popped in lock-step with the view in
+            // `resume_generator_with_exc` / `vm_enter_gen_drive`).  This builder runs
+            // synchronously on that same stack while the frame is suspended, so the
+            // pointee is alive and no `&mut GeneratorFrame` to it is live.
+            let catch_gen_frame = if catch_func.is_none() {
+                last_view.and_then(|view| view.gen_frame.map(|p| unsafe { p.as_ref() }))
+            } else {
+                None
+            };
+            let catch_gen_info = catch_gen_frame
+                .map(|gframe| (gframe.fn_name.clone(), gframe.code.filename.clone()));
+            let catch_class_info = if catch_func.is_none() && catch_gen_frame.is_none() {
+                last_view
+                    .filter(|view| view.kind == FrameKind::Class)
+                    .and_then(|view| class_frame_identity(self, view))
+            } else {
+                None
+            };
+            // Capture the namespace owner now, while the catching frame is live.
+            // Imported-module execution uses a child Interpreter that may be dropped
+            // before `e.__traceback__` is first read, so consulting `self.env` during
+            // later materialisation would both select the wrong namespace and fail
+            // to keep a failed import's globals alive.
+            let catch_env = catch_func
+                .as_ref()
+                .map(|func| &func.env)
+                .or_else(|| catch_gen_frame.map(|gframe| &gframe.saved_env))
+                .or_else(|| last_view.and_then(|view| view.env.as_ref()))
+                .unwrap_or(&self.env);
+            let catch_globals = pyrust_core::FrameGlobals::for_environment(catch_env);
+            let catch_code = match (catch_func, catch_gen_info, catch_class_info) {
+                (Some(function), _, _) => TracebackCatchCodeSnapshot::Function(function),
+                (None, Some((funcname, filename)), _) => {
+                    TracebackCatchCodeSnapshot::Generator { funcname, filename }
+                }
+                (None, None, Some((class_name, filename))) => TracebackCatchCodeSnapshot::Class {
+                    class_name,
+                    filename,
+                },
+                (None, None, None) => TracebackCatchCodeSnapshot::Module {
+                    // Materialization may happen through another Interpreter after
+                    // an imported child has been dropped. Retain this source
+                    // identity instead of consulting the later materializer.
+                    filename: self
+                        .script_filename
+                        .clone()
+                        .unwrap_or_else(|| std::sync::Arc::from("<unknown>")),
+                },
+            };
+            (catch_code, catch_globals)
         };
-        let catch_gen_info =
-            catch_gen_frame.map(|gframe| (gframe.fn_name.clone(), gframe.code.filename.clone()));
-        // Capture the namespace owner now, while the catching frame is live.
-        // Imported-module execution uses a child Interpreter that may be dropped
-        // before `e.__traceback__` is first read, so consulting `self.env` during
-        // later materialisation would both select the wrong namespace and fail
-        // to keep a failed import's globals alive.
-        let catch_env = catch_func
-            .as_ref()
-            .map(|func| &func.env)
-            .or_else(|| catch_gen_frame.map(|gframe| &gframe.saved_env))
-            .or_else(|| last_view.and_then(|view| view.env.as_ref()))
-            .unwrap_or(&self.env);
-        let catch_globals = pyrust_core::FrameGlobals::for_environment(catch_env);
-        let catch_code = match (catch_func, catch_gen_info) {
-            (Some(function), _) => TracebackCatchCodeSnapshot::Function(function),
-            (None, Some((funcname, filename))) => {
-                TracebackCatchCodeSnapshot::Generator { funcname, filename }
+        let (catch_locals, catch_live_view) = match catch_view_index {
+            Some(view_index) => {
+                let (locals, token) = self.capture_catching_frame_locals_and_token(view_index);
+                (locals, Some((view_index, token)))
             }
-            (None, None) => TracebackCatchCodeSnapshot::Module {
-                // Materialization may happen through another Interpreter after
-                // an imported child has been dropped. Retain this source
-                // identity instead of consulting the later materializer.
-                filename: self
-                    .script_filename
-                    .clone()
-                    .unwrap_or_else(|| std::sync::Arc::from("<unknown>")),
-            },
+            None => (None, None),
         };
         let state: Box<dyn std::any::Any> = Box::new(DeferredTracebackState {
             frames: captured,
             catch_code,
             catch_lineno,
             catch_globals,
+            catch_locals,
+            catch_live_view,
             // The raising instruction's caret anchor was published just before
             // handler dispatch (vm.rs), so it is current here (#2411).
             catch_col_span: pyrust_core::get_current_vm_col_span(),
@@ -222,7 +262,7 @@ impl Interpreter {
     /// If `value` is a deferred-traceback placeholder, materialise it into a real
     /// traceback object chain; otherwise return `None`.  Used by every read site
     /// that may observe an exception's `__traceback__` slot.
-    pub(crate) fn materialize_deferred_traceback(&self, value: &Value) -> Option<Value> {
+    pub(crate) fn materialize_deferred_traceback(&mut self, value: &Value) -> Option<Value> {
         let ValueKind::BuiltinObject { ops, state } = value.kind() else {
             return None;
         };
@@ -232,7 +272,16 @@ impl Interpreter {
         // Clone out the snapshot fields, then drop the borrow before recursing
         // into the tail (which may itself be a deferred placeholder sharing no
         // lock, but keeping the borrow narrow is cleaner).
-        let (frames, catch_code, catch_lineno, catch_col_span, catch_globals, tail) = {
+        let (
+            frames,
+            catch_code,
+            catch_lineno,
+            catch_col_span,
+            catch_globals,
+            catch_locals,
+            catch_live_view,
+            tail,
+        ) = {
             let borrow = state.borrow();
             let s = borrow.downcast_ref::<DeferredTracebackState>()?;
             (
@@ -241,6 +290,8 @@ impl Interpreter {
                 s.catch_lineno,
                 s.catch_col_span,
                 s.catch_globals.clone(),
+                s.catch_locals.clone(),
+                s.catch_live_view.clone(),
                 s.tail.clone(),
             )
         };
@@ -255,6 +306,8 @@ impl Interpreter {
                 lineno: catch_lineno,
                 col_span: catch_col_span,
                 globals: &catch_globals,
+                locals: catch_locals.as_ref(),
+                live_view: catch_live_view.as_ref(),
             },
             tail,
         ))
@@ -334,7 +387,7 @@ impl Interpreter {
     ///
     /// Returns `Some(new_value)` to store, or `None` to leave the slot untouched.
     pub(crate) fn caught_traceback_value(
-        &self,
+        &mut self,
         existing: &Value,
         catch_lineno: i64,
         is_bare_reraise: bool,
@@ -431,7 +484,7 @@ impl Interpreter {
     /// source-line lookup; `snapshot` is the freshly-captured unwind frames
     /// (outermost-first).  The chain is already ordered outermost-first.
     pub(crate) fn uncaught_inner_frames_from_tb(
-        &self,
+        &mut self,
         exc: &Value,
         filename: &std::sync::Arc<str>,
         src: &str,
@@ -479,6 +532,8 @@ impl Interpreter {
                 // objects already live in the materialised traceback.
                 globals: None,
                 col_span: fi.col_span,
+                locals: None,
+                frame: None,
             });
         }
         // The carried chain (outermost-first), each node carrying its own
@@ -498,6 +553,8 @@ impl Interpreter {
                 funcname: std::sync::Arc::from(&funcname[..]),
                 globals: None,
                 col_span,
+                locals: None,
+                frame: None,
             });
         }
         Some(frames)
@@ -514,6 +571,8 @@ struct TracebackCatchFrame<'a> {
     /// PEP 657 caret anchor of the catching frame's raising instruction.
     col_span: Option<(u32, u32, u32, u32)>,
     globals: &'a pyrust_core::FrameGlobals,
+    locals: Option<&'a Value>,
+    live_view: Option<&'a (usize, std::rc::Weak<()>)>,
 }
 
 /// Stable identity needed to rebuild the catching frame's code object.
@@ -528,6 +587,10 @@ enum TracebackCatchCodeSnapshot {
         funcname: std::sync::Arc<str>,
         filename: std::sync::Arc<str>,
     },
+    Class {
+        class_name: std::sync::Arc<str>,
+        filename: std::sync::Arc<str>,
+    },
     Module {
         filename: std::sync::Arc<str>,
     },
@@ -539,6 +602,16 @@ impl TracebackCatchCodeSnapshot {
             Self::Function(function) => interpreter.build_code_object(function),
             Self::Generator { funcname, filename } => code_obj::code_with_loc(
                 funcname.to_string(),
+                0,
+                Vec::new(),
+                filename.to_string(),
+                0,
+            ),
+            Self::Class {
+                class_name,
+                filename,
+            } => code_obj::code_with_loc(
+                class_name.to_string(),
                 0,
                 Vec::new(),
                 filename.to_string(),
@@ -571,6 +644,12 @@ pub(crate) struct DeferredTracebackState {
     /// Strong owner of the catching frame's root namespace.  Tracebacks retain
     /// frame globals even after an imported child Interpreter is dropped.
     catch_globals: pyrust_core::FrameGlobals,
+    /// Catching frame's locals mapping (synced on frame exit if the exception
+    /// escapes before `e.__traceback__` is read, issue #3029).
+    catch_locals: Option<Value>,
+    /// `(view_index, live_token)` for ABA-safe reuse of the catching frame's
+    /// live frame object while the frame is still on `vm_frame_views` (#3029).
+    catch_live_view: Option<(usize, std::rc::Weak<()>)>,
     /// PEP 657 caret anchor of the instruction that raised in the catching frame
     /// (issue #2411), captured at catch time from `get_current_vm_col_span`.
     /// Carried so a same-frame raise (e.g. `1/0` caught then chained) keeps its

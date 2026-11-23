@@ -410,9 +410,9 @@ pub(crate) use generator_protocols::{
 mod introspection {
     use super::{
         FrameKind, GeneratorFrame, Interpreter, PyDict, PyKey, Rc, UserFunction, Value, ValueKind,
-        VmFrameCache, VmFrameView, class_frame_locals_value, compiler_owned_frame_local_keys,
-        lookup_enclosing_function_value, resolve_frame_source_line, snapshot_view_locals,
-        values_are_identical,
+        VmFrameCache, VmFrameView, class_frame_identity, class_frame_locals_value,
+        compiler_owned_frame_local_keys, lookup_enclosing_function_value,
+        resolve_frame_source_line, snapshot_view_locals, values_are_identical,
     };
     include!("runtime/introspection.rs");
 }

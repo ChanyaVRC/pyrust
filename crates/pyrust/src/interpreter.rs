@@ -77,6 +77,10 @@ pub(crate) struct ActiveClassAnnotationScopes {
     /// before first introspection means a later rebind must move to the tail.
     qualname_slot: Option<crate::bytecode::Reg>,
     qualname_was_deleted: bool,
+    /// Immutable class body code-object identity (`co_name`, `co_filename`)
+    /// surfaced by `sys._getframe()` and class-body tracebacks (issue #3029).
+    pub(crate) class_name: std::sync::Arc<str>,
+    pub(crate) filename: std::sync::Arc<str>,
     /// Lazily materialized class-frame namespace.  Keeping the Python dict in
     /// the class-state stack makes every inner/outer frame view return the same
     /// mapping without allocating anything for classes that are never
@@ -512,6 +516,10 @@ pub(crate) struct VmFrameCache {
     /// `f_locals` dict. Mapping-only keys inserted through `f_locals` are not
     /// recorded here and therefore survive later fastlocals refreshes.
     pub(crate) function_local_names: Vec<PyKey>,
+    /// Unique per-activation liveness token used by deferred tracebacks to
+    /// prove ABA-safely that a catching frame is still live on `vm_frame_views`
+    /// when `e.__traceback__` materializes (issue #3029).
+    pub(crate) live_token: Rc<()>,
 }
 
 /// Thin wrapper around `iter_values` matching pyrust-core's `IterValuesFn`
