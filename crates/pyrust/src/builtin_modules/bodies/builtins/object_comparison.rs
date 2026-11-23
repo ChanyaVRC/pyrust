@@ -60,7 +60,7 @@ pyrust_module! {
         } else {
             String::new()
         };
-        if native_iterator_class(&self_val).is_some() {
+        if matches!(self_val.kind(), ValueKind::Generator(_)) {
             if spec_str.is_empty() {
                 return Ok(Value::string(render_value_repr(_interp, &self_val)?));
             }

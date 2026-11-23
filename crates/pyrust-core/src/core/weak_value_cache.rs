@@ -14,6 +14,12 @@
 #[derive(Clone)]
 pub struct WeakValueCache(WeakValueCacheKind);
 
+impl std::fmt::Debug for WeakValueCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WeakValueCache(..)")
+    }
+}
+
 #[derive(Clone)]
 enum WeakValueCacheKind {
     Inline(u64),

@@ -258,7 +258,7 @@ mod object_comparison {
     use super::{
         ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, Result, Value, ValueKind,
         apply_format_spec, apply_format_spec_named, builtin_data_backing, full_type_name_str,
-        native_iterator_class, render_instance_str, render_value_repr, value_type_name_str,
+        render_instance_str, render_value_repr, value_type_name_str,
     };
     include!("builtins/object_comparison.rs");
 }

@@ -718,26 +718,35 @@ impl Value {
             kind: GeneratorKind::Iterator,
             iterable_coroutine: false,
             names: RefCell::new(None),
+            function: None,
+            frame_ptr: None,
             state: RefCell::new(state),
         })))
     }
 
     /// Create a Python frame object — a generator, coroutine or async
     /// generator.  `state` is the type-erased `GeneratorFrame` managed by the
-    /// VM; `kind` and the display names are stored beside it rather than
-    /// inside it, because the cell is mutably checked out for as long as the
-    /// body runs and the object must still be able to say what it is (#2978).
+    /// VM; `kind`, the display names, the originating `UserFunction`, and the
+    /// frame's stable heap address are stored beside it rather than inside it,
+    /// because the cell is mutably checked out for as long as the body runs
+    /// and the object must still be able to answer introspection queries
+    /// (#2978, #2980).
     pub fn generator_frame(
         state: Box<dyn std::any::Any>,
         kind: GeneratorKind,
         name: std::sync::Arc<str>,
         qualname: std::sync::Arc<str>,
         iterable_coroutine: bool,
+        function: Rc<UserFunction>,
     ) -> Self {
+        let frame_ptr =
+            std::ptr::NonNull::new((&*state as *const dyn std::any::Any as *const ()).cast_mut());
         Value::opaque(Opaque::Generator(Rc::new(GeneratorCell {
             kind,
             iterable_coroutine,
             names: RefCell::new(Some(GeneratorNames { name, qualname })),
+            function: Some(function),
+            frame_ptr,
             state: RefCell::new(state),
         })))
     }

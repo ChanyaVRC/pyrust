@@ -8,15 +8,15 @@ impl Interpreter {
     /// Render a value using the same priority as `str(x)`: `__str__` first,
     /// then `__repr__`, then the default object representation.
     pub(crate) fn render_value_as_str(&mut self, value: &Value) -> Result<String> {
-        // Concrete bytearray/deque iterators use GeneratorCell only as their
-        // storage carrier. Their str is the concrete iterator repr, never the
-        // generic `<generator object>` fallback.
-        if native_iterator_class(value).is_some()
-            || matches!(
-                value.kind(),
-                ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. }
-            )
-        {
+        // Generators, coroutines, async generators, native iterators, and bound
+        // methods inherit `object.__str__` which delegates to `__repr__`
+        // (#2980, #3094).
+        if matches!(
+            value.kind(),
+            ValueKind::Generator(_)
+                | ValueKind::BoundMethod { .. }
+                | ValueKind::ClassBoundMethod { .. }
+        ) {
             return render_value_repr(self, value);
         }
         // `str(cls)` dispatches `type(cls).__str__(cls)` (falling back to the

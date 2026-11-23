@@ -99,14 +99,11 @@ impl Interpreter {
         if let Some(k) = value.to_key() {
             return Ok(k);
         }
-        // The three concrete iterator classes backed by GeneratorCell inherit
-        // object identity hashing. Keep them as identity keys without making
-        // real generators hashable through this conversion path.
-        if native_iterator_class(value).is_some() {
-            let hash = value
-                .object_id()
-                .as_int()
-                .expect("object id must be an int") as u64;
+        // Generators, coroutines, async generators, and built-in iterators
+        // inherit object identity hashing in CPython 3.12 (#2980).
+        if let ValueKind::Generator(cell) = value.kind() {
+            let ptr = Rc::as_ptr(cell) as i64;
+            let hash = (if ptr == -1 { -2 } else { ptr }) as u64;
             return Ok(PyKey::Object {
                 hash,
                 value: value.clone(),

@@ -309,16 +309,7 @@ impl Interpreter {
             // Coroutines (`async def`, issue #1039) take the same path.
             if code.is_generator || code.is_coroutine {
                 let gen_env = std::mem::replace(&mut self.env, previous_env);
-                let gen_qualname = std::sync::Arc::from(function.effective_qualname().as_str());
-                return Ok(Self::build_generator_value(
-                    &code,
-                    regs,
-                    gen_env,
-                    Rc::clone(&function.local_index),
-                    std::sync::Arc::from(&function.name[..]),
-                    gen_qualname,
-                    function.iterable_coroutine.get(),
-                ));
+                return Ok(Self::build_generator_value(&code, regs, gen_env, &function));
             }
 
             // Issue #389: publish a function frame view (see the

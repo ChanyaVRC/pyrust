@@ -79,6 +79,9 @@ pub(crate) struct GeneratorFrame {
     /// lives on the owning `GeneratorCell`, outside the state this frame
     /// occupies, so that it reads back while the body runs (#2978).
     pub(crate) fn_name: std::sync::Arc<str>,
+    /// Originating `UserFunction` for `gi_code` / `f_code` introspection on
+    /// both suspended and running generator frames (#2980).
+    pub(crate) function: Rc<pyrust_core::UserFunction>,
     /// Source line of the `yield` the generator is currently suspended at
     /// (`0` before the first yield).  Restored into the dispatch loop's
     /// `cur_line` on resume so that an exception caught inside the body after a

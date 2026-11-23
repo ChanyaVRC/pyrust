@@ -4,13 +4,14 @@ impl Interpreter {
         code: &Rc<crate::bytecode::FnCode>,
         regs: RegsBuf,
         saved_env: EnvRef,
-        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
-        fn_name: std::sync::Arc<str>,
-        qualname: std::sync::Arc<str>,
-        is_iterable_coroutine: bool,
+        function: &Rc<UserFunction>,
     ) -> Value {
         let num_iters = code.num_iters as usize;
         let is_coroutine = code.is_coroutine;
+        let fn_name: std::sync::Arc<str> = std::sync::Arc::from(&function.name[..]);
+        let qualname: std::sync::Arc<str> =
+            std::sync::Arc::from(function.effective_qualname().as_str());
+        let is_iterable_coroutine = function.iterable_coroutine.get();
         // The Python-visible type of this object, recorded outside the state
         // cell so `type()` / `repr()` / `dir()` can answer while the body is
         // running and the cell is checked out (#2978).  `async def` + `yield`
@@ -31,11 +32,12 @@ impl Interpreter {
             handled_exc_slice: HandledExcBuf::new(),
             active_exception: None,
             exc_saved_active_slice: Vec::new(),
-            local_index,
+            local_index: Rc::clone(&function.local_index),
             yield_dst: 0,
             suspended_line: 0,
             last_return_value: None,
             fn_name: std::sync::Arc::clone(&fn_name),
+            function: Rc::clone(function),
             is_coroutine,
             async_gen_running_owner: None,
             frame_cache: std::cell::RefCell::new(None),
@@ -50,6 +52,7 @@ impl Interpreter {
             fn_name,
             qualname,
             is_iterable_coroutine,
+            Rc::clone(function),
         )
     }
 }

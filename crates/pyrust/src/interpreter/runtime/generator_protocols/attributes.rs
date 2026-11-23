@@ -168,7 +168,18 @@ impl Interpreter {
         // coroutines, which expose their own protocol above instead.
         if !is_async_gen && !is_coroutine_only {
             match name {
-                "__iter__" | "__next__" | "send" | "close" | "throw" => {
+                "__iter__" | "__next__" => {
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        name.to_string(),
+                        target.clone(),
+                    ));
+                }
+                "send" | "close" | "throw"
+                    if kind == GeneratorKind::Generator
+                        || cell
+                            .try_borrow()
+                            .is_ok_and(|state| state.is::<AsyncGenASend>()) =>
+                {
                     return Ok(pyrust_builtins::bound_method::bound_method(
                         name.to_string(),
                         target.clone(),
@@ -237,24 +248,36 @@ impl Interpreter {
                     // resume, which is the same fact `next(g)` re-entrancy
                     // reports as "generator already executing" (#2285).
                     "running" => return Ok(Value::bool_(generator_is_running(cell))),
-                    // code: pyrust does not expose a standalone code
-                    // object here; return None to avoid AttributeError
-                    // (issue #1270).
-                    "code" => return Ok(Value::none()),
-                    // frame: the suspended frame object (or None once
-                    // exhausted), built from the retained FnCode (#2185).
-                    // A *running* frame is checked out and unreadable, so it
-                    // reports None rather than a live frame object — a
-                    // documented limitation.
+                    // suspended: True while paused at a yield/await point,
+                    // False when unstarted, running, exhausted, or closed (#2980).
+                    "suspended" => return Ok(Value::bool_(generator_is_suspended(cell))),
+                    // cr_origin: coroutine creation traceback tuple when origin
+                    // tracking is enabled, None by default (#2980).
+                    "origin" if prefix == "cr_" => return Ok(Value::none()),
+                    // code: the originating function's `types.CodeType` object,
+                    // readable across all states (unstarted, running, suspended,
+                    // exhausted, closed) because `function` lives on
+                    // `GeneratorCell` outside the checked-out state (#2980).
+                    "code" => {
+                        if let Some(func) = cell.function() {
+                            return Ok(self.build_code_object(func));
+                        }
+                        return Ok(Value::none());
+                    }
+                    // frame: live frame object while running (#2980), suspended
+                    // frame object while unstarted/paused (#2185), or None once
+                    // exhausted/closed.
                     "frame" => {
-                        let qualname = cell.qualname().unwrap_or_else(|| "?".into());
+                        if let Some(live_frame) = self.build_running_generator_frame_object(cell) {
+                            return Ok(live_frame);
+                        }
                         return Ok(cell
                             .try_borrow()
                             .ok()
                             .and_then(|borrow| {
-                                borrow.downcast_ref::<GeneratorFrame>().map(|frame| {
-                                    self.build_generator_frame_object(frame, &qualname)
-                                })
+                                borrow
+                                    .downcast_ref::<GeneratorFrame>()
+                                    .map(|frame| self.build_generator_frame_object(frame))
                             })
                             .unwrap_or_else(Value::none));
                     }
@@ -280,7 +303,7 @@ impl Interpreter {
                 _ => {}
             }
         }
-        let obj_name = kind.frame_type_name().unwrap_or("generator");
+        let obj_name = full_type_name_str(target);
         Err(PyError::attribute_error(
             format!("'{obj_name}' object has no attribute '{name}'"),
             Some(name.to_string()),

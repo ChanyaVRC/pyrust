@@ -162,6 +162,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
             crate::interpreter::CallBuiltinCacheEntry::Empty;
             insns_len
         ]),
+        cached_code_object: RefCell::new(None),
         exc_table,
         has_exc_handlers,
     }

@@ -15,6 +15,25 @@ impl Interpreter {
     /// `co_consts`, `co_names`) in addition to `co_name`/`co_argcount`/
     /// `co_varnames`.
     pub(crate) fn build_code_object(&self, function: &UserFunction) -> Value {
+        let fncode = function
+            .precompiled_code
+            .as_ref()
+            .and_then(|rc| Rc::clone(rc).downcast::<crate::bytecode::FnCode>().ok());
+        // Reuse the weakly cached code object when available so `f.__code__`,
+        // `g.gi_code`, and `frame.f_code` share Python identity (issue #2980).
+        // Skip the cache for `types.coroutine`-wrapped functions whose
+        // `CO_ITERABLE_COROUTINE` flag can diverge per function wrapper.
+        let cacheable = !function.iterable_coroutine.get();
+        if cacheable
+            && let Some(fc) = fncode.as_ref()
+            && let Some(cached) = fc
+                .cached_code_object
+                .borrow()
+                .as_ref()
+                .and_then(pyrust_core::WeakValueCache::upgrade)
+        {
+            return cached;
+        }
         let co_name = function.name.to_string();
         // co_argcount: positional-only + positional-or-keyword params (excludes
         // *args/**kwargs and keyword-only), matching CPython.
@@ -78,12 +97,7 @@ impl Interpreter {
         // The remaining attributes come from the compiled `FnCode` when
         // available: co_firstlineno, co_consts, co_names, co_cellvars,
         // co_stacksize, the function-body locals appended to co_varnames, and
-        // the generator/coroutine flags. Downcast once and derive them all
-        // together.
-        let fncode = function
-            .precompiled_code
-            .as_ref()
-            .and_then(|rc| Rc::clone(rc).downcast::<crate::bytecode::FnCode>().ok());
+        // the generator/coroutine flags.
 
         // co_filename: the source path the function's code object was compiled
         // from.  Read it from the code object (#2438) so an imported module's
@@ -176,7 +190,7 @@ impl Interpreter {
             .map(|(name, _)| Value::string(name))
             .collect();
 
-        code_obj::CodeBuild {
+        let code = code_obj::CodeBuild {
             name: co_name,
             qualname,
             argcount,
@@ -193,7 +207,11 @@ impl Interpreter {
             freevars,
             cellvars,
         }
-        .build()
+        .build();
+        if cacheable && let Some(fc) = fncode.as_ref() {
+            *fc.cached_code_object.borrow_mut() = pyrust_core::WeakValueCache::new(&code);
+        }
+        code
     }
 
     /// Compute the function's free variables (the names it reads from an
