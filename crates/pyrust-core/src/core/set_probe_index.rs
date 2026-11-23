@@ -90,8 +90,9 @@ impl PySetProbeSnapshot {
             } else {
                 slot
             };
-            for candidate_slot in slot..=linear_end {
-                match self.slots[candidate_slot] {
+            for (offset, &entry) in self.slots[slot..=linear_end].iter().enumerate() {
+                let candidate_slot = slot + offset;
+                match entry {
                     SET_REPLAY_EMPTY => {
                         return reusable_dummy
                             .map_or((candidate_slot, true), |dummy| (dummy, false));
