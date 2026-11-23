@@ -187,6 +187,15 @@ impl Interpreter {
         receiver: Value,
         mut args: Vec<Value>,
     ) -> Result<Value> {
+        // Issue #2953: primitive protocol dispatch routes back through builtin
+        // operations (`len`, `iter`, `eval_index`, …). A `PyInstance` receiver
+        // here would re-enter the exact same slot and overflow the native stack.
+        if matches!(receiver.kind(), ValueKind::PyInstance(_)) {
+            let type_name = pyrust_core::builtin_type_name(&receiver);
+            return Err(PyError::Runtime(format!(
+                "'{type_name}' object is missing internal builtin backing for '{method}'"
+            )));
+        }
         let type_name = pyrust_core::builtin_type_name(&receiver);
         // Issue #2297: `int.__round__(ndigits=None)` accepts 0 or 1 positional
         // argument — handle its arity separately from the fixed-arity slots below

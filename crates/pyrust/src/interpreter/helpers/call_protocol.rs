@@ -496,9 +496,22 @@ pub(crate) fn invoke_class_method(
                 // Resolve a builtin subclass to its backing for the protocol
                 // body, but keep the Python-visible receiver available for the
                 // return-self contract of mutable in-place wrappers (#2990).
-                if let ValueKind::PyInstance(inst) = instance.kind()
-                    && let Some(backing) = instance_builtin_data(inst)
-                {
+                //
+                // Issue #2953: a builtin-backed subclass instance lacking its
+                // internal `__builtin_data__` (or whose backing was replaced
+                // with another PyInstance) must fail loudly with a catchable
+                // `RuntimeError` instead of forwarding the `PyInstance` back
+                // into `dispatch_builtin_protocol_dunder`, which re-enters the
+                // same dunder until the native stack overflows.
+                if let ValueKind::PyInstance(inst) = instance.kind() {
+                    let Some(backing) = instance_builtin_data(inst)
+                        .filter(|backing| !matches!(backing.kind(), ValueKind::PyInstance(_)))
+                    else {
+                        let class_name = inst.borrow().class.borrow().name.clone();
+                        return Err(PyError::Runtime(format!(
+                            "'{class_name}' object is missing internal builtin backing for '{method}'"
+                        )));
+                    };
                     if builtin_methods::is_mutable_builtin_inplace_dunder(&method) {
                         return interp.dispatch_builtin_subclass_protocol_dunder(
                             &method, &instance, backing, rest,

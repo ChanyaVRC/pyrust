@@ -377,3 +377,199 @@ fn native_classmethod_cache_invalidates_on_target_and_mro_mutation() {
         );
     }
 }
+
+#[test]
+fn backingless_builtin_subclass_instances_raise_runtime_error_without_stack_overflow() {
+    // Issue #2953: a builtin-backed subclass `PyInstance` lacking its internal
+    // `__builtin_data__` storage (or pointing `__builtin_data__` back at a
+    // `PyInstance`) must never recurse until the native stack overflows on
+    // protocol dunders or builtin methods; it must fail with a catchable
+    // Python `RuntimeError`.
+    let mut interpreter = run_program(
+        "from collections import Counter, OrderedDict, defaultdict, deque\n\
+         class MyDict(dict): pass\n\
+         class MyList(list): pass\n\
+         class MySet(set): pass\n\
+         class MyFrozenset(frozenset): pass\n\
+         class MyTuple(tuple): pass\n\
+         class MyBytearray(bytearray): pass\n\
+         class MyStr(str): pass\n\
+         class MyInt(int): pass\n\
+         class MyFloat(float): pass\n\
+         class MyBytes(bytes): pass\n\
+         class MyOrderedDict(OrderedDict): pass\n\
+         class MyCounter(Counter): pass\n\
+         class MyDefaultDict(defaultdict): pass\n\
+         class MyDeque(deque): pass\n",
+    );
+
+    let make_backingless = |interp: &mut Interpreter, class_name: &str, var_name: &str| {
+        let cls_val = interp
+            .lookup_name(class_name)
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing class {class_name}"));
+        let ValueKind::PyClass(class_rc) = cls_val.kind() else {
+            panic!("{class_name} must be a PyClass");
+        };
+        let inst = Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(class_rc),
+            attrs: InstanceAttrs::new(),
+        })));
+        interp.env.borrow_mut().values.insert(var_name, inst);
+    };
+
+    for (cls, var) in [
+        ("MyDict", "d"),
+        ("MyList", "l"),
+        ("MySet", "s"),
+        ("MyFrozenset", "fs"),
+        ("MyTuple", "t"),
+        ("MyBytearray", "ba"),
+        ("MyStr", "st"),
+        ("MyInt", "i"),
+        ("MyFloat", "fl"),
+        ("MyBytes", "bs"),
+        ("MyOrderedDict", "od"),
+        ("MyCounter", "ct"),
+        ("MyDefaultDict", "dd"),
+        ("MyDeque", "dq"),
+    ] {
+        make_backingless(&mut interpreter, cls, var);
+    }
+
+    // Also test a self-referential `__builtin_data__` cycle (`d_cyc.__builtin_data__ = d_cyc`).
+    make_backingless(&mut interpreter, "MyDict", "d_cyc");
+    let d_cyc = interpreter.lookup_name("d_cyc").unwrap().unwrap();
+    if let ValueKind::PyInstance(rc) = d_cyc.kind() {
+        rc.borrow_mut()
+            .attrs
+            .insert("__builtin_data__", d_cyc.clone());
+    }
+
+    let must_fail_with_runtime_error = [
+        // dict subclass
+        "len(d)",
+        "d.items()",
+        "d.keys()",
+        "d.values()",
+        "iter(d)",
+        "bool(d)",
+        "0 in d",
+        "d.__len__()",
+        "d.__getitem__(0)",
+        "d.__setitem__(0, 1)",
+        "d.__delitem__(0)",
+        // cyclic __builtin_data__
+        "len(d_cyc)",
+        "d_cyc.items()",
+        "iter(d_cyc)",
+        // list subclass
+        "len(l)",
+        "l.append(1)",
+        "iter(l)",
+        "bool(l)",
+        "0 in l",
+        // set / frozenset / tuple / bytearray / str / bytes / int / float subclasses
+        "len(s)",
+        "s.add(1)",
+        "iter(s)",
+        "len(fs)",
+        "iter(fs)",
+        "len(t)",
+        "t.count(1)",
+        "iter(t)",
+        "len(ba)",
+        "ba.append(1)",
+        "iter(ba)",
+        "len(st)",
+        "st.upper()",
+        "iter(st)",
+        "len(bs)",
+        "bs.upper()",
+        "iter(bs)",
+        "i.bit_length()",
+        "fl.hex()",
+        // OrderedDict (inherits dict.__len__ / dict.items)
+        "len(od)",
+        "od.items()",
+        "repr(od)",
+    ];
+
+    for expr in must_fail_with_runtime_error {
+        let wrapped = format!(
+            "caught = False\n\
+             try:\n\
+             \x20   {expr}\n\
+             except RuntimeError:\n\
+             \x20   caught = True\n"
+        );
+        interpreter
+            .exec_source(&wrapped, None, None)
+            .unwrap_or_else(|e| panic!("unexpected uncaught error for `{expr}`: {e:?}"));
+        assert_eq!(
+            interpreter.lookup_name("caught").unwrap(),
+            Some(Value::bool_(true)),
+            "expected catchable RuntimeError for `{expr}`"
+        );
+    }
+
+    // Operator fallbacks (`[]`, `+`) raise a catchable TypeError or
+    // RuntimeError cleanly without overflowing the native stack.
+    for expr in ["d[0]", "l[0]", "l + [1]", "i + 1"] {
+        let wrapped = format!(
+            "caught = False\n\
+             try:\n\
+             \x20   {expr}\n\
+             except (RuntimeError, TypeError):\n\
+             \x20   caught = True\n"
+        );
+        interpreter
+            .exec_source(&wrapped, None, None)
+            .unwrap_or_else(|e| panic!("unexpected uncaught error for `{expr}`: {e:?}"));
+        assert_eq!(
+            interpreter.lookup_name("caught").unwrap(),
+            Some(Value::bool_(true)),
+            "expected catchable error for `{expr}`"
+        );
+    }
+
+    // Operations that fall back to `object.__repr__`/`__str__`/`__eq__` or
+    // lazy storage init (`deque`, `Counter`, `defaultdict`) must also
+    // terminate cleanly without overflowing the native stack.
+    let must_not_overflow = [
+        "repr(d)",
+        "str(d)",
+        "d == {}",
+        "repr(d_cyc)",
+        "repr(l)",
+        "str(l)",
+        "repr(s)",
+        "repr(fs)",
+        "repr(t)",
+        "repr(ba)",
+        "repr(st)",
+        "repr(bs)",
+        "repr(i)",
+        "repr(fl)",
+        "len(ct)",
+        "ct.items()",
+        "repr(ct)",
+        "len(dd)",
+        "dd.items()",
+        "repr(dd)",
+        "assert len(dq) == 0",
+        "assert list(dq) == []",
+        "assert isinstance(repr(dq), str)",
+    ];
+    for stmt in must_not_overflow {
+        let wrapped = format!(
+            "try:\n\
+             \x20   {stmt}\n\
+             except (RuntimeError, TypeError):\n\
+             \x20   pass\n"
+        );
+        interpreter
+            .exec_source(&wrapped, None, None)
+            .unwrap_or_else(|e| panic!("unexpected uncaught error for `{stmt}`: {e:?}"));
+    }
+}

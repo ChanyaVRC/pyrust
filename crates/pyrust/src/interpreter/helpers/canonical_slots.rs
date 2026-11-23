@@ -29,6 +29,7 @@ pub(crate) enum CanonicalSlot {
     ObjectDir,
     ObjectReduce,
     ObjectReduceEx,
+    BaseExceptionReduce,
     BaseExceptionReduceEx,
     TypeInit,
 }
@@ -41,7 +42,7 @@ enum CanonicalSlotOwner {
 }
 
 impl CanonicalSlot {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 24] = [
         Self::ObjectInitSubclass,
         Self::ObjectSubclassHook,
         Self::ObjectGetAttribute,
@@ -63,6 +64,7 @@ impl CanonicalSlot {
         Self::ObjectDir,
         Self::ObjectReduce,
         Self::ObjectReduceEx,
+        Self::BaseExceptionReduce,
         Self::BaseExceptionReduceEx,
         Self::TypeInit,
     ];
@@ -90,7 +92,9 @@ impl CanonicalSlot {
             | Self::ObjectDir
             | Self::ObjectReduce
             | Self::ObjectReduceEx => CanonicalSlotOwner::Object,
-            Self::BaseExceptionReduceEx => CanonicalSlotOwner::BaseException,
+            Self::BaseExceptionReduce | Self::BaseExceptionReduceEx => {
+                CanonicalSlotOwner::BaseException
+            }
             Self::TypeInit => CanonicalSlotOwner::Type,
         }
     }
@@ -118,6 +122,7 @@ impl CanonicalSlot {
             Self::ObjectDir => "__dir__",
             Self::ObjectReduce => "__reduce__",
             Self::ObjectReduceEx => "__reduce_ex__",
+            Self::BaseExceptionReduce => "__reduce__",
             Self::BaseExceptionReduceEx => "__reduce_ex__",
             Self::TypeInit => "__init__",
         }
@@ -183,10 +188,19 @@ thread_local! {
         .cloned()
         .expect("canonical type.__init__ slot must exist");
 
-    /// PyRust supplies an exception-specialised `__reduce_ex__` sentinel on
-    /// `BaseException`; CPython reaches the same behavior through
-    /// `object.__reduce_ex__`. Keep its identity typed so protocol consumers
-    /// can recognise the canonical fallback without decoding a function name.
+    /// PyRust supplies exception-specialised `__reduce__` and `__reduce_ex__`
+    /// sentinels on `BaseException`. Keep their identities typed so protocol
+    /// consumers can recognise the canonical fallbacks without decoding a
+    /// function name.
+    static CANONICAL_BASE_EXCEPTION_REDUCE_VALUE: Value =
+        lookup_exc_class("BaseException")
+            .expect("canonical BaseException class must exist")
+            .borrow()
+            .attrs
+            .get(CanonicalSlot::BaseExceptionReduce.name())
+            .cloned()
+            .expect("canonical BaseException.__reduce__ slot must exist");
+
     static CANONICAL_BASE_EXCEPTION_REDUCE_EX_VALUE: Value =
         lookup_exc_class("BaseException")
             .expect("canonical BaseException class must exist")
@@ -204,14 +218,16 @@ thread_local! {
 /// typed, and the own-dictionary value is the canonical runtime sentinel.
 #[inline]
 pub(crate) fn value_is_canonical_slot(value: &Value, slot: CanonicalSlot) -> bool {
-    match slot.owner() {
-        CanonicalSlotOwner::Object => CANONICAL_OBJECT_SLOT_VALUES
-            .with(|values| values_are_identical(&values[slot as usize], value)),
-        CanonicalSlotOwner::BaseException => CANONICAL_BASE_EXCEPTION_REDUCE_EX_VALUE
+    match slot {
+        CanonicalSlot::BaseExceptionReduce => CANONICAL_BASE_EXCEPTION_REDUCE_VALUE
             .with(|canonical| values_are_identical(canonical, value)),
-        CanonicalSlotOwner::Type => {
+        CanonicalSlot::BaseExceptionReduceEx => CANONICAL_BASE_EXCEPTION_REDUCE_EX_VALUE
+            .with(|canonical| values_are_identical(canonical, value)),
+        CanonicalSlot::TypeInit => {
             CANONICAL_TYPE_INIT_VALUE.with(|canonical| values_are_identical(canonical, value))
         }
+        _ => CANONICAL_OBJECT_SLOT_VALUES
+            .with(|values| values_are_identical(&values[slot as usize], value)),
     }
 }
 
@@ -232,6 +248,20 @@ mod canonical_slot_tests {
         assert!(!value_is_canonical_slot(&repr, CanonicalSlot::ObjectStr));
 
         let base_exception = lookup_exc_class("BaseException").expect("BaseException");
+        let reduce = base_exception
+            .borrow()
+            .attrs
+            .get("__reduce__")
+            .cloned()
+            .expect("BaseException.__reduce__");
+        assert!(value_is_canonical_slot(
+            &reduce,
+            CanonicalSlot::BaseExceptionReduce
+        ));
+        assert!(!value_is_canonical_slot(
+            &reduce,
+            CanonicalSlot::ObjectReduce
+        ));
         let reduce_ex = base_exception
             .borrow()
             .attrs

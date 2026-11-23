@@ -45,32 +45,53 @@ use pyrust_derive::pyrust_module;
 
 const COPY_PY_SOURCE: &str = include_str!("copy_py.py");
 
-/// Bind the native `copy` fast path to this import generation's private
-/// Python reconstruction helper. The helper stays out of the public module
-/// namespace and is supplied as a hidden receiver on each `copy()` call.
+/// Bind the native `copy` and `deepcopy` fast paths to this import
+/// generation's private Python reconstruction helpers. The helpers stay out of
+/// the public module namespace and are supplied as hidden receivers on each
+/// call.
 pub(crate) fn inject_python_members(
     interp: &mut crate::interpreter::Interpreter,
     module: &Rc<RefCell<PyModule>>,
 ) -> Result<Option<Value>> {
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     interp.exec_source(COPY_PY_SOURCE, Some(ns.clone()), None)?;
-    let helper = ns
+    let helper_shallow = ns
         .dict_with(|dict| dict.get(&PyKey::str_from("_reconstruct_shallow")).cloned())
         .flatten()
-        .ok_or_else(|| PyError::Runtime("copy: reconstruction helper missing".into()))?;
+        .ok_or_else(|| PyError::Runtime("copy: shallow reconstruction helper missing".into()))?;
+    let helper_deep = ns
+        .dict_with(|dict| dict.get(&PyKey::str_from("_reconstruct_deep")).cloned())
+        .flatten()
+        .ok_or_else(|| PyError::Runtime("copy: deep reconstruction helper missing".into()))?;
     let native_copy = module
         .borrow()
         .attrs
         .get("copy")
         .cloned()
         .ok_or_else(|| PyError::Runtime("copy: native copy function missing".into()))?;
+    let native_deepcopy = module
+        .borrow()
+        .attrs
+        .get("deepcopy")
+        .cloned()
+        .ok_or_else(|| PyError::Runtime("copy: native deepcopy function missing".into()))?;
     let copy = pyrust_builtins::native_builtin_callable::native_generation_builtin(
         native_copy,
-        helper,
+        helper_shallow,
         "copy",
         "copy",
     );
-    module.borrow_mut().insert_attr("copy".to_string(), copy);
+    let deepcopy = pyrust_builtins::native_builtin_callable::native_generation_builtin(
+        native_deepcopy,
+        helper_deep,
+        "deepcopy",
+        "copy",
+    );
+    {
+        let mut module_mut = module.borrow_mut();
+        module_mut.insert_attr("copy".to_string(), copy);
+        module_mut.insert_attr("deepcopy".to_string(), deepcopy);
+    }
     Ok(Some(ns))
 }
 
@@ -158,25 +179,29 @@ pyrust_module! {
     /// shared references, and is forwarded to `__deepcopy__` calls.
     /// <https://docs.python.org/3/library/copy.html#copy.deepcopy>
     fn deepcopy(args) -> Result<Value> {
-        if args.is_empty() || args.len() > 2 {
+        // The injected public callable supplies its private reconstruction
+        // helper as args[0]; only the remaining arguments are user-visible.
+        let reconstruct_deep = args[0].value.clone();
+        let user_args = &args[1..];
+        if user_args.is_empty() || user_args.len() > 2 {
             return Err(PyError::named(
                 "TypeError",
                 format!(
                     "{FN_NAME}() takes 1 or 2 arguments ({} given)",
-                    args.len()
+                    user_args.len()
                 ),
             ));
         }
-        let obj = args[0].value.clone();
-        // Use the caller-supplied memo dict when present; otherwise start with
-        // an empty dict.  CPython always passes a dict (never None) to
-        // __deepcopy__, so we must forward a proper dict here.
-        let memo = if args.len() == 2 {
-            args[1].value.clone()
+        let obj = user_args[0].value.clone();
+        // Use the caller-supplied memo dict when present and not None;
+        // otherwise start with an empty dict.  CPython always passes a dict
+        // (never None) to __deepcopy__, so we must forward a proper dict here.
+        let memo = if user_args.len() == 2 && !user_args[1].value.is_none() {
+            user_args[1].value.clone()
         } else {
             Value::dict(PyDict::default())
         };
-        deep_copy(obj, &memo, _interp)
+        deep_copy_with_reconstruct(obj, &memo, Some(&reconstruct_deep), _interp)
     }
 }
 
@@ -471,116 +496,70 @@ fn shallow_copy_with_reconstruct(
             crate::interpreter::IteratorCopy::Unowned => Ok(obj.clone()),
         },
 
-        // PyInstance — check for __copy__ dunder first (MRO-aware).
+        // PyInstance — CPython 3.12 copy.copy precedence:
+        //   1. class-level `__copy__` (`getattr(cls, "__copy__", None)`)
+        //   2. `__reduce_ex__(4)` / `__reduce__()` (falling back to the fast
+        //      default copy protocol when the canonical inherited reducer has
+        //      no user override)
+        //   3. `copy.Error` when both reducers are disabled (`None`/missing)
         ValueKind::PyInstance(rc) => {
             let rc = Rc::clone(rc);
-            // Look up __copy__ on the class via MRO so inherited dunders
-            // are found.  Do not hold any borrow across the call.
-            let copy_method = {
-                let borrow = rc.borrow();
-                let class = Rc::clone(&borrow.class);
-                drop(borrow);
-                lookup_class_attr(&class, "__copy__")
-            };
-            let dynamic_reversed_reduction =
-                copy_method.is_none() && crate::interpreter::is_reversed_iterator(&obj);
-            let iterator_reduction = if copy_method.is_none() && !dynamic_reversed_reduction {
-                match crate::interpreter::copy_iterator_object(&obj, false)? {
-                    crate::interpreter::IteratorCopy::GetItemReduction {
+            let class = Rc::clone(&rc.borrow().class);
+            let cls_val = Value::py_class(Rc::clone(&class));
+            match interp.get_attr(&cls_val, "__copy__") {
+                Ok(copier) if !copier.is_none() => {
+                    return interp.call_function_expanded(
+                        copier,
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: obj.clone(),
+                        }],
+                    );
+                }
+                Ok(_) => {}
+                Err(error) if error.class_name_is("AttributeError") => {}
+                Err(error) => return Err(error),
+            }
+            match resolve_instance_copy_reduction(&obj, &class, false, interp)? {
+                InstanceReduction::Reduced(reduction) => {
+                    if let Some(reconstruct) = reconstruct {
+                        interp.call_function_expanded(
+                            reconstruct.clone(),
+                            &[
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: obj.clone(),
+                                },
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: reduction,
+                                },
+                            ],
+                        )
+                    } else {
+                        reconstruct_reduction_shallow(&obj, reduction, interp)
+                    }
+                }
+                InstanceReduction::DefaultProtocol => {
+                    if let crate::interpreter::IteratorCopy::GetItemReduction {
                         constructor,
                         owner,
                         position,
-                    } => Some((constructor, owner, position)),
-                    _ => None,
+                    } = crate::interpreter::copy_iterator_object(&obj, false)?
+                    {
+                        rebuild_getitem_reduction(constructor, owner, position, interp)
+                    } else if is_exception_class(&class) {
+                        // #2360 / #2361: exceptions copy via their `__reduce__`
+                        // value — reconstruct `type(*args)` and re-apply the
+                        // non-slot state. Shallow: share arg/state values.
+                        copy_exception(&rc, interp, |v, _| Ok(v), |_| {})
+                    } else {
+                        // Default: copy protocol — capture state via
+                        // __getstate__, build a bare instance, restore via
+                        // __setstate__, and detach internal built-in storage.
+                        shallow_copy_via_protocol(&rc, interp)
+                    }
                 }
-            } else {
-                None
-            };
-            if let Some(method) = copy_method.filter(|method| {
-                !method.is_none()
-                    && !pyrust_builtins::classmethod::as_static_method_any(method)
-                        .is_some_and(|wrapped| wrapped.is_none())
-            }) {
-                // Call `__copy__(self)` — use invoke_class_method so that
-                // UserFunction and BuiltinFunction are both handled and
-                // `self` is bound via the bound_prefix slot.
-                //
-                // CPython's `copy.copy` is pure Python and resolves the hook as
-                // a *class* attribute, then passes the object explicitly:
-                // `copier = getattr(cls, "__copy__", None); copier(x)`.  For a
-                // plain `def` that class-level lookup is unbound, so the single
-                // explicit argument lands on `self` — identical to prepending
-                // the receiver.  A `staticmethod` / `classmethod` hook, though,
-                // still receives `x` as a real argument *on top of* its own
-                // descriptor binding, so it needs one explicit positional
-                // (issue #2939 review).  Note `__deepcopy__` is different:
-                // `copy.deepcopy` uses an *instance* getattr and passes only
-                // `memo`, which the plain binding path already models.
-                let instance = Value::py_instance(Rc::clone(&rc));
-                let binds_own_receiver = matches!(
-                    method.kind(),
-                    ValueKind::UserFunction(f)
-                        if f.kind != pyrust_core::UserFunctionKind::Regular
-                );
-                if binds_own_receiver {
-                    let call_args = [ExpandedCallArg {
-                        name: None,
-                        value: instance.clone(),
-                    }];
-                    invoke_class_method(interp, method, instance, &call_args)
-                } else {
-                    invoke_class_method(interp, method, instance, &[])
-                }
-            } else if dynamic_reversed_reduction {
-                let reduction = call_copy_reducer(&obj, interp)?;
-                if let Some(reconstruct) = reconstruct {
-                    interp.call_function_expanded(
-                        reconstruct.clone(),
-                        &[
-                            ExpandedCallArg {
-                                name: None,
-                                value: obj.clone(),
-                            },
-                            ExpandedCallArg {
-                                name: None,
-                                value: reduction,
-                            },
-                        ],
-                    )
-                } else {
-                    reconstruct_reduction_shallow(&obj, reduction, interp)
-                }
-            } else if let Some((constructor, owner, position)) = iterator_reduction {
-                rebuild_getitem_reduction(constructor, owner, position, interp)
-            } else if let Some(reconstruct) = reconstruct
-                && let Some(reduce_method) = static_reduce_method(&rc)
-            {
-                let instance = Value::py_instance(Rc::clone(&rc));
-                let reduction = invoke_class_method(interp, reduce_method, instance.clone(), &[])?;
-                interp.call_function_expanded(
-                    reconstruct.clone(),
-                    &[
-                        ExpandedCallArg {
-                            name: None,
-                            value: instance,
-                        },
-                        ExpandedCallArg {
-                            name: None,
-                            value: reduction,
-                        },
-                    ],
-                )
-            } else if is_exception_class(&rc.borrow().class) {
-                // #2360 / #2361: exceptions copy via their `__reduce__` value —
-                // reconstruct `type(*args)` and re-apply the non-slot state.
-                // Shallow: share the arg/state values (identity copy).
-                copy_exception(&rc, interp, |v, _| Ok(v), |_| {})
-            } else {
-                // Default: copy protocol — capture state via __getstate__,
-                // build a bare instance, restore via __setstate__.  When the
-                // class customises neither hook this is a verbatim __dict__
-                // copy (capture returns the dict, restore re-applies it).
-                shallow_copy_via_protocol(&rc, interp)
             }
         }
 
@@ -597,56 +576,137 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
     shallow_copy_with_reconstruct(obj, None, interp)
 }
 
-/// Return the class-level staticmethod `__reduce__` only when the inherited
-/// canonical object reducer is unquestionably the active `__reduce_ex__`.
-/// Custom instance hooks and `__getattribute__` stay on the pre-existing
-/// fallback path tracked by #2953.
-fn static_reduce_method(instance: &Rc<RefCell<PyInstance>>) -> Option<Value> {
-    let class = Rc::clone(&instance.borrow().class);
-    {
-        let instance = instance.borrow();
-        if instance.attrs.get("__reduce__").is_some() {
-            return None;
-        }
-        if instance
-            .attrs
-            .get("__reduce_ex__")
-            .is_some_and(|method| !method.is_none())
-        {
-            return None;
-        }
+enum InstanceReduction {
+    /// Inherited canonical reducer with no user override: keep the native
+    /// default protocol (exception reconstruction or `__getstate__`/`__setstate__`
+    /// plus `#2945` internal built-in storage detachment).
+    DefaultProtocol,
+    /// A custom `__reduce_ex__` or `__reduce__` hook returned a reduction value
+    /// to pass through `_reconstruct`.
+    Reduced(Value),
+}
+
+fn raise_uncopyable_error(
+    class: &Rc<RefCell<PyClass>>,
+    is_deep: bool,
+    interp: &mut crate::interpreter::Interpreter,
+) -> PyError {
+    let cls_val = Value::py_class(Rc::clone(class));
+    let cls_repr = crate::interpreter::render_value_repr(interp, &cls_val)
+        .unwrap_or_else(|_| cls_val.repr_raw());
+    let kind = if is_deep { "deep" } else { "shallow" };
+    let message = format!("un({kind})copyable object of type {cls_repr}");
+    match current_copy_error_class_value().kind() {
+        ValueKind::PyClass(err_cls) => PyError::Class(Rc::clone(err_cls), message),
+        _ => PyError::Runtime(message),
     }
-    if lookup_class_attr(&class, "__getattribute__").is_some_and(|method| {
-        !crate::interpreter::value_is_canonical_slot(
-            &method,
-            crate::interpreter::CanonicalSlot::ObjectGetAttribute,
-        )
-    }) {
-        return None;
+}
+
+/// Whether `reductor` is the canonical inherited `object` or `BaseException`
+/// reducer bound directly to `obj` (rather than a user override, instance
+/// attribute, descriptor, or `__getattribute__` replacement).
+fn is_canonical_bound_reducer(
+    reductor: &Value,
+    obj: &Value,
+    class: &Rc<RefCell<PyClass>>,
+    attr_name: &str,
+) -> bool {
+    let Some((method_name, receiver)) = pyrust_builtins::bound_method::as_bound_method(reductor)
+    else {
+        return false;
+    };
+    if method_name.as_str() != attr_name || !receiver.is_identical_to(obj) {
+        return false;
     }
-    let reduce_ex_falls_through = lookup_class_attr(&class, "__reduce_ex__").is_none_or(|method| {
-        method.is_none()
-            || pyrust_builtins::classmethod::as_static_method_any(&method)
-                .is_some_and(|wrapped| wrapped.is_none())
-            || crate::interpreter::value_is_canonical_slot(
-                &method,
+    let Some(slot) = lookup_class_attr(class, attr_name) else {
+        return false;
+    };
+    match attr_name {
+        "__reduce_ex__" => {
+            crate::interpreter::value_is_canonical_slot(
+                &slot,
                 crate::interpreter::CanonicalSlot::ObjectReduceEx,
-            )
-            || crate::interpreter::value_is_canonical_slot(
-                &method,
+            ) || crate::interpreter::value_is_canonical_slot(
+                &slot,
                 crate::interpreter::CanonicalSlot::BaseExceptionReduceEx,
             )
-    });
-    if !reduce_ex_falls_through {
-        return None;
+        }
+        "__reduce__" => {
+            crate::interpreter::value_is_canonical_slot(
+                &slot,
+                crate::interpreter::CanonicalSlot::ObjectReduce,
+            ) || (is_exception_class(class)
+                && crate::interpreter::value_is_canonical_slot(
+                    &slot,
+                    crate::interpreter::CanonicalSlot::BaseExceptionReduce,
+                ))
+        }
+        _ => false,
     }
-    lookup_class_attr(&class, "__reduce__").filter(|method| {
-        matches!(
-            method.kind(),
-            ValueKind::UserFunction(function)
-                if function.kind == pyrust_core::UserFunctionKind::StaticMethod
-        ) || pyrust_builtins::classmethod::as_static_method_any(method).is_some()
+}
+
+/// Whether `class` overrides `__reduce__` relative to its canonical base
+/// (`object.__reduce__`, or `BaseException.__reduce__` for exception classes).
+/// Mirrors CPython's `object_reduce_ex` check on `Py_TYPE(self)`.
+fn class_overrides_reduce(class: &Rc<RefCell<PyClass>>) -> bool {
+    lookup_class_attr(class, "__reduce__").is_some_and(|slot| {
+        !crate::interpreter::value_is_canonical_slot(
+            &slot,
+            crate::interpreter::CanonicalSlot::ObjectReduce,
+        ) && !(is_exception_class(class)
+            && crate::interpreter::value_is_canonical_slot(
+                &slot,
+                crate::interpreter::CanonicalSlot::BaseExceptionReduce,
+            ))
     })
+}
+
+/// Resolve and invoke the `__reduce_ex__(4)` / `__reduce__()` hook on `obj`
+/// following CPython 3.12's `Lib/copy.py` and `object_reduce_ex` precedence.
+fn resolve_instance_copy_reduction(
+    obj: &Value,
+    class: &Rc<RefCell<PyClass>>,
+    is_deep: bool,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<InstanceReduction> {
+    match interp.get_attr(obj, "__reduce_ex__") {
+        Ok(reductor) if !reductor.is_none() => {
+            if is_canonical_bound_reducer(&reductor, obj, class, "__reduce_ex__") {
+                if class_overrides_reduce(class) {
+                    let inst_reduce = interp.get_attr(obj, "__reduce__")?;
+                    let rv = interp.call_function_expanded(inst_reduce, &[])?;
+                    return Ok(InstanceReduction::Reduced(rv));
+                }
+                return Ok(InstanceReduction::DefaultProtocol);
+            }
+            let rv = interp.call_function_expanded(
+                reductor,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: Value::int(4),
+                }],
+            )?;
+            return Ok(InstanceReduction::Reduced(rv));
+        }
+        Ok(_) => {}
+        Err(error) if error.class_name_is("AttributeError") => {}
+        Err(error) => return Err(error),
+    }
+
+    match interp.get_attr(obj, "__reduce__") {
+        Ok(reductor) if interp.truthy_value(&reductor)? => {
+            if is_canonical_bound_reducer(&reductor, obj, class, "__reduce__") {
+                return Ok(InstanceReduction::DefaultProtocol);
+            }
+            let rv = interp.call_function_expanded(reductor, &[])?;
+            Ok(InstanceReduction::Reduced(rv))
+        }
+        Ok(_) => Err(raise_uncopyable_error(class, is_deep, interp)),
+        Err(error) if error.class_name_is("AttributeError") => {
+            Err(raise_uncopyable_error(class, is_deep, interp))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Default shallow-copy path for an instance: capture state, build a bare
@@ -729,9 +789,10 @@ fn detach_internal_storage(
 /// container/instance is inserted into the memo *before* its children are
 /// recursed into.  `memo` is forwarded to any `__deepcopy__(self, memo)`
 /// dunder calls so user code receives a proper dict.
-fn deep_copy(
+fn deep_copy_with_reconstruct(
     obj: Value,
     memo: &Value,
+    reconstruct: Option<&Value>,
     interp: &mut crate::interpreter::Interpreter,
 ) -> Result<Value> {
     // Cycle / sharing short-circuit: if we've already copied this object,
@@ -771,7 +832,7 @@ fn deep_copy(
                 PySet::with_capacity_and_hasher(keys.len(), Default::default());
             for k in keys {
                 let v = key_to_value(k);
-                let deep_v = deep_copy(v, memo, interp)?;
+                let deep_v = deep_copy_with_reconstruct(v, memo, reconstruct, interp)?;
                 let new_k = interp.value_to_pykey(&deep_v)?;
                 new_set.insert(new_k);
             }
@@ -798,7 +859,7 @@ fn deep_copy(
             let mut new_items = Vec::with_capacity(items_vec.len());
             let mut all_same = true;
             for item in &items_vec {
-                let copied = deep_copy(item.clone(), memo, interp)?;
+                let copied = deep_copy_with_reconstruct(item.clone(), memo, reconstruct, interp)?;
                 if !deepcopy_kept_identity(item, &copied) {
                     all_same = false;
                 }
@@ -835,7 +896,7 @@ fn deep_copy(
                 memo_insert(memo, id, new_list.clone());
             }
             for item in items_vec {
-                let copied = deep_copy(item, memo, interp)?;
+                let copied = deep_copy_with_reconstruct(item, memo, reconstruct, interp)?;
                 new_list.list_push(copied)?;
             }
             Ok(new_list)
@@ -857,10 +918,10 @@ fn deep_copy(
             for (k, v) in pairs {
                 let deep_k = {
                     let kv = key_to_value(k);
-                    let deep_kv = deep_copy(kv, memo, interp)?;
+                    let deep_kv = deep_copy_with_reconstruct(kv, memo, reconstruct, interp)?;
                     interp.value_to_pykey(&deep_kv)?
                 };
-                let deep_v = deep_copy(v, memo, interp)?;
+                let deep_v = deep_copy_with_reconstruct(v, memo, reconstruct, interp)?;
                 let _ = new_dict.dict_insert(deep_k, deep_v);
             }
             Ok(new_dict)
@@ -881,7 +942,7 @@ fn deep_copy(
                 PySet::with_capacity_and_hasher(keys.len(), Default::default());
             for k in keys {
                 let v = key_to_value(k);
-                let deep_v = deep_copy(v, memo, interp)?;
+                let deep_v = deep_copy_with_reconstruct(v, memo, reconstruct, interp)?;
                 let new_k = interp.value_to_pykey(&deep_v)?;
                 new_set.insert(new_k);
             }
@@ -906,7 +967,12 @@ fn deep_copy(
             if let Some(elements) = ops.storage_elements(state) {
                 let mut deep_elements = Vec::with_capacity(elements.len());
                 for element in elements {
-                    deep_elements.push(deep_copy(element, memo, interp)?);
+                    deep_elements.push(deep_copy_with_reconstruct(
+                        element,
+                        memo,
+                        reconstruct,
+                        interp,
+                    )?);
                 }
                 if let ValueKind::BuiltinObject {
                     ops: copied_ops,
@@ -924,7 +990,7 @@ fn deep_copy(
                 // instance `__dict__` copies into a plain `dict` whose keys are
                 // attribute names (always `str`, so only the values recurse).
                 for (key, value) in pairs {
-                    let deep_value = deep_copy(value, memo, interp)?;
+                    let deep_value = deep_copy_with_reconstruct(value, memo, reconstruct, interp)?;
                     let _ = copied.dict_insert(key, deep_value);
                 }
             }
@@ -944,7 +1010,8 @@ fn deep_copy(
                     // therefore reconstructs a second iterator over the
                     // already-memoised copied carrier, rather than aliasing
                     // the outer copy.
-                    let copied_carrier = deep_copy(carrier, memo, interp)?;
+                    let copied_carrier =
+                        deep_copy_with_reconstruct(carrier, memo, reconstruct, interp)?;
                     let copy = rebuild_reduced_iterator(copied_carrier, position, interp)?;
                     if let Some(id) = value_identity(&obj) {
                         memo_insert(memo, id, copy.clone());
@@ -960,7 +1027,8 @@ fn deep_copy(
                     // before it invokes the reducer or memoises the outer
                     // iterator. This ordering deliberately creates a distinct
                     // inner cursor when the owner points back to the iterator.
-                    let copied_owner = deep_copy(owner, memo, interp)?;
+                    let copied_owner =
+                        deep_copy_with_reconstruct(owner, memo, reconstruct, interp)?;
                     let copy = construct_getitem_reduction(constructor, copied_owner, interp)?;
                     if let Some(id) = value_identity(&obj) {
                         memo_insert(memo, id, copy.clone());
@@ -982,87 +1050,122 @@ fn deep_copy(
             if let Some(sources) = crate::interpreter::iterator_retained_values(&rebuilt) {
                 let mut deep_sources = Vec::with_capacity(sources.len());
                 for source in sources {
-                    deep_sources.push(deep_copy(source, memo, interp)?);
+                    deep_sources.push(deep_copy_with_reconstruct(
+                        source,
+                        memo,
+                        reconstruct,
+                        interp,
+                    )?);
                 }
                 crate::interpreter::set_iterator_retained_values(&rebuilt, deep_sources)?;
             }
             Ok(rebuilt)
         }
 
-        // PyInstance — check for __deepcopy__ dunder first (MRO-aware).
+        // PyInstance — CPython 3.12 copy.deepcopy precedence:
+        //   1. instance-level `__deepcopy__` (`getattr(x, "__deepcopy__", None)`)
+        //   2. `__reduce_ex__(4)` / `__reduce__()` (falling back to the fast
+        //      default copy protocol when the canonical inherited reducer has
+        //      no user override)
+        //   3. `copy.Error` when both reducers are disabled (`None`/missing)
         ValueKind::PyInstance(rc) => {
             let rc = Rc::clone(rc);
-            // Look up __deepcopy__ on the class via MRO so inherited
-            // dunders are found.  Do not hold any borrow across the call.
-            let deepcopy_method = {
-                let borrow = rc.borrow();
-                let class = Rc::clone(&borrow.class);
-                drop(borrow);
-                lookup_class_attr(&class, "__deepcopy__")
-            };
-            let dynamic_reversed_reduction =
-                deepcopy_method.is_none() && crate::interpreter::is_reversed_iterator(&obj);
-            let iterator_reduction = if deepcopy_method.is_none() && !dynamic_reversed_reduction {
-                match crate::interpreter::copy_iterator_object(&obj, true)? {
-                    crate::interpreter::IteratorCopy::GetItemReduction {
+            let class = Rc::clone(&rc.borrow().class);
+            match interp.get_attr(&obj, "__deepcopy__") {
+                Ok(copier) if !copier.is_none() => {
+                    let result = interp.call_function_expanded(
+                        copier,
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: memo.clone(),
+                        }],
+                    )?;
+                    if !deepcopy_kept_identity(&obj, &result)
+                        && let Some(id) = value_identity(&obj)
+                    {
+                        memo_insert(memo, id, result.clone());
+                    }
+                    return Ok(result);
+                }
+                Ok(_) => {}
+                Err(error) if error.class_name_is("AttributeError") => {}
+                Err(error) => return Err(error),
+            }
+            match resolve_instance_copy_reduction(&obj, &class, true, interp)? {
+                InstanceReduction::Reduced(reduction) => {
+                    let rebuilt = if let Some(reconstruct) = reconstruct {
+                        let deepcopy_fn =
+                            pyrust_builtins::native_builtin_callable::native_generation_builtin(
+                                Value::builtin_function("copy.deepcopy"),
+                                reconstruct.clone(),
+                                "deepcopy",
+                                "copy",
+                            );
+                        interp.call_function_expanded(
+                            reconstruct.clone(),
+                            &[
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: obj.clone(),
+                                },
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: memo.clone(),
+                                },
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: reduction,
+                                },
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: deepcopy_fn,
+                                },
+                            ],
+                        )?
+                    } else {
+                        reconstruct_reduction_deep(&obj, reduction, memo, interp)?
+                    };
+                    if !deepcopy_kept_identity(&obj, &rebuilt)
+                        && let Some(id) = value_identity(&obj)
+                    {
+                        memo_insert(memo, id, rebuilt.clone());
+                    }
+                    Ok(rebuilt)
+                }
+                InstanceReduction::DefaultProtocol => {
+                    if let crate::interpreter::IteratorCopy::GetItemReduction {
                         constructor,
                         owner,
                         position,
-                    } => Some((constructor, owner, position)),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            if let Some(method) = deepcopy_method {
-                // Call `__deepcopy__(self, memo)` — forward the memo dict so
-                // user code receives a proper dict argument (CPython never
-                // passes None here).  invoke_class_method binds `self` via
-                // bound_prefix and appends the remaining args after.
-                let result = invoke_class_method(
-                    interp,
-                    method,
-                    Value::py_instance(Rc::clone(&rc)),
-                    &[ExpandedCallArg {
-                        name: None,
-                        value: memo.clone(),
-                    }],
-                )?;
-                if let Some(id) = value_identity(&obj) {
-                    memo_insert(memo, id, result.clone());
-                }
-                Ok(result)
-            } else if dynamic_reversed_reduction {
-                let reduction = call_copy_reducer(&obj, interp)?;
-                reconstruct_reduction_deep(&obj, reduction, memo, interp)
-            } else if let Some((constructor, owner, position)) = iterator_reduction {
-                let copied_owner = deep_copy(owner, memo, interp)?;
-                let copy = construct_getitem_reduction(constructor, copied_owner, interp)?;
-                if let Some(id) = value_identity(&obj) {
-                    memo_insert(memo, id, copy.clone());
-                }
-                apply_getitem_reduction_state(&copy, position, interp)?;
-                Ok(copy)
-            } else if is_exception_class(&rc.borrow().class) {
-                // #2360 / #2361: exceptions deep-copy via their `__reduce__`
-                // value — reconstruct `type(*args)` (recursing into args) and
-                // re-apply the deep-copied non-slot state.  __traceback__ /
-                // __cause__ / __context__ are excluded, matching CPython.
-                let obj_id = value_identity(&obj);
-                copy_exception(
-                    &rc,
-                    interp,
-                    |v, interp| deep_copy(v, memo, interp),
-                    |new_val| {
-                        // Memoise *before* the state recurses so a
-                        // self-referential attr (`e.x = e`) cycles back here.
-                        if let Some(id) = obj_id {
-                            memo_insert(memo, id, new_val.clone());
+                    } = crate::interpreter::copy_iterator_object(&obj, true)?
+                    {
+                        let copied_owner =
+                            deep_copy_with_reconstruct(owner, memo, reconstruct, interp)?;
+                        let copy = construct_getitem_reduction(constructor, copied_owner, interp)?;
+                        if let Some(id) = value_identity(&obj) {
+                            memo_insert(memo, id, copy.clone());
                         }
-                    },
-                )
-            } else {
-                deep_copy_via_protocol(&rc, &obj, memo, interp)
+                        apply_getitem_reduction_state(&copy, position, interp)?;
+                        Ok(copy)
+                    } else if is_exception_class(&class) {
+                        // #2360 / #2361: exceptions deep-copy via their `__reduce__`
+                        // value — reconstruct `type(*args)` (recursing into args)
+                        // and re-apply the deep-copied non-slot state.
+                        let obj_id = value_identity(&obj);
+                        copy_exception(
+                            &rc,
+                            interp,
+                            |v, interp| deep_copy_with_reconstruct(v, memo, reconstruct, interp),
+                            |new_val| {
+                                if let Some(id) = obj_id {
+                                    memo_insert(memo, id, new_val.clone());
+                                }
+                            },
+                        )
+                    } else {
+                        deep_copy_via_protocol(&rc, &obj, memo, reconstruct, interp)
+                    }
+                }
             }
         }
 
@@ -1115,27 +1218,12 @@ fn construct_getitem_reduction(
     )
 }
 
-/// Resolve the same reducer that CPython's copy module asks an instance for.
-/// This is used only for genuine `reversed` subclasses, after their explicit
-/// copy hook has had priority; ordinary instances retain the existing copy
-/// protocol path.
-fn call_copy_reducer(obj: &Value, interp: &mut crate::interpreter::Interpreter) -> Result<Value> {
-    match interp.get_attr(obj, "__reduce_ex__") {
-        Ok(reducer) if !reducer.is_none() => {
-            return interp.call_function_expanded(
-                reducer,
-                &[ExpandedCallArg {
-                    name: None,
-                    value: Value::int(4),
-                }],
-            );
-        }
-        Ok(_) => {}
-        Err(error) if error.class_name_is("AttributeError") => {}
-        Err(error) => return Err(error),
-    }
-    let reducer = interp.get_attr(obj, "__reduce__")?;
-    interp.call_function_expanded(reducer, &[])
+fn deep_copy(
+    obj: Value,
+    memo: &Value,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<Value> {
+    deep_copy_with_reconstruct(obj, memo, None, interp)
 }
 
 fn reduction_parts(reduction: Value) -> Result<Vec<Value>> {
@@ -1415,6 +1503,7 @@ fn deep_copy_via_protocol(
     rc: &Rc<RefCell<PyInstance>>,
     obj: &Value,
     memo: &Value,
+    reconstruct: Option<&Value>,
     interp: &mut crate::interpreter::Interpreter,
 ) -> Result<Value> {
     let class = Rc::clone(&rc.borrow().class);
@@ -1436,16 +1525,16 @@ fn deep_copy_via_protocol(
         .is_some_and(|backing| pyrust_builtins::bytearray::as_bytearray_rc(&backing).is_some());
     if bytearray_backed {
         detach_internal_storage(rc, &new_rc, interp, |value, interp| {
-            deep_copy(value, memo, interp)
+            deep_copy_with_reconstruct(value, memo, reconstruct, interp)
         })?;
     }
     // Capture state from the original, deep-copy it, then restore.
     let state = capture_state(rc, interp)?;
-    let deep_state = deep_copy(state, memo, interp)?;
+    let deep_state = deep_copy_with_reconstruct(state, memo, reconstruct, interp)?;
     restore_state(&new_rc, deep_state, interp)?;
     if !bytearray_backed {
         detach_internal_storage(rc, &new_rc, interp, |value, interp| {
-            deep_copy(value, memo, interp)
+            deep_copy_with_reconstruct(value, memo, reconstruct, interp)
         })?;
     }
     Ok(new_val)
