@@ -38,7 +38,7 @@ use crate::interpreter::{
     modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, native_iterator_class,
     native_iterator_reduce, normalize_complex_slot_result, normalize_float_slot_result,
     normalize_int_slot_result, primitive_class_by_name, primitive_class_dispatch, py_mod_i64,
-    py_round_half_even_checked, reject_keyword_args_expanded, render_instance_str, render_key_repr,
+    py_round_half_even_checked, reject_keyword_args_expanded, render_instance_str,
     render_value_repr, resolve_zero_arg_super, reversed_iterator_reduce, round_bigint_neg_ndigits,
     round_float_ndigits, sync_module_env_to_globals_dict, type_class_singleton,
     unicode_exc_set_attrs, value_class, value_to_float, value_type_name_str,
@@ -230,10 +230,10 @@ mod object_basics {
         ExpandedCallArg, FN_PREFIX, InstanceAttrs, MODULE_NAME, PyError, Rc, Result, Value,
         ValueKind, class_has_native_builtin_type_ancestor, dir_names,
         find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
-        getitem_iterator_reduce, hash_value_with_interp, instance_builtin_data,
-        is_getitem_iterator, is_reversed_iterator, lookup_class_attr, native_iterator_class,
-        native_iterator_reduce, reject_keyword_args_expanded, render_key_repr, render_value_repr,
-        reversed_iterator_reduce, value_class, value_type_name_str,
+        full_type_name_str, getitem_iterator_reduce, hash_value_with_interp, is_getitem_iterator,
+        is_reversed_iterator, lookup_class_attr, native_iterator_class, native_iterator_reduce,
+        reject_keyword_args_expanded, render_value_repr, reversed_iterator_reduce, value_class,
+        value_type_name_str,
     };
     include!("builtins/object_basics.rs");
 }

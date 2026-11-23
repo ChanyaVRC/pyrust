@@ -96,7 +96,13 @@ impl Interpreter {
                         ValueKind::PyClass(c) => Rc::clone(c),
                         _ => continue,
                     };
-                    let value = entry_class.borrow().attrs.get(name).cloned();
+                    let value = entry_class.borrow().attrs.get(name).cloned().or_else(|| {
+                        super::builtin_methods::primitive_class_direct_object_dunder(
+                            &entry_class,
+                            name,
+                        )
+                        .map(Value::builtin_function)
+                    });
                     if let Some(value) = value {
                         let user_fn = match value.kind() {
                             ValueKind::UserFunction(f) => Some(Rc::clone(f)),
@@ -224,7 +230,13 @@ impl Interpreter {
                         ValueKind::PyClass(c) => Rc::clone(c),
                         _ => continue,
                     };
-                    let value = entry_class.borrow().attrs.get(name).cloned();
+                    let value = entry_class.borrow().attrs.get(name).cloned().or_else(|| {
+                        super::builtin_methods::primitive_class_direct_object_dunder(
+                            &entry_class,
+                            name,
+                        )
+                        .map(Value::builtin_function)
+                    });
                     if let Some(value) = value {
                         let user_fn = match value.kind() {
                             ValueKind::UserFunction(f) => Some(Rc::clone(f)),

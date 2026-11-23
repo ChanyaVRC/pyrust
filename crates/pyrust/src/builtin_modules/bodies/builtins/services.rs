@@ -369,14 +369,27 @@ pyrust_module! {
     /// encoded as `Option<PyStr>` — absent → `None` (treated as `""`),
     /// present-and-str → `Some(PyStr)`, present-and-non-str → the typed
     /// dialect's standard "must be str or None" TypeError.
+    #[arity_style(expected_got)]
     fn format(
         #[positional_only] value: PyValue,
         #[positional_only]
-        #[default(None)]
-        format_spec: Option<PyStr>,
+        #[default(PyValue(Value::string("")))]
+        format_spec: PyValue,
     ) -> Result<Value> {
         let value = &value.0;
-        let spec: &str = format_spec.as_ref().map(|s| s.as_ref()).unwrap_or("");
+        let spec_owned: String = match format_spec.0.as_str() {
+            Some(s) => s.to_owned(),
+            None => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "format() argument 2 must be str, not {}",
+                        pyrust_core::py_value_display_name(&format_spec.0),
+                    ),
+                ));
+            }
+        };
+        let spec: &str = &spec_owned;
         // Delegate to the shared `__format__` dispatcher that f-strings and
         // `str.format` already use (#1370).  It only invokes a *user-defined*
         // `__format__` (skipping the inherited builtin/`object.__format__`),

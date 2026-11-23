@@ -171,6 +171,21 @@ pub(crate) fn adapt_builtin_subclass_method(
 /// the concrete builtin adapter boundary.  Generic attribute/cache code must
 /// consume this typed result rather than infer semantics from punctuation in a
 /// dispatch key.
+/// Resolve the owning `PyClass` for a builtin descriptor's owner name
+/// (`"object"`, `"type"`, primitive types like `"list"`/`"int"`/`"str"`, or
+/// dictionary views). Used by `__objclass__` and descriptor `__get__`
+/// validation (issue #2964).
+pub(super) fn resolve_builtin_owner_class(
+    owner: &str,
+) -> Option<Rc<std::cell::RefCell<pyrust_core::PyClass>>> {
+    match owner {
+        "object" => Some(crate::interpreter::object_class_singleton()),
+        "type" => Some(crate::interpreter::type_class_singleton()),
+        _ => crate::interpreter::primitive_class_by_name(owner)
+            .or_else(|| dict_view_class_by_name(owner)),
+    }
+}
+
 pub(crate) fn builtin_callable_metadata(
     name: &'static str,
 ) -> crate::builtin_registry::BuiltinCallableMetadata {
@@ -272,6 +287,15 @@ impl Interpreter {
         // __name__ / __qualname__ / __module__ on builtin functions.
         //
         let metadata = builtin_callable_metadata(func_name);
+        let slot_parts = slot_wrapper_parts(func_name);
+        let method_parts = if slot_parts.is_none() {
+            method_descriptor_parts(func_name)
+        } else {
+            None
+        };
+        let is_slot_wrapper = slot_parts.is_some();
+        let is_method_desc = method_parts.is_some();
+        let is_legacy_type_token = matches!(func_name, "generator" | "str" | "property");
         if name == "__name__" {
             return Ok(Value::string(metadata.python_name()));
         }
@@ -279,13 +303,39 @@ impl Interpreter {
             return Ok(Value::string(metadata.python_qualname()));
         }
         if name == "__objclass__"
-            && let Some(owner) = metadata.owner()
-            && let Some(class) = dict_view_class_by_name(owner)
+            && let Some(owner) = slot_parts
+                .or(method_parts)
+                .map(|(o, _)| o)
+                .or_else(|| metadata.owner())
+            && let Some(class) = resolve_builtin_owner_class(owner)
         {
             return Ok(Value::py_class(class));
         }
+        if name == "__self__"
+            && !is_slot_wrapper
+            && !is_method_desc
+            && !is_legacy_type_token
+            && metadata.kind == crate::builtin_registry::BuiltinCallableKind::ModuleFunction
+            && let Some(module_name) = metadata.python_module()
+        {
+            return self.load_module(module_name);
+        }
+        if name == "__get__" && (is_slot_wrapper || is_method_desc) {
+            return Ok(pyrust_builtins::bound_method::bound_method(
+                "__get__",
+                target.clone(),
+            ));
+        }
         if name == "__module__" {
-            if metadata.kind == crate::builtin_registry::BuiltinCallableKind::MethodDescriptor {
+            if is_slot_wrapper {
+                return Err(pyrust_core::py_err!(
+                    "AttributeError",
+                    "'wrapper_descriptor' object has no attribute '__module__'"
+                ));
+            }
+            if is_method_desc
+                || metadata.kind == crate::builtin_registry::BuiltinCallableKind::MethodDescriptor
+            {
                 return Err(pyrust_core::py_err!(
                     "AttributeError",
                     "'method_descriptor' object has no attribute '__module__'"
@@ -296,7 +346,7 @@ impl Interpreter {
                 .expect("BuiltinFunction must carry Rc<UserFunction>");
             return Ok(function.module_value_with_default(metadata.python_module()));
         }
-        if name == "__call__" && !matches!(func_name, "generator" | "str" | "property") {
+        if name == "__call__" && !is_legacy_type_token {
             // Issue #2550: builtin functions (`len`, `print`) and method
             // descriptors (`str.upper`) are callable, so CPython exposes
             // `len.__call__ == <method-wrapper '__call__' of
@@ -307,13 +357,14 @@ impl Interpreter {
             // builtin (so `len.__call__([1,2,3]) == 3`).  The `generator`
             // / `str` / `property` type-token names are excluded — they
             // are handled as type objects below, not as plain builtins.
-            let owner = match metadata.kind {
-                crate::builtin_registry::BuiltinCallableKind::ModuleFunction => {
-                    "builtin_function_or_method"
-                }
-                crate::builtin_registry::BuiltinCallableKind::MethodDescriptor => {
-                    "method_descriptor"
-                }
+            let owner = if is_slot_wrapper {
+                "wrapper_descriptor"
+            } else if is_method_desc
+                || metadata.kind == crate::builtin_registry::BuiltinCallableKind::MethodDescriptor
+            {
+                "method_descriptor"
+            } else {
+                "builtin_function_or_method"
             };
             return Ok(pyrust_builtins::type_call_wrapper::call_wrapper(
                 target.clone(),
@@ -388,11 +439,26 @@ impl Interpreter {
             let empty =
                 pyrust_builtins::property::property(Value::none(), Value::none(), Value::none());
             Ok(pyrust_builtins::property::property_method(empty, kind))
-        } else {
+        } else if is_legacy_type_token {
             Err(pyrust_core::py_err!(
                 "AttributeError",
                 "type object '{}' has no attribute '{name}'",
                 func_name
+            ))
+        } else {
+            let obj_type = if is_slot_wrapper {
+                "wrapper_descriptor"
+            } else if is_method_desc
+                || metadata.kind == crate::builtin_registry::BuiltinCallableKind::MethodDescriptor
+            {
+                "method_descriptor"
+            } else {
+                "builtin_function_or_method"
+            };
+            Err(PyError::attribute_error(
+                format!("'{obj_type}' object has no attribute '{name}'"),
+                Some(name.to_string()),
+                Some(target.clone()),
             ))
         }
     }
@@ -552,7 +618,11 @@ impl Interpreter {
         {
             return Ok(val);
         }
-        let type_name = pyrust_core::builtin_type_name(target);
+        let type_name = if pyrust_builtins::bound_method::is_method_wrapper(target) {
+            std::borrow::Cow::Borrowed("method-wrapper")
+        } else {
+            pyrust_core::builtin_type_name(target)
+        };
         Err(PyError::attribute_error(
             format!("'{type_name}' object has no attribute '{name}'"),
             Some(name.to_string()),
@@ -600,7 +670,11 @@ impl Interpreter {
         {
             return Ok(value);
         }
-        let type_name = pyrust_core::builtin_type_name(target);
+        let type_name = if pyrust_builtins::bound_method::is_method_wrapper(target) {
+            std::borrow::Cow::Borrowed("method-wrapper")
+        } else {
+            pyrust_core::builtin_type_name(target)
+        };
         Err(PyError::attribute_error(
             format!("'{type_name}' object has no attribute '{name}'"),
             Some(name.to_string()),

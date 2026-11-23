@@ -82,6 +82,67 @@ impl Interpreter {
         }
     }
 
+    /// Descriptor `__get__(obj, type=None)` for unbound builtin slot wrappers
+    /// (`list.__len__`, `object.__repr__`, `int.__abs__`) and method
+    /// descriptors (`list.append`, `str.upper`, `dict.get`), matching CPython
+    /// 3.12's `wrapperdescr_get` / `method_get` (issue #2964).
+    #[inline(never)]
+    fn builtin_descriptor_get(
+        &mut self,
+        descriptor: Value,
+        func_name: &'static str,
+        owner_name: &str,
+        method_name: &str,
+        pos: &[Value],
+        has_kw: bool,
+    ) -> Result<Value> {
+        if has_kw {
+            return Err(pyrust_core::type_err!(
+                "wrapper __get__() takes no keyword arguments"
+            ));
+        }
+        if pos.is_empty() {
+            return Err(pyrust_core::type_err!(
+                " expected at least 1 argument, got 0"
+            ));
+        }
+        if pos.len() > 2 {
+            return Err(pyrust_core::type_err!(
+                " expected at most 2 arguments, got {}",
+                pos.len()
+            ));
+        }
+        let obj = &pos[0];
+        if obj.is_none() {
+            if pos.get(1).is_none_or(Value::is_none) {
+                return Err(pyrust_core::type_err!("__get__(None, None) is invalid"));
+            }
+            return Ok(descriptor);
+        }
+        let applies = if owner_name == "object" {
+            true
+        } else if let Some(owner_cls) = resolve_builtin_owner_class(owner_name) {
+            let obj_cls = value_class(obj);
+            match obj_cls.kind() {
+                ValueKind::PyClass(oc) => class_is_subclass_of(oc, &owner_cls),
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if !applies {
+            let actual = pyrust_core::error_type_name(obj);
+            return Err(pyrust_core::type_err!(
+                "descriptor '{method_name}' for '{owner_name}' objects doesn't apply to a '{actual}' object"
+            ));
+        }
+        Ok(pyrust_builtins::bound_method::bound_method_for_descriptor(
+            method_name,
+            obj.clone(),
+            func_name,
+        ))
+    }
+
     fn dict_view_mapping_descriptor_protocol_call(
         &mut self,
         descriptor: Value,
@@ -403,6 +464,20 @@ impl Interpreter {
                 }
                 return apply_format_spec(&receiver, spec);
             }
+        }
+        if method == "__get__"
+            && let ValueKind::BuiltinFunction(func_name) = receiver.kind()
+            && let Some((owner_name, method_name)) =
+                slot_wrapper_parts(func_name).or_else(|| method_descriptor_parts(func_name))
+        {
+            return self.builtin_descriptor_get(
+                receiver.clone(),
+                func_name,
+                owner_name,
+                method_name,
+                pos,
+                has_kw,
+            );
         }
         // #2704: `super(cls).__get__(obj, owner)` — the unbound super object is
         // a descriptor.  Binding it to a non-None `obj` yields the concrete

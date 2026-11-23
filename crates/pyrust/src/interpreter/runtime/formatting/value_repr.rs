@@ -116,7 +116,10 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             {
                 return Ok(rendered);
             }
-            if !is_object_repr || instance_builtin_data(&instance_rc).is_none() {
+            if !is_object_repr
+                || (instance_builtin_data(&instance_rc).is_none()
+                    && !pyrust_core::is_exception_instance(&instance_rc))
+            {
                 let result =
                     invoke_class_method(interp, method_val, Value::py_instance(instance_rc), &[])?;
                 return if matches!(result.kind(), ValueKind::Str(_)) {

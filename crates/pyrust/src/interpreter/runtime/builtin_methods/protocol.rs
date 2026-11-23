@@ -153,13 +153,61 @@ impl Interpreter {
             let h = hash_value_with_interp(self, &self_arg.value)?;
             return Ok(Value::int(h));
         }
-        let object_fn: &'static str = if method == "__repr__" {
-            "object.__repr__"
-        } else {
-            "object.__str__"
-        };
-        let dispatch = crate::builtin_registry::lookup(object_fn)
-            .unwrap_or_else(|| panic!("{object_fn} must be in the registry"));
+        if method == "__repr__" {
+            let self_val = &self_arg.value;
+            if let ValueKind::PyInstance(inst_rc) = self_val.kind() {
+                let inst_rc = Rc::clone(inst_rc);
+                if let Some(backing) = instance_builtin_data(&inst_rc) {
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    let s = if backing.is_list() || backing.is_dict() || backing.is_tuple() {
+                        crate::interpreter::render_value_repr(self, &backing)?
+                    } else if let Some(is_empty) = backing.set_len().map(|len| len == 0) {
+                        let class_name = class.borrow().name.clone();
+                        if is_empty {
+                            format!("{class_name}()")
+                        } else {
+                            let inner = crate::interpreter::render_value_repr(self, &backing)?;
+                            format!("{class_name}({inner})")
+                        }
+                    } else {
+                        match backing.kind() {
+                            ValueKind::Str(_)
+                            | ValueKind::Int(_)
+                            | ValueKind::BigInt(_)
+                            | ValueKind::Bool(_)
+                            | ValueKind::Float(_)
+                            | ValueKind::Complex(_, _)
+                            | ValueKind::Bytes(_) => backing.repr_raw(),
+                            ValueKind::BuiltinObject { ops, .. }
+                                if ops.canonical_class_tag()
+                                    == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
+                            {
+                                let class_name = class.borrow().name.clone();
+                                let items = pyrust_builtins::frozenset::as_items(&backing);
+                                let is_empty = items.as_ref().is_none_or(|rc| rc.is_empty());
+                                if is_empty {
+                                    format!("{class_name}()")
+                                } else {
+                                    let snapshot: Vec<_> = items.unwrap().iter().cloned().collect();
+                                    let mut parts = Vec::with_capacity(snapshot.len());
+                                    for k in &snapshot {
+                                        parts.push(crate::interpreter::render_key_repr(self, k)?);
+                                    }
+                                    format!("{class_name}({{{}}})", parts.join(", "))
+                                }
+                            }
+                            _ => crate::interpreter::render_value_repr(self, &backing)?,
+                        }
+                    };
+                    return Ok(Value::string(s));
+                }
+            }
+            return Ok(Value::string(crate::interpreter::render_value_repr(
+                self, self_val,
+            )?));
+        }
+        let dispatch = crate::builtin_registry::lookup("object.__str__")
+            .expect("object.__str__ must be in the registry");
         dispatch(self, args)
     }
 
