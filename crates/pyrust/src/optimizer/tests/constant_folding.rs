@@ -161,6 +161,48 @@ fn binop_const_fusion_skips_scratch_that_crosses_a_jump_target() {
 }
 
 #[test]
+fn binop_const_fusion_handles_wide_temp_indices_past_inline_bitset_and_slot_limits() {
+    use crate::ast::BinaryOp;
+    // Exercise both heap-spill paths of `load_const_dead_after_use` and
+    // `pass_binop_const_fusion` (issue #2905): temp offset > 256 spills
+    // `TempBitset` past its 256-bit inline array and spills `TempSlotBuf` /
+    // `last_read_inline` past 64 slots.  Reg 302 (offset 300 from num_locals=2)
+    // is reloaded as a block-local loop scratch and must fuse; reg 305 (offset
+    // 303) crosses the back-edge target and must NOT fuse.
+    let num_locals = 2u32;
+    let local_scratch = 302u32;
+    let escaping_scratch = 305u32;
+    let insns = vec![
+        Insn::LoadConst(escaping_scratch, 3), // 0: loaded before loop
+        Insn::LoadConst(local_scratch, 0),    // 1: ← back-edge target; block-local
+        Insn::BinOp(2, 0, BinaryOp::Lt, local_scratch), // 2: fuse
+        Insn::JumpIfFalse(2, 6),              // 3: exit
+        Insn::LoadConst(local_scratch, 1),    // 4: reload block-local scratch
+        Insn::BinOp(2, 0, BinaryOp::Mod, local_scratch), // 5: fuse
+        Insn::BinOp(4, 2, BinaryOp::Add, escaping_scratch), // 6: reads escaping_scratch across back-edge
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),       // 7: i += 1
+        Insn::Jump(-8),                                     // 8: back-edge to 1
+        Insn::Return(0),                                    // 9
+    ];
+    let out = pass_binop_const_fusion(insns, num_locals);
+    assert!(
+        !out.iter()
+            .any(|insn| matches!(insn, Insn::LoadConst(r, _) if *r == local_scratch)),
+        "wide block-local scratch temp must still fuse: {out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|insn| matches!(insn, Insn::LoadConst(r, 3) if *r == escaping_scratch)),
+        "wide escaping scratch temp crossing back-edge must NOT fuse: {out:?}"
+    );
+    assert!(
+        out.iter()
+            .any(|insn| matches!(insn, Insn::BinOpConst(2, 0, BinaryOp::Lt, 0, false))),
+        "loop bound with wide temp index must fuse into BinOpConst: {out:?}"
+    );
+}
+
+#[test]
 fn binop_const_fusion_skips_when_reg_is_local() {
     use crate::ast::BinaryOp;
     // r=1 < num_locals=3  → must NOT fuse (register could be a local variable)
