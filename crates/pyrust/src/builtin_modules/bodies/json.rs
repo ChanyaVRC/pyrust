@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::Interpreter;
-use crate::value::{PyKey, Value, ValueKind};
+use crate::value::{PyKey, Value};
 use pyrust_derive::pyrust_module;
 
 /// Python-source definitions for every public `json` member.  Exec'd once at
@@ -44,17 +44,6 @@ pub(crate) fn inject_python_members(
         .ok_or_else(|| PyError::Runtime("json: exec namespace not a dict".into()))?;
     for name in JSON_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            // `JSONDecodeError` renders its repr via `__module__`; the exec
-            // namespace's `__name__` defaults to `__main__`, so override it to
-            // `json` so `repr(json.JSONDecodeError(...))` and qualname match.
-            if name == "JSONDecodeError"
-                && let ValueKind::PyClass(cls_rc) = val.kind()
-            {
-                cls_rc
-                    .borrow_mut()
-                    .attrs
-                    .insert("__module__".to_string(), Value::string("json"));
-            }
             module
                 .borrow_mut()
                 .attrs

@@ -25,6 +25,8 @@ class JSONDecodeError(ValueError):
     colno: The column corresponding to pos
     """
 
+    __module__ = "json.decoder"
+
     def __init__(self, msg, doc, pos):
         lineno = doc.count('\n', 0, pos) + 1
         colno = pos - doc.rfind('\n', 0, pos)

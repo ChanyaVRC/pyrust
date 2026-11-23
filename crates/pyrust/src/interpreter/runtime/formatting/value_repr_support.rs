@@ -106,6 +106,9 @@ pub(crate) fn render_instance_str(
             {
                 render_instance_str(interp, &owner)
             }
+            ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
+                render_value_repr(interp, value)
+            }
             // Issue #2771: `str(cls)` / `print(cls)` dispatches the metaclass
             // `__str__` (falling back to `__repr__`) when overridden; returns
             // `None` for an ordinary class so plain classes keep `to_py_str()`.

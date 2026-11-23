@@ -40,6 +40,12 @@ impl Interpreter {
                 ],
             );
         }
+        if matches!(
+            value.kind(),
+            ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. }
+        ) {
+            return Ok(Value::string(render_value_repr(self, value)?));
+        }
         // Issue #2936: `str(mappingproxy)` is `str(proxied)`, which needs
         // interpreter dispatch when the proxied object is a dict subclass
         // instance.  Only owner-carrying proxies are affected, and the
@@ -80,9 +86,15 @@ impl Interpreter {
         let owner_carrying_mappingproxy = spec.is_empty()
             && value.is_builtin_object()
             && pyrust_builtins::mapping_proxy::owner_of(value).is_some();
+        let bound_method_empty_spec = spec.is_empty()
+            && matches!(
+                value.kind(),
+                ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. }
+            );
         if matches!(value.kind(), ValueKind::PyInstance(_))
             || class_with_custom_metaclass
             || owner_carrying_mappingproxy
+            || bound_method_empty_spec
             || native_iterator_class(value).is_some()
         {
             return self.dispatch_dunder_format(value, spec);
@@ -174,6 +186,14 @@ impl Interpreter {
             && pyrust_builtins::mapping_proxy::owner_of(value).is_some()
         {
             return Ok(Value::string(render_instance_str(self, value)?));
+        }
+        if spec.is_empty()
+            && matches!(
+                value.kind(),
+                ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. }
+            )
+        {
+            return Ok(Value::string(render_value_repr(self, value)?));
         }
         let ValueKind::PyInstance(inst) = value.kind() else {
             return apply_format_spec(value, spec);

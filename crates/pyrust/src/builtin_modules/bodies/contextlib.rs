@@ -31,7 +31,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::Interpreter;
 use crate::interpreter::{class_is_subclass_of, is_stop_iteration_error};
-use crate::value::{InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyInstance, PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 const INTERNAL_CLASS_NAMES: [&str; 3] = [
@@ -238,7 +238,7 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<Option<Value>> {
-    let ns = Value::dict(PyDict::default());
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     // Seed the exec namespace with the names the Python source references at
     // class-definition time (`ABC`, `abstractmethod`, `wraps`).  pyrust's
     // `exec(src, globals)` does not make an `import` executed inside `src`

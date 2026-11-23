@@ -21,9 +21,13 @@ class CancelledError(BaseException):
     """The operation has been cancelled (matches CPython's
     asyncio.CancelledError, which subclasses BaseException since 3.8)."""
 
+    __module__ = "asyncio.exceptions"
+
 
 class InvalidStateError(Exception):
     """The operation is not allowed in this state."""
+
+    __module__ = "asyncio.exceptions"
 
 
 # asyncio.TimeoutError is the builtin TimeoutError since CPython 3.11 (it used
@@ -41,6 +45,8 @@ _FINISHED = "FINISHED"
 class Future:
     """A minimal asyncio.Future: a result-or-exception holder that a coroutine
     can `await`, plus done-callbacks the event loop uses to wake waiters."""
+
+    __module__ = "_asyncio"
 
     def __init__(self, loop=None):
         self._loop = loop if loop is not None else _get_running_loop()
@@ -135,6 +141,8 @@ class Task(Future):
     """A Future that drives a coroutine: it steps the coroutine until the
     coroutine awaits a *pending* Future, suspends on that Future, and resumes
     when the Future resolves."""
+
+    __module__ = "_asyncio"
 
     def __init__(self, coro, loop=None):
         super().__init__(loop=loop)

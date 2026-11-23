@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::Interpreter;
-use crate::value::{PyDict, PyKey, Value, ValueKind};
+use crate::value::{PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 /// Python-source definitions for every public `statistics` member.  Exec'd
@@ -56,7 +56,7 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<Option<Value>> {
-    let ns = Value::dict(PyDict::default());
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     interp.exec_source(STATISTICS_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()

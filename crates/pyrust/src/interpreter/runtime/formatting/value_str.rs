@@ -11,7 +11,12 @@ impl Interpreter {
         // Concrete bytearray/deque iterators use GeneratorCell only as their
         // storage carrier. Their str is the concrete iterator repr, never the
         // generic `<generator object>` fallback.
-        if native_iterator_class(value).is_some() {
+        if native_iterator_class(value).is_some()
+            || matches!(
+                value.kind(),
+                ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. }
+            )
+        {
             return render_value_repr(self, value);
         }
         // `str(cls)` dispatches `type(cls).__str__(cls)` (falling back to the
