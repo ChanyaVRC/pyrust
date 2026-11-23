@@ -191,6 +191,31 @@ impl Interpreter {
             "modules".to_string(),
             self.bootstrap_module_registry.clone(),
         );
+        // Fresh per-interpreter mutable sys containers and aliases (#2970).
+        let orig_argv: Vec<Value> = self.script_argv.iter().map(Value::string).collect();
+        sys.insert_attr("orig_argv".to_string(), Value::list(orig_argv));
+        sys.insert_attr("warnoptions".to_string(), Value::list(Vec::new()));
+        sys.insert_attr("meta_path".to_string(), Value::list(Vec::new()));
+        sys.insert_attr("path_hooks".to_string(), Value::list(Vec::new()));
+        sys.insert_attr(
+            "path_importer_cache".to_string(),
+            Value::dict(PyDict::default()),
+        );
+        sys.insert_attr("_xoptions".to_string(), Value::dict(PyDict::default()));
+        // Keep `sys.__stdout__ is sys.stdout` (and stderr/stdin/hooks) exact.
+        for (src, alias) in [
+            ("stdout", "__stdout__"),
+            ("stderr", "__stderr__"),
+            ("stdin", "__stdin__"),
+            ("displayhook", "__displayhook__"),
+            ("excepthook", "__excepthook__"),
+            ("unraisablehook", "__unraisablehook__"),
+            ("breakpointhook", "__breakpointhook__"),
+        ] {
+            if let Some(val) = sys.get_attr_value(src) {
+                sys.insert_attr(alias.to_string(), val);
+            }
+        }
     }
 
     /// Snapshot the import roots currently exposed through `sys.path`.
@@ -268,9 +293,8 @@ impl Interpreter {
                 // value so `os.path is direct_os_path` matches CPython.
                 if let ValueKind::PyModule(m) = val.kind() {
                     let submodule_attrs: Vec<String> = {
-                        let borrowed = m.borrow();
-                        borrowed
-                            .attrs
+                        let snapshot = m.borrow().attrs_snapshot();
+                        snapshot
                             .iter()
                             .filter_map(|(attr_name, attr_val)| {
                                 // Only consider attrs that are themselves
@@ -340,6 +364,7 @@ impl Interpreter {
                     // warnings state mirrors the singleton `warnings` module
                     // already shared through `module_cache`/`sys.modules`.
                     warnings_state: Rc::clone(&self.warnings_state),
+                    sys_state: Rc::clone(&self.sys_state),
                     // This child is an implementation detail of importing a
                     // module into the same Python interpreter. Start with the
                     // parent's integer conversion policy; changes are copied

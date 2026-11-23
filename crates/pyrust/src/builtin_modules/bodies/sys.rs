@@ -11,8 +11,9 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    get_call_depth, get_int_max_str_digits as interpreter_int_max_str_digits, get_recursion_limit,
-    instantiate_exception, lookup_name_in_module, reject_keyword_args_expanded,
+    cached_builtins_module, get_call_depth,
+    get_int_max_str_digits as interpreter_int_max_str_digits, get_recursion_limit,
+    instantiate_exception, lookup_name_in_module, reject_keyword_args_expanded, render_value_repr,
     set_int_max_str_digits as set_interpreter_int_max_str_digits, set_recursion_limit,
     value_type_name_str,
 };
@@ -117,6 +118,27 @@ pyrust_module! {
         // compiled into the interpreter.
         // <https://docs.python.org/3/library/sys.html#sys.builtin_module_names>
         "builtin_module_names" => make_builtin_module_names(),
+        // CPython 3.12 surface additions (issue #2970).
+        "api_version"          => Value::int(1013),
+        "dont_write_bytecode"  => Value::bool_(false),
+        "float_repr_style"     => Value::string("short"),
+        "platlibdir"           => Value::string(sys_platlibdir()),
+        "pycache_prefix"       => Value::none(),
+        "orig_argv"            => Value::list(Vec::new()),
+        "warnoptions"          => Value::list(Vec::new()),
+        "meta_path"            => Value::list(Vec::new()),
+        "path_hooks"           => Value::list(Vec::new()),
+        "path_importer_cache"  => Value::dict(crate::value::PyDict::default()),
+        "_xoptions"            => Value::dict(crate::value::PyDict::default()),
+        "stdlib_module_names"  => make_stdlib_module_names(),
+        "thread_info"          => make_thread_info(),
+        "__stdout__"           => Value::none(),
+        "__stderr__"           => Value::none(),
+        "__stdin__"            => Value::none(),
+        "__displayhook__"      => Value::none(),
+        "__excepthook__"       => Value::none(),
+        "__unraisablehook__"   => Value::none(),
+        "__breakpointhook__"   => Value::none(),
     }
 
     /// CPython: sys.exit([arg]) — raises `SystemExit(arg)`.
@@ -440,6 +462,562 @@ pyrust_module! {
             ));
         }
         Ok(Value::bool_(false))
+    }
+
+    /// CPython: sys.getfilesystemencoding() — always 'utf-8' on Python 3.12.
+    fn getfilesystemencoding(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "getfilesystemencoding() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        Ok(Value::string("utf-8"))
+    }
+
+    /// CPython: sys.getfilesystemencodeerrors() — 'surrogatepass' on Windows,
+    /// 'surrogateescape' on Unix/macOS.
+    fn getfilesystemencodeerrors(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "getfilesystemencodeerrors() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let err = if cfg!(windows) {
+            "surrogatepass"
+        } else {
+            "surrogateescape"
+        };
+        Ok(Value::string(err))
+    }
+
+    /// CPython: sys.getswitchinterval() — thread switch interval in seconds.
+    fn getswitchinterval(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "getswitchinterval() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        Ok(Value::float(_interp.sys_state.borrow().switch_interval))
+    }
+
+    /// CPython: sys.setswitchinterval(interval) — set the thread switch interval.
+    fn setswitchinterval(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "setswitchinterval() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let interval = match args[0].value.kind() {
+            ValueKind::Float(f) => f,
+            ValueKind::Int(i) => i as f64,
+            ValueKind::Bool(b) => if b { 1.0 } else { 0.0 },
+            ValueKind::BigInt(b) => {
+                use num_traits::ToPrimitive;
+                b.to_f64().unwrap_or(f64::INFINITY)
+            }
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "must be real number, not {}",
+                        value_type_name_str(&args[0].value)
+                    ),
+                ));
+            }
+        };
+        if interval <= 0.0 || interval.is_nan() {
+            return Err(PyError::named(
+                "ValueError",
+                "switch interval must be strictly positive".to_string(),
+            ));
+        }
+        _interp.sys_state.borrow_mut().switch_interval = interval;
+        Ok(Value::none())
+    }
+
+    /// CPython: sys.get_coroutine_origin_tracking_depth().
+    fn get_coroutine_origin_tracking_depth(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "get_coroutine_origin_tracking_depth() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        Ok(Value::int(
+            _interp.sys_state.borrow().coroutine_origin_tracking_depth as i64,
+        ))
+    }
+
+    /// CPython: sys.set_coroutine_origin_tracking_depth(depth).
+    fn set_coroutine_origin_tracking_depth(args) -> Result<Value> {
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "set_coroutine_origin_tracking_depth() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        if let Some(kw) = args[0].name.as_deref()
+            && kw != "depth"
+        {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'{kw}' is an invalid keyword argument for set_coroutine_origin_tracking_depth()"
+                ),
+            ));
+        }
+        let depth = _interp.value_to_isize(
+            &args[0].value,
+            "Python int too large to convert to C int",
+        )?;
+        if depth < 0 {
+            return Err(PyError::named(
+                "ValueError",
+                "depth must be >= 0".to_string(),
+            ));
+        }
+        _interp
+            .sys_state
+            .borrow_mut()
+            .coroutine_origin_tracking_depth = depth as usize;
+        Ok(Value::none())
+    }
+
+    /// CPython: sys.getprofile() — return the current profiler function or None.
+    fn getprofile(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("getprofile() takes no arguments ({} given)", args.len()),
+            ));
+        }
+        Ok(_interp.sys_state.borrow().profile_func.clone())
+    }
+
+    /// CPython: sys.setprofile(profilefunc) — install or clear the profile hook.
+    fn setprofile(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "setprofile() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        _interp.sys_state.borrow_mut().profile_func = args[0].value.clone();
+        Ok(Value::none())
+    }
+
+    /// CPython: sys.gettrace() — return the current trace function or None.
+    fn gettrace(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("gettrace() takes no arguments ({} given)", args.len()),
+            ));
+        }
+        Ok(_interp.sys_state.borrow().trace_func.clone())
+    }
+
+    /// CPython: sys.settrace(tracefunc) — install or clear the trace hook.
+    fn settrace(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "settrace() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        _interp.sys_state.borrow_mut().trace_func = args[0].value.clone();
+        Ok(Value::none())
+    }
+
+    /// CPython: sys.get_asyncgen_hooks() — return `asyncgen_hooks(firstiter, finalizer)`.
+    fn get_asyncgen_hooks(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "get_asyncgen_hooks() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let (firstiter, finalizer) = {
+            let state = _interp.sys_state.borrow();
+            (state.asyncgen_firstiter.clone(), state.asyncgen_finalizer.clone())
+        };
+        Ok(make_asyncgen_hooks(firstiter, finalizer))
+    }
+
+    /// CPython: sys.set_asyncgen_hooks([firstiter[, finalizer]]).
+    fn set_asyncgen_hooks(args) -> Result<Value> {
+        if args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "set_asyncgen_hooks() takes at most 2 arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let mut firstiter: Option<Value> = None;
+        let mut finalizer: Option<Value> = None;
+        let mut pos_idx = 0usize;
+        for arg in args {
+            match arg.name.as_deref() {
+                None => {
+                    if pos_idx == 0 {
+                        firstiter = Some(arg.value.clone());
+                    } else {
+                        finalizer = Some(arg.value.clone());
+                    }
+                    pos_idx += 1;
+                }
+                Some("firstiter") => {
+                    if firstiter.is_some() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "argument for set_asyncgen_hooks() given by name ('firstiter') and position (1)".to_string(),
+                        ));
+                    }
+                    firstiter = Some(arg.value.clone());
+                }
+                Some("finalizer") => {
+                    if finalizer.is_some() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "argument for set_asyncgen_hooks() given by name ('finalizer') and position (2)".to_string(),
+                        ));
+                    }
+                    finalizer = Some(arg.value.clone());
+                }
+                Some(other) => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("'{other}' is an invalid keyword argument for set_asyncgen_hooks()"),
+                    ));
+                }
+            }
+        }
+        if let Some(ref f) = firstiter
+            && !f.is_none()
+            && !sys_value_is_callable(f)
+        {
+            return Err(PyError::named(
+                "TypeError",
+                format!("callable firstiter expected, got {}", value_type_name_str(f)),
+            ));
+        }
+        if let Some(ref f) = finalizer
+            && !f.is_none()
+            && !sys_value_is_callable(f)
+        {
+            return Err(PyError::named(
+                "TypeError",
+                format!("callable finalizer expected, got {}", value_type_name_str(f)),
+            ));
+        }
+        let mut state = _interp.sys_state.borrow_mut();
+        if let Some(f) = firstiter {
+            state.asyncgen_firstiter = f;
+        }
+        if let Some(f) = finalizer {
+            state.asyncgen_finalizer = f;
+        }
+        Ok(Value::none())
+    }
+
+    /// CPython: sys.addaudithook(hook) — register an audit hook callable.
+    fn addaudithook(args) -> Result<Value> {
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("addaudithook() takes exactly one argument ({} given)", args.len()),
+            ));
+        }
+        if let Some(kw) = args[0].name.as_deref()
+            && kw != "hook"
+        {
+            return Err(PyError::named(
+                "TypeError",
+                format!("'{kw}' is an invalid keyword argument for addaudithook()"),
+            ));
+        }
+        let hook = args[0].value.clone();
+        if !sys_value_is_callable(&hook) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "addaudithook() argument must be callable, not {}",
+                    value_type_name_str(&hook)
+                ),
+            ));
+        }
+        _interp.sys_state.borrow_mut().audit_hooks.push(hook);
+        Ok(Value::none())
+    }
+
+    /// CPython: sys.audit(event, *args) — dispatch an auditing event to all hooks.
+    fn audit(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "audit() missing required argument 'event' (pos 1)".to_string(),
+            ));
+        }
+        let event = args[0].value.clone();
+        if event.as_str().is_none() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "audit() argument 1 must be str, not {}",
+                    value_type_name_str(&event)
+                ),
+            ));
+        }
+        let hooks: Vec<Value> = _interp.sys_state.borrow().audit_hooks.clone();
+        if hooks.is_empty() {
+            return Ok(Value::none());
+        }
+        let event_args = Value::tuple(args[1..].iter().map(|a| a.value.clone()).collect());
+        let call_args = [
+            ExpandedCallArg {
+                name: None,
+                value: event,
+            },
+            ExpandedCallArg {
+                name: None,
+                value: event_args,
+            },
+        ];
+        for hook in hooks {
+            _interp.call_function_expanded(hook, &call_args)?;
+        }
+        Ok(Value::none())
+    }
+
+    /// CPython: sys.displayhook(value) — print repr(value) to stdout and bind
+    /// `builtins._ = value` unless `value is None`.
+    fn displayhook(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "displayhook() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let val = args[0].value.clone();
+        if val.is_none() {
+            return Ok(Value::none());
+        }
+        let rendered = render_value_repr(_interp, &val)?;
+        let line = format!("{rendered}\n");
+        let sys_mod = _interp.load_module("sys")?;
+        let stdout = _interp.get_attr(&sys_mod, "stdout")?;
+        if stdout.is_none() {
+            return Err(PyError::Runtime("lost sys.stdout".to_string()));
+        }
+        let write_fn = _interp.get_attr(&stdout, "write")?;
+        _interp.call_function_expanded(
+            write_fn,
+            &[ExpandedCallArg {
+                name: None,
+                value: Value::string(line),
+            }],
+        )?;
+        let builtins_mod = cached_builtins_module();
+        if let ValueKind::PyModule(m) = builtins_mod.kind() {
+            m.borrow_mut().insert_attr("_".to_string(), val);
+        }
+        Ok(Value::none())
+    }
+
+    /// CPython: sys.excepthook(exctype, value, traceback) — print exception to stderr.
+    fn excepthook(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 3 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "excepthook() takes exactly 3 arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let exctype = &args[0].value;
+        let value = &args[1].value;
+        let type_name = match exctype.kind() {
+            ValueKind::PyClass(c) => c.borrow().name.clone(),
+            _ => value_type_name_str(value).to_string(),
+        };
+        let msg = value.to_py_str();
+        let line = if msg.is_empty() {
+            format!("{type_name}\n")
+        } else {
+            format!("{type_name}: {msg}\n")
+        };
+        let sys_mod = _interp.load_module("sys")?;
+        let stderr = _interp.get_attr(&sys_mod, "stderr")?;
+        if !stderr.is_none() {
+            let write_fn = _interp.get_attr(&stderr, "write")?;
+            _interp.call_function_expanded(
+                write_fn,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: Value::string(line),
+                }],
+            )?;
+        }
+        Ok(Value::none())
+    }
+
+    /// CPython: sys.unraisablehook(unraisable) — handle an unraisable exception.
+    fn unraisablehook(args) -> Result<Value> {
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "unraisablehook() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        if let Some(kw) = args[0].name.as_deref()
+            && kw != "unraisable"
+        {
+            return Err(PyError::named(
+                "TypeError",
+                format!("'{kw}' is an invalid keyword argument for unraisablehook()"),
+            ));
+        }
+        let sys_mod = _interp.load_module("sys")?;
+        let stderr = _interp.get_attr(&sys_mod, "stderr")?;
+        if !stderr.is_none() {
+            let msg = _interp
+                .get_attr(&args[0].value, "err_msg")
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| "Exception ignored in".to_string());
+            let write_fn = _interp.get_attr(&stderr, "write")?;
+            _interp.call_function_expanded(
+                write_fn,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: Value::string(format!("{msg}\n")),
+                }],
+            )?;
+        }
+        Ok(Value::none())
+    }
+
+    /// CPython: sys.breakpointhook(*args, **kwargs).
+    fn breakpointhook(_args) -> Result<Value> {
+        if std::env::var("PYTHONBREAKPOINT").ok().as_deref() == Some("0") {
+            return Ok(Value::none());
+        }
+        Ok(Value::none())
+    }
+
+    /// CPython: sys.call_tracing(func, args) — call `func(*args)`.
+    fn call_tracing(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "call_tracing() takes exactly 2 arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let func = args[0].value.clone();
+        let Some(items) = args[1].value.as_tuple() else {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "call_tracing() argument 2 must be tuple, not {}",
+                    value_type_name_str(&args[1].value)
+                ),
+            ));
+        };
+        let call_args: Vec<ExpandedCallArg> = items
+            .iter()
+            .map(|v| ExpandedCallArg {
+                name: None,
+                value: v.clone(),
+            })
+            .collect();
+        _interp.call_function_expanded(func, &call_args)
+    }
+
+    /// CPython: sys.getallocatedblocks() — implementation-specific count.
+    fn getallocatedblocks(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "getallocatedblocks() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        Ok(Value::int(1))
+    }
+
+    /// CPython: sys._clear_type_cache() — no-op returning None.
+    fn _clear_type_cache(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "_clear_type_cache() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        Ok(Value::none())
     }
 
     // ── version_info rich-comparison and sequence methods ────────────────────
@@ -850,6 +1428,295 @@ fn make_implementation() -> Value {
 fn make_builtin_module_names() -> Value {
     let names = ["builtins", "sys", "_thread", "errno", "time", "gc"];
     Value::tuple(names.iter().map(|n| Value::string(*n)).collect())
+}
+
+/// Platform library directory name matching CPython 3.12 (`"DLLs"` on Windows,
+/// `"lib"` on Unix/macOS).
+fn sys_platlibdir() -> &'static str {
+    if cfg!(windows) { "DLLs" } else { "lib" }
+}
+
+/// Build `sys.stdlib_module_names` — a `frozenset` of Python 3.12 standard
+/// library module names (issue #2970).
+fn make_stdlib_module_names() -> Value {
+    const NAMES: &[&str] = &[
+        "__future__",
+        "_abc",
+        "_ast",
+        "_bisect",
+        "_codecs",
+        "_collections",
+        "_collections_abc",
+        "_csv",
+        "_datetime",
+        "_decimal",
+        "_functools",
+        "_heapq",
+        "_imp",
+        "_io",
+        "_json",
+        "_operator",
+        "_pickle",
+        "_random",
+        "_signal",
+        "_socket",
+        "_sre",
+        "_stat",
+        "_string",
+        "_struct",
+        "_thread",
+        "_threading_local",
+        "_tokenize",
+        "_tracemalloc",
+        "_typing",
+        "_warnings",
+        "_weakref",
+        "abc",
+        "argparse",
+        "array",
+        "ast",
+        "asyncio",
+        "atexit",
+        "base64",
+        "bdb",
+        "binascii",
+        "bisect",
+        "builtins",
+        "bz2",
+        "calendar",
+        "cmath",
+        "cmd",
+        "code",
+        "codecs",
+        "codeop",
+        "collections",
+        "colorsys",
+        "compileall",
+        "concurrent",
+        "configparser",
+        "contextlib",
+        "contextvars",
+        "copy",
+        "copyreg",
+        "cProfile",
+        "csv",
+        "ctypes",
+        "dataclasses",
+        "datetime",
+        "dbm",
+        "decimal",
+        "difflib",
+        "dis",
+        "doctest",
+        "email",
+        "encodings",
+        "enum",
+        "errno",
+        "faulthandler",
+        "fcntl",
+        "filecmp",
+        "fileinput",
+        "fnmatch",
+        "fractions",
+        "ftplib",
+        "functools",
+        "gc",
+        "genericpath",
+        "getopt",
+        "getpass",
+        "gettext",
+        "glob",
+        "graphlib",
+        "grp",
+        "gzip",
+        "hashlib",
+        "heapq",
+        "hmac",
+        "html",
+        "http",
+        "idlelib",
+        "imaplib",
+        "importlib",
+        "inspect",
+        "io",
+        "ipaddress",
+        "itertools",
+        "json",
+        "keyword",
+        "linecache",
+        "locale",
+        "logging",
+        "lzma",
+        "mailbox",
+        "marshal",
+        "math",
+        "mimetypes",
+        "mmap",
+        "modulefinder",
+        "multiprocessing",
+        "netrc",
+        "nt",
+        "ntpath",
+        "numbers",
+        "operator",
+        "optparse",
+        "os",
+        "pathlib",
+        "pdb",
+        "pickle",
+        "pickletools",
+        "pkgutil",
+        "platform",
+        "plistlib",
+        "poplib",
+        "posix",
+        "posixpath",
+        "pprint",
+        "profile",
+        "pstats",
+        "pty",
+        "pwd",
+        "py_compile",
+        "pyclbr",
+        "pydoc",
+        "queue",
+        "quopri",
+        "random",
+        "re",
+        "readline",
+        "reprlib",
+        "resource",
+        "rlcompleter",
+        "runpy",
+        "sched",
+        "secrets",
+        "select",
+        "selectors",
+        "shelve",
+        "shlex",
+        "shutil",
+        "signal",
+        "site",
+        "smtplib",
+        "socket",
+        "socketserver",
+        "sqlite3",
+        "ssl",
+        "stat",
+        "statistics",
+        "string",
+        "stringprep",
+        "struct",
+        "subprocess",
+        "symtable",
+        "sys",
+        "sysconfig",
+        "syslog",
+        "tabnanny",
+        "tarfile",
+        "tempfile",
+        "termios",
+        "textwrap",
+        "threading",
+        "time",
+        "timeit",
+        "tkinter",
+        "token",
+        "tokenize",
+        "tomllib",
+        "trace",
+        "traceback",
+        "tracemalloc",
+        "tty",
+        "turtle",
+        "types",
+        "typing",
+        "unicodedata",
+        "unittest",
+        "urllib",
+        "uuid",
+        "venv",
+        "warnings",
+        "wave",
+        "weakref",
+        "webbrowser",
+        "winreg",
+        "winsound",
+        "wsgiref",
+        "xml",
+        "xmlrpc",
+        "zipapp",
+        "zipfile",
+        "zipimport",
+        "zlib",
+        "zoneinfo",
+    ];
+    let mut set = crate::value::PySet::default();
+    for &name in NAMES {
+        set.insert(crate::value::PyKey::str_from(name));
+    }
+    pyrust_builtins::frozenset::frozenset(set)
+}
+
+/// Check whether `value` is callable, matching `builtins.callable()`.
+fn sys_value_is_callable(value: &Value) -> bool {
+    match value.kind() {
+        ValueKind::UserFunction(_)
+        | ValueKind::BuiltinFunction(_)
+        | ValueKind::BoundMethod { .. }
+        | ValueKind::ClassBoundMethod { .. }
+        | ValueKind::PyClass(_) => true,
+        ValueKind::BuiltinObject { .. } => crate::interpreter::is_builtin_callable_adapter(value),
+        ValueKind::PyInstance(inst) => {
+            let class = Rc::clone(&inst.borrow().class);
+            crate::interpreter::lookup_class_attr(&class, "__call__").is_some()
+        }
+        _ => false,
+    }
+}
+
+/// Build a tuple-backed struct-sequence `PyInstance` supporting both named
+/// attribute access and sequence operations (`len`, indexing, unpacking,
+/// tuple equality, `isinstance(..., tuple)`), matching CPython's
+/// `PyStructSequence` for `sys.thread_info` and `sys.get_asyncgen_hooks()`.
+fn make_struct_seq(class_name: &str, fields: Vec<(&str, Value)>) -> Value {
+    let mut attrs = InstanceAttrs::new();
+    let mut tuple_values = Vec::with_capacity(fields.len());
+    for (k, v) in fields {
+        tuple_values.push(v.clone());
+        attrs.insert(k, v);
+    }
+    attrs.set_builtin_data(Value::tuple(tuple_values));
+    let tuple_base = crate::interpreter::primitive_class_by_name("tuple");
+    let class = Rc::new(RefCell::new(PyClass::new(
+        class_name,
+        class_name,
+        tuple_base,
+        indexmap::IndexMap::new(),
+    )));
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+}
+
+/// Build `sys.thread_info` — struct-sequence describing the thread
+/// implementation (`name`, `lock`, `version`).
+fn make_thread_info() -> Value {
+    let (name, lock) = if cfg!(windows) {
+        (Value::string("nt"), Value::none())
+    } else {
+        (Value::string("pthread"), Value::string("semaphore"))
+    };
+    make_struct_seq(
+        "sys.thread_info",
+        vec![("name", name), ("lock", lock), ("version", Value::none())],
+    )
+}
+
+/// Build `sys.asyncgen_hooks(firstiter, finalizer)`.
+fn make_asyncgen_hooks(firstiter: Value, finalizer: Value) -> Value {
+    make_struct_seq(
+        "asyncgen_hooks",
+        vec![("firstiter", firstiter), ("finalizer", finalizer)],
+    )
 }
 
 /// Rough in-memory size estimate for `sys.getsizeof`.  CPython sizes are

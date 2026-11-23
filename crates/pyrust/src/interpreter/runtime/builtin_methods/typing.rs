@@ -54,7 +54,7 @@ impl Interpreter {
             .load_module("typing")
             .ok()
             .and_then(|module| match module.kind() {
-                ValueKind::PyModule(module) => module.borrow().attrs.get(helper_name).cloned(),
+                ValueKind::PyModule(module) => module.borrow().get_attr_value(helper_name),
                 _ => None,
             })
             .ok_or_else(|| PyError::Runtime(format!("typing.{helper_name} unavailable")))?;
@@ -153,7 +153,7 @@ impl Interpreter {
         self.load_module("typing")
             .ok()
             .and_then(|module| match module.kind() {
-                ValueKind::PyModule(module) => module.borrow().attrs.get(name).cloned(),
+                ValueKind::PyModule(module) => module.borrow().get_attr_value(name),
                 _ => None,
             })
             .ok_or_else(|| PyError::Runtime(format!("typing.{name} unavailable")))

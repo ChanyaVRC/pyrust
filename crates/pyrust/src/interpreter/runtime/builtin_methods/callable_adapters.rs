@@ -298,6 +298,19 @@ impl Interpreter {
                 combined.extend(args.iter().cloned());
                 return dispatch(self, &combined).map(Some);
             }
+            if matches!(fn_name.as_str(), "module.__init__" | "module.__repr__") {
+                let mut combined = ExpandedArgBuf::with_capacity(args.len() + 1);
+                combined.push(ExpandedCallArg {
+                    name: None,
+                    value: instance,
+                });
+                combined.extend(args.iter().cloned());
+                return match fn_name.as_str() {
+                    "module.__init__" => call_module_init(&combined).map(Some),
+                    "module.__repr__" => call_module_repr(&combined).map(Some),
+                    _ => unreachable!(),
+                };
+            }
             if let Some(method_name) = fn_name.split_once('.').map(|(_, method)| method) {
                 if is_mutable_builtin_inplace_dunder(method_name)
                     && let Some(backing) = builtin_data_backing(&instance)

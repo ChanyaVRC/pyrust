@@ -208,6 +208,10 @@ pub struct Interpreter {
     /// the handle because they are an implementation detail of the same
     /// Python interpreter and share `sys.modules` with their parent.
     pub(crate) warnings_state: Rc<crate::builtin_modules::warnings::WarningsState>,
+    /// Shared per-interpreter `sys` runtime state (switch interval, coroutine
+    /// origin tracking depth, profile/trace/asyncgen/audit hooks — issue
+    /// #2970). Shared via `Rc` with child filesystem-import interpreters.
+    pub(crate) sys_state: Rc<RefCell<SysRuntimeState>>,
     /// Decimal integer string-conversion limit configured through
     /// `sys.set_int_max_str_digits` (0 means unlimited).
     ///
@@ -349,6 +353,33 @@ pub struct Interpreter {
     /// stashes its inner PEP 657 caret anchor here so the enclosing frame's
     /// `vm_try!` adopts that anchor instead of clobbering it (#2993).
     pub(crate) inlined_comp_escaped_span: Option<Option<(u32, u32, u32, u32)>>,
+}
+
+/// Per-interpreter mutable state backing `sys` runtime getters/setters and
+/// hooks (issue #2970).
+#[derive(Debug)]
+pub(crate) struct SysRuntimeState {
+    pub(crate) switch_interval: f64,
+    pub(crate) coroutine_origin_tracking_depth: usize,
+    pub(crate) profile_func: Value,
+    pub(crate) trace_func: Value,
+    pub(crate) asyncgen_firstiter: Value,
+    pub(crate) asyncgen_finalizer: Value,
+    pub(crate) audit_hooks: Vec<Value>,
+}
+
+impl Default for SysRuntimeState {
+    fn default() -> Self {
+        Self {
+            switch_interval: 0.005,
+            coroutine_origin_tracking_depth: 0,
+            profile_func: Value::none(),
+            trace_func: Value::none(),
+            asyncgen_firstiter: Value::none(),
+            asyncgen_finalizer: Value::none(),
+            audit_hooks: Vec::new(),
+        }
+    }
 }
 
 /// Discriminator for `VmFrameView`: script-level (module-scope) vs.
@@ -527,6 +558,7 @@ impl Default for Interpreter {
             import_module_registry_cache: RefCell::new(None),
             module_class_cache: None,
             warnings_state: Rc::new(crate::builtin_modules::warnings::WarningsState::default()),
+            sys_state: Rc::new(RefCell::new(SysRuntimeState::default())),
             int_max_str_digits: pyrust_core::INT_MAX_STR_DIGITS_DEFAULT,
             recursion_limit: DEFAULT_RECURSION_LIMIT,
             env_pool: Vec::new(),

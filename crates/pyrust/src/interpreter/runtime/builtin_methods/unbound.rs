@@ -12,7 +12,7 @@ impl Interpreter {
         let ValueKind::PyModule(module) = module_val.kind() else {
             return None;
         };
-        let attr = module.borrow().attrs.get(name).cloned()?;
+        let attr = module.borrow().get_attr_value(name)?;
         match attr.kind() {
             ValueKind::PyClass(class) => Some(Rc::clone(class)),
             _ => None,
@@ -149,6 +149,8 @@ impl Interpreter {
                     .insert_slot("default_factory", Value::none());
                 Ok(Value::none())
             }
+            ValueKind::BuiltinFunction("module.__init__") => call_module_init(args),
+            ValueKind::BuiltinFunction("module.__repr__") => call_module_repr(args),
             // Issue #2276: the unbound type-qualified object-level dunders
             // (`str.__hash__` / `int.__repr__` / `str.__str__` /
             // `int.__format__` / …) synthesised by `get_attr_class` for the

@@ -13,6 +13,12 @@ pub(crate) fn function_type_singleton() -> Rc<RefCell<PyClass>> {
     FUNCTION_TYPE.with(Rc::clone)
 }
 
+/// Returns the singleton `module` class (`types.ModuleType` / `type(sys)` —
+/// issue #2970).
+pub(crate) fn module_type_singleton() -> Rc<RefCell<PyClass>> {
+    MODULE_TYPE.with(Rc::clone)
+}
+
 /// Returns the singleton `range` class.  In CPython, `range` is a proper
 /// type (`type(range(5)) is range`), not a builtin function.  This singleton
 /// is registered in `PRIMITIVE_CLASS_DISPATCH` so that calling
@@ -56,6 +62,7 @@ pub(crate) fn dict_view_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>
 pub(crate) fn is_untagged_builtin_type_class(class: &Rc<RefCell<PyClass>>) -> bool {
     let ptr = Rc::as_ptr(class);
     RANGE_CLASS.with(|range| ptr == Rc::as_ptr(range))
+        || MODULE_TYPE.with(|module| ptr == Rc::as_ptr(module))
         || BUILTIN_TYPE_CLASSES.with(|classes| classes.iter().any(|entry| ptr == Rc::as_ptr(entry)))
         || DICT_VIEW_CLASSES.with(|classes| classes.iter().any(|entry| ptr == Rc::as_ptr(entry)))
         || NativeIteratorClass::from_class(class) == Some(NativeIteratorClass::Bytearray)

@@ -119,8 +119,8 @@ pyrust_module! {
         "ClassMethodDescriptorType" => Value::builtin_function(
             pyrust_builtins::classmethod::NATIVE_CLASS_METHOD_DESCRIPTOR_TYPE_NAME,
         ),
-        // CPython: types.ModuleType — `type(sys)`.
-        "ModuleType"          => Value::builtin_function("module"),
+        // CPython: types.ModuleType — `type(sys)` (issue #2970).
+        "ModuleType"          => Value::py_class(crate::interpreter::module_type_singleton()),
         "TracebackType"       => Value::builtin_function(pyrust_builtins::traceback::TYPE_NAME),
         "FrameType"           => Value::builtin_function(pyrust_builtins::frame::TYPE_NAME),
         "GetSetDescriptorType" => Value::builtin_function(

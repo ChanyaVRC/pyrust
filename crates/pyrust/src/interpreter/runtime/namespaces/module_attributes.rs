@@ -70,13 +70,15 @@ impl Interpreter {
         let live_namespace = module.borrow().live_namespace();
         let has_explicit_namespace = filesystem_namespace.is_some() || live_namespace.is_some();
 
-        // Native modules that opt into an exposed namespace (currently the
-        // canonical `sys` module) return their exact backing dict. Attribute
-        // assignment and direct `module.__dict__` mutation therefore share
-        // identity and cache-invalidation state.
+        // Native modules that already hold a live namespace (`sys`,
+        // `types.ModuleType` instances, or built-in modules upgraded on first
+        // `__dict__` read) return their exact backing dict.  Saturate the
+        // mutation token whenever an alias is exposed so caches never observe
+        // stale values after direct dict mutation (#2970).
         if name == "__dict__"
             && let Some(namespace) = live_namespace
         {
+            module.borrow().disable_cache();
             return Ok(namespace);
         }
 
@@ -142,6 +144,9 @@ impl Interpreter {
             if name == "__doc__" {
                 return Ok(Value::string(MODULE_TYPE_DOC));
             }
+            if let Some(bound) = bind_module_class_attr(target, name) {
+                return Ok(bound);
+            }
             let mod_name = module.borrow().name.clone();
             let msg = if name_tombstoned {
                 format!("module has no attribute '{name}'")
@@ -176,54 +181,17 @@ impl Interpreter {
             "__loader__" | "__spec__" => return Ok(Value::none()),
             "__doc__" => return Ok(Value::none()),
             "__dict__" => {
-                // Build a snapshot dict of the module namespace.
-                // Include both the stored attrs and the synthetic
-                // dunder attributes that get_attr synthesises above.
-                // Value::unset() is a deletion tombstone (written by
-                // delete_attr for synthetic dunders); filter it out so
-                // deleted dunders don't appear in __dict__.
-                // `attrs` is insertion ordered (issue #2918), so this dict is
-                // identical run to run. The synthetic dunders go in *first*,
-                // in CPython's slot order, because CPython initialises a
-                // built-in module's dict with `__name__`, `__doc__`,
-                // `__package__`, `__loader__`, `__spec__` before executing the
-                // method table — `list(vars(math))[:5]` is those five names.
-                let attrs_snapshot = module.borrow().attrs.clone();
-                // A slot keeps its head position even when the module stores
-                // its own binding for that name: in CPython the key is already
-                // in the dict, so `math.__name__ = 'x'` rebinds it in place
-                // rather than moving it to the end. Reserve the position with
-                // the synthetic default here and let the `extend` below
-                // overwrite the value — `IndexMap::insert` on a present key
-                // keeps its index. A tombstoned slot (explicitly deleted by
-                // the user) is omitted entirely.
-                let is_live = |key: &str| !attrs_snapshot.get(key).is_some_and(Value::is_unset);
-                let mut d: PyDict =
-                    PyDict::with_capacity_and_hasher(attrs_snapshot.len() + 5, Default::default());
-                if is_live("__name__") {
-                    d.insert(PyKey::str_from("__name__"), Value::string(mod_name));
-                }
-                if is_live("__doc__") {
-                    d.insert(PyKey::str_from("__doc__"), Value::none());
-                }
-                if is_live("__package__") {
-                    d.insert(PyKey::str_from("__package__"), Value::string(String::new()));
-                }
-                if is_live("__loader__") {
-                    d.insert(PyKey::str_from("__loader__"), Value::none());
-                }
-                if is_live("__spec__") {
-                    d.insert(PyKey::str_from("__spec__"), Value::none());
-                }
-                d.extend(
-                    attrs_snapshot
-                        .iter()
-                        .filter(|(_, v)| !v.is_unset())
-                        .map(|(k, v)| (PyKey::str_from(k), v.clone())),
-                );
-                return Ok(Value::dict(d));
+                // Lazily upgrade this built-in module into one live Python
+                // dictionary (issue #2970), preserving PR #2969's five-slot
+                // CPython head and declaration-ordered body so `m.__dict__ is
+                // vars(m)` and mutations through `__dict__` are immediately
+                // visible through attribute access.
+                return Ok(module.borrow_mut().attach_live_namespace_with_dunders());
             }
             _ => {}
+        }
+        if let Some(bound) = bind_module_class_attr(target, name) {
+            return Ok(bound);
         }
         let msg = if name_tombstoned {
             format!("module has no attribute '{name}'")
@@ -236,4 +204,27 @@ impl Interpreter {
             Some(target.clone()),
         ))
     }
+}
+
+/// Resolve an inherited attribute from `types.ModuleType` (or `object`) on a
+/// `PyModule` receiver, binding method descriptors to `target` (#2970).
+fn bind_module_class_attr(target: &Value, name: &str) -> Option<Value> {
+    let attr = lookup_class_attr(&module_type_singleton(), name)?;
+    if name == "__new__" {
+        return Some(attr);
+    }
+    if let Some(wrapped) = pyrust_builtins::classmethod::as_class_method_any(&attr) {
+        return pyrust_builtins::classmethod::bind_wrapped_class_method(
+            wrapped,
+            module_type_singleton(),
+        )
+        .ok();
+    }
+    if let ValueKind::BuiltinFunction(fn_name) = attr.kind() {
+        return Some(pyrust_builtins::super_bound_builtin::super_bound_builtin(
+            fn_name.to_string(),
+            target.clone(),
+        ));
+    }
+    Some(attr)
 }

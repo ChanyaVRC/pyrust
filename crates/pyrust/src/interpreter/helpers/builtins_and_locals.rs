@@ -118,6 +118,9 @@ pub(crate) fn builtin_class_doc(name: &str) -> Option<&'static str> {
         "KeyboardInterrupt" => "Program interrupted by user.",
         "BaseExceptionGroup" => "A combination of multiple unrelated exceptions.",
         "ExceptionGroup" => "A combination of multiple unrelated exceptions.",
+        "module" => {
+            "Create a module object.\n\nThe name must be a string; the optional doc argument can have any type."
+        }
         _ => return None,
     })
 }

@@ -84,3 +84,24 @@ import _module_dict_order_source as source
 print(list(vars(source))[:5] == SLOTS)
 print([name for name in vars(source) if not name.startswith("__")])
 print(list(vars(source)) == list(source.__dict__))
+
+# Issue #2970: built-in module `__dict__` is live storage (not a fresh
+# snapshot), and `types.ModuleType` preserves the same five-slot head and
+# insertion-ordered mutation semantics.
+import types
+
+print(math.__dict__ is vars(math), math.__dict__ is math.__dict__)
+print(sys.__dict__ is vars(sys), sys.__dict__ is sys.__dict__)
+
+mod = types.ModuleType("order_probe")
+print(list(mod.__dict__) == SLOTS, mod.__dict__ is vars(mod))
+mod.alpha = 1
+mod.beta = 2
+mod.gamma = 3
+print(list(mod.__dict__) == SLOTS + ["alpha", "beta", "gamma"])
+del mod.beta
+print(list(mod.__dict__) == SLOTS + ["alpha", "gamma"])
+mod.beta = 20
+print(list(mod.__dict__) == SLOTS + ["alpha", "gamma", "beta"])
+mod.__dict__["alpha"] = 10
+print(list(mod.__dict__) == SLOTS + ["alpha", "gamma", "beta"], mod.alpha == 10)

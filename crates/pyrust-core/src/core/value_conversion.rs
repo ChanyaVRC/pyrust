@@ -350,7 +350,7 @@ impl Value {
                     function.effective_qualname()
                 )
             }
-            ValueKind::PyModule(m) => format!("<module '{}'>", m.borrow().name),
+            ValueKind::PyModule(m) => m.borrow().repr_string(),
             ValueKind::Tuple(items) => {
                 // Cycle detection (#364): tuples are immutable so a *direct*
                 // self-cycle isn't constructible from Python, but a tuple can

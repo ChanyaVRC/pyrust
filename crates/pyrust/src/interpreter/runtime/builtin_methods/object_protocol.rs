@@ -122,14 +122,15 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
         }
         ValueKind::PyModule(module) => {
             let module = module.borrow();
-            let is_filesystem = module.filesystem_namespace().is_some();
+            let has_explicit_namespace =
+                module.filesystem_namespace().is_some() || module.live_namespace().is_some();
             let mut names: Vec<String> = module.attrs_snapshot().into_keys().collect();
             drop(module);
             // Append the synthetic dunder attributes that are returned by
-            // get_attr for built-in modules. Filesystem modules store their
-            // real dunders in the shared namespace and must not resurrect a
-            // deleted one here.
-            if !is_filesystem {
+            // get_attr for built-in modules. Filesystem and live-namespace
+            // modules store their real dunders in the shared namespace and
+            // must not resurrect a deleted one here.
+            if !has_explicit_namespace {
                 for dunder in &[
                     "__name__",
                     "__package__",

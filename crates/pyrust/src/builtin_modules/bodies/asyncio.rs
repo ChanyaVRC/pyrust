@@ -112,9 +112,9 @@ fn arg_to_secs(v: &Value) -> f64 {
 fn asyncio_attr(interp: &mut Interpreter, name: &str) -> Result<Value> {
     let module = interp.load_module("asyncio")?;
     if let ValueKind::PyModule(m) = module.kind()
-        && let Some(v) = m.borrow().attrs.get(name)
+        && let Some(v) = m.borrow().get_attr_value(name)
     {
-        return Ok(v.clone());
+        return Ok(v);
     }
     Err(PyError::Runtime(format!("asyncio: {name} not loaded")))
 }
