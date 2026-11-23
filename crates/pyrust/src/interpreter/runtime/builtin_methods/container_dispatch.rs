@@ -116,6 +116,32 @@ impl Interpreter {
         ))
     }
 
+    /// Allocation-free, execution-free 1-arg fast path for hot builtin
+    /// container mutators (`set.add(int|str)`), called before `exec_call_method`
+    /// allocates `Vec<Value>` and an empty kwargs `PyDict` (#2924).
+    #[inline]
+    pub(super) fn try_dispatch_builtin_container_method_1arg(
+        kind: BuiltinContainerKind,
+        receiver: &Value,
+        method: &str,
+        arg: Value,
+    ) -> Result<std::result::Result<Value, Value>> {
+        if matches!(kind, BuiltinContainerKind::Set)
+            && pyrust_builtins::set::method_spec(method)
+                .is_some_and(|spec| matches!(spec.method(), pyrust_builtins::set::Method::Add))
+        {
+            if let Some(i) = arg.as_int() {
+                receiver.set_add(PyKey::Int(i))?;
+                return Ok(Ok(Value::none()));
+            }
+            if arg.is_str() {
+                receiver.set_add(PyKey::Str(arg))?;
+                return Ok(Ok(Value::none()));
+            }
+        }
+        Ok(Err(arg))
+    }
+
     /// Shared dispatch body for method calls on the six classified builtin
     /// container types (`list` / `dict` / `tuple` / `str` / `bytes` / `set`). Both
     /// `Insn::CallMethod` (no kwargs) and `Insn::CallMethodExpanded`

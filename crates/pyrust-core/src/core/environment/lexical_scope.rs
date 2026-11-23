@@ -170,6 +170,7 @@ impl Environment {
         self.root_namespace
             .value_cache_interest
             .set(self.root_namespace.value_cache_interest.get() | name_mask);
+        self.root_namespace.recompute_sync_fast_check_mask();
     }
 
     /// Register a precomputed name mask for a canonical fallback value that is
@@ -179,6 +180,7 @@ impl Environment {
         self.root_namespace
             .fallback_cache_interest
             .set(self.root_namespace.fallback_cache_interest.get() | name_mask);
+        self.root_namespace.recompute_sync_fast_check_mask();
     }
 
     #[inline]
@@ -186,11 +188,22 @@ impl Environment {
         self.root_namespace.env_binding_interest.set(
             self.root_namespace.env_binding_interest.get() | namespace_name_interest_mask(name),
         );
+        self.root_namespace.recompute_sync_fast_check_mask();
     }
 
     #[inline]
     pub fn namespace_env_binding_may_overlap(&self, name_mask: u64) -> bool {
         self.root_namespace.env_binding_interest.get() & name_mask == name_mask
+    }
+
+    /// Single-bitmask pre-check for `Insn::SyncModuleGlobal` (#2924).
+    ///
+    /// Returns `false` only when no cache interest mask or slow env binding
+    /// overlaps `name_mask`, no globals/module dictionary needs mirroring, and
+    /// no sibling fast-local mirror is active.
+    #[inline(always)]
+    pub fn needs_namespace_module_write_sync(&self, name_mask: u64) -> bool {
+        (self.root_namespace.sync_fast_check_mask.get() & name_mask) == name_mask
     }
 
     /// Register one live Script fast-local register file for synchronization
@@ -240,6 +253,7 @@ impl Environment {
                 .get()
                 .saturating_add(1),
         );
+        self.root_namespace.recompute_sync_fast_check_mask();
         self.root_namespace.fastlocal_mirror_epoch.set(
             self.root_namespace
                 .fastlocal_mirror_epoch
@@ -387,6 +401,7 @@ impl Environment {
             .collect();
         *self.root_namespace.binding_order.borrow_mut() = Some(Box::new(initial));
         self.root_namespace.has_binding_order.set(true);
+        self.root_namespace.recompute_sync_fast_check_mask();
     }
 
     /// Record a binding insertion when the binding-order journal is active.
@@ -784,6 +799,7 @@ impl Environment {
         *self.root_namespace.globals_provider.borrow_mut() =
             Some(NamespaceGlobalsProvider::Explicit { globals, locals });
         self.root_namespace.cache_disabled.set(true);
+        self.root_namespace.recompute_sync_fast_check_mask();
     }
 
     /// Link a filesystem `PyModule` to this root namespace.
@@ -794,6 +810,7 @@ impl Environment {
     /// the shared globals dictionary for constant-only modules.
     pub fn configure_filesystem_module_namespace(&self, module_mutation: ModuleMutationState) {
         self.root_namespace.filesystem_module_backing.set(true);
+        self.root_namespace.recompute_sync_fast_check_mask();
         *self.root_namespace.filesystem_module_mutation.borrow_mut() = Some(module_mutation);
     }
 
@@ -807,6 +824,7 @@ impl Environment {
     pub fn expose_namespace_globals(&self) -> Value {
         let globals = self.root_namespace.globals_provider_snapshot().0;
         self.root_namespace.cache_disabled.set(true);
+        self.root_namespace.recompute_sync_fast_check_mask();
         if let Some(module_mutation) = self
             .root_namespace
             .filesystem_module_mutation
@@ -825,6 +843,7 @@ impl Environment {
         // Once the live dict is authoritative it tracks insertion and deletion
         // order natively, so drop any pre-exposure binding-order journal.
         self.root_namespace.has_binding_order.set(false);
+        self.root_namespace.recompute_sync_fast_check_mask();
         *self.root_namespace.binding_order.borrow_mut() = None;
     }
 

@@ -125,11 +125,12 @@ impl CollectionMutationState {
             Some((_, count)) => *count += 1,
             None => watchers.push((key.clone(), 1)),
         }
-        self.0
-            .dict_layout
-            .borrow()
-            .as_ref()
-            .map_or(0, |layout| layout.entry_count)
+        self.0.has_watchers.set(true);
+        if self.0.has_dict_layout.get() {
+            self.0.dict_layout_entry_count.get()
+        } else {
+            0
+        }
     }
 
     /// Release a matching terminal-key removal watch.
@@ -143,10 +144,16 @@ impl CollectionMutationState {
             return;
         }
         watchers.swap_remove(index);
+        if watchers.is_empty() {
+            self.0.has_watchers.set(false);
+        }
         drop(watchers);
         // Both follow-up tables are populated only by a mutation observed while
-        // this watch was installed, so a walk that ran to completion without one
-        // scans two empty tables here.
+        // a watch was installed; skip both RefCell borrows on the common
+        // unmutated walk (#2924).
+        if !self.0.has_mutation_activity.get() {
+            return;
+        }
         let mut pending = self.0.pending_removed_keys.borrow_mut();
         if let Some(index) = pending.iter().position(|pending| pending == key) {
             pending.swap_remove(index);
@@ -186,6 +193,7 @@ struct DictIterationLayout {
 }
 
 impl DictIterationLayout {
+    #[inline]
     fn for_len(len: usize) -> Self {
         if len == 0 {
             return Self {
@@ -194,10 +202,13 @@ impl DictIterationLayout {
                 usable: 0,
             };
         }
-        let mut table_size = 8usize;
-        while dict_usable_fraction(table_size) < len {
-            table_size = table_size.saturating_mul(2);
-        }
+        // Smallest power of two >= 8 with `floor(2 * table_size / 3) >= len`,
+        // i.e. `table_size >= ceil(3 * len / 2)`.
+        let min_size = len.saturating_add(len / 2).saturating_add(len & 1);
+        let table_size = min_size
+            .checked_next_power_of_two()
+            .unwrap_or(usize::MAX)
+            .max(8);
         Self {
             live_len: len,
             entry_count: len,
@@ -277,14 +288,23 @@ struct CollectionMutationStateInner {
     /// exactly on their terminal entry — one in practice — so linear scans
     /// avoid hashing a `PyKey` on the loop-entry and loop-exit paths.
     removal_watchers: RefCell<Vec<(PyKey, usize)>>,
+    /// True while `removal_watchers` is non-empty, avoiding a `RefCell` borrow
+    /// on idle restart and mutation probes when no terminal watch is installed.
+    has_watchers: Cell<bool>,
+    /// True once a tracked mutation has populated `pending_removed_keys` or
+    /// `reinserted_keys` since the last idle restart.
+    has_mutation_activity: Cell<bool>,
     /// Watched keys currently absent after an entry deletion/table reset.
     pending_removed_keys: RefCell<Vec<PyKey>>,
     /// Latest reinsertion generation and virtual compact-dict entry position.
     /// Its size is bounded by the number of terminal iterators.
     reinserted_keys: RefCell<Vec<(PyKey, u64, usize)>>,
-    /// CPython-compatible compact-entry accounting, active only while a dict
-    /// iterator retains this state.
-    dict_layout: RefCell<Option<DictIterationLayout>>,
+    /// CPython-compatible compact-entry accounting stored in plain `Cell`s so
+    /// idle restarts and terminal-key watches avoid `RefCell` borrows (#2924).
+    has_dict_layout: Cell<bool>,
+    dict_layout_live_len: Cell<usize>,
+    dict_layout_entry_count: Cell<usize>,
+    dict_layout_usable: Cell<usize>,
     key: MutableContainerKey,
     /// Keeps the backing allocation reserved (without keeping its contents
     /// alive), so an address cannot be reused while an iterator still carries
@@ -324,6 +344,11 @@ impl MutableContainerTarget {
             (Self::Set(left), Self::Set(right)) => Weak::ptr_eq(left, right),
             _ => false,
         }
+    }
+
+    #[inline]
+    fn matches_dict(&self, dict: &Rc<RefCell<PyDict>>) -> bool {
+        matches!(self, Self::Dict(left) if std::ptr::eq(left.as_ptr(), Rc::as_ptr(dict)))
     }
 }
 
@@ -389,14 +414,45 @@ fn retain_idle_mutation_state(state: &Rc<CollectionMutationStateInner>) {
 /// its accounting may have gone stale exactly as it would have if the
 /// registration had been dropped and rebuilt. Restoring the freshly-created
 /// shape keeps reuse indistinguishable from re-registration.
+#[inline]
+fn set_dict_layout_cells(
+    state: &CollectionMutationStateInner,
+    layout: Option<DictIterationLayout>,
+) {
+    match layout {
+        Some(layout) => {
+            state.has_dict_layout.set(true);
+            state.dict_layout_live_len.set(layout.live_len);
+            state.dict_layout_entry_count.set(layout.entry_count);
+            state.dict_layout_usable.set(layout.usable);
+        }
+        None => {
+            state.has_dict_layout.set(false);
+        }
+    }
+}
+
+fn restart_idle_mutation_state_with_len(
+    state: &CollectionMutationStateInner,
+    dict_len: Option<usize>,
+) {
+    if state.has_watchers.get() {
+        state.removal_watchers.borrow_mut().clear();
+        state.has_watchers.set(false);
+    }
+    if state.has_mutation_activity.get() {
+        state.pending_removed_keys.borrow_mut().clear();
+        state.reinserted_keys.borrow_mut().clear();
+        state.has_mutation_activity.set(false);
+    }
+    set_dict_layout_cells(state, dict_len.map(DictIterationLayout::for_len));
+}
+
 fn restart_idle_mutation_state(
     state: &CollectionMutationStateInner,
     target: &MutableContainerTarget,
 ) {
-    state.removal_watchers.borrow_mut().clear();
-    state.pending_removed_keys.borrow_mut().clear();
-    state.reinserted_keys.borrow_mut().clear();
-    *state.dict_layout.borrow_mut() = dict_target_len(target).map(DictIterationLayout::for_len);
+    restart_idle_mutation_state_with_len(state, dict_target_len(target));
 }
 
 fn dict_target_len(target: &MutableContainerTarget) -> Option<usize> {
@@ -424,15 +480,21 @@ fn collection_mutation_state(
         return CollectionMutationState::attach(state);
     }
     let dict_len = dict_target_len(&target);
+    let dict_layout = dict_len.map(DictIterationLayout::for_len);
     let state = Rc::new(CollectionMutationStateInner {
         version: Cell::new(0),
         entry_order: Cell::new(0),
         cache_exhausted: Cell::new(false),
         observers: Cell::new(0),
         removal_watchers: RefCell::new(Vec::new()),
+        has_watchers: Cell::new(false),
+        has_mutation_activity: Cell::new(false),
         pending_removed_keys: RefCell::new(Vec::new()),
         reinserted_keys: RefCell::new(Vec::new()),
-        dict_layout: RefCell::new(dict_len.map(DictIterationLayout::for_len)),
+        has_dict_layout: Cell::new(dict_layout.is_some()),
+        dict_layout_live_len: Cell::new(dict_layout.as_ref().map_or(0, |l| l.live_len)),
+        dict_layout_entry_count: Cell::new(dict_layout.as_ref().map_or(0, |l| l.entry_count)),
+        dict_layout_usable: Cell::new(dict_layout.as_ref().map_or(0, |l| l.usable)),
         key,
         target,
     });
@@ -485,14 +547,20 @@ fn begin_tracked_dict_mutation(
     dict: &Rc<RefCell<PyDict>>,
 ) -> Option<TrackedDictMutationProbe> {
     let state = state.as_ref()?;
-    state.dict_layout.borrow().as_ref()?;
+    if !state.has_dict_layout.get() {
+        return None;
+    }
     let dict = dict.borrow();
-    let watched_presence = state
-        .removal_watchers
-        .borrow()
-        .iter()
-        .map(|(key, _)| (key.clone(), dict.contains_key(key)))
-        .collect();
+    let watched_presence = if state.has_watchers.get() {
+        state
+            .removal_watchers
+            .borrow()
+            .iter()
+            .map(|(key, _)| (key.clone(), dict.contains_key(key)))
+            .collect()
+    } else {
+        Vec::new()
+    };
     Some(TrackedDictMutationProbe {
         before_len: dict.len(),
         watched_presence,
@@ -568,18 +636,23 @@ fn bump_active_collection_mutation_state(
             .set(state.entry_order.get().wrapping_add(1));
     }
 
-    {
+    if !dict_mutation.removed_watched.is_empty() {
         let mut pending = state.pending_removed_keys.borrow_mut();
         for key in dict_mutation.removed_watched {
             if !pending.contains(&key) {
                 pending.push(key);
+                state.has_mutation_activity.set(true);
             }
         }
     }
 
-    let mut layout_ref = state.dict_layout.borrow_mut();
-    let Some(layout) = layout_ref.as_mut() else {
+    if !state.has_dict_layout.get() {
         return;
+    }
+    let mut layout = DictIterationLayout {
+        live_len: state.dict_layout_live_len.get(),
+        entry_count: state.dict_layout_entry_count.get(),
+        usable: state.dict_layout_usable.get(),
     };
     if dict_mutation.reset {
         layout.reset();
@@ -611,14 +684,34 @@ fn bump_active_collection_mutation_state(
                     Some(entry) => *entry = (key, next_version, position),
                     None => reinserted.push((key, next_version, position)),
                 }
+                state.has_mutation_activity.set(true);
             }
         }
     }
     layout.live_len = dict_mutation.after_len;
+    state.dict_layout_live_len.set(layout.live_len);
+    state.dict_layout_entry_count.set(layout.entry_count);
+    state.dict_layout_usable.set(layout.usable);
 }
 
+#[cold]
+#[inline(never)]
+fn bump_collection_mutation_state_slow(key: MutableContainerKey) {
+    let state = COLLECTION_MUTATION_STATES
+        .with(|states| states.borrow().get(&key).and_then(Weak::upgrade))
+        .filter(|state| state.observers.get() != 0);
+    bump_active_collection_mutation_state(state, None);
+}
+
+#[inline]
 fn bump_collection_mutation_state(key: MutableContainerKey) {
-    bump_active_collection_mutation_state(active_collection_mutation_state(key), None);
+    if ACTIVE_COLLECTION_MUTATION_STATES
+        .try_with(|active| active.get() == 0)
+        .unwrap_or(true)
+    {
+        return;
+    }
+    bump_collection_mutation_state_slow(key);
 }
 
 #[inline]
@@ -639,10 +732,31 @@ fn set_container_key(set: &SetInner) -> MutableContainerKey {
 
 /// Register an active iterator against a dict backing store.
 pub fn dict_iteration_mutation_state(dict: &Rc<RefCell<PyDict>>) -> CollectionMutationState {
-    collection_mutation_state(
-        dict_container_key(dict),
-        MutableContainerTarget::Dict(Rc::downgrade(dict)),
-    )
+    dict_iteration_mutation_state_with_len(dict, dict.borrow().len())
+}
+
+/// Register an active iterator against a dict backing store whose length was
+/// already read under the caller's borrow, avoiding a redundant `RefCell`
+/// borrow and `Weak::upgrade` on retained-registration hits (#2924).
+pub fn dict_iteration_mutation_state_with_len(
+    dict: &Rc<RefCell<PyDict>>,
+    len: usize,
+) -> CollectionMutationState {
+    let key = dict_container_key(dict);
+    let registered = COLLECTION_MUTATION_STATES.with(|states| {
+        states
+            .borrow()
+            .get(&key)
+            .and_then(Weak::upgrade)
+            .filter(|state| state.target.matches_dict(dict))
+    });
+    if let Some(state) = registered {
+        if state.observers.get() == 0 {
+            restart_idle_mutation_state_with_len(&state, Some(len));
+        }
+        return CollectionMutationState::attach(state);
+    }
+    collection_mutation_state(key, MutableContainerTarget::Dict(Rc::downgrade(dict)))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -948,15 +1062,21 @@ mod mutation_version_tests {
             kind: MutableContainerKind::Dict,
             ptr: Rc::as_ptr(&dict) as usize,
         };
+        let layout = DictIterationLayout::for_len(0);
         let inner = Rc::new(CollectionMutationStateInner {
             version: Cell::new(u64::MAX - 1),
             entry_order: Cell::new(0),
             cache_exhausted: Cell::new(false),
             observers: Cell::new(0),
             removal_watchers: RefCell::new(Vec::new()),
+            has_watchers: Cell::new(false),
+            has_mutation_activity: Cell::new(false),
             pending_removed_keys: RefCell::new(Vec::new()),
             reinserted_keys: RefCell::new(Vec::new()),
-            dict_layout: RefCell::new(Some(DictIterationLayout::for_len(0))),
+            has_dict_layout: Cell::new(true),
+            dict_layout_live_len: Cell::new(layout.live_len),
+            dict_layout_entry_count: Cell::new(layout.entry_count),
+            dict_layout_usable: Cell::new(layout.usable),
             key,
             target: MutableContainerTarget::Dict(Weak::clone(&Rc::downgrade(&dict))),
         });
@@ -968,5 +1088,24 @@ mod mutation_version_tests {
         assert_eq!(state.version(), 0);
         assert_eq!(state.cache_version(), None);
         assert!(!state.matches_cache_version(0));
+    }
+
+    #[test]
+    fn dict_iteration_layout_for_len_matches_reference_power_of_two_sizing() {
+        for len in 0..=256usize {
+            let layout = DictIterationLayout::for_len(len);
+            let expected_usable = if len == 0 {
+                0
+            } else {
+                let mut table_size = 8usize;
+                while super::dict_usable_fraction(table_size) < len {
+                    table_size *= 2;
+                }
+                super::dict_usable_fraction(table_size) - len
+            };
+            assert_eq!(layout.live_len, len, "len={len}");
+            assert_eq!(layout.entry_count, len, "len={len}");
+            assert_eq!(layout.usable, expected_usable, "len={len}");
+        }
     }
 }

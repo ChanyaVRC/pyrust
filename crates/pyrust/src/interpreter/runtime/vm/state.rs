@@ -227,10 +227,12 @@ struct TrampFrame {
     saved_code_ptr: *const crate::bytecode::FnCode,
     saved_active_code_rc: Option<Rc<crate::bytecode::FnCode>>,
     saved_num_locals: u32,
-    saved_env: EnvRef,
-    /// Cache key owned by this callee evaluation. Present only when this frame
-    /// entered from a `CallMemo` miss that was not already in flight.
-    memo_key: Option<MemoKey>,
+    /// `None` when callee shares the caller's environment (`Rc::ptr_eq`),
+    /// avoiding an `Rc::clone` + `Rc::drop` on every intra-module call (#2924).
+    saved_env: Option<EnvRef>,
+    /// Cache key owned by this callee evaluation. Boxed so plain `Insn::Call`
+    /// frames pay 8 B (null niche) instead of a 48 B inline `MemoKey` (#2924).
+    memo_key: Option<Box<MemoKey>>,
 }
 
 /// Placeholder left inside a generator's state cell (`Rc<GeneratorCell>`)

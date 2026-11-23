@@ -53,13 +53,31 @@ pub(super) fn iter_slot_is_int_range_exact(
     )
 }
 
-/// Whether an iterator slot currently holds the canonical list/tuple index
-/// cursor — the second iterator kind the int-loop versioning guard admits,
-/// because stepping it clones one element and bumps a counter without
-/// invoking any Python-visible protocol.
+/// Whether an iterator slot currently holds a canonical, side-effect-free
+/// element cursor admitted by the int-loop versioning guard:
+/// - `IterState::ValueIndexed`: canonical `list`/`tuple` index cursor;
+/// - `IterState::LiveKeysGuarded`: an unmutated plain `dict`/`set` cursor with
+///   a frozen key order (`#2924`), whose steps read directly from `frozen_keys`
+///   and cannot invoke Python code or raise while the body performs only
+///   guarded integer operations.
 #[inline(always)]
 pub(super) fn iter_slot_is_indexed_sequence(state: Option<&IterState>) -> bool {
-    matches!(state, Some(IterState::ValueIndexed { .. }))
+    match state {
+        Some(IterState::ValueIndexed { .. }) => true,
+        Some(IterState::LiveKeysGuarded(guarded)) => {
+            let cursor = &guarded.state().cursor;
+            !cursor.dynamic_backing
+                && !cursor.size_changed
+                && !cursor.keys_changed
+                && !cursor.exhausted
+                && cursor.frozen_keys.is_some()
+                && cursor
+                    .mutation_state
+                    .as_ref()
+                    .is_some_and(|state| state.version() == cursor.observed_mutation)
+        }
+        _ => false,
+    }
 }
 
 /// Canonical-sequence element read for `GetItemSeqIntOrExit`: `Some(element)`

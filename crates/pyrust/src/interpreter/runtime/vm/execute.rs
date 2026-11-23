@@ -188,23 +188,27 @@ impl Interpreter {
                         gen_drive_return!(__v);
                     }
                     if let Some(__saved) = tramp_stack.pop() {
-                        self.detach_vm_frame_view();
+                        let __detached_view = self.detach_vm_frame_view();
                         let __memo_key = __saved.memo_key;
                         tramp_arena.truncate(tramp_active_base);
                         tramp_active_base = __saved.saved_base;
                         regs = __saved.saved_regs;
                         pc = __saved.saved_pc;
                         cur_line = __saved.saved_cur_line;
-                        // Restore the caller's code / locals / env (a no-op for
-                        // a self-recursive call; a real switch for a general
-                        // Python→Python call).
+                        // Restore the caller's code / locals / env BEFORE
+                        // dropping the detached frame view (whose `function`
+                        // `Rc<UserFunction>` keeps the callee's `FnCode` alive,
+                        // #2924) and finalizing any escaping frame cache (#3028).
                         code_ptr = __saved.saved_code_ptr;
                         active_code_rc = __saved.saved_active_code_rc;
                         num_locals = __saved.saved_num_locals;
-                        self.env = __saved.saved_env;
+                        if let Some(__saved_env) = __saved.saved_env {
+                            self.env = __saved_env;
+                        }
+                        drop(__detached_view);
                         self.finish_pop_vm_frame_view();
                         if let Some(__key) = __memo_key {
-                            self.finish_memoized_call(__key, &__v);
+                            self.finish_memoized_call(*__key, &__v);
                         }
                         regs[__saved.dst as usize] = __v;
                         continue 'vm;
@@ -362,7 +366,7 @@ impl Interpreter {
             // must exactly fill the params (receiver included for a method);
             // `$memo_key` = probed `CallMemo` miss key, if any;
             // `$bind` = statements that fill `tramp_arena[base + …]`.
-            (@enter $lt:lifetime, $dst:expr, $f:expr, $nsupplied:expr,
+            (@enter $lt:lifetime, $dst:expr, $f:expr, $view_fn:expr, $nsupplied:expr,
                     $fb:ident, $base:ident, $np:ident, $memo_key:expr, $bind:block) => {{
                 let $fb = $f;
                 let f = $fb;
@@ -396,7 +400,15 @@ impl Interpreter {
                 {
                     break $lt;
                 }
-                let callee_code = match self.get_or_compile_bytecode(f) {
+                // Borrow `FnCode` directly out of `f.precompiled_code` without
+                // cloning its `Rc`: `VmFrameView::function` keeps `f` (and its
+                // immutable `precompiled_code`) alive until `tramp_return!`
+                // restores `code_ptr` and pops the view (#2924).
+                let callee_code: &crate::bytecode::FnCode = match f
+                    .precompiled_code
+                    .as_deref()
+                    .and_then(|any| any.downcast_ref::<crate::bytecode::FnCode>())
+                {
                     Some(c) => c,
                     None => break $lt,
                 };
@@ -412,10 +424,6 @@ impl Interpreter {
                     // is false).
                     break $lt;
                 }
-                if call_depth() >= max_call_depth(self) {
-                    let error = self.recursion_limit_error()?;
-                    tramp_unwind_err!(error);
-                }
                 let num_regs = callee_code.num_regs as usize;
                 let $base = tramp_arena.len();
                 if tramp_arena.is_empty() {
@@ -427,21 +435,32 @@ impl Interpreter {
                 if $base + num_regs > tramp_arena.capacity() {
                     break $lt;
                 }
+                let Some(depth_guard) = CallDepthGuard::try_enter(max_call_depth(self)) else {
+                    let error = self.recursion_limit_error()?;
+                    tramp_unwind_err!(error);
+                };
                 tramp_arena.resize($base + num_regs, Value::unset());
                 $bind
                 let callee_num_locals = callee_code.num_locals;
-                let callee_env = Rc::clone(&f.env);
-                let callee_code_ptr: *const crate::bytecode::FnCode =
-                    Rc::as_ptr(&callee_code);
+                let callee_is_class_method = callee_code.is_class_method;
+                let callee_code_ptr: *const crate::bytecode::FnCode = callee_code;
                 // SAFETY: base+num_regs <= capacity (checked) ⇒ no realloc;
                 // pointer valid until this frame's `truncate` on return.
                 let new_ptr = unsafe { tramp_arena.as_mut_ptr().add($base) };
                 // Claim only after every gate and register read succeeded. A
                 // same-key recursive miss gets no second owner but still
                 // enters the trampoline.
-                let memo_key = ($memo_key).and_then(|key| self.claim_memoized_call(key));
+                let memo_key = ($memo_key)
+                    .and_then(|key| self.claim_memoized_call(key))
+                    .map(Box::new);
+                let saved_env = if Rc::ptr_eq(&self.env, &f.env) {
+                    None
+                } else {
+                    Some(std::mem::replace(&mut self.env, Rc::clone(&f.env)))
+                };
+                let callee_local_index = Rc::clone(&f.local_index);
                 tramp_stack.push(TrampFrame {
-                    _depth_guard: CallDepthGuard::enter(),
+                    _depth_guard: depth_guard,
                     saved_regs: regs,
                     saved_pc: pc,
                     dst: $dst,
@@ -450,7 +469,7 @@ impl Interpreter {
                     saved_code_ptr: code_ptr,
                     saved_active_code_rc: active_code_rc.take(),
                     saved_num_locals: num_locals,
-                    saved_env: std::mem::replace(&mut self.env, callee_env),
+                    saved_env,
                     memo_key,
                 });
                 // Publish a frame view so `locals()` / `sys._getframe()` /
@@ -463,21 +482,37 @@ impl Interpreter {
                     // valid (no realloc) until this frame's view is popped.
                     regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(new_ptr) },
                     regs_len: num_regs,
-                    local_index: Rc::clone(&f.local_index),
+                    local_index: callee_local_index,
                     nonlocal_names: None,
                     env: None,
-                    is_class_method: callee_code.is_class_method,
-                    function: Some(Rc::clone(f)),
+                    is_class_method: callee_is_class_method,
+                    function: Some($view_fn),
                     gen_frame: None,
                 });
                 tramp_active_base = $base;
-                active_code_rc = Some(callee_code);
                 code_ptr = callee_code_ptr;
                 num_locals = callee_num_locals;
                 regs = unsafe { RegSlice::from_raw(new_ptr, num_regs) };
                 pc = 0;
                 continue 'vm;
             }};
+            // Direct owned-`Rc<UserFunction>` form used by `Insn::Call` (#2924):
+            // moves `$f` into `VmFrameView::function` without cloning a second `Rc`.
+            (@user_fn $func_reg:expr, $argc:expr, $f:ident) => {
+                'trampoline: {
+                    tramp_try!(@enter 'trampoline, $func_reg, &$f, $f, $argc, f, base, nparams, Option::<MemoKey>::None, {
+                        for i in 0..nparams {
+                            let v = vm_try!(vm_read(&regs, $func_reg + 1 + i as u32, num_locals));
+                            if let pyrust_core::ParamBind::Reg(r) = f.param_binds[i] {
+                                tramp_arena[base + r as usize] = v;
+                            }
+                        }
+                        if let Some(slot) = f.self_bind {
+                            tramp_arena[base + slot as usize] = Value::user_function(Rc::clone(f));
+                        }
+                    });
+                }
+            };
             // Plain-call implementation: callee at register `$func_reg`,
             // positional args read from `$func_reg + 1 ..`.
             (@plain $func_reg:expr, $argc:expr, $func_val:expr, $memo_key:expr) => {
@@ -485,7 +520,7 @@ impl Interpreter {
                     let ValueKind::UserFunction(f0) = $func_val.kind() else {
                         break 'trampoline;
                     };
-                    tramp_try!(@enter 'trampoline, $func_reg, f0, $argc, f, base, nparams, $memo_key, {
+                    tramp_try!(@enter 'trampoline, $func_reg, f0, Rc::clone(f0), $argc, f, base, nparams, $memo_key, {
                         for i in 0..nparams {
                             let v = vm_try!(vm_read(&regs, $func_reg + 1 + i as u32, num_locals));
                             if let pyrust_core::ParamBind::Reg(r) = f.param_binds[i] {
@@ -516,7 +551,7 @@ impl Interpreter {
             macro_rules! tramp_try_method {
             ($dst:expr, $f:expr, $recv:expr, $args_base:expr, $argc:expr) => {
                 'trampoline: {
-                    tramp_try!(@enter 'trampoline, $dst, $f, ($argc as usize) + 1, f, base, nparams, Option::<MemoKey>::None, {
+                    tramp_try!(@enter 'trampoline, $dst, $f, Rc::clone($f), ($argc as usize) + 1, f, base, nparams, Option::<MemoKey>::None, {
                         let _ = nparams;
                         if let pyrust_core::ParamBind::Reg(r) = f.param_binds[0] {
                             tramp_arena[base + r as usize] = $recv;
@@ -1269,6 +1304,30 @@ impl Interpreter {
                         let owned = vm_read(&regs, *func_reg, num_locals);
                         vm_try!(owned);
                         unreachable!();
+                    }
+
+                    // Fast path for Python user-function calls (#2924): a
+                    // `UserFunction` never matches builtin `id()` or builtin /
+                    // primitive-class caches, so try the VM trampoline directly
+                    // before probing caches or cloning a second `Rc`.
+                    let user_fn = match regs[*func_reg as usize].kind() {
+                        ValueKind::UserFunction(f) => Some(Rc::clone(f)),
+                        _ => None,
+                    };
+                    if let Some(f) = user_fn {
+                        tramp_try!(@user_fn *func_reg, *argc, f);
+                        regs[*func_reg as usize] = vm_try!(self.call_positional_cached(
+                            &mut regs,
+                            num_locals,
+                            *func_reg,
+                            *argc,
+                            Value::user_function(f),
+                            code,
+                            pc - 1,
+                            cur_line,
+                            PositionalCallCacheProbe::Probed(BuiltinCallProbe::Uncacheable),
+                        ));
+                        continue 'vm;
                     }
 
                     let probe = {

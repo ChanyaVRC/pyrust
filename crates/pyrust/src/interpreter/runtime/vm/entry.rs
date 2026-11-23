@@ -542,7 +542,7 @@ impl Interpreter {
             let floor = st.gen_drive_stack.last().map_or(0, |g| g.tramp_floor);
             while st.tramp_stack.len() > floor {
                 let saved = st.tramp_stack.pop().unwrap();
-                if let Some(key) = saved.memo_key.as_ref() {
+                if let Some(key) = saved.memo_key.as_deref() {
                     self.cancel_memoized_call(key);
                 }
                 // PEP 657 stage 2 (#2443): the *caller* of the frame recorded
@@ -581,7 +581,9 @@ impl Interpreter {
                 let view = self.detach_vm_frame_view();
                 st.tramp_arena.truncate(*st.tramp_active_base);
                 *st.tramp_active_base = saved.saved_base;
-                self.env = saved.saved_env;
+                if let Some(saved_env) = saved.saved_env {
+                    self.env = saved_env;
+                }
                 self.finish_pop_vm_frame_view();
                 let mut callee_is_inlined_comp = false;
                 if let Some(view) = view

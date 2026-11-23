@@ -146,8 +146,29 @@ impl Interpreter {
 
     /// Mirror a module fast-local assignment into the live global namespace
     /// and maintain both global cache versions.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn sync_module_global_binding(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &RegSlice,
+        register: crate::bytecode::Reg,
+        name_index: u16,
+    ) -> Result<()> {
+        let index = name_index as usize;
+        if let Some(&name_mask) = code.global_cache_interest_masks.get(index)
+            && !self
+                .env
+                .borrow()
+                .needs_namespace_module_write_sync(name_mask)
+        {
+            return Ok(());
+        }
+        self.sync_module_global_binding_dispatch_slow(code, regs, register, name_index)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn sync_module_global_binding_dispatch_slow(
         &mut self,
         code: &crate::bytecode::FnCode,
         regs: &RegSlice,

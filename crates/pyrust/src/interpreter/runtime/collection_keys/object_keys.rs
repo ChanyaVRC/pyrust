@@ -177,6 +177,13 @@ fn dict_may_have_user_eq_candidate(dict: &PyDict, probe_key: &PyKey) -> bool {
 /// may compare equal.  This is a single alternate bucket probe, avoiding a
 /// whole-map scan on the common primitive insertion path.
 fn dict_has_object_hash_candidate(dict: &PyDict, probe_key: &PyKey) -> bool {
+    // Fast path (#2924): a dict with neither a materialized Python-hash index
+    // nor any live `PyKey::Object` entry cannot contain a cross-representation
+    // object candidate. Check before computing `py_hash_pykey` (which runs a
+    // 64-bit Mersenne modulo division for integer keys).
+    if !dict.has_python_hash_index() && !dict.may_have_object_key() {
+        return false;
+    }
     let target_hash = pyrust_core::py_hash_pykey(probe_key) as u64;
     if let Some(candidates) = dict.python_hash_candidates(target_hash) {
         return candidates.iter().any(key_contains_object);

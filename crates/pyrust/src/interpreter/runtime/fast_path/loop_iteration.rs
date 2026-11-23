@@ -142,8 +142,14 @@ pub(super) fn advance_loop_fast_state(
             let state = guarded.state_mut();
             let cursor = &mut state.cursor;
             let container = &state.container;
-            if let Some(value) = crate::interpreter::iteration::next_frozen_key(cursor) {
-                return advanced_item!(value);
+            match crate::interpreter::iteration::next_frozen_key_step(cursor) {
+                crate::interpreter::iteration::FrozenKeyStep::Item(value) => {
+                    return advanced_item!(value);
+                }
+                crate::interpreter::iteration::FrozenKeyStep::Exhausted => {
+                    return LoopFastOutcome::Exhausted;
+                }
+                crate::interpreter::iteration::FrozenKeyStep::Slow => {}
             }
             if cursor.snapshot.is_some() {
                 match fast_try!(

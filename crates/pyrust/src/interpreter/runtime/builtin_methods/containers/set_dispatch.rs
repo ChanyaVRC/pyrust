@@ -22,19 +22,17 @@ impl Interpreter {
                         resolved.name()
                     ))
                 })?;
-                let pk = self.value_to_pykey(&key_val)?;
                 match resolved {
                     SetMethod::Add => {
-                        if self.set_lookup(&receiver, &pk)?.is_some() {
-                            return Ok(Value::none());
-                        }
-                        receiver.set_add(pk)?;
+                        self.set_insert_value(&receiver, key_val)?;
                         Ok(Value::none())
                     }
                     SetMethod::Contains => {
+                        let pk = self.value_to_pykey(&key_val)?;
                         Ok(Value::bool_(self.set_lookup(&receiver, &pk)?.is_some()))
                     }
                     SetMethod::Discard => {
+                        let pk = self.value_to_pykey(&key_val)?;
                         if let Some(idx) = self.set_lookup(&receiver, &pk)? {
                             receiver
                                 .set_with_mut(|set| {
@@ -46,19 +44,22 @@ impl Interpreter {
                         }
                         Ok(Value::none())
                     }
-                    SetMethod::Remove => match self.set_lookup(&receiver, &pk)? {
-                        Some(idx) => {
-                            receiver
-                                .set_with_mut(|set| {
-                                    set.shift_remove_index(idx);
-                                })
-                                .ok_or_else(|| {
-                                    PyError::Runtime("internal: expected set".to_string())
-                                })?;
-                            Ok(Value::none())
+                    SetMethod::Remove => {
+                        let pk = self.value_to_pykey(&key_val)?;
+                        match self.set_lookup(&receiver, &pk)? {
+                            Some(idx) => {
+                                receiver
+                                    .set_with_mut(|set| {
+                                        set.shift_remove_index(idx);
+                                    })
+                                    .ok_or_else(|| {
+                                        PyError::Runtime("internal: expected set".to_string())
+                                    })?;
+                                Ok(Value::none())
+                            }
+                            None => Err(PyError::key_error(key_val.clone())),
                         }
-                        None => Err(PyError::key_error(key_val.clone())),
-                    },
+                    }
                     _ => unreachable!(),
                 }
             }

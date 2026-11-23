@@ -1,3 +1,29 @@
+/// Fast path for inserting a known-primitive (non-`Object`, non-nested-object)
+/// key into a plain dict `Value` without running any user code (#2924).
+///
+/// Returns `Ok(None)` when the insert completed under a single `RefCell`
+/// borrow, or `Ok(Some((key, value)))` when the dict may hold an `Object` key
+/// with a matching Python hash and full `__eq__` dedup must run instead.
+#[inline]
+pub(crate) fn try_dict_insert_primitive_fast(
+    receiver: &Value,
+    key: PyKey,
+    value: Value,
+) -> Result<Option<(PyKey, Value)>> {
+    let mut deferred = None;
+    receiver
+        .dict_with_mut(|dict| {
+            dict.prepare_python_insert(&key);
+            if !dict_has_object_hash_candidate(dict, &key) {
+                dict.insert_primitive_prepared(key, value);
+            } else {
+                deferred = Some((key, value));
+            }
+        })
+        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+    Ok(deferred)
+}
+
 impl Interpreter {
     /// Build a fresh dict from Python-level key/value pairs.
     pub(crate) fn dict_from_value_pairs<I>(
@@ -83,46 +109,42 @@ impl Interpreter {
         key: PyKey,
         value: Value,
     ) -> Result<()> {
-        receiver
-            .dict_prepare_python_insert(&key)
-            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-        // Primitive keys are fully handled by IndexMap's Hash + PartialEq
-        // implementation, including numeric cross-type equality.  Avoid the
-        // redundant pre-lookup in that overwhelmingly common case: insert
-        // itself already performs the required table probe.  Only keys whose
-        // equality can dispatch Python code need the receiver-based lookup
-        // before taking the short mutable borrow.
-        let needs_dedup = match &key {
-            PyKey::Object { .. } => true,
-            PyKey::Tuple(_) | PyKey::FrozenSet(_) if nested_object_tuple_key(&key) => true,
-            _ => receiver
-                .dict_with(|dict| dict_has_object_hash_candidate(dict, &key))
-                .unwrap_or(false),
-        };
-        if needs_dedup {
-            let activate_hash_index = receiver
-                .dict_with(|dict| {
-                    if dict.has_python_hash_index() {
-                        return false;
-                    }
-                    match &key {
-                        PyKey::Object { .. } => dict.may_have_non_object_key(),
-                        _ if nested_object_tuple_key(&key) => !dict.is_empty(),
-                        _ => dict.may_have_dynamic_key(),
-                    }
-                })
-                .unwrap_or(false);
-            if activate_hash_index {
-                receiver
-                    .dict_ensure_python_hash_index()
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+        // Fast path (#2924): primitive keys that do not carry user `__eq__`
+        // (everything except `Object` and nested-object containers) perform
+        // table preparation, the O(1) object-candidate check, and the raw
+        // `IndexMap` insert in a single mutable borrow instead of three.
+        let is_dynamic_key = matches!(&key, PyKey::Object { .. })
+            || (matches!(&key, PyKey::Tuple(_) | PyKey::FrozenSet(_))
+                && nested_object_tuple_key(&key));
+        let (key, value) = if !is_dynamic_key {
+            match try_dict_insert_primitive_fast(receiver, key, value)? {
+                None => return Ok(()),
+                Some(pair) => pair,
             }
-        }
-        let existing = if needs_dedup {
-            self.dict_lookup(receiver, &key)?
         } else {
-            None
+            receiver
+                .dict_prepare_python_insert(&key)
+                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+            (key, value)
         };
+        let activate_hash_index = receiver
+            .dict_with(|dict| {
+                if dict.has_python_hash_index() {
+                    return false;
+                }
+                match &key {
+                    PyKey::Object { .. } => dict.may_have_non_object_key(),
+                    _ if nested_object_tuple_key(&key) => !dict.is_empty(),
+                    _ => dict.may_have_dynamic_key(),
+                }
+            })
+            .unwrap_or(false);
+        if activate_hash_index {
+            receiver
+                .dict_ensure_python_hash_index()
+                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+        }
+        let existing = self.dict_lookup(receiver, &key)?;
         receiver
             .dict_with_mut(|dict| {
                 if let Some((idx, _)) = existing

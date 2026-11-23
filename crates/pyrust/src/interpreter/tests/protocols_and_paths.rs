@@ -220,3 +220,78 @@ fn functools_reduce_empty_without_initializer_is_type_error() {
         "expected canonical CPython error wording, got: {msg}"
     );
 }
+
+#[test]
+fn frozen_dict_and_set_versioned_int_loops_preserve_deopt_and_mutation_errors() {
+    let interp = run_program(concat!(
+        "d = {i: i * 2 for i in range(16)}\n",
+        "total = 0\n",
+        "for k in d:\n",
+        "    total += k\n",
+        "s = {1, 2, 3, 4}\n",
+        "stotal = 0\n",
+        "for k in s:\n",
+        "    stotal += k\n",
+        "mixed = {1: 'a', 2: 'b', 3.5: 'c', 4: 'd'}\n",
+        "mtotal = 0\n",
+        "for mk in mixed:\n",
+        "    mtotal += mk\n",
+        "empty_ran = False\n",
+        "for ek in {}:\n",
+        "    empty_ran = True\n",
+        "ek_bound = 'ek' in globals()\n",
+        "class Key1:\n",
+        "    def __hash__(self): return 1\n",
+        "    def __eq__(self, other): return other == 1\n",
+        "k1 = Key1()\n",
+        "od = {k1: 'old'}\n",
+        "od[1] = 'new'\n",
+        "od_len = len(od)\n",
+        "od_val = od[1]\n",
+        "od_key_is_k1 = next(iter(od)) is k1\n",
+        "class SubSet(set):\n",
+        "    def __init__(self): self.log = []\n",
+        "    def add(self, x): self.log.append(x); super().add(x)\n",
+        "ss = SubSet()\n",
+        "ss.add(7)\n",
+        "ss_log = len(ss.log)\n",
+    ));
+    assert_eq!(interp.lookup_name("total").unwrap(), Some(Value::int(120)));
+    assert_eq!(interp.lookup_name("stotal").unwrap(), Some(Value::int(10)));
+    assert_eq!(
+        interp.lookup_name("mtotal").unwrap(),
+        Some(Value::float(10.5))
+    );
+    assert_eq!(
+        interp.lookup_name("empty_ran").unwrap(),
+        Some(Value::bool_(false))
+    );
+    assert_eq!(
+        interp.lookup_name("ek_bound").unwrap(),
+        Some(Value::bool_(false))
+    );
+    assert_eq!(interp.lookup_name("od_len").unwrap(), Some(Value::int(1)));
+    assert_eq!(
+        interp.lookup_name("od_val").unwrap(),
+        Some(Value::string("new"))
+    );
+    assert_eq!(
+        interp.lookup_name("od_key_is_k1").unwrap(),
+        Some(Value::bool_(true))
+    );
+    assert_eq!(interp.lookup_name("ss_log").unwrap(), Some(Value::int(1)));
+
+    let err = run_program_expect_error(concat!(
+        "d = {1: 1, 2: 2}\n",
+        "it = iter(d)\n",
+        "d[3] = 3\n",
+        "total = 0\n",
+        "for k in it:\n",
+        "    total += k\n",
+    ));
+    assert!(
+        err.to_string()
+            .contains("dictionary changed size during iteration"),
+        "expected size-change RuntimeError, got: {err}"
+    );
+}

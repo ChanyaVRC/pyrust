@@ -636,4 +636,45 @@ mod tests {
         assert_eq!(environment, u64::MAX);
         assert_eq!(structure, u64::MAX);
     }
+
+    #[test]
+    fn needs_namespace_module_write_sync_tracks_all_invalidation_sources() {
+        let root = Environment::new(None);
+        assert!(!root.borrow().needs_namespace_module_write_sync(0b0011));
+
+        // Interest masks activate sync only for overlapping name masks.
+        root.borrow()
+            .register_namespace_value_cache_interest(0b0011);
+        assert!(root.borrow().needs_namespace_module_write_sync(0b0011));
+        assert!(!root.borrow().needs_namespace_module_write_sync(0b1100));
+
+        // Single mirror keeps fast check selective; a second sibling mirror
+        // forces sync for all masks until dropped.
+        let mut regs_a = [Value::unset(); 1];
+        let mut regs_b = [Value::unset(); 1];
+        let layout = Rc::new(HashMap::from([("x".to_string(), 0u32)]));
+        let guard_a = unsafe {
+            root.borrow().register_namespace_fastlocals(
+                NonNull::new(regs_a.as_mut_ptr()).unwrap(),
+                regs_a.len(),
+                &layout,
+            )
+        };
+        assert!(!root.borrow().needs_namespace_module_write_sync(0b1100));
+        let guard_b = unsafe {
+            root.borrow().register_namespace_fastlocals(
+                NonNull::new(regs_b.as_mut_ptr()).unwrap(),
+                regs_b.len(),
+                &layout,
+            )
+        };
+        assert!(root.borrow().needs_namespace_module_write_sync(0b1100));
+        drop(guard_b);
+        assert!(!root.borrow().needs_namespace_module_write_sync(0b1100));
+        drop(guard_a);
+
+        // Exposing globals forces sync unconditionally.
+        let _globals = root.borrow().expose_namespace_globals();
+        assert!(root.borrow().needs_namespace_module_write_sync(0b1100));
+    }
 }
