@@ -47,6 +47,148 @@ fn deque_bump_state(inst: &Rc<RefCell<PyInstance>>) {
     }
 }
 
+/// Whether `value` is a `collections.deque` or subclass instance.
+pub(crate) fn is_deque_value(value: &Value) -> bool {
+    let ValueKind::PyInstance(inst) = value.kind() else {
+        return false;
+    };
+    let class = Rc::clone(&inst.borrow().class);
+    is_canonical_collection_class_or_subclass(&class, CanonicalCollectionKind::Deque)
+}
+
+/// Whether `value` is an *exact* `collections.deque` instance (not a subclass).
+pub(crate) fn is_exact_deque_value(value: &Value) -> bool {
+    let ValueKind::PyInstance(inst) = value.kind() else {
+        return false;
+    };
+    let class = Rc::clone(&inst.borrow().class);
+    is_canonical_deque_class(&class)
+}
+
+/// Extend a deque instance in place from `iterable` (right end).
+/// Used by `try_inplace_op` for `deque += iterable` / `DSub += iterable`.
+pub(crate) fn deque_extend_in_place(
+    interp: &mut crate::Interpreter,
+    target: &Value,
+    iterable: &Value,
+) -> Result<()> {
+    let ValueKind::PyInstance(inst) = target.kind() else {
+        return Err(PyError::Runtime(
+            "internal: expected deque instance".to_string(),
+        ));
+    };
+    let inst = Rc::clone(inst);
+    deque_extend_iterable(interp, &inst, iterable, false)?;
+    Ok(())
+}
+
+/// Concatenate two deques into a new deque preserving `left`'s class and
+/// `maxlen`. Used by both `deque.__add__` and `Interpreter::add`.
+pub(crate) fn deque_concat_values(left: &Value, right: &Value) -> Result<Value> {
+    let ValueKind::PyInstance(inst) = left.kind() else {
+        return Err(PyError::Runtime(
+            "internal: expected deque instance".to_string(),
+        ));
+    };
+    let inst = Rc::clone(inst);
+    let other_items = match deque_items_of(right) {
+        Some(v) => v,
+        None => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "can only concatenate deque (not \"{}\") to deque",
+                    crate::interpreter::value_type_name_str(right),
+                ),
+            ));
+        }
+    };
+    let mut items = deque_items_snapshot(&inst)?;
+    items.extend(other_items);
+    let maxlen = deque_maxlen(&inst);
+    Ok(deque_from_items(&inst, items, maxlen))
+}
+
+/// Repeat a deque `n` times into a new deque preserving `target`'s class and
+/// `maxlen`. Used by `deque.__mul__`, `deque.__rmul__`, and `Interpreter::mul`.
+pub(crate) fn deque_mul_by_i64(target: &Value, n: i64) -> Result<Value> {
+    let ValueKind::PyInstance(inst) = target.kind() else {
+        return Err(PyError::Runtime(
+            "internal: expected deque instance".to_string(),
+        ));
+    };
+    let inst = Rc::clone(inst);
+    let maxlen = deque_maxlen(&inst);
+    let base = deque_items_snapshot(&inst)?;
+    let items = deque_repeat_items(&base, n, maxlen)?;
+    Ok(deque_from_items(&inst, items, maxlen))
+}
+
+/// Repeat a deque `n` times *in place* (mutating storage and preserving
+/// identity, subclass type, and `maxlen`). Used by `deque.__imul__` and
+/// `try_inplace_op`.
+pub(crate) fn deque_imul_by_i64(target: &Value, n: i64) -> Result<()> {
+    let ValueKind::PyInstance(inst) = target.kind() else {
+        return Err(PyError::Runtime(
+            "internal: expected deque instance".to_string(),
+        ));
+    };
+    let inst = Rc::clone(inst);
+    deque_repeat_in_place(&inst, n)
+}
+
+fn deque_repeat_items(base: &[Value], n: i64, maxlen: Option<usize>) -> Result<Vec<Value>> {
+    let reps = usize::try_from(n.max(0)).unwrap_or(usize::MAX);
+    if base.is_empty() || reps == 0 || maxlen == Some(0) {
+        return Ok(Vec::new());
+    }
+    if let Some(limit) = maxlen {
+        // A bounded result retains only the conceptual repeated sequence's
+        // rightmost `limit` elements. Construct exactly that suffix instead of
+        // allocating `base.len() * reps` and trimming it afterwards.
+        let total = base.len().saturating_mul(reps);
+        let keep = total.min(limit);
+        let start = (base.len() - keep % base.len()) % base.len();
+        return Ok((0..keep)
+            .map(|offset| base[(start + offset) % base.len()].clone())
+            .collect());
+    }
+    let total = base
+        .len()
+        .checked_mul(reps)
+        .ok_or_else(|| PyError::named("MemoryError", String::new()))?;
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(total)
+        .map_err(|_| PyError::named("MemoryError", String::new()))?;
+    for _ in 0..reps {
+        items.extend(base.iter().cloned());
+    }
+    Ok(items)
+}
+
+fn deque_repeat_in_place(inst: &Rc<RefCell<PyInstance>>, n: i64) -> Result<()> {
+    let maxlen = deque_maxlen(inst);
+    let reps = usize::try_from(n.max(0)).unwrap_or(usize::MAX);
+    let base = deque_items_snapshot(inst)?;
+    if reps == 0 || maxlen == Some(0) {
+        if !base.is_empty() {
+            let data = deque_items_data(inst)?;
+            data.borrow_mut().clear();
+            deque_bump_state(inst);
+        }
+        return Ok(());
+    }
+    if base.is_empty() || reps == 1 {
+        return Ok(());
+    }
+    let items = deque_repeat_items(&base, n, maxlen)?;
+    let data = deque_items_data(inst)?;
+    *data.borrow_mut() = items.into();
+    deque_bump_state(inst);
+    Ok(())
+}
+
 /// Extend a deque one source element at a time.
 ///
 /// General iterators may run Python code or fail part-way through; CPython
@@ -65,7 +207,18 @@ fn deque_extend_iterable(
         ValueKind::List(items) => Some(items.to_vec()),
         ValueKind::Tuple(items) => Some(items.to_vec()),
         ValueKind::PyInstance(other) if Rc::ptr_eq(inst, other) => {
-            Some(deque_items_snapshot(inst)?)
+            // If a deque subclass overrides `__iter__`, CPython runs that
+            // override into a temporary copy before mutating `self` (so custom
+            // `__iter__` is honoured without self-mutation interference, and an
+            // exception inside it leaves `self` unchanged).
+            let class = Rc::clone(&inst.borrow().class);
+            let custom_iter = crate::interpreter::lookup_class_attr_owner(&class, "__iter__")
+                .is_some_and(|owner| !is_canonical_deque_class(&owner));
+            if custom_iter {
+                Some(interp.collect_iterable(iterable)?)
+            } else {
+                Some(deque_items_snapshot(inst)?)
+            }
         }
         _ => None,
     };
@@ -531,9 +684,11 @@ fn deque_from_items(
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
-/// Shared body for deque `__mul__` / `__rmul__` (#2011).  Repeats the deque
-/// `n` times into a new deque; `n <= 0` yields empty.  The result inherits
-/// `self`'s maxlen (trimmed).  A non-int multiplier raises `TypeError`.
+/// Shared body for direct deque `__mul__` / `__rmul__` dunder calls (#2011).
+/// Repeats the deque `n` times into a new deque; `n <= 0` yields empty.  The
+/// result inherits `self`'s maxlen (trimmed).  Direct dunder calls follow
+/// CPython's `sq_repeat` slot-wrapper wording (`'X' object cannot be
+/// interpreted as an integer`).
 fn deque_repeat(
     _interp: &mut crate::Interpreter,
     args: &[ExpandedCallArg],
@@ -549,43 +704,17 @@ fn deque_repeat(
     let multiplier = &args[1].value;
     let resolved = _interp.value_to_index(multiplier, |value| {
         pyrust_core::type_err!(
-            "can't multiply sequence by non-int of type '{}'",
-            pyrust_core::error_type_name(value)
+            "'{}' object cannot be interpreted as an integer",
+            pyrust_core::builtin_type_name(value)
         )
     })?;
     let overflow = format!(
         "cannot fit '{}' into an index-sized integer",
-        value_type_name_str(multiplier)
+        crate::interpreter::error_type_name_str(multiplier)
     );
     let n = _interp.value_to_isize(&resolved, &overflow)?;
-    let base = deque_items_snapshot(&inst)?;
-    let reps = usize::try_from(n.max(0)).unwrap_or(usize::MAX);
     let maxlen = deque_maxlen(&inst);
-    let items = if base.is_empty() || reps == 0 || maxlen == Some(0) {
-        Vec::new()
-    } else if let Some(limit) = maxlen {
-        // A bounded result retains only the conceptual repeated sequence's
-        // rightmost `limit` elements.  Construct exactly that suffix instead
-        // of allocating `base.len() * reps` and trimming it afterwards.
-        let total = base.len().saturating_mul(reps);
-        let keep = total.min(limit);
-        let start = (base.len() - keep % base.len()) % base.len();
-        (0..keep)
-            .map(|offset| base[(start + offset) % base.len()].clone())
-            .collect()
-    } else {
-        let total = base
-            .len()
-            .checked_mul(reps)
-            .ok_or_else(|| PyError::named("MemoryError", String::new()))?;
-        let mut items = Vec::new();
-        items
-            .try_reserve_exact(total)
-            .map_err(|_| PyError::named("MemoryError", String::new()))?;
-        for _ in 0..reps {
-            items.extend(base.iter().cloned());
-        }
-        items
-    };
+    let base = deque_items_snapshot(&inst)?;
+    let items = deque_repeat_items(&base, n, maxlen)?;
     Ok(deque_from_items(&inst, items, maxlen))
 }

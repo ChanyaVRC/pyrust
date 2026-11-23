@@ -1706,9 +1706,10 @@ pyrust_module! {
             }
             let items_repr = format!("[{}]", inner.join(", "));
             let maxlen = deque_maxlen(&inst);
+            let type_name = inst.borrow().class.borrow().name.clone();
             let s = match maxlen {
-                None => format!("deque({items_repr})"),
-                Some(ml) => format!("deque({items_repr}, maxlen={ml})"),
+                None => format!("{type_name}({items_repr})"),
+                Some(ml) => format!("{type_name}({items_repr}, maxlen={ml})"),
             };
             Ok(Value::string(s))
         }
@@ -1853,41 +1854,30 @@ pyrust_module! {
         }
 
         /// `d + other` — concatenate two deques into a new deque (#2011).
-        /// The result inherits `self`'s `maxlen` and is trimmed to it (keeping
-        /// the rightmost elements), matching CPython.  A non-deque RHS raises
-        /// `TypeError` directly (CPython's `deque.__add__` does not defer to
-        /// `__radd__`).
+        /// The result inherits `self`'s class and `maxlen` (trimmed to keep
+        /// rightmost elements), matching CPython.
         fn __add__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
+            let _inst = expect_self(args, FN_NAME)?;
             if args.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
                     format!("{FN_NAME}() takes exactly 1 argument"),
                 ));
             }
-            let other = &args[1].value;
-            let other_items = match deque_items_of(other) {
-                Some(v) => v,
-                None => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "can only concatenate deque (not \"{}\") to deque",
-                            crate::interpreter::value_type_name_str(other),
-                        ),
-                    ));
-                }
-            };
-            let mut items = deque_items_snapshot(&inst)?;
-            items.extend(other_items);
-            let maxlen = deque_maxlen(&inst);
-            Ok(deque_from_items(&inst, items, maxlen))
+            deque_concat_values(&args[0].value, &args[1].value)
+        }
+
+        /// `d += iterable` — extend the deque in place and return `self`
+        /// (issue #2989).
+        fn __iadd__(args) -> Result<Value> {
+            let (inst, other) = expect_self_one_arg(args, FN_NAME)?;
+            deque_extend_iterable(_interp, &inst, other, false)?;
+            Ok(args[0].value.clone())
         }
 
         /// `d * n` — repeat the deque `n` times into a new deque (#2011).
         /// `n <= 0` yields an empty deque.  The result inherits `self`'s
         /// `maxlen` and is trimmed to it (keeping rightmost), matching CPython.
-        /// A non-int `n` raises `TypeError`.
         fn __mul__(args) -> Result<Value> {
             deque_repeat(_interp, args, FN_NAME)
         }
@@ -1895,6 +1885,24 @@ pyrust_module! {
         /// `n * d` — reflected multiply, identical to `d * n` (#2011).
         fn __rmul__(args) -> Result<Value> {
             deque_repeat(_interp, args, FN_NAME)
+        }
+
+        /// `d *= n` — repeat the deque in place and return `self` (issue #2989).
+        fn __imul__(args) -> Result<Value> {
+            let (inst, multiplier) = expect_self_one_arg(args, FN_NAME)?;
+            let resolved = _interp.value_to_index(multiplier, |value| {
+                pyrust_core::type_err!(
+                    "'{}' object cannot be interpreted as an integer",
+                    pyrust_core::builtin_type_name(value)
+                )
+            })?;
+            let overflow = format!(
+                "cannot fit '{}' into an index-sized integer",
+                crate::interpreter::error_type_name_str(multiplier)
+            );
+            let n = _interp.value_to_isize(&resolved, &overflow)?;
+            deque_repeat_in_place(&inst, n)?;
+            Ok(args[0].value.clone())
         }
     }
 }

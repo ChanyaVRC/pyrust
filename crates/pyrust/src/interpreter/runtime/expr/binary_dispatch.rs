@@ -30,20 +30,37 @@ impl Interpreter {
                     return r;
                 }
                 // Before raising TypeError, try __index__ on the count operand
-                // when one side is a built-in sequence.  CPython calls
+                // when one side is a built-in sequence (or sequence subclass,
+                // including bytearray and collections.deque). CPython calls
                 // PyNumber_AsSsize_t (which invokes __index__) before failing.
-                let is_seq = |v: &Value| {
-                    matches!(
-                        v.kind(),
-                        ValueKind::Str(_)
-                            | ValueKind::List(_)
-                            | ValueKind::Tuple(_)
-                            | ValueKind::Bytes(_)
-                    )
+                let is_seq = |v: &Value| match v.kind() {
+                    ValueKind::Str(_)
+                    | ValueKind::List(_)
+                    | ValueKind::Tuple(_)
+                    | ValueKind::Bytes(_) => true,
+                    ValueKind::BuiltinObject { .. } => {
+                        pyrust_builtins::bytearray::as_bytearray_snapshot(v).is_some()
+                    }
+                    ValueKind::PyInstance(_) => {
+                        crate::interpreter::is_deque_value(v)
+                            || builtin_data_backing(v).is_some_and(|b| {
+                                matches!(
+                                    b.kind(),
+                                    ValueKind::Str(_)
+                                        | ValueKind::List(_)
+                                        | ValueKind::Tuple(_)
+                                        | ValueKind::Bytes(_)
+                                ) || pyrust_builtins::bytearray::as_bytearray_snapshot(&b).is_some()
+                            })
+                    }
+                    _ => false,
                 };
                 let is_py_instance = |v: &Value| matches!(v.kind(), ValueKind::PyInstance(_));
-                if is_seq(&left) && is_py_instance(&right) {
-                    let right = self.try_index_for_seq_repeat(right)?;
+                if is_seq(&left) {
+                    if is_py_instance(&right) {
+                        let right = self.try_index_for_seq_repeat(right)?;
+                        return self.mul(left, right);
+                    }
                     return self.mul(left, right);
                 }
                 if is_seq(&right) && is_py_instance(&left) {

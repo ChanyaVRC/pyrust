@@ -147,6 +147,34 @@ pub(crate) fn is_canonical_deque_class(class: &Rc<RefCell<PyClass>>) -> bool {
     crate::builtin_modules::collections::is_canonical_deque_class(class)
 }
 
+pub(crate) fn is_deque_value(value: &Value) -> bool {
+    crate::builtin_modules::collections::is_deque_value(value)
+}
+
+pub(crate) fn is_exact_deque_value(value: &Value) -> bool {
+    crate::builtin_modules::collections::is_exact_deque_value(value)
+}
+
+pub(crate) fn deque_extend_in_place(
+    interp: &mut Interpreter,
+    target: &Value,
+    iterable: &Value,
+) -> Result<()> {
+    crate::builtin_modules::collections::deque_extend_in_place(interp, target, iterable)
+}
+
+pub(crate) fn deque_concat_values(left: &Value, right: &Value) -> Result<Value> {
+    crate::builtin_modules::collections::deque_concat_values(left, right)
+}
+
+pub(crate) fn deque_mul_by_i64(target: &Value, n: i64) -> Result<Value> {
+    crate::builtin_modules::collections::deque_mul_by_i64(target, n)
+}
+
+pub(crate) fn deque_imul_by_i64(target: &Value, n: i64) -> Result<()> {
+    crate::builtin_modules::collections::deque_imul_by_i64(target, n)
+}
+
 /// Preserve the module-owned, reload-aware identity policy for synthetic
 /// `typing` values without exposing that implementation to runtime consumers.
 pub(crate) fn mapping_proxy_typing_subscript_policy(value: &Value) -> Option<bool> {
