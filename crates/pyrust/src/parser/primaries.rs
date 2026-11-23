@@ -159,6 +159,7 @@ impl Parser {
                 Ok(Expr::Var(name, span))
             }
             Some(Token::LParen) => {
+                let lparen_lineno = self.current_lineno();
                 self.bump();
                 if self.is(&Token::RParen) {
                     self.bump();
@@ -190,6 +191,7 @@ impl Parser {
                     self.expect(&Token::RParen)?;
                     return Ok(Expr::Tuple(items));
                 }
+                let elt_lineno = self.current_lineno();
                 let first = self.parse_expr()?;
                 if self.is(&Token::For) || self.is_async_for() {
                     // Generator expression: (elt for target in iter ...) or async variant
@@ -197,6 +199,8 @@ impl Parser {
                     self.expect(&Token::RParen)?;
                     return Ok(Expr::GenExp {
                         elt: Box::new(first),
+                        elt_lineno,
+                        first_lineno: lparen_lineno,
                         clauses,
                     });
                 }
@@ -292,6 +296,7 @@ impl Parser {
     fn parse_comp_clauses(&mut self) -> Result<Vec<CompClause>> {
         let mut clauses = Vec::new();
         while self.is(&Token::For) || self.is_async_for() {
+            let for_lineno = self.current_lineno();
             let is_async = if self.is_async_for() {
                 self.bump(); // consume `async`
                 true
@@ -305,12 +310,16 @@ impl Parser {
             self.expect(&Token::In)?;
             let iter = self.parse_or()?; // parse iterable (no comma-list at this level)
             // Consume any number of chained `if` filters (`for ... if A if B`).
-            // They AND together with short-circuit semantics, so fold them into a
-            // left-associated `and` chain matching CPython's `comp_if` grammar.
+            // Keep individual `(filter, cond_lineno)` entries so the genexpr
+            // compiler can stamp each filter's line (#2992), while retaining
+            // the `and`-folded `cond` for static analyses.
             let mut cond: Option<Expr> = None;
+            let mut cond_filters: Vec<(Expr, u32)> = Vec::new();
             while self.is(&Token::If) {
+                let cond_lineno = self.current_lineno();
                 self.bump();
                 let filter = self.parse_or()?;
+                cond_filters.push((filter.clone(), cond_lineno));
                 cond = Some(match cond {
                     None => filter,
                     Some(prev) => Expr::Binary {
@@ -325,6 +334,8 @@ impl Parser {
                 target,
                 iter,
                 cond,
+                cond_filters,
+                for_lineno,
                 is_async,
             });
         }

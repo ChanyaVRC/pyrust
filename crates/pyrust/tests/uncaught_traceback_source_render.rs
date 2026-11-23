@@ -997,3 +997,645 @@ ZeroDivisionError: integer modulo by zero
 ";
     assert_eq!(stderr, expected, "got:\n{stderr}");
 }
+
+// ── #2992: await / yield from / yield anchors, multi-line calls, genexpr ────
+
+#[test]
+fn yield_from_assigned_sub_raise_caret_is_byte_exact() {
+    let src = "\
+def sub():
+    raise RuntimeError(\"boom\")
+    yield 1
+
+def outer():
+    x = yield from sub()
+    return x
+
+g = outer()
+next(g)
+";
+    let stderr = run_pyrust_stderr("yf_assign.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"yf_assign.py\", line 10, in <module>
+    next(g)
+  File \"yf_assign.py\", line 6, in outer
+    x = yield from sub()
+        ^^^^^^^^^^^^^^^^
+  File \"yf_assign.py\", line 2, in sub
+    raise RuntimeError(\"boom\")
+RuntimeError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn yield_from_multiline_whole_line_omits_caret() {
+    let src = "\
+def sub(a, b):
+    raise RuntimeError(\"boom\")
+    yield a
+
+def outer():
+    x = (
+        yield from sub(
+            1,
+            2,
+        )
+    )
+    return x
+
+g = outer()
+next(g)
+";
+    let stderr = run_pyrust_stderr("yf_ml.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"yf_ml.py\", line 15, in <module>
+    next(g)
+  File \"yf_ml.py\", line 7, in outer
+    yield from sub(
+  File \"yf_ml.py\", line 2, in sub
+    raise RuntimeError(\"boom\")
+RuntimeError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn yield_from_assigned_bad_iter_caret_is_byte_exact() {
+    let src = "def outer():\n    x = yield from 123\nnext(outer())\n";
+    let stderr = run_pyrust_stderr("yf_bad_iter.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"yf_bad_iter.py\", line 3, in <module>
+    next(outer())
+  File \"yf_bad_iter.py\", line 2, in outer
+    x = yield from 123
+        ^^^^^^^^^^^^^^
+TypeError: 'int' object is not iterable
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn yield_from_assigned_throw_caret_is_byte_exact() {
+    let src = "\
+def sub():
+    yield 1
+
+def outer():
+    x = yield from sub()
+
+g = outer()
+next(g)
+g.throw(ValueError(\"t\"))
+";
+    let stderr = run_pyrust_stderr("yf_throw.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"yf_throw.py\", line 9, in <module>
+    g.throw(ValueError(\"t\"))
+  File \"yf_throw.py\", line 5, in outer
+    x = yield from sub()
+        ^^^^^^^^^^^^^^^^
+  File \"yf_throw.py\", line 2, in sub
+    yield 1
+ValueError: t
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn yield_assigned_throw_caret_is_byte_exact() {
+    let src = "def g():\n    x = yield 1\ngen = g()\nnext(gen)\ngen.throw(ValueError(\"t\"))\n";
+    let stderr = run_pyrust_stderr("y_throw.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"y_throw.py\", line 5, in <module>
+    gen.throw(ValueError(\"t\"))
+  File \"y_throw.py\", line 2, in g
+    x = yield 1
+        ^^^^^^^
+ValueError: t
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn await_return_caret_is_byte_exact() {
+    let src = "\
+async def bad():
+    raise RuntimeError(\"boom\")
+
+async def caller():
+    return await bad()
+
+caller().send(None)
+";
+    let stderr = run_pyrust_stderr("await_ret.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"await_ret.py\", line 7, in <module>
+    caller().send(None)
+  File \"await_ret.py\", line 5, in caller
+    return await bad()
+           ^^^^^^^^^^^
+  File \"await_ret.py\", line 2, in bad
+    raise RuntimeError(\"boom\")
+RuntimeError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn await_assign_caret_is_byte_exact() {
+    let src = "\
+async def bad():
+    raise RuntimeError(\"boom\")
+
+async def caller():
+    x = await bad()
+    return x
+
+caller().send(None)
+";
+    let stderr = run_pyrust_stderr("await_assign.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"await_assign.py\", line 8, in <module>
+    caller().send(None)
+  File \"await_assign.py\", line 5, in caller
+    x = await bad()
+        ^^^^^^^^^^^
+  File \"await_assign.py\", line 2, in bad
+    raise RuntimeError(\"boom\")
+RuntimeError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn await_multiline_caret_is_byte_exact() {
+    let src = "\
+async def bad(a, b):
+    raise RuntimeError(\"boom\")
+
+async def caller():
+    x = await bad(
+        1,
+        2,
+    )
+    return x
+
+caller().send(None)
+";
+    let stderr = run_pyrust_stderr("await_ml.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"await_ml.py\", line 11, in <module>
+    caller().send(None)
+  File \"await_ml.py\", line 5, in caller
+    x = await bad(
+        ^^^^^^^^^^
+  File \"await_ml.py\", line 2, in bad
+    raise RuntimeError(\"boom\")
+RuntimeError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn await_not_awaitable_caret_is_byte_exact() {
+    let src = "\
+async def caller():
+    x = await 123
+    return x
+
+caller().send(None)
+";
+    let stderr = run_pyrust_stderr("await_int.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"await_int.py\", line 5, in <module>
+    caller().send(None)
+  File \"await_int.py\", line 2, in caller
+    x = await 123
+        ^^^^^^^^^
+TypeError: object int can't be used in 'await' expression
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn multiline_call_in_function_caret_is_byte_exact() {
+    let src = "\
+def inner(a, b):
+    raise ValueError(\"fail\")
+
+def outer():
+    return inner(
+        1,
+        2,
+    )
+
+outer()
+";
+    let stderr = run_pyrust_stderr("ml_call_fn.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ml_call_fn.py\", line 10, in <module>
+    outer()
+  File \"ml_call_fn.py\", line 5, in outer
+    return inner(
+           ^^^^^^
+  File \"ml_call_fn.py\", line 2, in inner
+    raise ValueError(\"fail\")
+ValueError: fail
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn multiline_call_whole_line_omits_caret() {
+    let src = "\
+def f(a, b):
+    raise ValueError(\"fail\")
+
+f(
+    1,
+    2,
+)
+";
+    let stderr = run_pyrust_stderr("ml_call_mod.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ml_call_mod.py\", line 4, in <module>
+    f(
+  File \"ml_call_mod.py\", line 2, in f
+    raise ValueError(\"fail\")
+ValueError: fail
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn multiline_method_call_caret_is_byte_exact() {
+    let src = "\
+class Box:
+    def boom(self, a, b):
+        raise ValueError(\"fail\")
+
+def outer(b):
+    return b.boom(
+        1,
+        2,
+    )
+
+outer(Box())
+";
+    let stderr = run_pyrust_stderr("ml_method.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ml_method.py\", line 11, in <module>
+    outer(Box())
+  File \"ml_method.py\", line 6, in outer
+    return b.boom(
+           ^^^^^^^
+  File \"ml_method.py\", line 3, in boom
+    raise ValueError(\"fail\")
+ValueError: fail
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn multiline_chained_attr_call_caret_is_byte_exact() {
+    let src = "\
+class Box:
+    def boom(self, a):
+        raise ValueError(\"fail\")
+
+def outer(b):
+    return (
+        b
+        .boom(
+            1,
+        )
+    )
+
+outer(Box())
+";
+    let stderr = run_pyrust_stderr("ml_chain.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ml_chain.py\", line 13, in <module>
+    outer(Box())
+  File \"ml_chain.py\", line 8, in outer
+    .boom(
+     ^^^^^
+  File \"ml_chain.py\", line 3, in boom
+    raise ValueError(\"fail\")
+ValueError: fail
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn multiline_nested_call_reports_inner_line() {
+    let src = "\
+def g(x):
+    raise ValueError(\"inner\")
+
+def f(x):
+    return x
+
+def outer():
+    return f(
+        g(
+            1,
+        )
+    )
+
+outer()
+";
+    let stderr = run_pyrust_stderr("ml_nested.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ml_nested.py\", line 14, in <module>
+    outer()
+  File \"ml_nested.py\", line 9, in outer
+    g(
+  File \"ml_nested.py\", line 2, in g
+    raise ValueError(\"inner\")
+ValueError: inner
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn multiline_call_in_binop_caret_is_byte_exact() {
+    let src = "\
+def inner(a, b):
+    raise ValueError(\"fail\")
+
+def outer():
+    return 1 + inner(
+        1,
+        2,
+    )
+
+outer()
+";
+    let stderr = run_pyrust_stderr("ml_binop_call.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ml_binop_call.py\", line 10, in <module>
+    outer()
+  File \"ml_binop_call.py\", line 5, in outer
+    return 1 + inner(
+               ^^^^^^
+  File \"ml_binop_call.py\", line 2, in inner
+    raise ValueError(\"fail\")
+ValueError: fail
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn multiline_keyword_call_caret_is_byte_exact() {
+    let src = "\
+def inner(a=0, b=0):
+    raise ValueError(\"fail\")
+
+def outer():
+    return inner(
+        a=1,
+        b=2,
+    )
+
+outer()
+";
+    let stderr = run_pyrust_stderr("ml_kw_call.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ml_kw_call.py\", line 10, in <module>
+    outer()
+  File \"ml_kw_call.py\", line 5, in outer
+    return inner(
+           ^^^^^^
+  File \"ml_kw_call.py\", line 2, in inner
+    raise ValueError(\"fail\")
+ValueError: fail
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn genexpr_single_line_element_caret_is_byte_exact() {
+    let src = "\
+def genexpr_test():
+    g = (1 // x for x in [0])
+    return list(g)
+
+genexpr_test()
+";
+    let stderr = run_pyrust_stderr("ge_single.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ge_single.py\", line 5, in <module>
+    genexpr_test()
+  File \"ge_single.py\", line 3, in genexpr_test
+    return list(g)
+           ^^^^^^^
+  File \"ge_single.py\", line 2, in <genexpr>
+    g = (1 // x for x in [0])
+         ~~^^~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn genexpr_multiline_element_caret_is_byte_exact() {
+    let src = "\
+def genexpr_test():
+    g = (
+        1 // x
+        for x in [0]
+    )
+    return list(g)
+
+genexpr_test()
+";
+    let stderr = run_pyrust_stderr("ge_ml.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ge_ml.py\", line 8, in <module>
+    genexpr_test()
+  File \"ge_ml.py\", line 6, in genexpr_test
+    return list(g)
+           ^^^^^^^
+  File \"ge_ml.py\", line 3, in <genexpr>
+    1 // x
+    ~~^^~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn genexpr_filter_call_caret_is_byte_exact() {
+    let src = "\
+def check(x):
+    raise ValueError(x)
+
+def genexpr_test():
+    g = (
+        x
+        for x in [0]
+        if check(x)
+    )
+    return list(g)
+
+genexpr_test()
+";
+    let stderr = run_pyrust_stderr("ge_filter_call.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ge_filter_call.py\", line 12, in <module>
+    genexpr_test()
+  File \"ge_filter_call.py\", line 10, in genexpr_test
+    return list(g)
+           ^^^^^^^
+  File \"ge_filter_call.py\", line 8, in <genexpr>
+    if check(x)
+       ^^^^^^^^
+  File \"ge_filter_call.py\", line 2, in check
+    raise ValueError(x)
+ValueError: 0
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn genexpr_filter_subscript_caret_is_byte_exact() {
+    let src = "\
+def genexpr_test():
+    d = {}
+    g = (
+        x
+        for x in [\"k\"]
+        if d[x]
+    )
+    return list(g)
+
+genexpr_test()
+";
+    let stderr = run_pyrust_stderr("ge_filter_sub.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ge_filter_sub.py\", line 10, in <module>
+    genexpr_test()
+  File \"ge_filter_sub.py\", line 8, in genexpr_test
+    return list(g)
+           ^^^^^^^
+  File \"ge_filter_sub.py\", line 6, in <genexpr>
+    if d[x]
+       ~^^^
+KeyError: 'k'
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn genexpr_nested_element_caret_is_byte_exact() {
+    let src = "\
+def genexpr_test():
+    g = (
+        (
+            1 // y
+            for y in [x]
+        )
+        for x in [0]
+    )
+    for inner in g:
+        list(inner)
+
+genexpr_test()
+";
+    let stderr = run_pyrust_stderr("ge_nested.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ge_nested.py\", line 12, in <module>
+    genexpr_test()
+  File \"ge_nested.py\", line 10, in genexpr_test
+    list(inner)
+  File \"ge_nested.py\", line 4, in <genexpr>
+    1 // y
+    ~~^^~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn genexpr_sum_multiline_caret_is_byte_exact() {
+    let src = "\
+def genexpr_test():
+    return sum(
+        1 // x
+        for x in [0]
+    )
+
+genexpr_test()
+";
+    let stderr = run_pyrust_stderr("ge_sum.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ge_sum.py\", line 7, in <module>
+    genexpr_test()
+  File \"ge_sum.py\", line 2, in genexpr_test
+    return sum(
+           ^^^^
+  File \"ge_sum.py\", line 3, in <genexpr>
+    1 // x
+    ~~^^~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn genexpr_multiline_call_element_is_byte_exact() {
+    let src = "\
+def boom(x):
+    raise ValueError(x)
+
+def genexpr_test():
+    g = (
+        boom(
+            x,
+        )
+        for x in [1]
+    )
+    return list(g)
+
+genexpr_test()
+";
+    let stderr = run_pyrust_stderr("ge_call_ml.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"ge_call_ml.py\", line 13, in <module>
+    genexpr_test()
+  File \"ge_call_ml.py\", line 11, in genexpr_test
+    return list(g)
+           ^^^^^^^
+  File \"ge_call_ml.py\", line 6, in <genexpr>
+    boom(
+  File \"ge_call_ml.py\", line 2, in boom
+    raise ValueError(x)
+ValueError: 1
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}

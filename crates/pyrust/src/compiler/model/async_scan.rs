@@ -9,9 +9,9 @@
 /// annotations remain in the current scope and are scanned.
 fn expr_contains_await(expr: &Expr) -> bool {
     match expr {
-        Expr::Await(_) => true,
-        Expr::Yield(e) => e.as_deref().is_some_and(expr_contains_await),
-        Expr::YieldFrom(e) => expr_contains_await(e),
+        Expr::Await { .. } => true,
+        Expr::Yield { value: e, .. } => e.as_deref().is_some_and(expr_contains_await),
+        Expr::YieldFrom { expr: e, .. } => expr_contains_await(e),
         Expr::Binary { left, right, .. } => expr_contains_await(left) || expr_contains_await(right),
         Expr::Unary { expr: e, .. } => expr_contains_await(e),
         Expr::Compare { left, ops } => {
@@ -152,7 +152,7 @@ fn expr_has_async_collection_comp(expr: &Expr) -> bool {
         }
         // A generator expression itself never propagates async-ness, but an
         // async collection comp nested inside its parts does.
-        Expr::GenExp { elt, clauses } => comp_parts_have_async_comp(&[elt], clauses),
+        Expr::GenExp { elt, clauses, .. } => comp_parts_have_async_comp(&[elt], clauses),
         Expr::Binary { left, right, .. } => {
             expr_has_async_collection_comp(left) || expr_has_async_collection_comp(right)
         }
@@ -198,9 +198,9 @@ fn expr_has_async_collection_comp(expr: &Expr) -> bool {
         }),
         Expr::Starred(e) => expr_has_async_collection_comp(e),
         Expr::Named { value, .. } => expr_has_async_collection_comp(value),
-        Expr::Await(e) => expr_has_async_collection_comp(e),
-        Expr::Yield(e) => e.as_deref().is_some_and(expr_has_async_collection_comp),
-        Expr::YieldFrom(e) => expr_has_async_collection_comp(e),
+        Expr::Await { expr: e, .. } => expr_has_async_collection_comp(e),
+        Expr::Yield { value: e, .. } => e.as_deref().is_some_and(expr_has_async_collection_comp),
+        Expr::YieldFrom { expr: e, .. } => expr_has_async_collection_comp(e),
         Expr::FString(parts) => fstring_parts_have_async_collection_comp(parts),
         // Lambda bodies are separate, but defaults and annotations execute in
         // the enclosing scope and can create an async collection comp there.

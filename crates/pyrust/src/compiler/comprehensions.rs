@@ -43,47 +43,74 @@ impl Compiler {
     /// `innermost`.  The outermost `for` iterates over `IT_PARAM` (the implicit
     /// parameter that receives the outermost iterable from the enclosing scope).
     fn build_comp_loop_body(clauses: &[CompClause], innermost: Stmt) -> Vec<Stmt> {
+        Self::build_comp_loop_body_with_linenos(clauses, innermost, 0).0
+    }
+
+    /// Build the loop-nest AST along with parallel 1-based statement line
+    /// numbers so generator expressions carry accurate `tb_lineno` and PEP 657
+    /// caret anchors across multi-line elements, clauses, and chained `if`
+    /// filters (issue #2992).
+    fn build_comp_loop_body_with_linenos(
+        clauses: &[CompClause],
+        innermost: Stmt,
+        innermost_lineno: u32,
+    ) -> (Vec<Stmt>, Vec<u32>) {
         const IT_PARAM: &str = ".0";
 
-        let mut body = vec![innermost];
-        for clause in clauses[1..].iter().rev() {
-            if let Some(cond) = &clause.cond {
+        let wrap_filters = |clause: &CompClause,
+                            mut body: Vec<Stmt>,
+                            mut body_linenos: Vec<u32>|
+         -> (Vec<Stmt>, Vec<u32>) {
+            if !clause.cond_filters.is_empty() {
+                for (filter, filter_lineno) in clause.cond_filters.iter().rev() {
+                    body = vec![Stmt::If {
+                        branches: vec![(filter.clone(), body)],
+                        else_branch: None,
+                        branch_linenos: vec![body_linenos],
+                        else_linenos: vec![],
+                    }];
+                    body_linenos = vec![*filter_lineno];
+                }
+            } else if let Some(cond) = &clause.cond {
                 body = vec![Stmt::If {
                     branches: vec![(cond.clone(), body)],
                     else_branch: None,
-                    branch_linenos: vec![],
+                    branch_linenos: vec![body_linenos],
                     else_linenos: vec![],
                 }];
+                body_linenos = vec![clause.for_lineno];
             }
+            (body, body_linenos)
+        };
+
+        let mut body = vec![innermost];
+        let mut body_linenos = vec![innermost_lineno];
+        for clause in clauses[1..].iter().rev() {
+            (body, body_linenos) = wrap_filters(clause, body, body_linenos);
             body = vec![Stmt::For {
                 target: clause.target.clone(),
                 iter: clause.iter.clone(),
                 body,
                 else_branch: None,
-                body_linenos: vec![],
+                body_linenos,
                 else_linenos: vec![],
                 // `async for` clause (#2283): lowers to compile_async_for.
                 is_async: clause.is_async,
             }];
+            body_linenos = vec![clause.for_lineno];
         }
-        if let Some(cond) = &clauses[0].cond {
-            body = vec![Stmt::If {
-                branches: vec![(cond.clone(), body)],
-                else_branch: None,
-                branch_linenos: vec![],
-                else_linenos: vec![],
-            }];
-        }
+        (body, body_linenos) = wrap_filters(&clauses[0], body, body_linenos);
         body = vec![Stmt::For {
             target: clauses[0].target.clone(),
             iter: Expr::Var(IT_PARAM.to_string(), None),
             body,
             else_branch: None,
-            body_linenos: vec![],
+            body_linenos,
             else_linenos: vec![],
             is_async: clauses[0].is_async,
         }];
-        body
+        let outer_linenos = vec![clauses[0].for_lineno];
+        (body, outer_linenos)
     }
 
     /// Resolve bindings for the implicit function shared by collection
@@ -371,6 +398,7 @@ impl Compiler {
         // Build the innermost statement: .acc.append(elt)
         let innermost = Stmt::Expr(Expr::Call {
             span: None,
+            lineno: 0,
             func: Box::new(Expr::Attr {
                 target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
                 name: "append".to_string(),
@@ -543,6 +571,7 @@ impl Compiler {
         // Build the innermost statement: .acc.add(elt)
         let innermost = Stmt::Expr(Expr::Call {
             span: None,
+            lineno: 0,
             func: Box::new(Expr::Attr {
                 target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
                 name: "add".to_string(),
@@ -559,6 +588,7 @@ impl Compiler {
         // Build the accumulator: .acc = set()
         let acc_init = Expr::Call {
             span: None,
+            lineno: 0,
             func: Box::new(Expr::Var("set".to_string(), None)),
             args: vec![],
         };
@@ -581,7 +611,13 @@ impl Compiler {
     ///      clauses, and yields `elt` on each matching element.
     ///   3. Emit `MakeFunction` directly into a temp register — no global
     ///      store/reload — then call it immediately with the iterable.
-    fn compile_gen_exp(&mut self, elt: &Expr, clauses: &[CompClause]) -> Reg {
+    fn compile_gen_exp(
+        &mut self,
+        elt: &Expr,
+        elt_lineno: u32,
+        first_lineno: u32,
+        clauses: &[CompClause],
+    ) -> Reg {
         if clauses.is_empty() {
             self.failed = true;
             if self.error_msg.is_none() {
@@ -620,9 +656,26 @@ impl Compiler {
         // Build the inner body working from the innermost clause outward:
         // `yield elt` wrapped in the clause loop nest (shared with the
         // collection comprehensions, so `async for` clauses thread through to
-        // `compile_async_for` identically — #2283).
-        let yield_stmt = Stmt::Expr(Expr::Yield(Some(Box::new(elt.clone()))));
-        let body = Self::build_comp_loop_body(clauses, yield_stmt);
+        // `compile_async_for` identically — #2283).  Thread per-part line
+        // numbers so `<genexpr>` raises report accurate `tb_lineno` and PEP 657
+        // carets (#2992).
+        let effective_first_lineno = if first_lineno != 0 {
+            first_lineno
+        } else {
+            self.current_lineno
+        };
+        let effective_elt_lineno = if elt_lineno != 0 {
+            elt_lineno
+        } else {
+            effective_first_lineno
+        };
+        let yield_stmt = Stmt::Expr(Expr::Yield {
+            value: Some(Box::new(elt.clone())),
+            span: None,
+            lineno: effective_elt_lineno,
+        });
+        let (body, body_linenos) =
+            Self::build_comp_loop_body_with_linenos(clauses, yield_stmt, effective_elt_lineno);
 
         // Parameter spec for the anonymous generator function.
         let params = vec![FunctionParam {
@@ -681,7 +734,9 @@ impl Compiler {
         // async generator (#2280/#2283).  The result is the async-gen object —
         // NOT awaited here, unlike a collection comprehension.
         sub.is_async_function = is_async;
-        sub.compile_block(&body);
+        sub.first_lineno = effective_first_lineno;
+        sub.set_lineno(effective_first_lineno);
+        sub.compile_block_with_linenos(&body, &body_linenos);
         let mut inner_code = match sub.finish() {
             Ok(c) => c,
             Err(e) => {

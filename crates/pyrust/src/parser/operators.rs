@@ -318,8 +318,16 @@ impl Parser {
         // `await expr` — soft keyword, only meaningful inside `async def`; the
         // compiler will reject it outside async context.
         if matches!(self.current(), Some(Token::Ident(kw)) if kw == "await") {
+            let kw_col = self.current_col();
+            let kw_lineno = self.current_lineno();
             self.bump();
-            return Ok(Expr::Await(Box::new(self.parse_unary()?)));
+            let expr = Box::new(self.parse_unary()?);
+            let span = self.make_whole_span(kw_col, kw_lineno);
+            return Ok(Expr::Await {
+                expr,
+                span,
+                lineno: kw_lineno,
+            });
         }
         self.parse_power()
     }

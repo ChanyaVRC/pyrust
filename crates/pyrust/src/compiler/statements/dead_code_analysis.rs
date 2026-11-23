@@ -201,14 +201,14 @@ impl Compiler {
             return;
         }
         match expr {
-            Expr::Yield(value) => {
+            Expr::Yield { value, .. } => {
                 if !self.is_function_scope {
                     self.set_syntax_error("'yield' outside function");
                 } else if let Some(value) = value {
                     self.check_dead_expr(value);
                 }
             }
-            Expr::YieldFrom(value) => {
+            Expr::YieldFrom { expr: value, .. } => {
                 if !self.is_function_scope {
                     self.set_syntax_error("'yield' outside function");
                 } else if self.is_async_function {
@@ -217,7 +217,7 @@ impl Compiler {
                     self.check_dead_expr(value);
                 }
             }
-            Expr::Await(value) => {
+            Expr::Await { expr: value, .. } => {
                 if !self.is_function_scope {
                     self.set_syntax_error("'await' outside function");
                 } else if !self.is_async_function {
@@ -340,7 +340,7 @@ impl Compiler {
             Expr::DictComp { key, val, clauses } => {
                 self.check_dead_comprehension(&[key, val], clauses, "dict comprehension", true);
             }
-            Expr::GenExp { elt, clauses } => {
+            Expr::GenExp { elt, clauses, .. } => {
                 self.check_dead_comprehension(&[elt], clauses, "generator expression", false);
             }
             Expr::Var(_, _)

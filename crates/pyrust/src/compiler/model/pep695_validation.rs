@@ -112,17 +112,17 @@ fn pep695_expression_violation(
             };
             Some(violation)
         }
-        Expr::Yield(_) | Expr::YieldFrom(_)
+        Expr::Yield { .. } | Expr::YieldFrom { .. }
             if context == Pep695ExpressionContext::AnnotationScope =>
         {
             Some(Pep695ExpressionViolation::YieldExpression)
         }
-        Expr::Await(_) if context == Pep695ExpressionContext::AnnotationScope => {
+        Expr::Await { .. } if context == Pep695ExpressionContext::AnnotationScope => {
             Some(Pep695ExpressionViolation::AwaitExpression)
         }
         // Yield/await in a comprehension body have comprehension-specific
         // diagnostics and async classification. Do not replace those here.
-        Expr::Yield(_) | Expr::YieldFrom(_) | Expr::Await(_) => None,
+        Expr::Yield { .. } | Expr::YieldFrom { .. } | Expr::Await { .. } => None,
         Expr::Lambda { params, .. } => params.iter().find_map(|parameter| {
             parameter
                 .default
@@ -137,7 +137,9 @@ fn pep695_expression_violation(
         }),
         Expr::ListComp { elt, clauses }
         | Expr::SetComp { elt, clauses }
-        | Expr::GenExp { elt, clauses } => pep695_comprehension_violation(&[elt], clauses, context),
+        | Expr::GenExp { elt, clauses, .. } => {
+            pep695_comprehension_violation(&[elt], clauses, context)
+        }
         Expr::DictComp { key, val, clauses } => {
             pep695_comprehension_violation(&[key, val], clauses, context)
         }

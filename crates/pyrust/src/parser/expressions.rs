@@ -58,15 +58,27 @@ impl Parser {
     fn parse_expr_inner(&mut self) -> Result<Expr> {
         // Yield / yield from
         if self.is(&Token::Yield) {
+            let kw_col = self.current_col();
+            let kw_lineno = self.current_lineno();
             self.bump(); // consume `yield`
             if self.is(&Token::From) {
                 self.bump(); // consume `from`
                 let iter = self.parse_expr()?;
-                return Ok(Expr::YieldFrom(Box::new(iter)));
+                let span = self.make_whole_span(kw_col, kw_lineno);
+                return Ok(Expr::YieldFrom {
+                    expr: Box::new(iter),
+                    span,
+                    lineno: kw_lineno,
+                });
             }
             // bare `yield` or `yield expr`
             if self.at_stmt_end() {
-                return Ok(Expr::Yield(None));
+                let span = self.make_whole_span(kw_col, kw_lineno);
+                return Ok(Expr::Yield {
+                    value: None,
+                    span,
+                    lineno: kw_lineno,
+                });
             }
             let val = self.parse_expr_or_tuple()?;
             if matches!(val, Expr::Starred(_)) {
@@ -74,7 +86,12 @@ impl Parser {
                     "can't use starred expression here".to_string(),
                 ));
             }
-            return Ok(Expr::Yield(Some(Box::new(val))));
+            let span = self.make_whole_span(kw_col, kw_lineno);
+            return Ok(Expr::Yield {
+                value: Some(Box::new(val)),
+                span,
+                lineno: kw_lineno,
+            });
         }
         // Lambda
         if self.is(&Token::Lambda) {
@@ -291,5 +308,28 @@ impl Parser {
         } else {
             None
         }
+    }
+
+    /// Build a whole-`^` (`full == prim`) PEP 657 caret span from
+    /// `(start_col, start_lineno)` through the just-consumed token, emitting
+    /// `MULTILINE_FULL_END` when the expression straddles physical lines
+    /// (issue #2992).
+    fn make_whole_span(
+        &self,
+        start_col: Option<u32>,
+        start_lineno: u32,
+    ) -> Option<crate::ast::CaretSpan> {
+        let s = start_col?;
+        let end_lineno = self.prev_lineno();
+        if start_lineno != 0 && end_lineno != 0 && start_lineno != end_lineno {
+            return Some((
+                s,
+                s,
+                crate::ast::MULTILINE_FULL_END,
+                crate::ast::MULTILINE_FULL_END,
+            ));
+        }
+        let e = self.prev_end_col()?;
+        (s < e).then_some((s, s, e, e))
     }
 }

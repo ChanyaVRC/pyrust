@@ -517,14 +517,14 @@ fn collect_class_lambda_outer_refs_in_expr(
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis => {}
-        Expr::Yield(Some(e)) => {
+        Expr::Yield { value: Some(e), .. } => {
             collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells)
         }
-        Expr::Yield(None) => {}
-        Expr::YieldFrom(e) => {
+        Expr::Yield { value: None, .. } => {}
+        Expr::YieldFrom { expr: e, .. } => {
             collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells)
         }
-        Expr::Await(e) => {
+        Expr::Await { expr: e, .. } => {
             collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells)
         }
     }

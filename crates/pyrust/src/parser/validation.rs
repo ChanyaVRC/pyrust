@@ -285,7 +285,7 @@ fn validate_del_target(expr: &Expr) -> Result<()> {
         Expr::Call { .. } => "function call",
         Expr::Ternary { .. } => "conditional expression",
         Expr::Compare { .. } => "comparison",
-        Expr::Yield(_) | Expr::YieldFrom(_) => "yield expression",
+        Expr::Yield { .. } | Expr::YieldFrom { .. } => "yield expression",
         Expr::Lambda { .. } => "lambda",
         _ => "expression",
     };

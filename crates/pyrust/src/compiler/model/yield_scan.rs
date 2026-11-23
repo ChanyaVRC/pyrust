@@ -79,7 +79,7 @@ fn stmt_contains_yield(stmt: &Stmt) -> bool {
 
 fn expr_contains_yield(expr: &Expr) -> bool {
     match expr {
-        Expr::Yield(_) | Expr::YieldFrom(_) => true,
+        Expr::Yield { .. } | Expr::YieldFrom { .. } => true,
         Expr::Binary { left, right, .. } => expr_contains_yield(left) || expr_contains_yield(right),
         Expr::Unary { expr: e, .. } => expr_contains_yield(e),
         Expr::Compare { left, ops } => {
@@ -115,7 +115,7 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         }),
         Expr::Starred(e) => expr_contains_yield(e),
         Expr::Named { value, .. } => expr_contains_yield(value),
-        Expr::Await(e) => expr_contains_yield(e),
+        Expr::Await { expr: e, .. } => expr_contains_yield(e),
         // An f-string's `{expr}` interpolations (and any `{expr}` inside a
         // nested format spec) are real sub-expressions in the same scope, so a
         // `yield` there counts: `(f"{(yield x)}" for x in xs)` is rejected as

@@ -59,6 +59,9 @@ fn insn_anchor_by_discriminant(insn: &Insn) -> bool {
             | Insn::RaiseExceptStarResidual(_)
             | Insn::RaiseFrom(..)
             | Insn::RaiseAssert(_)
+            | Insn::GetAwaitable(..)
+            | Insn::YieldFrom { .. }
+            | Insn::Yield { .. }
     )
 }
 

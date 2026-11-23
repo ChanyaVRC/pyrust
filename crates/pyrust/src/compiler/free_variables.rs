@@ -346,7 +346,7 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
         // remainder as uses at the enclosing scope.
         Expr::ListComp { elt, clauses }
         | Expr::SetComp { elt, clauses }
-        | Expr::GenExp { elt, clauses } => {
+        | Expr::GenExp { elt, clauses, .. } => {
             // Outermost iterable is evaluated at this scope level.
             if let Some(first) = clauses.first() {
                 collect_transitive_free_vars_in_expr(&first.iter, uses);
@@ -435,9 +435,9 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis => {}
-        Expr::Yield(Some(e)) => collect_transitive_free_vars_in_expr(e, uses),
-        Expr::Yield(None) => {}
-        Expr::YieldFrom(e) => collect_transitive_free_vars_in_expr(e, uses),
-        Expr::Await(e) => collect_transitive_free_vars_in_expr(e, uses),
+        Expr::Yield { value: Some(e), .. } => collect_transitive_free_vars_in_expr(e, uses),
+        Expr::Yield { value: None, .. } => {}
+        Expr::YieldFrom { expr: e, .. } => collect_transitive_free_vars_in_expr(e, uses),
+        Expr::Await { expr: e, .. } => collect_transitive_free_vars_in_expr(e, uses),
     }
 }

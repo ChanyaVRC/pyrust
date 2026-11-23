@@ -314,10 +314,10 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis => {}
-        Expr::Yield(Some(e)) => collect_free_var_reads_in_expr(e, uses),
-        Expr::Yield(None) => {}
-        Expr::YieldFrom(e) => collect_free_var_reads_in_expr(e, uses),
-        Expr::Await(e) => collect_free_var_reads_in_expr(e, uses),
+        Expr::Yield { value: Some(e), .. } => collect_free_var_reads_in_expr(e, uses),
+        Expr::Yield { value: None, .. } => {}
+        Expr::YieldFrom { expr: e, .. } => collect_free_var_reads_in_expr(e, uses),
+        Expr::Await { expr: e, .. } => collect_free_var_reads_in_expr(e, uses),
     }
 }
 

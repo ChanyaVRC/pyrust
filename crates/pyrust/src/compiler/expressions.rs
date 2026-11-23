@@ -334,7 +334,12 @@ impl Compiler {
                     result_dst
                 }
             }
-            Expr::Call { func, args, span } => self.compile_call(func, args, *span),
+            Expr::Call {
+                func,
+                args,
+                span,
+                lineno,
+            } => self.compile_call(func, args, *span, *lineno),
             Expr::Attr { target, name, span } => {
                 let obj = self.compile_expr(target);
                 let name_idx = self.intern_name(name);
@@ -428,7 +433,12 @@ impl Compiler {
             Expr::ListComp { elt, clauses } => self.compile_list_comp(elt, clauses),
             Expr::DictComp { key, val, clauses } => self.compile_dict_comp(key, val, clauses),
             Expr::SetComp { elt, clauses } => self.compile_set_comp(elt, clauses),
-            Expr::GenExp { elt, clauses } => self.compile_gen_exp(elt, clauses),
+            Expr::GenExp {
+                elt,
+                elt_lineno,
+                first_lineno,
+                clauses,
+            } => self.compile_gen_exp(elt, *elt_lineno, *first_lineno, clauses),
             Expr::Named { target, value } => {
                 let val_reg = self.compile_expr(value);
                 if let Some(reg) = self.local_reg(target) {
@@ -445,7 +455,11 @@ impl Compiler {
             }
             Expr::FString(parts) => self.compile_fstring(parts),
 
-            Expr::Yield(val_expr) => {
+            Expr::Yield {
+                value: val_expr,
+                span,
+                lineno,
+            } => {
                 if !self.is_function_scope {
                     self.set_syntax_error("'yield' outside function");
                     return 0;
@@ -459,12 +473,22 @@ impl Compiler {
                     r
                 };
                 let dst = self.alloc_temp();
+                let saved_lineno = self.current_lineno;
+                if *lineno != 0 {
+                    self.set_lineno(*lineno);
+                }
+                self.set_col_span_for_next(*span);
                 self.emit(Insn::Yield { src, dst });
+                self.set_lineno(saved_lineno);
                 self.free_temp(src);
                 dst
             }
 
-            Expr::YieldFrom(iter_expr) => {
+            Expr::YieldFrom {
+                expr: iter_expr,
+                span,
+                lineno,
+            } => {
                 if !self.is_function_scope {
                     self.set_syntax_error("'yield' outside function");
                     return 0;
@@ -498,12 +522,20 @@ impl Compiler {
                 // func_reg+1 .. func_reg+argc; alloc_temp() is sequential so
                 // iter_arg_reg == iter_fn_reg + 1.
                 let iter_src = self.compile_expr(iter_expr);
+                let saved_lineno = self.current_lineno;
+                if *lineno != 0 {
+                    self.set_lineno(*lineno);
+                }
                 let iter_fn_reg = self.alloc_temp();
                 let iter_name_idx = self.intern_name("iter");
                 self.emit(Insn::LoadGlobal(iter_fn_reg, iter_name_idx));
                 let iter_arg_reg = self.alloc_temp(); // == iter_fn_reg + 1
                 self.emit(Insn::Move(iter_arg_reg, iter_src));
                 self.free_temp(iter_src);
+                // PEP 657 (#2992): `iter(...)` raising (`yield from 123`) and
+                // `YieldFrom` propagating from the sub-iterator both underline
+                // the `yield from <expr>` span.
+                self.set_col_span_for_next(*span);
                 self.emit(Insn::Call(iter_fn_reg, 1)); // result lands in iter_fn_reg
                 self.free_temp(iter_arg_reg);
                 let iter_reg = iter_fn_reg; // iter_reg holds the iterator object
@@ -519,11 +551,13 @@ impl Compiler {
                 let result_reg = self.alloc_temp();
                 self.emit(Insn::LoadNone(result_reg));
 
+                self.set_col_span_for_next(*span);
                 self.emit(Insn::YieldFrom {
                     iter_reg,
                     sent_reg,
                     result_reg,
                 });
+                self.set_lineno(saved_lineno);
 
                 // iter_reg and sent_reg are only live during YieldFrom.
                 self.free_temp(sent_reg);
@@ -533,7 +567,11 @@ impl Compiler {
                 result_reg
             }
 
-            Expr::Await(awaited_expr) => {
+            Expr::Await {
+                expr: awaited_expr,
+                span,
+                lineno,
+            } => {
                 if !self.is_function_scope {
                     self.set_syntax_error("'await' outside function");
                     return 0;
@@ -562,7 +600,12 @@ impl Compiler {
                 // spurious "object is not iterable".
                 let result_reg = self.alloc_temp();
                 let awaited_src = self.compile_expr(awaited_expr);
-                self.emit_await_drive_into(awaited_src, result_reg);
+                let saved_lineno = self.current_lineno;
+                if *lineno != 0 {
+                    self.set_lineno(*lineno);
+                }
+                self.emit_await_drive_into_with_span(awaited_src, result_reg, *span);
+                self.set_lineno(saved_lineno);
                 self.free_temp(awaited_src);
                 result_reg
             }
@@ -580,13 +623,24 @@ impl Compiler {
     /// (issue #2279).  Both `awaited_src` and `result_reg` must outlive this
     /// call; only the internal scratch temps are freed here.
     fn emit_await_drive_into(&mut self, awaited_src: Reg, result_reg: Reg) {
+        self.emit_await_drive_into_with_span(awaited_src, result_reg, None);
+    }
+
+    fn emit_await_drive_into_with_span(
+        &mut self,
+        awaited_src: Reg,
+        result_reg: Reg,
+        span: Option<crate::ast::CaretSpan>,
+    ) {
         let iter_reg = self.alloc_temp();
+        self.set_col_span_for_next(span);
         self.emit(Insn::GetAwaitable(iter_reg, awaited_src));
 
         let sent_reg = self.alloc_temp();
         self.emit(Insn::LoadNone(sent_reg));
         self.emit(Insn::LoadNone(result_reg));
 
+        self.set_col_span_for_next(span);
         self.emit(Insn::YieldFrom {
             iter_reg,
             sent_reg,
