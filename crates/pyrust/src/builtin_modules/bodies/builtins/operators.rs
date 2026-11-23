@@ -696,10 +696,7 @@ pyrust_module! {
         // metaclass `__call__` and user construction hooks are preserved.
         let instance = _interp.call_class_expanded(class, &[])?;
         if let ValueKind::PyInstance(instance) = instance.kind() {
-            instance.borrow_mut().attrs.insert(
-                crate::interpreter::BUILTIN_DATA_ATTR,
-                backing,
-            );
+            instance.borrow_mut().attrs.set_builtin_data(backing);
         }
         Ok(instance)
     }

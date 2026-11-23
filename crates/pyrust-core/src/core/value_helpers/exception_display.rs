@@ -57,7 +57,7 @@ pub fn class_chain_contains_builtin_exception(class: &Rc<RefCell<PyClass>>, name
 /// generic `<module.Class object at 0x…>` form (the override would need
 /// interpreter dispatch to honour).
 fn instance_backing_for_repr(instance: &Rc<RefCell<PyInstance>>) -> Option<Value> {
-    let backing = instance.borrow().attrs.get("__builtin_data__").cloned()?;
+    let backing = instance.borrow().attrs.builtin_data().cloned()?;
     let base_tag = backing_class_tag(&backing)?;
     let mut cursor = Some(Rc::clone(&instance.borrow().class));
     while let Some(class) = cursor {

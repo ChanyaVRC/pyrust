@@ -33,9 +33,9 @@ use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    BUILTIN_DATA_ATTR, Interpreter, IterSrcBuf, MapIter, NativeIterFrame, NativeIteratorClass,
-    class_is_subclass_of, coerce_subclass_backing, invoke_class_method, lookup_class_attr,
-    value_from_bigint, value_type_name_str,
+    Interpreter, IterSrcBuf, MapIter, NativeIterFrame, NativeIteratorClass, class_is_subclass_of,
+    coerce_subclass_backing, invoke_class_method, lookup_class_attr, value_from_bigint,
+    value_type_name_str,
 };
 use crate::value::{
     InstanceAttrs, PyBigInt, PyClass, PyDict, PyInstance, PyKey, Value, ValueKind, key_repr,
@@ -225,8 +225,32 @@ fn tag_public_classes(
                     }
                 }
                 "deque" => {
+                    {
+                        let mut class = cls_rc.borrow_mut();
+                        class.slots = Some(indexmap::IndexSet::new());
+                        class.attrs.insert(
+                            "maxlen".to_string(),
+                            pyrust_builtins::property::property(
+                                Value::builtin_function("collections.deque._get_maxlen"),
+                                Value::none(),
+                                Value::none(),
+                            ),
+                        );
+                    }
                     register_canonical_collection_class(CanonicalCollectionKind::Deque, cls_rc);
                     super::collections_abc::register_virtual_mutable_sequence(cls_rc);
+                }
+                "defaultdict" => {
+                    let mut class = cls_rc.borrow_mut();
+                    class.slots = Some(indexmap::IndexSet::new());
+                    class.attrs.insert(
+                        "default_factory".to_string(),
+                        pyrust_builtins::property::property(
+                            Value::builtin_function("collections.defaultdict._get_default_factory"),
+                            Value::builtin_function("collections.defaultdict._set_default_factory"),
+                            Value::builtin_function("collections.defaultdict._del_default_factory"),
+                        ),
+                    );
                 }
                 _ => {}
             }
@@ -780,7 +804,7 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             let class = Rc::clone(&inst.borrow().class);
             let mut attrs = InstanceAttrs::new();
-            attrs.insert(BUILTIN_DATA_ATTR, Value::dict(counts));
+            attrs.set_builtin_data(Value::dict(counts));
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class,
                 attrs,
@@ -964,7 +988,7 @@ pyrust_module! {
             // mapping.
             inst.borrow_mut()
                 .attrs
-                .insert("default_factory", factory);
+                .insert_slot("default_factory", factory);
             let backing = defaultdict_backing(args, FN_NAME)?;
             dict_init_into_backing(
                 _interp,
@@ -1012,7 +1036,7 @@ pyrust_module! {
             let factory = inst
                 .borrow()
                 .attrs
-                .get("default_factory")
+                .get_slot("default_factory")
                 .cloned()
                 .unwrap_or_else(Value::none);
             if factory.is_none() {
@@ -1068,15 +1092,16 @@ pyrust_module! {
             let factory_repr = inst
                 .borrow()
                 .attrs
-                .get("default_factory")
+                .get_slot("default_factory")
                 .map(|v| v.repr_raw())
                 .unwrap_or_else(|| "None".to_string());
             let body: Vec<String> = items
                 .iter()
                 .map(|(k, v)| format!("{}: {}", key_repr(k), v.repr_raw()))
                 .collect();
+            let class_name = inst.borrow().class.borrow().name.clone();
             Ok(Value::string(format!(
-                "defaultdict({factory_repr}, {{{}}})",
+                "{class_name}({factory_repr}, {{{}}})",
                 body.join(", ")
             )))
         }
@@ -1129,13 +1154,13 @@ pyrust_module! {
             let factory = inst
                 .borrow()
                 .attrs
-                .get("default_factory")
+                .get_slot("default_factory")
                 .cloned()
                 .unwrap_or_else(Value::none);
             let class = Rc::clone(&inst.borrow().class);
             let mut attrs = InstanceAttrs::new();
-            attrs.insert("default_factory", factory);
-            attrs.insert(BUILTIN_DATA_ATTR, Value::dict(items));
+            attrs.insert_slot("default_factory", factory);
+            attrs.set_builtin_data(Value::dict(items));
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class,
                 attrs,
@@ -1265,7 +1290,7 @@ pyrust_module! {
             };
             {
                 let mut attrs = inst.borrow_mut();
-                if let Some(previous) = attrs.attrs.get("_items") {
+                if let Some(previous) = attrs.attrs.get_slot("_items") {
                     // Reinitialising a deque is a structural mutation for any
                     // iterator that still observes the previous storage.
                     pyrust_builtins::deque_storage::bump_mutation_state(previous);
@@ -1275,11 +1300,11 @@ pyrust_module! {
                 // failure leaves the deque empty with its new maxlen, and
                 // d.__init__(d) sees the already-cleared receiver, matching
                 // CPython.
-                attrs.attrs.insert(
+                attrs.attrs.insert_slot(
                     "_items",
                     pyrust_builtins::deque_storage::deque_storage(Vec::new()),
                 );
-                attrs.attrs.insert("maxlen", maxlen_val);
+                attrs.attrs.insert_slot("maxlen", maxlen_val);
             }
             if let Some(iterable) = pos_iterable {
                 deque_extend_iterable(_interp, &inst, &iterable, false)?;
@@ -1435,16 +1460,16 @@ pyrust_module! {
             let maxlen_val = inst
                 .borrow()
                 .attrs
-                .get("maxlen")
+                .get_slot("maxlen")
                 .cloned()
                 .unwrap_or_else(Value::none);
             let class = Rc::clone(&inst.borrow().class);
             let mut attrs = InstanceAttrs::new();
-            attrs.insert(
+            attrs.insert_slot(
                 "_items",
                 pyrust_builtins::deque_storage::deque_storage(items),
             );
-            attrs.insert("maxlen", maxlen_val);
+            attrs.insert_slot("maxlen", maxlen_val);
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class,
                 attrs,
@@ -1704,12 +1729,12 @@ pyrust_module! {
                 };
                 inner.push(r);
             }
+            let class_name = inst.borrow().class.borrow().name.clone();
             let items_repr = format!("[{}]", inner.join(", "));
             let maxlen = deque_maxlen(&inst);
-            let type_name = inst.borrow().class.borrow().name.clone();
             let s = match maxlen {
-                None => format!("{type_name}({items_repr})"),
-                Some(ml) => format!("{type_name}({items_repr}, maxlen={ml})"),
+                None => format!("{class_name}({items_repr})"),
+                Some(ml) => format!("{class_name}({items_repr}, maxlen={ml})"),
             };
             Ok(Value::string(s))
         }
@@ -1722,7 +1747,7 @@ pyrust_module! {
         /// Internal attrs (`_items`, `maxlen`) are only written by `__init__`
         /// and `copy`, which bypass `__setattr__` via direct `attrs.insert`.
         fn __setattr__(args) -> Result<Value> {
-            let _inst = expect_self(args, FN_NAME)?;
+            let inst = expect_self(args, FN_NAME)?;
             if args.len() != 3 {
                 return Err(PyError::named(
                     "TypeError",
@@ -1752,10 +1777,21 @@ pyrust_module! {
                         .to_string(),
                 ));
             }
-            Err(PyError::named(
-                "AttributeError",
-                format!("'collections.deque' object has no attribute '{attr_name}'"),
-            ))
+            let class = Rc::clone(&inst.borrow().class);
+            if crate::interpreter::class_suppresses_instance_dict(&class) {
+                return Err(PyError::named(
+                    "AttributeError",
+                    format!("'collections.deque' object has no attribute '{attr_name}'"),
+                ));
+            }
+            if attr_name == "__dict__" {
+                crate::interpreter::replace_instance_dict(&inst, &args[2].value)?;
+                return Ok(Value::none());
+            }
+            inst.borrow_mut()
+                .attrs
+                .insert(&attr_name, args[2].value.clone());
+            Ok(Value::none())
         }
 
         /// `d == other` — equal iff `other` is a deque with the same

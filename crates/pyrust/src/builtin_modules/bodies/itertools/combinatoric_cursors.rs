@@ -20,8 +20,11 @@ fn repeat_too_large() -> PyError {
     PyError::named("OverflowError", "repeat argument too large".to_string())
 }
 
-fn internal(fn_name: &str) -> PyError {
-    PyError::Runtime(format!("internal: {fn_name}() instance state corrupted"))
+fn uninitialized(fn_name: &str) -> PyError {
+    PyError::named(
+        "TypeError",
+        format!("{fn_name}() object is not initialized"),
+    )
 }
 
 fn try_value_vec(capacity: usize) -> Result<Vec<Value>> {
@@ -238,19 +241,19 @@ fn with_cursor<R>(
     let cursor_value = inst
         .borrow()
         .attrs
-        .get("_cursor")
+        .get_slot("_cursor")
         .cloned()
-        .ok_or_else(|| internal(fn_name))?;
+        .ok_or_else(|| uninitialized(fn_name))?;
     let ValueKind::BuiltinObject { ops, state } = cursor_value.kind() else {
-        return Err(internal(fn_name));
+        return Err(uninitialized(fn_name));
     };
     if !pyrust_core::builtin_ops_is::<CursorOps>(ops) {
-        return Err(internal(fn_name));
+        return Err(uninitialized(fn_name));
     }
     let mut state = state.borrow_mut();
     let cursor = state
         .downcast_mut::<Cursor>()
-        .ok_or_else(|| internal(fn_name))?;
+        .ok_or_else(|| uninitialized(fn_name))?;
     action(cursor)
 }
 
@@ -298,7 +301,7 @@ impl ProductCursor {
                 position -= 1;
                 let pool_len = match self.pools[position].kind() {
                     ValueKind::List(items) => items.len(),
-                    _ => return Err(internal(fn_name)),
+                    _ => return Err(uninitialized(fn_name)),
                 };
                 self.indices[position] += 1;
                 if self.indices[position] < pool_len {
@@ -313,9 +316,14 @@ impl ProductCursor {
         let mut tuple = try_value_vec(self.indices.len())?;
         for (pool, &index) in self.pools.iter().zip(&self.indices) {
             let ValueKind::List(items) = pool.kind() else {
-                return Err(internal(fn_name));
+                return Err(uninitialized(fn_name));
             };
-            tuple.push(items.get(index).cloned().ok_or_else(|| internal(fn_name))?);
+            tuple.push(
+                items
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| uninitialized(fn_name))?,
+            );
         }
         Ok(Some(tuple))
     }
@@ -333,7 +341,7 @@ pub(super) fn next_product(
 ) -> Result<Option<Vec<Value>>> {
     with_cursor(inst, fn_name, |cursor| match cursor {
         Cursor::Product(cursor) => cursor.next_tuple(fn_name),
-        _ => Err(internal(fn_name)),
+        _ => Err(uninitialized(fn_name)),
     })
 }
 
@@ -440,7 +448,7 @@ pub(super) fn next_combinations(
         Cursor::Combinations(cursor) if cursor.with_replacement == with_replacement => {
             cursor.next_tuple(fn_name)
         }
-        _ => Err(internal(fn_name)),
+        _ => Err(uninitialized(fn_name)),
     })
 }
 
@@ -520,14 +528,18 @@ pub(super) fn next_permutations(
 ) -> Result<Option<Vec<Value>>> {
     with_cursor(inst, fn_name, |cursor| match cursor {
         Cursor::Permutations(cursor) => cursor.next_tuple(fn_name),
-        _ => Err(internal(fn_name)),
+        _ => Err(uninitialized(fn_name)),
     })
 }
 
 fn tuple_from_pool(pool: &[Value], indices: &[usize], fn_name: &str) -> Result<Vec<Value>> {
     let mut tuple = try_value_vec(indices.len())?;
     for &index in indices {
-        tuple.push(pool.get(index).cloned().ok_or_else(|| internal(fn_name))?);
+        tuple.push(
+            pool.get(index)
+                .cloned()
+                .ok_or_else(|| uninitialized(fn_name))?,
+        );
     }
     Ok(tuple)
 }

@@ -79,11 +79,11 @@ pub(crate) use call_state::{
 mod calls {
     use super::classes::{PrimitiveLayout, classify_primitive_layout, primitive_layout_for_class};
     use super::{
-        BUILTIN_DATA_ATTR, CallDepthGuard, EnvRef, ExcHandlersBuf, ExpandedArgBuf, ExpandedCallArg,
-        FnCode, FrameKind, GeneratorFrame, GeneratorKind, HandledExcBuf, HashMap, InstanceAttrs,
-        Interpreter, PyClass, PyDict, PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf,
-        Result, UserFunction, Value, ValueKind, VmFrameView, bind_class_level_method_wrapper,
-        call_depth, call_descriptor_get, call_slot_value_unbound, class_chain_new_slot_wrapped,
+        CallDepthGuard, EnvRef, ExcHandlersBuf, ExpandedArgBuf, ExpandedCallArg, FnCode, FrameKind,
+        GeneratorFrame, GeneratorKind, HandledExcBuf, HashMap, InstanceAttrs, Interpreter, PyClass,
+        PyDict, PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result, UserFunction,
+        Value, ValueKind, VmFrameView, bind_class_level_method_wrapper, call_depth,
+        call_descriptor_get, call_slot_value_unbound, class_chain_new_slot_wrapped,
         class_is_subclass_of, invoke_class_method, is_exception_class, is_primitive_class,
         lookup_class_attr, mapping_entries_for_expansion, max_call_depth, object_class_singleton,
         slot_is_descriptor, smallvec, type_class_singleton, value_type_name_str,
@@ -123,13 +123,12 @@ mod builtin_methods {
         value_iterable_needs_runtime_key_semantics,
     };
     use super::{
-        BUILTIN_DATA_ATTR, BinaryOp, ExpandedArgBuf, ExpandedCallArg, GeneratorKind, GetItemIter,
-        IndexMap, Interpreter, NativeIterFrame, NativeIteratorClass, PrimitiveClassKind,
-        PrintOptions, PyBigInt, PyClass, PyDict, PyError, PyInstance, PyKey, PySet, PyToPrimitive,
-        Rc, RefCell, RegSlice, Result, Value, ValueKind, apply_format_spec,
-        apply_format_spec_named, bind_class_level_method_wrapper, builtin_data_backing,
-        builtin_iterator_has_length_hint, c3_linearize_classes,
-        call_bytes_method_coerced_prevalidated, canonical_class_by_tag,
+        BinaryOp, ExpandedArgBuf, ExpandedCallArg, GeneratorKind, GetItemIter, IndexMap,
+        Interpreter, NativeIterFrame, NativeIteratorClass, PrimitiveClassKind, PrintOptions,
+        PyBigInt, PyClass, PyDict, PyError, PyInstance, PyKey, PySet, PyToPrimitive, Rc, RefCell,
+        RegSlice, Result, Value, ValueKind, apply_format_spec, apply_format_spec_named,
+        bind_class_level_method_wrapper, builtin_data_backing, builtin_iterator_has_length_hint,
+        c3_linearize_classes, call_bytes_method_coerced_prevalidated, canonical_class_by_tag,
         class_descriptor_display_name, class_direct_subclasses, class_is_subclass_of,
         class_mro_items, coerce_bytes_subclass_arg, coerce_bytes_subclass_join_iterable,
         coerce_bytes_subclass_method_args, coerce_bytes_subclass_method_kwargs,

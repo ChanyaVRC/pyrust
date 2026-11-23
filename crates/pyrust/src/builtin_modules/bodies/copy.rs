@@ -29,13 +29,13 @@
 //
 // Reference: <https://docs.python.org/3/library/copy.html>
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{
-    ExpandedCallArg, effective_builtin_receiver, invoke_class_method, is_exception_class,
-    key_to_value, lookup_class_attr, make_iterator, restore_reduced_iterator_position,
+    ExpandedCallArg, invoke_class_method, is_exception_class, key_to_value, lookup_class_attr,
+    make_iterator, restore_reduced_iterator_position,
 };
 use crate::value::{
     InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, PyModule, PySet, Value, ValueKind,
@@ -265,24 +265,14 @@ fn capture_state(
 
 /// Snapshot the instance attributes used by the default copy protocol, or
 /// return `None` when the instance carries no state.
+///
+/// Built-in subclass backing (`builtin_data`) and native C-style slots
+/// (`_cursor`, `_items`, `maxlen`, `default_factory`, …) live in physically
+/// separate `InstanceAttrs` storage outside the Python-visible mapping, so
+/// `items_snapshot()` contains only genuine user attributes (#2968).
 pub(crate) fn default_instance_state(rc: &Rc<RefCell<PyInstance>>) -> Value {
-    // `InstanceAttrs` also carries primitive-subclass storage. Exclude only
-    // the exact backing resolved through canonical ancestry; a plain user
-    // object may legitimately own an attribute with this spelling.
-    let receiver = Value::py_instance(Rc::clone(rc));
-    let builtin_backing = effective_builtin_receiver(&receiver, &[]);
     let borrow = rc.borrow();
-    let attrs: Vec<_> = borrow
-        .attrs
-        .items_snapshot()
-        .into_iter()
-        .filter(|(name, value)| {
-            name.as_ref() != crate::interpreter::BUILTIN_DATA_ATTR
-                || !builtin_backing
-                    .as_ref()
-                    .is_some_and(|backing| backing.is_identical_to(value))
-        })
-        .collect();
+    let attrs = borrow.attrs.items_snapshot();
     if attrs.is_empty() {
         return Value::none();
     }
@@ -710,8 +700,8 @@ fn resolve_instance_copy_reduction(
 }
 
 /// Default shallow-copy path for an instance: capture state, build a bare
-/// instance of the same class, restore state.  Shallow — the state values are
-/// shared by reference, not recursively copied.
+/// instance of the same class, restore state, and copy opaque internal storage.
+/// Shallow — the state values are shared by reference, not recursively copied.
 fn shallow_copy_via_protocol(
     rc: &Rc<RefCell<PyInstance>>,
     interp: &mut crate::interpreter::Interpreter,
@@ -722,63 +712,81 @@ fn shallow_copy_via_protocol(
         class,
         attrs: InstanceAttrs::new(),
     }));
+    detach_internal_storage_shallow(rc, &new_rc, interp)?;
     restore_state(&new_rc, state, interp)?;
-    detach_internal_storage(rc, &new_rc, interp, shallow_copy)?;
     Ok(Value::py_instance(new_rc))
 }
 
-/// Is this attribute the instance's own built-in payload rather than one of
-/// its element values?  Two forms exist: the `__builtin_data__` backing every
-/// `dict` / `list` / `set` / `bytearray` / … subclass instance carries, and an
-/// opaque storage object a built-in class parks in a named attribute (a
-/// `deque`'s `VecDeque`).  Both are storage the copy must own outright.
-fn is_internal_storage_attr(name: &str, value: &Value) -> bool {
-    name == crate::interpreter::BUILTIN_DATA_ATTR
-        || matches!(value.kind(), ValueKind::BuiltinObject { ops, .. } if ops.is_internal_storage())
-}
-
-/// Give a freshly built shallow copy its *own* built-in payload (#2935).
-///
-/// A built-in-backed instance — `OrderedDict`, `Counter`, `defaultdict`,
-/// `deque`, and every user subclass of `dict` / `list` / `set` / `bytearray` —
-/// keeps its contents in an internal attribute.  That storage is the object's
-/// own state, not a shared element value, so leaving the attribute pointing at
-/// the original's backing makes writes to the copy rewrite the original.
-/// Shallow-copying the backing keeps CPython's semantics: the structure is
-/// independent while the values inside stay shared.
-///
-/// The storage is taken from the *original* rather than from the restored
-/// state so that a class customising `__getstate__` can neither alias nor drop
-/// its own backing.  Dropping it is not a milder failure than aliasing it: a
-/// `dict` subclass instance with no `__builtin_data__` is not an empty mapping
-/// but a broken one, and `len()` on it recurses until the native stack
-/// overflows.  Both `copy` and `deepcopy` therefore run this step —
-/// `copy_val` supplies the per-storage copy (identity-preserving for shallow,
-/// memo-aware recursion for deep).
-///
-/// For the common case (no `__getstate__`) this is idempotent: the state
-/// snapshot already carried the backing, so the copy re-derived here is the
-/// very value `restore_state` installed — under `deepcopy` the memo returns it
-/// verbatim rather than building a second one.
-fn detach_internal_storage(
+/// Give a freshly built shallow copy its *own* opaque built-in payload (#2935,
+/// #2968): detaches `builtin_data` (`list`/`dict`/`set`/`bytearray`/…) and any
+/// internal-storage native slots (`_items` on `deque`, `_cursor` on
+/// combinatoric iterators), while preserving scalar/reference native slots such
+/// as `deque.maxlen` and `defaultdict.default_factory`.
+fn detach_internal_storage_shallow(
     rc: &Rc<RefCell<PyInstance>>,
     new_rc: &Rc<RefCell<PyInstance>>,
     interp: &mut crate::interpreter::Interpreter,
-    mut copy_val: impl FnMut(Value, &mut crate::interpreter::Interpreter) -> Result<Value>,
 ) -> Result<()> {
-    let storages: Vec<(String, Value)> = rc
-        .borrow()
-        .attrs
-        .items_snapshot()
-        .into_iter()
-        .filter(|(name, value)| is_internal_storage_attr(name.as_ref(), value))
-        .map(|(name, value)| (name.to_string(), value))
-        .collect();
-    for (name, storage) in storages {
-        let independent = copy_val(storage, interp)?;
-        new_rc.borrow_mut().attrs.insert(&name, independent);
+    let (builtin_data, native_slots) = {
+        let borrow = rc.borrow();
+        (
+            borrow.attrs.builtin_data().cloned(),
+            borrow.attrs.slots_snapshot(),
+        )
+    };
+    if let Some(backing) = builtin_data {
+        let independent = shallow_copy(backing, interp)?;
+        new_rc.borrow_mut().attrs.set_builtin_data(independent);
+    }
+    for (name, value) in native_slots {
+        let copied = if matches!(
+            value.kind(),
+            ValueKind::BuiltinObject { ops, .. } if ops.is_internal_storage()
+        ) {
+            shallow_copy(value, interp)?
+        } else {
+            value
+        };
+        new_rc.borrow_mut().attrs.insert_slot(name.as_ref(), copied);
     }
     Ok(())
+}
+
+thread_local! {
+    /// Active `copy.deepcopy` recursion depth, guarding against unbounded
+    /// native recursion on unmemoized pre-construction cycles such as a
+    /// self-referential `Counter` (#2968).
+    static DEEPCOPY_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct DeepCopyDepthGuard;
+
+impl DeepCopyDepthGuard {
+    fn enter(interp: &crate::interpreter::Interpreter) -> Result<Self> {
+        // Cap below the native debug stack ceiling while still honouring
+        // smaller user-configured `sys.setrecursionlimit()` values.
+        const NATIVE_DEEPCOPY_CAP: usize = 200;
+        let limit = crate::interpreter::get_recursion_limit(interp).min(NATIVE_DEEPCOPY_CAP);
+        let next = DEEPCOPY_DEPTH.with(|depth| {
+            let next = depth.get() + 1;
+            if next > limit {
+                return Err(PyError::named(
+                    "RecursionError",
+                    "maximum recursion depth exceeded".to_string(),
+                ));
+            }
+            depth.set(next);
+            Ok(next)
+        })?;
+        let _ = next;
+        Ok(Self)
+    }
+}
+
+impl Drop for DeepCopyDepthGuard {
+    fn drop(&mut self) {
+        DEEPCOPY_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
 }
 
 // ── deep_copy ─────────────────────────────────────────────────────────────────
@@ -795,6 +803,7 @@ fn deep_copy_with_reconstruct(
     reconstruct: Option<&Value>,
     interp: &mut crate::interpreter::Interpreter,
 ) -> Result<Value> {
+    let _depth_guard = DeepCopyDepthGuard::enter(interp)?;
     // Cycle / sharing short-circuit: if we've already copied this object,
     // return the same copy.  Atomic values (value_identity == None) skip this.
     if let Some(id) = value_identity(&obj)
@@ -1496,9 +1505,21 @@ fn apply_reduction_state(
     Ok(())
 }
 
-/// Default deep-copy path for an instance: build a bare instance, memoise it
-/// *before* deep-copying its state, then capture/restore the state.  Inserting
-/// into the memo first lets self-referential instance graphs terminate.
+/// Default deep-copy path for an instance (#2968).
+///
+/// Mirrors CPython 3.12's `copy._reconstruct` ordering so an adversarial
+/// `__deepcopy__` inspecting `memo.get(id(orig))` never observes a half-built
+/// instance lacking its internal backing:
+///   - Pre-memo constructor-arg payloads (`Counter`, `set`/`tuple`/`frozenset`
+///     subclasses, combinatoric `_cursor` iterators, `defaultdict.default_factory`)
+///     deep-copy their constructor inputs *before* `new_val` is memoised.
+///   - Post-memo mutable containers (`list`/`dict`/`OrderedDict`/`defaultdict`
+///     subclasses and `deque` / `deque` subclasses) install a valid *empty*
+///     backing before `memo_insert`, then populate that backing in place so
+///     both adversarial observers (`len(seen) == 0`) and self-referential
+///     cycles (`s.append(s)`, `d['self'] = d`, `dq.append(dq)`) work cleanly.
+///   - Atomic / buffer-backed payloads (`bytearray` and scalar subclasses) copy
+///     and install their backing before `memo_insert` (no element recursion).
 fn deep_copy_via_protocol(
     rc: &Rc<RefCell<PyInstance>>,
     obj: &Value,
@@ -1506,36 +1527,209 @@ fn deep_copy_via_protocol(
     reconstruct: Option<&Value>,
     interp: &mut crate::interpreter::Interpreter,
 ) -> Result<Value> {
-    let class = Rc::clone(&rc.borrow().class);
+    let (class, builtin_data, native_slots) = {
+        let borrow = rc.borrow();
+        (
+            Rc::clone(&borrow.class),
+            borrow.attrs.builtin_data().cloned(),
+            borrow.attrs.slots_snapshot(),
+        )
+    };
+    let is_counter =
+        crate::builtin_modules::collections::is_canonical_counter_class_or_subclass(&class);
     let new_rc = Rc::new(RefCell::new(PyInstance {
         class,
         attrs: InstanceAttrs::new(),
     }));
     let new_val = Value::py_instance(Rc::clone(&new_rc));
+
+    enum PostMemoBacking {
+        None,
+        List {
+            target: Value,
+            items: Vec<Value>,
+        },
+        Dict {
+            target: Value,
+            pairs: Vec<(PyKey, Value)>,
+        },
+        Deque {
+            target: Value,
+            items: Vec<Value>,
+        },
+    }
+
+    let mut post_memo = PostMemoBacking::None;
+
+    // 1. Handle `builtin_data` (pre-memo or empty-seeded post-memo).
+    if let Some(backing) = builtin_data {
+        match backing.kind() {
+            ValueKind::List(items) => {
+                let snapshot: Vec<Value> = items.iter().cloned().collect();
+                drop(items);
+                let empty = Value::list(Vec::with_capacity(snapshot.len()));
+                new_rc.borrow_mut().attrs.set_builtin_data(empty.clone());
+                post_memo = PostMemoBacking::List {
+                    target: empty,
+                    items: snapshot,
+                };
+            }
+            ValueKind::Dict(d) => {
+                let pairs: Vec<(PyKey, Value)> =
+                    d.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                drop(d);
+                if is_counter {
+                    // CPython reduces Counter as `(cls, (dict(self),))`:
+                    // deep-copy items before memoising `new_val`.
+                    let mut new_map =
+                        PyDict::with_capacity_and_hasher(pairs.len(), Default::default());
+                    for (k, v) in pairs {
+                        let deep_k = {
+                            let kv = key_to_value(k);
+                            let deep_kv =
+                                deep_copy_with_reconstruct(kv, memo, reconstruct, interp)?;
+                            interp.value_to_pykey(&deep_kv)?
+                        };
+                        let deep_v = deep_copy_with_reconstruct(v, memo, reconstruct, interp)?;
+                        new_map.insert(deep_k, deep_v);
+                    }
+                    new_rc
+                        .borrow_mut()
+                        .attrs
+                        .set_builtin_data(Value::dict(new_map));
+                } else {
+                    let empty = Value::dict(PyDict::with_capacity_and_hasher(
+                        pairs.len(),
+                        Default::default(),
+                    ));
+                    new_rc.borrow_mut().attrs.set_builtin_data(empty.clone());
+                    post_memo = PostMemoBacking::Dict {
+                        target: empty,
+                        pairs,
+                    };
+                }
+            }
+            ValueKind::Set(_) | ValueKind::Tuple(_) => {
+                // CPython passes the deep-copied elements to the set/tuple
+                // constructor before memoising the subclass instance.
+                let deep_backing =
+                    deep_copy_with_reconstruct(backing.clone(), memo, reconstruct, interp)?;
+                new_rc.borrow_mut().attrs.set_builtin_data(deep_backing);
+            }
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
+            {
+                let deep_backing =
+                    deep_copy_with_reconstruct(backing.clone(), memo, reconstruct, interp)?;
+                new_rc.borrow_mut().attrs.set_builtin_data(deep_backing);
+            }
+            _ => {
+                // Bytearray (bytes are ints, no child recursion) and scalar
+                // immutable backings (`int`, `float`, `str`, `bytes`, …).
+                let deep_backing =
+                    deep_copy_with_reconstruct(backing.clone(), memo, reconstruct, interp)?;
+                new_rc.borrow_mut().attrs.set_builtin_data(deep_backing);
+            }
+        }
+    }
+
+    // 2. Handle native C-style slots (`_items` on deque, `_cursor` on
+    //    combinatoric iterators, `default_factory`, `maxlen`, `_buf`, …).
+    for (slot_name, slot_value) in native_slots {
+        if pyrust_builtins::deque_storage::is_storage(&slot_value) {
+            let items = pyrust_builtins::deque_storage::snapshot(&slot_value).unwrap_or_default();
+            let empty = pyrust_builtins::deque_storage::deque_storage(Vec::new());
+            new_rc
+                .borrow_mut()
+                .attrs
+                .insert_slot(slot_name.as_ref(), empty.clone());
+            post_memo = PostMemoBacking::Deque {
+                target: empty,
+                items,
+            };
+        } else if let ValueKind::BuiltinObject { ops, state } = slot_value.kind()
+            && ops.is_internal_storage()
+        {
+            // Combinatoric iterator cursor (`_cursor`): deep-copy pool elements
+            // BEFORE memoising `new_val`, matching CPython's `(cls, (pool, r))`
+            // reduction ordering so `Spy.__deepcopy__` sees `memo[id] is None`
+            // and never encounters an uninitialised cursor.
+            if let Some(copied_cursor) = ops.copy_storage(state) {
+                if let Some(elements) = ops.storage_elements(state) {
+                    let mut deep_elements = Vec::with_capacity(elements.len());
+                    for element in elements {
+                        deep_elements.push(deep_copy_with_reconstruct(
+                            element,
+                            memo,
+                            reconstruct,
+                            interp,
+                        )?);
+                    }
+                    if let ValueKind::BuiltinObject {
+                        ops: copied_ops,
+                        state: copied_state,
+                    } = copied_cursor.kind()
+                    {
+                        copied_ops.set_storage_elements(copied_state, deep_elements);
+                    }
+                }
+                new_rc
+                    .borrow_mut()
+                    .attrs
+                    .insert_slot(slot_name.as_ref(), copied_cursor);
+            }
+        } else {
+            // Non-storage native slot (`default_factory`, `maxlen`, `_buf`, …):
+            // deep-copy before memoisation (e.g. `default_factory` is a
+            // constructor argument in CPython's `defaultdict.__reduce__`).
+            let copied_slot = deep_copy_with_reconstruct(slot_value, memo, reconstruct, interp)?;
+            new_rc
+                .borrow_mut()
+                .attrs
+                .insert_slot(slot_name.as_ref(), copied_slot);
+        }
+    }
+
+    // 3. Memoise the valid (populated or empty-backed) instance *before*
+    //    recursing into user `__dict__` state and post-memo container items.
     if let Some(id) = value_identity(obj) {
         memo_insert(memo, id, new_val.clone());
     }
-    // A bytearray subclass's copied reduction carrier can be asked for an
-    // iterator while its user state is still recursing (the source may point
-    // back to the original iterator). Seed its primitive buffer first, as
-    // CPython's bytearray reconstruction does, so that nested `iter(copy)` is
-    // well-defined and retains the same live buffer. Other built-in-backed
-    // instances keep the established restore-then-detach order.
-    let bytearray_backed = effective_builtin_receiver(obj, &[])
-        .is_some_and(|backing| pyrust_builtins::bytearray::as_bytearray_rc(&backing).is_some());
-    if bytearray_backed {
-        detach_internal_storage(rc, &new_rc, interp, |value, interp| {
-            deep_copy_with_reconstruct(value, memo, reconstruct, interp)
-        })?;
-    }
-    // Capture state from the original, deep-copy it, then restore.
+
+    // 4. Capture state from the original, deep-copy it, then restore.
     let state = capture_state(rc, interp)?;
     let deep_state = deep_copy_with_reconstruct(state, memo, reconstruct, interp)?;
     restore_state(&new_rc, deep_state, interp)?;
-    if !bytearray_backed {
-        detach_internal_storage(rc, &new_rc, interp, |value, interp| {
-            deep_copy_with_reconstruct(value, memo, reconstruct, interp)
-        })?;
+
+    // 5. Populate post-memo mutable container backings in place.
+    match post_memo {
+        PostMemoBacking::None => {}
+        PostMemoBacking::List { target, items } => {
+            for item in items {
+                let copied = deep_copy_with_reconstruct(item, memo, reconstruct, interp)?;
+                target.list_push(copied)?;
+            }
+        }
+        PostMemoBacking::Dict { target, pairs } => {
+            for (k, v) in pairs {
+                let deep_k = {
+                    let kv = key_to_value(k);
+                    let deep_kv = deep_copy_with_reconstruct(kv, memo, reconstruct, interp)?;
+                    interp.value_to_pykey(&deep_kv)?
+                };
+                let deep_v = deep_copy_with_reconstruct(v, memo, reconstruct, interp)?;
+                let _ = target.dict_insert(deep_k, deep_v);
+            }
+        }
+        PostMemoBacking::Deque { target, items } => {
+            if let Some(data) = pyrust_builtins::deque_storage::data(&target) {
+                for item in items {
+                    let copied = deep_copy_with_reconstruct(item, memo, reconstruct, interp)?;
+                    data.borrow_mut().push_back(copied);
+                }
+            }
+        }
     }
+
     Ok(new_val)
 }

@@ -917,7 +917,7 @@ pyrust_module! {
                     pools.extend(single_pass.iter().cloned());
                 }
             }
-            inst.borrow_mut().attrs.insert(
+            inst.borrow_mut().attrs.insert_slot(
                 "_cursor",
                 combinatoric_cursors::product_cursor_value(pools)?,
             );
@@ -1018,7 +1018,7 @@ pyrust_module! {
             // The cursor is Rust-only state.  Keeping indices/cycles as Python
             // list attributes forced every yield to decode both lists into
             // Vec<usize>, then allocate and encode them again.
-            inst.borrow_mut().attrs.insert(
+            inst.borrow_mut().attrs.insert_slot(
                 "_cursor",
                 combinatoric_cursors::permutations_cursor_value(pool, r)?,
             );

@@ -84,7 +84,7 @@ fn init_combo_state(
             "r must be non-negative".to_string(),
         ));
     }
-    inst.borrow_mut().attrs.insert(
+    inst.borrow_mut().attrs.insert_slot(
         "_cursor",
         combinatoric_cursors::combinations_cursor_value(pool, r as usize, with_replacement)?,
     );

@@ -295,7 +295,7 @@ fn counts_of(other: &Value) -> Option<PyDict> {
     if !is_canonical_collection_class_or_subclass(&borrow.class, CanonicalCollectionKind::Counter) {
         return None;
     }
-    match borrow.attrs.get(BUILTIN_DATA_ATTR) {
+    match borrow.attrs.builtin_data() {
         Some(v) => match v.kind() {
             ValueKind::Dict(map) => Some(map.clone()),
             _ => Some(PyDict::default()),
@@ -314,7 +314,7 @@ fn fresh_base_counter(receiver: &Rc<RefCell<PyInstance>>, counts: PyDict) -> Res
         ));
     };
     let mut attrs = InstanceAttrs::new();
-    attrs.insert(BUILTIN_DATA_ATTR, Value::dict(counts));
+    attrs.set_builtin_data(Value::dict(counts));
     Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
         class,
         attrs,

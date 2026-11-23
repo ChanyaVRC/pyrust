@@ -97,6 +97,58 @@ impl Interpreter {
             ValueKind::BuiltinFunction("BaseExceptionGroup.split") => {
                 self.exception_group_subgroup_or_split(args, true)
             }
+            ValueKind::BuiltinFunction("collections.deque._get_maxlen") => {
+                let Some(ValueKind::PyInstance(inst)) = args.first().map(|a| a.value.kind()) else {
+                    return Err(pyrust_core::type_err!(
+                        "descriptor 'maxlen' for 'collections.deque' objects doesn't apply"
+                    ));
+                };
+                Ok(inst
+                    .borrow()
+                    .attrs
+                    .get_slot("maxlen")
+                    .cloned()
+                    .unwrap_or_else(Value::none))
+            }
+            ValueKind::BuiltinFunction("collections.defaultdict._get_default_factory") => {
+                let Some(ValueKind::PyInstance(inst)) = args.first().map(|a| a.value.kind()) else {
+                    return Err(pyrust_core::type_err!(
+                        "descriptor 'default_factory' for 'collections.defaultdict' objects doesn't apply"
+                    ));
+                };
+                Ok(inst
+                    .borrow()
+                    .attrs
+                    .get_slot("default_factory")
+                    .cloned()
+                    .unwrap_or_else(Value::none))
+            }
+            ValueKind::BuiltinFunction("collections.defaultdict._set_default_factory") => {
+                let Some(ValueKind::PyInstance(inst)) = args.first().map(|a| a.value.kind()) else {
+                    return Err(pyrust_core::type_err!(
+                        "descriptor 'default_factory' for 'collections.defaultdict' objects doesn't apply"
+                    ));
+                };
+                let value = args
+                    .get(1)
+                    .map(|a| a.value.clone())
+                    .unwrap_or_else(Value::none);
+                inst.borrow_mut()
+                    .attrs
+                    .insert_slot("default_factory", value);
+                Ok(Value::none())
+            }
+            ValueKind::BuiltinFunction("collections.defaultdict._del_default_factory") => {
+                let Some(ValueKind::PyInstance(inst)) = args.first().map(|a| a.value.kind()) else {
+                    return Err(pyrust_core::type_err!(
+                        "descriptor 'default_factory' for 'collections.defaultdict' objects doesn't apply"
+                    ));
+                };
+                inst.borrow_mut()
+                    .attrs
+                    .insert_slot("default_factory", Value::none());
+                Ok(Value::none())
+            }
             // Issue #2276: the unbound type-qualified object-level dunders
             // (`str.__hash__` / `int.__repr__` / `str.__str__` /
             // `int.__format__` / …) synthesised by `get_attr_class` for the

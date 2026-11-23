@@ -14,26 +14,38 @@ use super::{get_pos, set_pos};
 
 pub(super) fn initialize(inst: &Rc<RefCell<PyInstance>>, initial: Vec<u8>) {
     let mut attrs = inst.borrow_mut();
-    attrs.attrs.insert("_buf", Value::bytes(initial));
-    attrs.attrs.insert("_pos", Value::int(0));
-    attrs.attrs.insert("_closed", Value::bool_(false));
+    attrs.attrs.insert_slot("_buf", Value::bytes(initial));
+    attrs.attrs.insert_slot("_pos", Value::int(0));
+    attrs.attrs.insert_slot("_closed", Value::bool_(false));
 }
 
 pub(super) fn contents(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<Vec<u8>> {
-    match inst.borrow().attrs.get("_buf").map(|value| value.kind()) {
+    match inst
+        .borrow()
+        .attrs
+        .get_slot("_buf")
+        .map(|value| value.kind())
+    {
         Some(ValueKind::Bytes(buffer)) => Ok(buffer.to_vec()),
-        _ => Err(PyError::Runtime(format!(
-            "internal: {fn_name}() BytesIO._buf corrupted",
-        ))),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() BytesIO object is not initialized"),
+        )),
     }
 }
 
 fn buffer_len(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<usize> {
-    match inst.borrow().attrs.get("_buf").map(|value| value.kind()) {
+    match inst
+        .borrow()
+        .attrs
+        .get_slot("_buf")
+        .map(|value| value.kind())
+    {
         Some(ValueKind::Bytes(buffer)) => Ok(buffer.len()),
-        _ => Err(PyError::Runtime(format!(
-            "internal: {fn_name}() BytesIO._buf corrupted",
-        ))),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() BytesIO object is not initialized"),
+        )),
     }
 }
 
@@ -127,7 +139,12 @@ pub(super) fn write(inst: &Rc<RefCell<PyInstance>>, data: &[u8]) -> Result<usize
         .map_err(|_| PyError::named("OverflowError", "new buffer size too large".to_string()))?;
     let new_pos = usize::try_from(new_pos_i64)
         .map_err(|_| PyError::named("OverflowError", "new buffer size too large".to_string()))?;
-    let buffer = match inst.borrow().attrs.get("_buf").map(|value| value.kind()) {
+    let buffer = match inst
+        .borrow()
+        .attrs
+        .get_slot("_buf")
+        .map(|value| value.kind())
+    {
         Some(ValueKind::Bytes(buffer)) => buffer.to_vec(),
         _ => Vec::new(),
     };
@@ -149,7 +166,7 @@ pub(super) fn write(inst: &Rc<RefCell<PyInstance>>, data: &[u8]) -> Result<usize
     }
     inst.borrow_mut()
         .attrs
-        .insert("_buf", Value::bytes(new_buffer));
+        .insert_slot("_buf", Value::bytes(new_buffer));
     set_pos(inst, new_pos_i64);
     Ok(written_len)
 }
@@ -194,7 +211,7 @@ pub(super) fn truncate(inst: &Rc<RefCell<PyInstance>>, size: i64, fn_name: &str)
         let new_len = usize::try_from(size).expect("truncate size is validated as non-negative");
         inst.borrow_mut()
             .attrs
-            .insert("_buf", Value::bytes(buffer[..new_len].to_vec()));
+            .insert_slot("_buf", Value::bytes(buffer[..new_len].to_vec()));
     }
     // CPython reports the requested size even though truncating past EOF does
     // not extend an in-memory stream.

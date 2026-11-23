@@ -2569,10 +2569,7 @@ mod tests {
 
     fn list_backed_instance(class: Rc<RefCell<PyClass>>) -> Rc<RefCell<PyInstance>> {
         let mut attrs = InstanceAttrs::new();
-        attrs.insert(
-            "__builtin_data__",
-            Value::list(vec![Value::int(1), Value::int(2)]),
-        );
+        attrs.set_builtin_data(Value::list(vec![Value::int(1), Value::int(2)]));
         Rc::new(RefCell::new(PyInstance { class, attrs }))
     }
 

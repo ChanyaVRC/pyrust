@@ -154,20 +154,20 @@ fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyI
 
 fn is_closed(inst: &Rc<RefCell<PyInstance>>) -> bool {
     matches!(
-        inst.borrow().attrs.get("_closed").map(|v| v.kind()),
+        inst.borrow().attrs.get_slot("_closed").map(|v| v.kind()),
         Some(ValueKind::Bool(true))
     )
 }
 
 fn get_pos(inst: &Rc<RefCell<PyInstance>>) -> i64 {
-    match inst.borrow().attrs.get("_pos").map(|v| v.kind()) {
+    match inst.borrow().attrs.get_slot("_pos").map(|v| v.kind()) {
         Some(ValueKind::Int(n)) => n,
         _ => 0,
     }
 }
 
 fn set_pos(inst: &Rc<RefCell<PyInstance>>, pos: i64) {
-    inst.borrow_mut().attrs.insert("_pos", Value::int(pos));
+    inst.borrow_mut().attrs.insert_slot("_pos", Value::int(pos));
 }
 
 // ── shared method prologue helpers ─────────────────────────────────────────────
@@ -478,7 +478,7 @@ pyrust_module! {
             let _ = _interp;
             inst.borrow_mut()
                 .attrs
-                .insert("_closed", Value::bool_(true));
+                .insert_slot("_closed", Value::bool_(true));
             Ok(Value::none())
         }
 
@@ -496,7 +496,7 @@ pyrust_module! {
             let _ = _interp;
             inst.borrow_mut()
                 .attrs
-                .insert("_closed", Value::bool_(true));
+                .insert_slot("_closed", Value::bool_(true));
             Ok(Value::bool_(false))
         }
 
@@ -794,7 +794,7 @@ pyrust_module! {
             let _ = _interp;
             inst.borrow_mut()
                 .attrs
-                .insert("_closed", Value::bool_(true));
+                .insert_slot("_closed", Value::bool_(true));
             Ok(Value::none())
         }
 
@@ -809,7 +809,7 @@ pyrust_module! {
             let _ = _interp;
             inst.borrow_mut()
                 .attrs
-                .insert("_closed", Value::bool_(true));
+                .insert_slot("_closed", Value::bool_(true));
             Ok(Value::bool_(false))
         }
 

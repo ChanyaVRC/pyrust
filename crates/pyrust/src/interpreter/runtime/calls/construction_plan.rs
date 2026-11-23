@@ -134,8 +134,8 @@ fn resolve_construction_plan_cached(class: &Rc<RefCell<PyClass>>) -> Option<Cons
 #[cfg(test)]
 mod construction_identity_tests {
     use super::{
-        BUILTIN_DATA_ATTR, Interpreter, PrimitiveLayout, PyClass, Rc, RefCell, ValueKind,
-        object_class_singleton, resolve_construction_plan_cached,
+        Interpreter, PrimitiveLayout, PyClass, Rc, RefCell, ValueKind, object_class_singleton,
+        resolve_construction_plan_cached,
     };
 
     #[test]
@@ -187,7 +187,7 @@ mod construction_identity_tests {
         let backing = instance
             .borrow()
             .attrs
-            .get(BUILTIN_DATA_ATTR)
+            .builtin_data()
             .cloned()
             .expect("primitive subclass must have backing storage");
         assert!(matches!(backing.kind(), ValueKind::List(items) if items.is_empty()));
@@ -220,7 +220,7 @@ mod construction_identity_tests {
         let ValueKind::PyInstance(instance) = value.kind() else {
             panic!("user class construction must return an instance");
         };
-        assert!(!instance.borrow().attrs.contains_key(BUILTIN_DATA_ATTR));
+        assert!(instance.borrow().attrs.builtin_data().is_none());
     }
 
     #[test]

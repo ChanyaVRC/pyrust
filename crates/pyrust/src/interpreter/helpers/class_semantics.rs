@@ -250,6 +250,12 @@ pub(crate) fn classify_exception_class(class: &Rc<RefCell<PyClass>>) -> ExcClass
 /// - `class Child(SlottedParent): pass` — Child has `slots: None`
 /// - `class GrandChild(Child): __slots__ = ('x',)` — Child has `slots: None`
 pub(crate) fn mro_has_unslotted_ancestor(class: &Rc<RefCell<PyClass>>) -> bool {
+    // Built-in primitive types (`dict`, `list`, `set`, `int`, `str`, …) have
+    // `tp_dictoffset == 0` in CPython and do not contribute an instance
+    // `__dict__` to slotted subclasses.
+    if is_primitive_class(class) {
+        return false;
+    }
     // Stop at `object` (no explicit base = treated as object).
     let (slots, base, extra_bases) = {
         let borrowed = class.borrow();

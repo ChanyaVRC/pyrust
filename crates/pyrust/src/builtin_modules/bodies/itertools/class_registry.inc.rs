@@ -104,7 +104,17 @@ pub(crate) fn patch_class_modules(module_value: &Value) {
         if let Some(value) = value
             && let ValueKind::PyClass(class) = value.kind()
         {
-            class.borrow_mut().error_name = Some(error_name);
+            let mut class_mut = class.borrow_mut();
+            class_mut.error_name = Some(error_name);
+            // CPython's combinatoric iterators are static C types with no
+            // instance `__dict__`; subclasses without `__slots__` still gain
+            // an instance `__dict__` automatically (#2968).
+            if matches!(
+                export_name,
+                "combinations" | "combinations_with_replacement" | "permutations" | "product"
+            ) {
+                class_mut.slots = Some(indexmap::IndexSet::new());
+            }
         }
     }
 }
