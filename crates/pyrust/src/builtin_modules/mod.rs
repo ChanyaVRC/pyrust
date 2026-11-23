@@ -349,6 +349,11 @@ pyrust_builtin_modules! {
     // from `struct_mod_py.py` by the `@inject` post-load hook.  The Rust ident
     // is `struct_mod` because `struct` is a keyword.
     "struct" as struct_mod @inject,
+    // `array` (issue #2809): native typed-element binary encoding/decoding and
+    // byteswap helpers in `array.rs` plus the `array` class, `ArrayType` alias,
+    // and `typecodes` constant injected from `array_py.py` by the `@inject`
+    // post-load hook.
+    array @inject,
 }
 
 include!("finalization.rs");
