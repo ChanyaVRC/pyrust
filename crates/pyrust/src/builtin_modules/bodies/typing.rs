@@ -329,15 +329,13 @@ pyrust_module! {
 
     // ── Generic.__class_getitem__ ─────────────────────────────────────────────
     //
-    // The name "typing._generic_cgi" does NOT contain ".__class_getitem__", so
-    // pyrust's expr.rs subscript handler calls our function rather than
-    // creating a sentinel GenericAlias.  Both the direct call
-    // (`Generic.__class_getitem__(T)`) and the subscript form (`Generic[T]`)
-    // route here and build a `_GenericAlias` wrapping the subscript, matching
-    // CPython (`typing.Generic[~T]`, type `_GenericAlias`).  The class-base path
-    // (`class Stack(Generic[T])`) unwraps the alias back to `Generic` via
-    // `generic_alias_origin`.
+    // The name "typing._generic_cgi" stays undotted so pyrust's subscript
+    // handler does not intercept it as a generic `types.GenericAlias` sentinel,
+    // while `#[method_descriptor]` explicitly records that this class-slot
+    // helper binds its receiver class (`Generic` or a subclass) rather than
+    // behaving as a non-descriptor module function (#2960).
 
+    #[method_descriptor]
     #[py_name = "_generic_cgi"]
     fn generic_class_getitem(args) -> Result<Value> {
         // The subscript form `Generic[T]` (or `Stack[T]` inheriting via MRO)
@@ -367,6 +365,7 @@ pyrust_module! {
 
     // ── Protocol.__class_getitem__ ────────────────────────────────────────────
 
+    #[method_descriptor]
     #[py_name = "_protocol_cgi"]
     fn protocol_class_getitem(args) -> Result<Value> {
         // Mirror `_generic_cgi`: use the receiver class as the alias origin so a
@@ -395,42 +394,49 @@ pyrust_module! {
     // at these registered callables, so generic expression dispatch does not
     // need to recognize `typing.Union` or `typing.Optional` by name.
 
+    #[method_descriptor]
     #[py_name = "_optional_cgi"]
     fn optional_class_getitem(args) -> Result<Value> {
         let _ = _interp;
         aliases::special_form_class_getitem("Optional", args)
     }
 
+    #[method_descriptor]
     #[py_name = "_union_cgi"]
     fn union_class_getitem(args) -> Result<Value> {
         let _ = _interp;
         aliases::special_form_class_getitem("Union", args)
     }
 
+    #[method_descriptor]
     #[py_name = "_callable_cgi"]
     fn callable_class_getitem(args) -> Result<Value> {
         let _ = _interp;
         aliases::special_form_class_getitem("Callable", args)
     }
 
+    #[method_descriptor]
     #[py_name = "_classvar_cgi"]
     fn classvar_class_getitem(args) -> Result<Value> {
         let _ = _interp;
         aliases::special_form_class_getitem("ClassVar", args)
     }
 
+    #[method_descriptor]
     #[py_name = "_final_cgi"]
     fn final_class_getitem(args) -> Result<Value> {
         let _ = _interp;
         aliases::special_form_class_getitem("Final", args)
     }
 
+    #[method_descriptor]
     #[py_name = "_literal_cgi"]
     fn literal_class_getitem(args) -> Result<Value> {
         let _ = _interp;
         aliases::special_form_class_getitem("Literal", args)
     }
 
+    #[method_descriptor]
     #[py_name = "_type_cgi"]
     fn type_class_getitem(args) -> Result<Value> {
         let _ = _interp;

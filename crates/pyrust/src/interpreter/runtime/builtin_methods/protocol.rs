@@ -31,6 +31,27 @@ fn restore_builtin_subclass_inplace_result(
 }
 
 impl Interpreter {
+    /// Dispatch an unregistered primitive-owned object-level dunder sentinel
+    /// (`int.__format__`, `str.__format__`, `str.__hash__`, `int.__repr__`, …)
+    /// when invoked through the shared slot router (`invoke_class_method`).
+    ///
+    /// Returns `None` when `registry_key` is not a primitive object dunder.
+    pub(crate) fn try_invoke_primitive_object_dunder(
+        &mut self,
+        registry_key: &str,
+        instance: &Value,
+        args: &[ExpandedCallArg],
+    ) -> Option<Result<Value>> {
+        let (type_name, method) = primitive_object_dunder_owner(registry_key)?;
+        let mut combined = Vec::with_capacity(args.len() + 1);
+        combined.push(ExpandedCallArg {
+            name: None,
+            value: instance.clone(),
+        });
+        combined.extend(args.iter().cloned());
+        Some(self.call_primitive_object_dunder(type_name, method, &combined))
+    }
+
     /// Dispatch an unbound type-qualified object-level dunder
     /// (`str.__hash__(x)`, `int.__format__(5, 'x')`, …) whose owner is the
     /// primitive `type_name`. Validates the receiver against the called type
@@ -108,6 +129,10 @@ impl Interpreter {
                     ));
                 }
             };
+            if let Some(backing) = builtin_data_backing(&self_arg.value) {
+                let owner = value_type_name_str(&self_arg.value);
+                return apply_format_spec_named(&backing, &spec, Some(&owner));
+            }
             return apply_format_spec(&self_arg.value, &spec);
         }
         // __hash__/__repr__/__str__ take no further positional/keyword args.

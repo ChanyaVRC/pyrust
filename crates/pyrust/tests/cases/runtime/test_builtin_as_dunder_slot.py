@@ -88,10 +88,8 @@ class BGetattr:
 show("BGetattr().missing", lambda: BGetattr().missing)
 
 
-# NOTE: a function from an imported module (`__len__ = math.sqrt`) is equally a
-# non-descriptor in CPython, but pyrust still binds it.  That case is deliberately
-# NOT asserted here — see the `builtins`-namespace guard in
-# `call_protocol.rs::invoke_class_method` and its follow-up note.
+# Non-`builtins` module functions (`math.sqrt`, …) follow the identical
+# non-descriptor rule — see `tests/cases/dunder/test_dunder_module_fn_and_format_2960.py`.
 
 
 # ── builtin *types* in slots are not builtin functions — unchanged ────────────

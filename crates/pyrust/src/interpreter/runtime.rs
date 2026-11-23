@@ -34,8 +34,9 @@ mod formatting {
         builtin_data_backing, exception_str_with_dispatch, extract_str_value, float_to_bigint,
         full_type_name_str, instance_builtin_data, intern_string, invoke_class_method,
         is_exception_class, is_percent_format_mapping, is_str_or_str_subclass, lookup_class_attr,
-        lookup_value_special_method, metaclass_dunder_for_call, native_iterator_class,
-        normalize_float_slot_result, render_instance_repr, try_value_to_float, value_type_name_str,
+        lookup_class_attr_owner, lookup_value_special_method, metaclass_dunder_for_call,
+        native_iterator_class, normalize_float_slot_result, object_class_singleton,
+        render_instance_repr, try_value_to_float, value_type_name_str,
     };
     include!("runtime/formatting.rs");
 }
@@ -126,8 +127,9 @@ mod builtin_methods {
         IndexMap, Interpreter, NativeIterFrame, NativeIteratorClass, PrimitiveClassKind,
         PrintOptions, PyBigInt, PyClass, PyDict, PyError, PyInstance, PyKey, PySet, PyToPrimitive,
         Rc, RefCell, RegSlice, Result, Value, ValueKind, apply_format_spec,
-        bind_class_level_method_wrapper, builtin_data_backing, builtin_iterator_has_length_hint,
-        c3_linearize_classes, call_bytes_method_coerced_prevalidated, canonical_class_by_tag,
+        apply_format_spec_named, bind_class_level_method_wrapper, builtin_data_backing,
+        builtin_iterator_has_length_hint, c3_linearize_classes,
+        call_bytes_method_coerced_prevalidated, canonical_class_by_tag,
         class_descriptor_display_name, class_direct_subclasses, class_is_subclass_of,
         class_mro_items, coerce_bytes_subclass_arg, coerce_bytes_subclass_join_iterable,
         coerce_bytes_subclass_method_args, coerce_bytes_subclass_method_kwargs,
