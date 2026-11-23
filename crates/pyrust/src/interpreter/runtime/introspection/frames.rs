@@ -167,16 +167,28 @@ impl Interpreter {
         }
     }
 
-    /// Pop one non-generator frame view and discard any materialized cache for
-    /// that activation. Generator views use direct `Vec::pop` on every hot
-    /// resume/exit path and own no side-vector slot.
+    /// Detach the top non-generator frame view from `vm_frame_views` without
+    /// yet touching `vm_frame_caches`. Callers that still own the popped
+    /// frame's register slice drop/truncate those registers and restore the
+    /// caller's `self.env` first (so non-escaping frame objects drop before
+    /// cache inspection, and any escaping frame that links to its parent sees
+    /// the caller's environment), then call [`Self::finish_pop_vm_frame_view`]
+    /// (issue #3028).
     #[inline]
-    pub(crate) fn pop_vm_frame_view(&mut self) -> Option<VmFrameView> {
+    pub(crate) fn detach_vm_frame_view(&mut self) -> Option<VmFrameView> {
         let view = self.vm_frame_views.pop()?;
         debug_assert!(
             view.gen_frame.is_none(),
             "generator frame views must use the direct hot-path pop"
         );
+        Some(view)
+    }
+
+    /// Finalize frame-cache cleanup after [`Self::detach_vm_frame_view`] once
+    /// the popped frame's registers are dropped and the caller's environment is
+    /// active again.
+    #[inline]
+    pub(crate) fn finish_pop_vm_frame_view(&mut self) {
         let new_len = self.vm_frame_views.len();
         if self
             .vm_frame_caches
@@ -185,18 +197,61 @@ impl Interpreter {
         {
             self.truncate_vm_frame_caches(new_len);
         }
+    }
+
+    /// Pop one non-generator frame view and discard any materialized cache for
+    /// that activation. Generator views use direct `Vec::pop` on every hot
+    /// resume/exit path and own no side-vector slot.
+    #[inline]
+    pub(crate) fn pop_vm_frame_view(&mut self) -> Option<VmFrameView> {
+        let view = self.detach_vm_frame_view()?;
+        self.finish_pop_vm_frame_view();
         Some(view)
+    }
+
+    /// Link an escaping generator frame to the caller that exhausted it
+    /// (issue #3028). Called only when a generator transitions to `done = true`
+    /// and already has a materialized `frame_cache`; yielded frames intentionally
+    /// keep `f_back = None`, matching CPython 3.12.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn link_finished_generator_frame_back(&mut self, frame: &GeneratorFrame) {
+        if self.vm_frame_views.is_empty() {
+            return;
+        }
+        let cached = frame
+            .frame_cache
+            .borrow()
+            .as_deref()
+            .and_then(|cache| cache.object.as_ref())
+            .and_then(pyrust_core::WeakValueCache::upgrade);
+        if let Some(frame_object) = cached
+            && frame_obj::stored_back(&frame_object).is_none_or(|b| b.is_none())
+        {
+            let back = self.build_frame_object(0, 0);
+            frame_obj::set_back(&frame_object, back);
+        }
     }
 
     #[cold]
     #[inline(never)]
     fn truncate_vm_frame_caches(&mut self, new_len: usize) {
+        let mut escaping_frames: Vec<Value> = Vec::new();
         let remove_vector = {
             let caches = self
                 .vm_frame_caches
                 .as_deref_mut()
-                .expect("cache vector checked by pop_vm_frame_view");
-            caches.truncate(new_len);
+                .expect("cache vector checked by finish_pop_vm_frame_view");
+            for slot in caches.drain(new_len..) {
+                if let Some(cache) = slot
+                    && let Some(frame) = cache
+                        .object
+                        .as_ref()
+                        .and_then(pyrust_core::WeakValueCache::upgrade)
+                {
+                    escaping_frames.push(frame);
+                }
+            }
             while caches.last().is_some_and(Option::is_none) {
                 caches.pop();
             }
@@ -204,6 +259,20 @@ impl Interpreter {
         };
         if remove_vector {
             self.vm_frame_caches = None;
+        }
+        // Link genuinely escaping frames to their immediate live parent
+        // (#3028). Non-escaping frames already dropped with the callee's
+        // registers so `upgrade()` returns `None` and no outer frame is built.
+        if !escaping_frames.is_empty() && !self.vm_frame_views.is_empty() {
+            let mut parent: Option<Value> = None;
+            for frame in escaping_frames {
+                if frame_obj::stored_back(&frame).is_none_or(|b| b.is_none()) {
+                    let back = parent
+                        .get_or_insert_with(|| self.build_frame_object(0, 0))
+                        .clone();
+                    frame_obj::set_back(&frame, back);
+                }
+            }
         }
     }
 
@@ -301,31 +370,46 @@ impl Interpreter {
         self.sync_cached_function_locals_at(view_index);
     }
 
-    /// Return a live generator frame's current caller when Python reads
-    /// `f_back`. Generator frame objects retain `None` in their backing state,
-    /// so suspended/finished frames naturally fall back to `None` without any
-    /// resume/pop mutation.
-    pub(crate) fn live_generator_frame_back_for_attribute(
-        &mut self,
-        frame: &Value,
-    ) -> Option<Value> {
+    /// Resolve `f_back` on demand for any live frame object (issue #3028).
+    ///
+    /// Returns `None` if `frame` is not currently active on `vm_frame_views`
+    /// (unwound, suspended generator, or traceback frame), letting `FrameOps`
+    /// return its stored `FrameState.back`.  For active generator frames the
+    /// caller is resolved dynamically without mutating `FrameState.back`
+    /// (since a generator's caller changes across resumes); for active
+    /// non-generator frames the immediate parent is built in O(1) and cached
+    /// in `FrameState.back`.
+    pub(crate) fn live_frame_back_for_attribute(&mut self, frame: &Value) -> Option<Value> {
         let view_index = self
             .vm_frame_views
             .iter()
             .enumerate()
-            .rposition(|(view_index, view)| {
-                view.gen_frame.is_some()
-                    && cached_frame_object(self, view_index)
-                        .as_ref()
-                        .is_some_and(|cached| values_are_identical(cached, frame))
-            });
-        let view_index = view_index?;
+            .rposition(|(view_index, _)| {
+                cached_frame_object(self, view_index)
+                    .as_ref()
+                    .is_some_and(|cached| values_are_identical(cached, frame))
+            })?;
+        if view_index == 0 {
+            return Some(Value::none());
+        }
         let depth = self.vm_frame_views.len() - 1 - view_index;
-        Some(self.build_frame_object(depth + 1, 0))
+        if self.vm_frame_views[view_index].gen_frame.is_some() {
+            return Some(self.build_frame_object(depth + 1, 0));
+        }
+        if let Some(stored) = frame_obj::stored_back(frame)
+            && !stored.is_none()
+        {
+            return Some(stored);
+        }
+        let back = self.build_frame_object(depth + 1, 0);
+        frame_obj::set_back(frame, back.clone());
+        Some(back)
     }
 
-    /// Build or reuse the frame object at `idx` (zero is the innermost frame),
-    /// including its `f_back` chain.
+    /// Build or reuse the single frame object at `idx` (zero is the innermost
+    /// frame).  `f_back` is initialized to `None` and resolved lazily on
+    /// attribute access (or on unwind if the frame escapes), keeping
+    /// `sys._getframe()` O(1) regardless of stack depth (issue #3028).
     pub(crate) fn build_frame_object(&mut self, idx: usize, lineno: i64) -> Value {
         let len = self.vm_frame_views.len();
         if idx >= len {
@@ -343,31 +427,40 @@ impl Interpreter {
             return frame;
         }
 
-        // Materialize outer frames through the same per-view caches so a
-        // direct depth lookup and this frame's `f_back` share identity. A
-        // generator's caller changes between resumes, so its stored back is
-        // always `None` and the active caller is supplied by the getter above.
-        let back = if self.vm_frame_views[view_index].gen_frame.is_some() {
-            Value::none()
-        } else {
-            self.build_frame_object(idx + 1, 0)
-        };
+        // Initialize `f_back` lazily to `None`; `live_frame_back_for_attribute`
+        // materializes the immediate parent on demand and
+        // `truncate_vm_frame_caches` links genuinely escaping frames on unwind.
+        let back = Value::none();
         let view = &self.vm_frame_views[view_index];
 
         let code = match &view.function {
             Some(func) => self.build_code_object(func),
             None => {
-                // Script / Class frame: synthesise a minimal code object whose
-                // co_name matches CPython (`<module>` for module scope).  Carry
-                // the running script's path into `co_filename` (#2438) so
-                // `sys._getframe().f_code.co_filename` reports the source file
-                // rather than `<unknown>`.
-                let filename = self
-                    .script_filename
-                    .as_ref()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "<unknown>".to_string());
-                code_obj::code_with_loc("<module>".to_string(), 0, Vec::new(), filename, 0)
+                if let Some(gen_frame) = view.gen_frame {
+                    // SAFETY: `gen_frame` points to the heap-stable
+                    // `GeneratorFrame` for the lifetime of this active view on
+                    // `vm_frame_views`.
+                    let gen_frame = unsafe { gen_frame.as_ref() };
+                    self.build_code_from_fncode(
+                        &gen_frame.code,
+                        gen_frame.fn_name.as_ref(),
+                        gen_frame.fn_name.as_ref(),
+                        &gen_frame.local_index,
+                    )
+                } else {
+                    // Script / Class frame: synthesise a minimal code object
+                    // whose co_name matches CPython (`<module>` for module
+                    // scope). Carry the running script's path into
+                    // `co_filename` (#2438) so
+                    // `sys._getframe().f_code.co_filename` reports the source
+                    // file rather than `<unknown>`.
+                    let filename = self
+                        .script_filename
+                        .as_ref()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    code_obj::code_with_loc("<module>".to_string(), 0, Vec::new(), filename, 0)
+                }
             }
         };
 

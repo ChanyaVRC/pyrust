@@ -240,7 +240,7 @@ impl Interpreter {
             unsafe { RegSlice::from_raw(class_regs_ptr.as_ptr(), class_regs_len) };
         let body_result = self.run_bytecode(class_code, class_regs_slice);
         // Always pop both stacks, even on error, to keep them balanced.
-        self.pop_vm_frame_view();
+        self.detach_vm_frame_view();
         self.env = previous_env;
         self.free_env(class_env_rc.clone());
         let store_order = self
@@ -248,12 +248,18 @@ impl Interpreter {
             .pop()
             .expect("class_store_order stack popped to empty");
         let (annotation_scopes, live_namespace) = self.pop_class_annotation_scopes();
-        body_result?;
+        if let Err(err) = body_result {
+            drop(class_regs);
+            self.finish_pop_vm_frame_view();
+            return Err(err);
+        }
 
         let attrs = live_namespace.as_ref().map_or_else(
             || collect_class_attrs(local_index, &class_regs, store_order, num_class_regs),
             collect_live_class_attrs,
         );
+        drop(class_regs);
+        self.finish_pop_vm_frame_view();
         Ok(ClassBodyExecution {
             attrs,
             class_env: class_env_rc,

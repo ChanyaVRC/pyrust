@@ -101,3 +101,30 @@ pub fn frame(code: Value, lineno: i64, back: Value, globals: Value, locals: Valu
 pub fn is_frame(value: &Value) -> bool {
     matches!(value.kind(), pyrust_core::ValueKind::BuiltinObject { ops, .. } if builtin_ops_is::<FrameOps>(ops))
 }
+
+/// Return the stored `f_back` value on a `frame` object without invoking
+/// attribute dispatch (issue #3028).
+pub fn stored_back(value: &Value) -> Option<Value> {
+    let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return None;
+    };
+    if !builtin_ops_is::<FrameOps>(ops) {
+        return None;
+    }
+    let borrow = state.borrow();
+    borrow.downcast_ref::<FrameState>().map(|s| s.back.clone())
+}
+
+/// Store `back` into a `frame` object's `FrameState.back` slot (issue #3028).
+pub fn set_back(value: &Value, back: Value) {
+    let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return;
+    };
+    if !builtin_ops_is::<FrameOps>(ops) {
+        return;
+    }
+    let mut borrow = state.borrow_mut();
+    if let Some(s) = borrow.downcast_mut::<FrameState>() {
+        s.back = back;
+    }
+}

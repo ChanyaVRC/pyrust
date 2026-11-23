@@ -280,6 +280,9 @@ impl Interpreter {
                 // StopIteration.value (PEP 380 §3 step 4).
                 frame.last_return_value = Some(ret_val.clone());
                 frame.done = true;
+                if frame.frame_cache.borrow().is_some() {
+                    self.link_finished_generator_frame_back(frame);
+                }
                 // CPython synthesises `StopIteration()` with *empty* args when a
                 // generator returns `None` (falls off the end or `return`/`return
                 // None`); only a non-None return value is passed as the single
@@ -552,7 +555,12 @@ impl Interpreter {
                         .copied()
                         .filter(|&s| s != (0, 0, 0, 0))
                 };
-                if let Some(view) = self.pop_vm_frame_view()
+                let view = self.detach_vm_frame_view();
+                st.tramp_arena.truncate(*st.tramp_active_base);
+                *st.tramp_active_base = saved.saved_base;
+                self.env = saved.saved_env;
+                self.finish_pop_vm_frame_view();
+                if let Some(view) = view
                     && let Some(func) = view.function
                 {
                     let frame_col = innermost_col;
@@ -575,7 +583,6 @@ impl Interpreter {
                     });
                 }
                 innermost_col = caller_call_col;
-                self.env = saved.saved_env;
                 line = saved.saved_cur_line;
             }
             let Some(mut gd) = st.gen_drive_stack.pop() else {
