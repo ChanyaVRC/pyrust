@@ -205,96 +205,111 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
             }
 
             // CPython exposes a type-specific introspection surface per
-            // generator kind (issue #2302): a plain generator advertises the
-            // synchronous iteration protocol plus `gi_*`; an async generator
-            // advertises the asynchronous protocol plus `ag_*`; a coroutine
-            // advertises `send`/`throw`/`close` plus `cr_*` (but NOT
-            // `__iter__`/`__next__`).
-            // Read from the immutable kind tag: a `dir()` taken from inside
-            // the running body must still describe the right surface, and the
-            // state cell is checked out for the whole of a resume (#2978).
-            let kind = cell.kind();
-            let is_async_gen = kind == GeneratorKind::AsyncGenerator;
-            let is_coroutine = matches!(
-                kind,
-                GeneratorKind::Coroutine | GeneratorKind::AsyncGenerator
-            );
-            let mut names = vec![
-                "__class__".to_string(),
-                "__name__".to_string(),
-                "__qualname__".to_string(),
-            ];
-            if is_async_gen {
-                names.extend(
-                    [
-                        "__aiter__",
-                        "__anext__",
-                        "asend",
-                        "athrow",
-                        "aclose",
-                        "ag_code",
-                        "ag_frame",
-                        "ag_running",
-                        "ag_suspended",
-                        "ag_await",
-                    ]
-                    .iter()
-                    .map(|s| s.to_string()),
-                );
-            } else if is_coroutine {
-                names.extend(
-                    [
-                        "send",
-                        "throw",
-                        "close",
-                        "cr_code",
-                        "cr_frame",
-                        "cr_origin",
-                        "cr_running",
-                        "cr_suspended",
-                        "cr_await",
-                    ]
-                    .iter()
-                    .map(|s| s.to_string()),
-                );
-            } else {
-                names.extend(
-                    [
-                        "__iter__",
-                        "__next__",
-                        "send",
-                        "throw",
-                        "close",
-                        "gi_code",
-                        "gi_frame",
-                        "gi_running",
-                        "gi_suspended",
-                        "gi_yieldfrom",
-                    ]
-                    .iter()
-                    .map(|s| s.to_string()),
-                );
-                // Only the concrete built-in iterators carry a remaining-count
-                // slot (issue #2920); a real generator does not.
-                if let Ok(state) = cell.try_borrow() {
-                    if state.downcast_ref::<GetItemIter>().is_some() {
-                        names.extend(
-                            [
-                                "__getattribute__",
-                                "__reduce__",
-                                "__reduce_ex__",
-                                "__setstate__",
-                            ]
-                            .iter()
-                            .map(|name| (*name).to_string()),
-                        );
+            // generator kind (issues #2302, #2978, #2980, #2981):
+            //   - plain generator: synchronous iteration + `send`/`throw`/`close`
+            //     + `gi_*` + `__name__`/`__qualname__` + `__reduce__`/`__reduce_ex__`
+            //   - coroutine: `send`/`throw`/`close` + `cr_*` + `__name__`/`__qualname__`
+            //     + `__reduce__`/`__reduce_ex__` (no `__iter__`/`__next__`)
+            //   - async generator: asynchronous protocol + `ag_*`
+            //     + `__name__`/`__qualname__` + `__reduce__`/`__reduce_ex__`
+            //   - built-in / native iterators (`GeneratorKind::Iterator`):
+            //     iteration protocol only — never `gi_*`, `__name__`,
+            //     `__qualname__`, or `send`/`throw`/`close` (except
+            //     `AsyncGenASend`, which exposes `send`/`throw`/`close`).
+            match cell.kind() {
+                GeneratorKind::AsyncGenerator => [
+                    "__class__",
+                    "__name__",
+                    "__qualname__",
+                    "__aiter__",
+                    "__anext__",
+                    "asend",
+                    "athrow",
+                    "aclose",
+                    "ag_code",
+                    "ag_frame",
+                    "ag_running",
+                    "ag_suspended",
+                    "ag_await",
+                    "__reduce__",
+                    "__reduce_ex__",
+                ]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+                GeneratorKind::Coroutine => [
+                    "__class__",
+                    "__name__",
+                    "__qualname__",
+                    "send",
+                    "throw",
+                    "close",
+                    "cr_code",
+                    "cr_frame",
+                    "cr_origin",
+                    "cr_running",
+                    "cr_suspended",
+                    "cr_await",
+                    "__reduce__",
+                    "__reduce_ex__",
+                ]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+                GeneratorKind::Generator => [
+                    "__class__",
+                    "__name__",
+                    "__qualname__",
+                    "__iter__",
+                    "__next__",
+                    "send",
+                    "throw",
+                    "close",
+                    "gi_code",
+                    "gi_frame",
+                    "gi_running",
+                    "gi_suspended",
+                    "gi_yieldfrom",
+                    "__reduce__",
+                    "__reduce_ex__",
+                ]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+                GeneratorKind::Iterator => {
+                    let mut names = vec![
+                        "__class__".to_string(),
+                        "__iter__".to_string(),
+                        "__next__".to_string(),
+                    ];
+                    if let Ok(state) = cell.try_borrow() {
+                        if state.is::<AsyncGenASend>() {
+                            names.extend(
+                                ["send", "throw", "close"]
+                                    .iter()
+                                    .map(|name| (*name).to_string()),
+                            );
+                        } else {
+                            if state.downcast_ref::<GetItemIter>().is_some() {
+                                names.extend(
+                                    [
+                                        "__getattribute__",
+                                        "__reduce__",
+                                        "__reduce_ex__",
+                                        "__setstate__",
+                                    ]
+                                    .iter()
+                                    .map(|name| (*name).to_string()),
+                                );
+                            }
+                            if builtin_iterator_has_length_hint(&**state) {
+                                names.push("__length_hint__".to_string());
+                            }
+                        }
                     }
-                    if builtin_iterator_has_length_hint(&**state) {
-                        names.push("__length_hint__".to_string());
-                    }
+                    names
                 }
             }
-            names
         }
         _ => Vec::new(),
     }

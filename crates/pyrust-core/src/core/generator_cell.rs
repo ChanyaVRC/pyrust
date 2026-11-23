@@ -69,7 +69,10 @@ pub struct GeneratorCell {
     /// just like `kind`, so it remains readable while the frame is running.
     iterable_coroutine: bool,
     /// `None` for built-in iterators, which expose no `__name__`.
-    names: RefCell<Option<GeneratorNames>>,
+    /// Shared with `GeneratorFrame` so the never-awaited coroutine warning
+    /// observes runtime `__qualname__` updates without borrowing the execution
+    /// state cell (issue #2981).
+    names: Option<Rc<RefCell<GeneratorNames>>>,
     /// Originating `UserFunction` for Python frame objects (`gi_code` /
     /// `cr_code` / `ag_code`), kept beside the execution state so code
     /// introspection remains readable while the body runs and after exhaustion
@@ -104,25 +107,25 @@ impl GeneratorCell {
 
     /// The Python-visible `__name__`, or `None` for a built-in iterator.
     pub fn name(&self) -> Option<std::sync::Arc<str>> {
-        self.names.borrow().as_ref().map(|n| n.name.clone())
+        self.names.as_ref().map(|n| n.borrow().name.clone())
     }
 
     /// The Python-visible `__qualname__`, or `None` for a built-in iterator.
     pub fn qualname(&self) -> Option<std::sync::Arc<str>> {
-        self.names.borrow().as_ref().map(|n| n.qualname.clone())
+        self.names.as_ref().map(|n| n.borrow().qualname.clone())
     }
 
     /// Overwrite `__name__`.  No-op on a built-in iterator, which has none.
     pub fn set_name(&self, value: &str) {
-        if let Some(names) = self.names.borrow_mut().as_mut() {
-            names.name = std::sync::Arc::from(value);
+        if let Some(names) = self.names.as_ref() {
+            names.borrow_mut().name = std::sync::Arc::from(value);
         }
     }
 
     /// Overwrite `__qualname__`.  No-op on a built-in iterator.
     pub fn set_qualname(&self, value: &str) {
-        if let Some(names) = self.names.borrow_mut().as_mut() {
-            names.qualname = std::sync::Arc::from(value);
+        if let Some(names) = self.names.as_ref() {
+            names.borrow_mut().qualname = std::sync::Arc::from(value);
         }
     }
 }

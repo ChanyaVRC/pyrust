@@ -143,6 +143,7 @@ impl Compiler {
         // Threaded source file (#2438): methods defined in this class body inherit
         // the enclosing scope's `co_filename`.
         sub.filename = self.filename.clone();
+        sub.qualname = std::sync::Arc::from(class_qualname.as_str());
         sub.qualname_prefix = class_qualname.clone();
         // Thread the enclosing function scope chain into the class body compiler.
         // Class scope is transparent to `nonlocal` (not a function scope), so we

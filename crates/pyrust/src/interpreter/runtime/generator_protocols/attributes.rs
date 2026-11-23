@@ -131,9 +131,11 @@ impl Interpreter {
 
         let is_async_gen = kind == GeneratorKind::AsyncGenerator;
         let is_coroutine_only = kind == GeneratorKind::Coroutine;
+        let is_plain_gen = kind == GeneratorKind::Generator;
         if is_async_gen {
             match name {
-                "__aiter__" | "__anext__" | "asend" | "athrow" | "aclose" => {
+                "__aiter__" | "__anext__" | "asend" | "athrow" | "aclose" | "__reduce__"
+                | "__reduce_ex__" => {
                     return Ok(pyrust_builtins::bound_method::bound_method(
                         name.to_string(),
                         target.clone(),
@@ -151,7 +153,7 @@ impl Interpreter {
             // does not surface that wrapper object, so `__await__` is
             // intentionally not exposed here (documented limitation).
             match name {
-                "send" | "close" | "throw" => {
+                "send" | "close" | "throw" | "__reduce__" | "__reduce_ex__" => {
                     return Ok(pyrust_builtins::bound_method::bound_method(
                         name.to_string(),
                         target.clone(),
@@ -160,13 +162,28 @@ impl Interpreter {
                 _ => {}
             }
         }
-        // Issue #1413: also expose the iteration protocol methods as
-        // bound-method values so that hasattr/getattr see them.
-        // These apply to all generator subtypes (GeneratorFrame,
-        // NativeIterFrame, CallableIter, …), so they are checked
-        // before the downcast.  Skipped for async generators and
-        // coroutines, which expose their own protocol above instead.
-        if !is_async_gen && !is_coroutine_only {
+        if is_plain_gen {
+            match name {
+                "__iter__" | "__next__" | "send" | "close" | "throw" | "__reduce__"
+                | "__reduce_ex__" => {
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        name.to_string(),
+                        target.clone(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        // Issue #1413 / #2981: built-in / native iterators stored in a
+        // GeneratorCell expose the iteration protocol (`__iter__`/`__next__`,
+        // plus `__length_hint__` when backed by a remaining-count cursor), NOT
+        // generator-only `send`/`throw`/`close` — except for `AsyncGenASend`,
+        // which is the coroutine-style one-shot awaitable returned by
+        // `__anext__`/`asend`/`athrow`/`aclose`.
+        if kind == GeneratorKind::Iterator {
+            let is_asend = cell
+                .try_borrow()
+                .is_ok_and(|state| state.is::<AsyncGenASend>());
             match name {
                 "__iter__" | "__next__" => {
                     return Ok(pyrust_builtins::bound_method::bound_method(
@@ -174,12 +191,7 @@ impl Interpreter {
                         target.clone(),
                     ));
                 }
-                "send" | "close" | "throw"
-                    if kind == GeneratorKind::Generator
-                        || cell
-                            .try_borrow()
-                            .is_ok_and(|state| state.is::<AsyncGenASend>()) =>
-                {
+                "send" | "close" | "throw" if is_asend => {
                     return Ok(pyrust_builtins::bound_method::bound_method(
                         name.to_string(),
                         target.clone(),
@@ -303,7 +315,10 @@ impl Interpreter {
                 _ => {}
             }
         }
-        let obj_name = full_type_name_str(target);
+        let obj_name = kind
+            .frame_type_name()
+            .map(std::borrow::Cow::Borrowed)
+            .unwrap_or_else(|| full_type_name_str(target));
         Err(PyError::attribute_error(
             format!("'{obj_name}' object has no attribute '{name}'"),
             Some(name.to_string()),

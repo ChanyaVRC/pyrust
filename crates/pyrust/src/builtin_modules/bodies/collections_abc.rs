@@ -87,9 +87,12 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{DictViewClass, ExpandedCallArg, Interpreter, class_is_subclass_of};
+use crate::interpreter::{
+    DictViewClass, ExpandedCallArg, Interpreter, class_is_subclass_of, is_async_gen_asend_value,
+};
 use crate::value::{PyClass, PyKey, Value, ValueKind};
 use indexmap::IndexMap;
+use pyrust_core::GeneratorKind;
 use pyrust_derive::pyrust_module;
 
 /// Python-source definitions for the concrete mixin methods of `collections.abc`
@@ -340,22 +343,38 @@ fn primitive_value_has_dunder(value: &Value, dunder: &str) -> bool {
             "__iter__" | "__len__" | "__contains__" | "__hash__" | "__reversed__"
         ),
 
-        // generator objects: have __iter__, __next__, send, throw, close;
-        // `anext_awaitable` also exposes `__await__` (issue #2983).
-        ValueKind::Generator(cell) => {
-            if cell.try_borrow().is_ok_and(|state| {
-                state
-                    .downcast_ref::<crate::interpreter::AnextAwaitable>()
-                    .is_some()
-            }) {
-                matches!(
-                    dunder,
-                    "__await__" | "__iter__" | "__next__" | "send" | "throw" | "close"
-                )
-            } else {
+        // Generator-backed objects: classify by immutable GeneratorKind so
+        // coroutines, async generators, plain generators, async-generator
+        // awaitables, `anext_awaitable`, and built-in iterators each report
+        // their exact CPython ABC protocol surface (#2981, #2983).
+        ValueKind::Generator(cell) => match cell.kind() {
+            GeneratorKind::Generator => {
                 matches!(dunder, "__iter__" | "__next__" | "send" | "throw" | "close")
             }
-        }
+            GeneratorKind::Coroutine => {
+                matches!(dunder, "__await__" | "send" | "throw" | "close")
+            }
+            GeneratorKind::AsyncGenerator => matches!(
+                dunder,
+                "__aiter__" | "__anext__" | "asend" | "athrow" | "aclose"
+            ),
+            GeneratorKind::Iterator => {
+                if cell.try_borrow().is_ok_and(|state| {
+                    state
+                        .downcast_ref::<crate::interpreter::AnextAwaitable>()
+                        .is_some()
+                }) {
+                    matches!(
+                        dunder,
+                        "__await__" | "__iter__" | "__next__" | "send" | "throw" | "close"
+                    )
+                } else if is_async_gen_asend_value(value) {
+                    matches!(dunder, "__await__" | "send" | "throw" | "close")
+                } else {
+                    matches!(dunder, "__iter__" | "__next__")
+                }
+            }
+        },
 
         // BuiltinObject variants
         ValueKind::BuiltinObject { ops, .. } => {
@@ -548,6 +567,63 @@ fn abc_subclasshook_for_class(abc_name: &str, class: &Rc<RefCell<PyClass>>) -> O
     Some(true)
 }
 
+/// Structural check for legacy built-in type tokens (`ValueKind::BuiltinFunction`,
+/// e.g. `types.GeneratorType`, `types.CoroutineType`, `types.AsyncGeneratorType`,
+/// `type(map(...))`, `type(iter([1]))`, …) that have not been migrated to
+/// `PyClass` singletons yet (#2981).
+///
+/// Mirrors CPython's `_check_methods`: returns `Some(true)` when the type
+/// provides every required method of `abc_name`, and `None` (`NotImplemented`)
+/// otherwise so `__subclasshook__` / `issubclass` match CPython.
+fn abc_subclasshook_for_builtin_token(abc_name: &str, type_name: &str) -> Option<bool> {
+    let required = required_methods(abc_name)?;
+    let has_dunder = |dunder: &str| match type_name {
+        "generator" => Some(matches!(
+            dunder,
+            "__iter__" | "__next__" | "send" | "throw" | "close"
+        )),
+        "coroutine" | "async_generator_asend" | "async_generator_athrow" => {
+            Some(matches!(dunder, "__await__" | "send" | "throw" | "close"))
+        }
+        "anext_awaitable" => Some(matches!(
+            dunder,
+            "__await__" | "__iter__" | "__next__" | "send" | "throw" | "close"
+        )),
+        "async_generator" => Some(matches!(
+            dunder,
+            "__aiter__" | "__anext__" | "asend" | "athrow" | "aclose"
+        )),
+        "map"
+        | "filter"
+        | "zip"
+        | "enumerate"
+        | "iterator"
+        | "callable_iterator"
+        | "list_iterator"
+        | "list_reverseiterator"
+        | "tuple_iterator"
+        | "str_iterator"
+        | "str_ascii_iterator"
+        | "bytes_iterator"
+        | "range_iterator"
+        | "longrange_iterator"
+        | "set_iterator"
+        | "dict_keyiterator"
+        | "dict_valueiterator"
+        | "dict_itemiterator"
+        | "dict_reversekeyiterator"
+        | "dict_reversevalueiterator"
+        | "dict_reverseitemiterator" => Some(matches!(dunder, "__iter__" | "__next__")),
+        _ => None,
+    };
+    for &method in required {
+        if !has_dunder(method)? {
+            return None;
+        }
+    }
+    Some(true)
+}
+
 // ── Registry names for the three ABC dunder methods ─────────────────────────
 //
 // These must match the `fn <short_name>(args)` declarations inside the
@@ -683,6 +759,15 @@ pyrust_module! {
                     None => Ok(Value::not_implemented()),
                 }
             }
+            ValueKind::BuiltinFunction(type_name) => {
+                let Some(abc_name) = canonical_structural_abc_name(&abc_class) else {
+                    return Ok(Value::not_implemented());
+                };
+                match abc_subclasshook_for_builtin_token(abc_name, type_name) {
+                    Some(result) => Ok(Value::bool_(result)),
+                    None => Ok(Value::not_implemented()),
+                }
+            }
             _ => Ok(Value::not_implemented()),
         }
     }
@@ -733,6 +818,14 @@ pyrust_module! {
                     class_is_subclass_of(c_rc, &abc_class)
                         || is_virtual_subclass(c_rc, &abc_class),
                 ))
+            }
+            ValueKind::BuiltinFunction(type_name) => {
+                if let Some(abc_name) = canonical_structural_abc_name(&abc_class)
+                    && let Some(result) = abc_subclasshook_for_builtin_token(abc_name, type_name)
+                {
+                    return Ok(Value::bool_(result));
+                }
+                Ok(Value::bool_(false))
             }
             _ => Ok(Value::bool_(false)),
         }

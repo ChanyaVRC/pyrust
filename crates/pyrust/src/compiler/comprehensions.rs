@@ -744,10 +744,17 @@ impl Compiler {
         let inner_global_rc = Rc::new(scope.globals);
         let inner_nonlocal_rc = Rc::new(scope.nonlocals);
 
+        let genexpr_qualname = if self.qualname_prefix.is_empty() {
+            "<genexpr>".to_string()
+        } else {
+            format!("{}.<genexpr>", self.qualname_prefix)
+        };
         let mut sub = Compiler::new(Rc::clone(&inner_index_rc), def_bound, inner_cell_vars);
         // Threaded source file (#2438): the comprehension's implicit code object
         // inherits the enclosing scope's `co_filename`.
         sub.filename = self.filename.clone();
+        sub.qualname = std::sync::Arc::from(genexpr_qualname.as_str());
+        sub.qualname_prefix = genexpr_qualname.clone();
         // Comprehensions create an implicit function scope; thread outer_locals.
         sub.outer_locals = self.outer_locals.clone();
         if self.is_function_scope {
@@ -812,7 +819,7 @@ impl Compiler {
             crate::bytecode::compute_self_bind("<genexpr>", &inner_index_rc, &inner_code.cell_vars);
         self.fn_protos.push(FnProto {
             name: Rc::from("<genexpr>"),
-            qualname: Rc::from("<genexpr>"),
+            qualname: Rc::from(genexpr_qualname.as_str()),
             param_spec,
             code: Rc::new(inner_code),
             local_index: inner_index_rc,

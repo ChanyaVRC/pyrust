@@ -133,6 +133,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     FnCode {
         insns,
         filename: code.filename,
+        qualname: code.qualname,
         lineno_table,
         col_table,
         first_lineno: code.first_lineno,

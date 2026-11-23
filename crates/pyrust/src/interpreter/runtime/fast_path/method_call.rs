@@ -189,6 +189,15 @@ impl Interpreter {
             if is_generator {
                 if !kw_map.is_empty() {
                     let receiver = regs[obj as usize].as_some();
+                    if let Some(val) = receiver
+                        && let ValueKind::Generator(cell) = val.kind()
+                        && cell.kind() != GeneratorKind::Iterator
+                        && matches!(method, "__reduce__" | "__reduce_ex__")
+                    {
+                        return Err(pyrust_core::type_err!(
+                            "object.{method}() takes no keyword arguments"
+                        ));
+                    }
                     let keyword_error = iterator_direct_method_keyword_error;
                     let iterator_error = receiver.and_then(|value| keyword_error(value, method));
                     if let Some(error) = iterator_error {

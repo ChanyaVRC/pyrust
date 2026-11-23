@@ -80,8 +80,12 @@ impl Interpreter {
 
         // co_qualname (CPython 3.11+): the compile-time qualified name.  Unlike
         // `__qualname__`, this is fixed at compile time and ignores any later
-        // `f.__qualname__ = ...` user override.
-        let qualname = function.qualname.to_string();
+        // `f.__qualname__ = ...` user override (#2981).
+        let qualname = fncode
+            .as_ref()
+            .map(|c| c.qualname.to_string())
+            .filter(|q| !q.is_empty() && q != "<module>")
+            .unwrap_or_else(|| function.qualname.to_string());
 
         // co_flags: CPython sets CO_OPTIMIZED | CO_NEWLOCALS for every normal
         // function, plus the signature and generator/coroutine flags the

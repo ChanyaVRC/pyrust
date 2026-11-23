@@ -28,6 +28,11 @@ pub struct FnCode {
     /// file (not the running script's) in tracebacks and `__code__.co_filename`
     /// (issue #2438).  `<unknown>` when no path was supplied (e.g. REPL / eval).
     pub(crate) filename: std::sync::Arc<str>,
+    /// Compile-time qualified name for this code object — `co_qualname`
+    /// (PEP 3155 / CPython 3.11+).  Fixed at compile time and unaffected by
+    /// runtime `__qualname__` reassignment on a function, generator, coroutine,
+    /// or async generator (issue #2981).
+    pub(crate) qualname: std::sync::Arc<str>,
     /// 1-based source line number for each instruction, parallel to `insns`.
     /// A value of 0 means "unknown / same as the previous instruction".  Set by
     /// the compiler when per-statement line information is available (i.e. when
