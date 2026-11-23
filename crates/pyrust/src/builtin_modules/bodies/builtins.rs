@@ -372,7 +372,19 @@ pub(crate) fn module() -> Value {
         typing_protocols::module(),
     ] {
         if let ValueKind::PyModule(module) = part.kind() {
-            attrs.extend(module.borrow().attrs.clone());
+            // Filter out dotted internal registry keys (e.g. `list.__init__`,
+            // `BaseException.add_note`, `bytearray_iterator.__getattribute__`):
+            // those remain in `regs()` for `builtin_registry::lookup` but must
+            // not leak into Python-visible `builtins.__dict__` / `vars(builtins)`
+            // / `dir(builtins)` (issue #2971).
+            attrs.extend(
+                module
+                    .borrow()
+                    .attrs
+                    .iter()
+                    .filter(|(name, _)| !name.contains('.'))
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
         }
     }
     // These objects are namespace data, not callable registry entries.  Put

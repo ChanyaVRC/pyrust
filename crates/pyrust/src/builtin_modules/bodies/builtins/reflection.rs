@@ -355,10 +355,7 @@ pyrust_module! {
             }
             _ => Err(PyError::named(
                 "TypeError",
-                format!(
-                    "{FN_NAME}() argument must have __dict__ attribute (got '{}')",
-                    value_type_name_str(&args[0].value),
-                ),
+                format!("{FN_NAME}() argument must have __dict__ attribute"),
             )),
         }
     }

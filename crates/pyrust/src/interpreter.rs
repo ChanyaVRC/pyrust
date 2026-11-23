@@ -119,7 +119,7 @@ impl Default for ModuleClassCache {
 /// Lazily-built map from exception-class name to its resolved [`PyClass`].
 /// Insertion ordered so publishing it into `builtins` yields a stable
 /// `vars(builtins)` (issue #2918).
-type ExcClassMap = indexmap::IndexMap<&'static str, Rc<RefCell<PyClass>>>;
+type ExcClassMap = indexmap::IndexMap<&'static str, Rc<RefCell<PyClass>>, pyrust_core::PyHasher>;
 
 pub(crate) struct ExcClasses(RefCell<Option<ExcClassMap>>);
 

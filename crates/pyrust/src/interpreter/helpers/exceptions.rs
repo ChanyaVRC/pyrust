@@ -799,9 +799,12 @@ pub(crate) fn lookup_exc_class(name: &str) -> Option<Rc<RefCell<PyClass>>> {
 /// made the tail of `vars(builtins)` differ run to run.  `EXC_CLASS_CACHE` is
 /// an ordered `Vec` declaring the hierarchy roots first, and that order carries
 /// through to the module namespace.
-pub(crate) fn build_exc_class_map() -> indexmap::IndexMap<&'static str, Rc<RefCell<PyClass>>> {
+pub(crate) fn build_exc_class_map() -> ExcClassMap {
     EXC_CLASS_CACHE.with(|cache| {
-        let mut map = indexmap::IndexMap::with_capacity(cache.len());
+        let mut map = indexmap::IndexMap::with_capacity_and_hasher(
+            cache.len(),
+            pyrust_core::PyHasher::default(),
+        );
         for (name, cls) in cache {
             map.insert(*name, Rc::clone(cls));
         }
