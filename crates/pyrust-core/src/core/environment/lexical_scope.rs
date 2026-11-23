@@ -323,6 +323,26 @@ impl Environment {
     /// Names already present in the target dictionary keep the position they
     /// were first inserted at, exactly like `dict.__setitem__`.
     pub fn namespace_materialization_snapshot(&self) -> Vec<(String, Value)> {
+        if self.root_namespace.has_binding_order.get()
+            && let Some(order) = self.root_namespace.binding_order.borrow().as_deref()
+        {
+            let mut live: IndexMap<String, Value> = self
+                .values
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.clone()))
+                .collect();
+            for (name, value) in self.declared_bindings_in_binding_order(false) {
+                live.insert(name, value);
+            }
+            let mut ordered = Vec::with_capacity(live.len());
+            for name in order.iter() {
+                if let Some(value) = live.shift_remove(name.as_str()) {
+                    ordered.push((name.clone(), value));
+                }
+            }
+            ordered.extend(live);
+            return ordered;
+        }
         let declared = self.declared_bindings_in_binding_order(true);
         let mut ordered: Vec<(String, Value)> = self
             .values
@@ -332,6 +352,133 @@ impl Environment {
             .collect();
         ordered.extend(declared);
         ordered
+    }
+
+    /// Whether this root namespace has activated its lazy binding-order
+    /// journal (issue #2919).
+    #[inline]
+    pub fn namespace_has_binding_order(&self) -> bool {
+        self.root_namespace.has_binding_order.get()
+    }
+
+    /// Whether at least one Script fast-local mirror is currently active on
+    /// this root namespace.
+    #[inline]
+    pub fn namespace_has_active_fastlocal_mirror(&self) -> bool {
+        self.root_namespace.active_mirror_count.get() > 0
+    }
+
+    /// Whether any live Script fast-local mirror declares a slot for `name`.
+    pub fn namespace_fastlocal_declares(&self, name: &str) -> bool {
+        self.root_namespace
+            .live_mirrors()
+            .iter()
+            .any(|mirror| mirror.local_index.contains_key(name))
+    }
+
+    fn ensure_binding_order_initialized(&self) {
+        if self.root_namespace.has_binding_order.get() {
+            return;
+        }
+        let initial: IndexSet<String, FxBuildHasher> = self
+            .namespace_materialization_snapshot()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        *self.root_namespace.binding_order.borrow_mut() = Some(Box::new(initial));
+        self.root_namespace.has_binding_order.set(true);
+    }
+
+    /// Record a binding insertion when the binding-order journal is active.
+    /// Re-binding a name that is already present keeps its existing position.
+    #[inline]
+    pub fn record_namespace_binding_order_insert(&self, name: &str) {
+        if !self.root_namespace.has_binding_order.get() {
+            return;
+        }
+        if let Some(order) = self
+            .root_namespace
+            .binding_order
+            .borrow_mut()
+            .as_deref_mut()
+            && !order.contains(name)
+        {
+            order.insert(name.to_string());
+        }
+    }
+
+    /// Activate the binding-order journal before an out-of-slot global
+    /// insertion (such as a `global`-write-only name or `from mod import *`)
+    /// so the newly bound key lands at its runtime binding point rather than
+    /// before declared fast-local slots.
+    pub fn record_namespace_out_of_order_insert(&self, name: &str) {
+        if self.root_namespace.cache_disabled.get() {
+            return;
+        }
+        self.ensure_binding_order_initialized();
+        if let Some(order) = self
+            .root_namespace
+            .binding_order
+            .borrow_mut()
+            .as_deref_mut()
+            && !order.contains(name)
+        {
+            order.insert(name.to_string());
+        }
+    }
+
+    /// Activate the binding-order journal before deleting a module binding so
+    /// a later re-bind of the same name appends at the end instead of reusing
+    /// its static register position.
+    pub fn record_namespace_binding_order_delete(&self, name: &str) {
+        if self.root_namespace.cache_disabled.get() {
+            return;
+        }
+        self.ensure_binding_order_initialized();
+        if let Some(order) = self
+            .root_namespace
+            .binding_order
+            .borrow_mut()
+            .as_deref_mut()
+        {
+            order.shift_remove(name);
+        }
+    }
+
+    /// Snapshot the recorded binding order for post-frame register write-back.
+    pub fn namespace_binding_order_snapshot(&self) -> Vec<String> {
+        self.root_namespace
+            .binding_order
+            .borrow()
+            .as_deref()
+            .map(|order| order.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Reorder `self.values` to match the recorded binding-order journal after
+    /// fast-local write-back completes.
+    pub fn reorder_values_to_binding_order(&mut self) {
+        if !self.root_namespace.has_binding_order.get() {
+            return;
+        }
+        let order = self.namespace_binding_order_snapshot();
+        if order.is_empty() {
+            return;
+        }
+        let mut remaining: IndexMap<String, Value> = self
+            .values
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect();
+        self.values.clear();
+        for name in &order {
+            if let Some(value) = remaining.shift_remove(name.as_str()) {
+                self.values.insert(name, value);
+            }
+        }
+        for (name, value) in remaining {
+            self.values.insert(&name, value);
+        }
     }
 
     /// Read the innermost live Script fast-local binding for one name.
@@ -492,6 +639,7 @@ impl Environment {
     pub const MODULE_WRITE_SYNC_GLOBALS: u8 = 1 << 0;
     pub const MODULE_WRITE_SYNC_SIBLINGS: u8 = 1 << 1;
     pub const MODULE_WRITE_SYNC_ENV: u8 = 1 << 2;
+    pub const MODULE_WRITE_TRACK_BINDING_ORDER: u8 = 1 << 3;
 
     /// Hot-path preparation for `SyncModuleGlobal`: advance interested cache
     /// generations and report which slow synchronization actions (if any) are
@@ -521,6 +669,9 @@ impl Environment {
         }
         if self.root_namespace.env_binding_interest.get() & name_mask == name_mask {
             flags |= Self::MODULE_WRITE_SYNC_ENV;
+        }
+        if self.root_namespace.has_binding_order.get() {
+            flags |= Self::MODULE_WRITE_TRACK_BINDING_ORDER;
         }
         flags
     }
@@ -671,6 +822,10 @@ impl Environment {
     /// first exposure snapshot is complete.
     pub fn activate_namespace_globals_alias(&self, globals: &Value) {
         register_namespace_alias(&self.root_namespace, globals);
+        // Once the live dict is authoritative it tracks insertion and deletion
+        // order natively, so drop any pre-exposure binding-order journal.
+        self.root_namespace.has_binding_order.set(false);
+        *self.root_namespace.binding_order.borrow_mut() = None;
     }
 
     #[inline]

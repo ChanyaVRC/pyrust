@@ -123,9 +123,10 @@ impl Interpreter {
             }
             return Ok(value);
         }
-        // CPython 3.12: `module.__annotations__` is a getset descriptor on
-        // `types.ModuleType` that lazily creates and stores `{}` in the
-        // module's `__dict__` on first attribute read (issue #2971).
+        // CPython 3.12 (`types.ModuleType.__annotations__` getset descriptor):
+        // reading `__annotations__` on a module whose `__dict__` does not yet
+        // contain it lazily creates `{}` and appends `'__annotations__'` to
+        // `module.__dict__` (issues #2919, #2971).
         if name == "__annotations__" {
             let empty = Value::dict(PyDict::default());
             module

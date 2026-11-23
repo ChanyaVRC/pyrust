@@ -13,6 +13,18 @@ impl Interpreter {
             // inspection can find the new value.
             let root = module_env(&self.env);
             {
+                let root_ref = root.borrow();
+                if root_ref.namespace_has_binding_order() {
+                    root_ref.record_namespace_binding_order_insert(name);
+                } else if !root_ref.namespace_cache_disabled()
+                    && root_ref.namespace_has_active_fastlocal_mirror()
+                    && root_ref.values.get(name).is_none()
+                    && root_ref.namespace_fastlocal_value(name).is_none()
+                {
+                    root_ref.record_namespace_out_of_order_insert(name);
+                }
+            }
+            {
                 let mut root = root.borrow_mut();
                 root.record_namespace_env_binding(name);
                 root.values.insert(name, value.clone());
@@ -48,6 +60,18 @@ impl Interpreter {
         // the root-owned globals backing only after it has been exposed.
         let is_module_scope = self.env.borrow().parent.is_none();
         if is_module_scope {
+            {
+                let env_ref = self.env.borrow();
+                if env_ref.namespace_has_binding_order() {
+                    env_ref.record_namespace_binding_order_insert(name);
+                } else if !env_ref.namespace_cache_disabled()
+                    && env_ref.namespace_has_active_fastlocal_mirror()
+                    && env_ref.values.get(name).is_none()
+                    && !env_ref.namespace_fastlocal_declares(name)
+                {
+                    env_ref.record_namespace_out_of_order_insert(name);
+                }
+            }
             // Invalidate the LoadGlobal inline cache for module-scope writes.
             bump_global_struct_version(self);
             if let Some(globals) = self.globals_write_target_for_environment(&self.env) {

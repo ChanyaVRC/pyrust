@@ -160,6 +160,14 @@ struct RootNamespaceState {
     /// `PyModule::insert_attr`; saturating this token disables module-backed
     /// equality caches at the same boundary as the root LoadGlobal cache.
     filesystem_module_mutation: RefCell<Option<ModuleMutationState>>,
+    /// Fast-path flag: true once a module-scope deletion or out-of-slot global
+    /// insertion has diverged live binding order from static register order
+    /// (issue #2919). Ordinary scripts never set this flag and pay only a
+    /// single `Cell::get()` on `SyncModuleGlobal`.
+    has_binding_order: Cell<bool>,
+    /// Lazily allocated live binding-order journal, populated only when
+    /// `has_binding_order` is true and cleared once the globals dict escapes.
+    binding_order: RefCell<Option<Box<IndexSet<String, FxBuildHasher>>>>,
 }
 
 impl RootNamespaceState {
@@ -180,6 +188,8 @@ impl RootNamespaceState {
             globals_provider: RefCell::new(None),
             filesystem_module_backing: Cell::new(false),
             filesystem_module_mutation: RefCell::new(None),
+            has_binding_order: Cell::new(false),
+            binding_order: RefCell::new(None),
         }
     }
 
