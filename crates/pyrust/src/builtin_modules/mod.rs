@@ -354,6 +354,9 @@ pyrust_builtin_modules! {
     // and `typecodes` constant injected from `array_py.py` by the `@inject`
     // post-load hook.
     array @inject,
+    // `datetime` (issue #2805): date/time/datetime/timedelta/tzinfo/timezone
+    // types injected from `datetime_py.py` by the `@inject` post-load hook.
+    datetime @inject,
 }
 
 include!("finalization.rs");
