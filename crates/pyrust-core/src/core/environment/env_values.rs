@@ -97,6 +97,33 @@ impl EnvValues {
         }
     }
 
+    /// Update an existing binding in place without inserting a new key.
+    ///
+    /// Returns `true` if `name` was already present and updated, or `false` if
+    /// absent. Used by `SyncModuleGlobal` so a conservative
+    /// `env_binding_interest` Bloom false positive never allocates an
+    /// `Rc<str>` or inserts an absent fast-local name into `EnvValues`, which
+    /// would perturb Python-visible namespace ordering (issue #2925).
+    #[inline]
+    pub fn update_if_present(&mut self, name: &str, value: Value) -> bool {
+        match self {
+            EnvValues::Inline(v) => {
+                if let Some(slot) = v.iter_mut().find(|(k, _)| &**k == name) {
+                    slot.1 = value;
+                    return true;
+                }
+                false
+            }
+            EnvValues::Map(m) => {
+                if let Some(slot) = m.get_mut(name) {
+                    *slot = value;
+                    return true;
+                }
+                false
+            }
+        }
+    }
+
     #[inline]
     pub fn remove(&mut self, name: &str) -> Option<Value> {
         match self {
