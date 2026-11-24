@@ -409,7 +409,7 @@ pyrust_module! {
         if let Some(result) = crate::interpreter::with_code_state(source_val, |cs| {
             use crate::interpreter::CodeMode;
             match cs.mode {
-                CodeMode::Exec => {
+                CodeMode::Exec | CodeMode::Single => {
                     _interp.run_exec_code(
                         Rc::clone(&cs.code),
                         Rc::clone(&cs.local_index),
@@ -470,12 +470,23 @@ pyrust_module! {
         }
         // Code object path (from compile()).
         if let Some(result) = crate::interpreter::with_code_state(source_val, |cs| {
-            _interp.run_eval_code_dispatch(
-                Rc::clone(&cs.code),
-                Rc::clone(&cs.local_index),
-                globals_opt.clone(),
-                locals_opt.clone(),
-            )
+            use crate::interpreter::CodeMode;
+            match cs.mode {
+                CodeMode::Eval => _interp.run_eval_code_dispatch(
+                    Rc::clone(&cs.code),
+                    Rc::clone(&cs.local_index),
+                    globals_opt.clone(),
+                    locals_opt.clone(),
+                ),
+                CodeMode::Exec | CodeMode::Single => _interp
+                    .run_exec_code(
+                        Rc::clone(&cs.code),
+                        Rc::clone(&cs.local_index),
+                        globals_opt.clone(),
+                        locals_opt.clone(),
+                    )
+                    .map(|()| Value::none()),
+            }
         }) {
             return result;
         }
@@ -497,8 +508,8 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/functions.html#compile>
     ///
     /// pyrust stores the compiled `FnCode` wrapped in a `Value`; the returned
-    /// value can be passed to `exec()` or `eval()`.  Only the `"exec"` and
-    /// `"eval"` modes are supported; `"single"` raises `NotImplementedError`.
+    /// value can be passed to `exec()` or `eval()`.  Supports `"exec"`,
+    /// `"eval"`, and `"single"` modes.
     #[arity_style(clinic)]
     fn compile(
         source: PyValueRef,
@@ -598,10 +609,41 @@ pyrust_module! {
                     local_index,
                 ))
             }
-            "single" => Err(PyError::named(
-                "NotImplementedError",
-                "compile() mode 'single' is not yet implemented".to_string(),
-            )),
+            "single" => {
+                let (program, linenos) =
+                    crate::interpreter::Interpreter::parse_single_source_to_stmts_with_linenos(
+                        source,
+                    )?;
+                let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let global_names = crate::interpreter::collect_global_names(&program);
+                let local_names = crate::interpreter::collect_local_names(
+                    &[],
+                    &program,
+                    &global_names,
+                    &empty,
+                );
+                let local_index: Rc<
+                    std::collections::HashMap<String, crate::bytecode::Reg>,
+                > = Rc::new(
+                    (0u32..)
+                        .zip(local_names.iter())
+                        .map(|(i, n)| (n.clone(), i))
+                        .collect(),
+                );
+                let code = crate::compiler::compile_script_with_linenos(
+                    &program,
+                    Rc::clone(&local_index),
+                    true,
+                    &linenos,
+                    &compile_filename,
+                )
+                .map(|c| Rc::new(crate::optimizer::optimize(c)))?;
+                Ok(crate::interpreter::value_code_object(
+                    code,
+                    crate::interpreter::CodeMode::Single,
+                    local_index,
+                ))
+            }
             other => Err(PyError::named(
                 "ValueError",
                 format!("compile() mode must be 'exec', 'eval' or 'single', not {other:?}"),

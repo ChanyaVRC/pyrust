@@ -140,6 +140,65 @@ impl Parser {
         Ok((stmts, linenos))
     }
 
+    /// Parse a single interactive statement for `compile(..., 'single')`.
+    ///
+    /// Mirrors CPython 3.12's `interactive` grammar:
+    /// - Rejects empty / whitespace-only / comment-only input (`SyntaxError`).
+    /// - Allows one logical simple-statement line (including `;`-separated
+    ///   simple statements) OR one compound statement.
+    /// - Rejects an inline compound statement lacking a trailing newline
+    ///   (e.g. `if True: 1` without `\n`).
+    /// - Rejects trailing statements on subsequent lines (`SyntaxError`).
+    pub fn parse_single_with_linenos(
+        &mut self,
+        ends_with_newline: bool,
+    ) -> Result<(Vec<Stmt>, Vec<u32>)> {
+        self.skip_newlines();
+        if self.is(&Token::Eof) {
+            return Err(PyError::Parse("invalid syntax".to_string()));
+        }
+        let stmt_lineno = self.current_lineno();
+        let stmts = self.parse_stmt_sequence()?;
+        let is_compound = |s: &Stmt| {
+            matches!(
+                s,
+                Stmt::If { .. }
+                    | Stmt::While { .. }
+                    | Stmt::For { .. }
+                    | Stmt::Try { .. }
+                    | Stmt::With { .. }
+                    | Stmt::Match { .. }
+                    | Stmt::Def { .. }
+                    | Stmt::Class { .. }
+            )
+        };
+        let has_compound = stmts.iter().any(is_compound);
+        if has_compound && stmts.len() > 1 {
+            return Err(PyError::Parse("invalid syntax".to_string()));
+        }
+        if has_compound {
+            let ended_with_dedent = self
+                .pos
+                .checked_sub(1)
+                .and_then(|i| self.tokens.get(i))
+                .is_some_and(|t| matches!(t, Token::Dedent));
+            if !ended_with_dedent && !ends_with_newline {
+                return Err(PyError::Parse("invalid syntax".to_string()));
+            }
+        }
+        self.skip_newlines();
+        if !self.is(&Token::Eof) {
+            let msg = if has_compound {
+                "invalid syntax"
+            } else {
+                "multiple statements found while compiling a single statement"
+            };
+            return Err(PyError::Parse(msg.to_string()));
+        }
+        let linenos = vec![stmt_lineno; stmts.len()];
+        Ok((stmts, linenos))
+    }
+
     fn parse_stmt_sequence(&mut self) -> Result<Vec<Stmt>> {
         let mut stmts = Vec::new();
         stmts.extend(self.parse_stmt()?);

@@ -724,6 +724,13 @@ pyrust_module! {
         _interp.call_next(iterator.0, default.as_value().cloned())
     }
 
+    /// CPython: aiter(async_iterable) — return an asynchronous iterator.
+    /// <https://docs.python.org/3/library/functions.html#aiter>
+    #[arity_style(takes_exactly_one)]
+    fn aiter(#[positional_only] async_iterable: PyValueRef) -> Result<Value> {
+        _interp.call_aiter(async_iterable.0)
+    }
+
     /// CPython: anext(async_iterator[, default]) — return awaitable for next item.
     /// <https://docs.python.org/3/library/functions.html#anext>
     ///

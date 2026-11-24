@@ -582,6 +582,21 @@ pyrust_module! {
         Ok(Value::bool_(is_callable))
     }
 
+    /// CPython: breakpoint(*args, **kws) — enter the debugger via `sys.breakpointhook`.
+    /// <https://docs.python.org/3/library/functions.html#breakpoint>
+    fn breakpoint(args) -> Result<Value> {
+        let sys_mod = _interp.load_module("sys")?;
+        let hook = match _interp.get_attr(&sys_mod, "breakpointhook") {
+            Ok(v) => v,
+            Err(ref e) if e.class_name_is("AttributeError") => {
+                return Err(PyError::Runtime("lost sys.breakpointhook".to_string()));
+            }
+            Err(e) => return Err(e),
+        };
+        _interp.emit_audit_event("builtins.breakpoint", std::slice::from_ref(&hook))?;
+        _interp.call_function_expanded(hook, args)
+    }
+
     /// CPython: slice(stop) / slice(start, stop[, step]) — construct a slice
     /// object.  Used as both a callable constructor and an `isinstance` target.
     /// <https://docs.python.org/3/library/functions.html#slice>

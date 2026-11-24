@@ -296,7 +296,7 @@ impl Interpreter {
                 self.exec_import_star(regs, num_locals, *mod_reg)?;
             }
             Insn::PrintExpr(src) => {
-                Self::exec_print_expr(regs, *src, num_locals)?;
+                self.exec_print_expr(regs, *src, num_locals)?;
             }
             Insn::RecordClassStore(slot) => self.record_class_namespace_store(regs, *slot),
             Insn::RecordClassDel(slot) => self.record_class_namespace_delete(*slot),
@@ -609,14 +609,27 @@ impl Interpreter {
     }
 
     fn exec_print_expr(
+        &mut self,
         regs: &RegSlice,
         src: crate::bytecode::Reg,
         num_locals: crate::bytecode::Reg,
     ) -> Result<()> {
         let val = vm_read(regs, src, num_locals)?;
-        if !val.is_none() {
-            println!("{}", val.repr_raw());
-        }
+        let sys_mod = self.load_module("sys")?;
+        let displayhook = match self.get_attr(&sys_mod, "displayhook") {
+            Ok(v) => v,
+            Err(ref e) if e.class_name_is("AttributeError") => {
+                return Err(PyError::Runtime("lost sys.displayhook".to_string()));
+            }
+            Err(e) => return Err(e),
+        };
+        self.call_function_expanded(
+            displayhook,
+            &[crate::interpreter::ExpandedCallArg {
+                name: None,
+                value: val,
+            }],
+        )?;
         Ok(())
     }
 }

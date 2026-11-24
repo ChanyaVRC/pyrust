@@ -654,6 +654,67 @@ impl Interpreter {
         }
     }
 
+    /// Check CPython's `PyAIter_Check`: whether `type(val)` defines `__anext__`
+    /// (`tp_as_async->am_anext != NULL`).
+    fn is_async_iterator(val: &Value) -> bool {
+        match val.kind() {
+            ValueKind::Generator(cell) => cell.kind() == GeneratorKind::AsyncGenerator,
+            ValueKind::PyInstance(inst_rc) => {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                lookup_class_attr(&class, "__anext__").is_some()
+            }
+            ValueKind::PyClass(class) => metaclass_dunder(class, "__anext__").is_some(),
+            _ => false,
+        }
+    }
+
+    /// Implementation of the `aiter(async_iterable)` builtin (issue #3140).
+    ///
+    /// Resolves `__aiter__` on `type(obj)` (mirroring CPython's `PyObject_GetAIter`
+    /// — instance-dict `__aiter__` is ignored), invokes it synchronously, and
+    /// validates that the returned object satisfies `PyAIter_Check` (its type
+    /// defines `__anext__`).
+    pub(crate) fn call_aiter(&mut self, obj: &Value) -> Result<Value> {
+        let it = match obj.kind() {
+            ValueKind::Generator(cell) if cell.kind() == GeneratorKind::AsyncGenerator => {
+                return Ok(obj.clone());
+            }
+            ValueKind::PyInstance(inst_rc) => {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                let Some(aiter_method) = lookup_class_attr(&class, "__aiter__") else {
+                    return Err(pyrust_core::type_err!(
+                        "'{}' object is not an async iterable",
+                        class.borrow().name
+                    ));
+                };
+                invoke_class_method(self, aiter_method, obj.clone(), &[])?
+            }
+            ValueKind::PyClass(class) => {
+                if let Some(aiter_method) = metaclass_dunder(class, "__aiter__") {
+                    invoke_class_method(self, aiter_method, obj.clone(), &[])?
+                } else {
+                    return Err(pyrust_core::type_err!(
+                        "'{}' object is not an async iterable",
+                        full_type_name_str(obj)
+                    ));
+                }
+            }
+            _ => {
+                return Err(pyrust_core::type_err!(
+                    "'{}' object is not an async iterable",
+                    full_type_name_str(obj)
+                ));
+            }
+        };
+        if !Self::is_async_iterator(&it) {
+            return Err(pyrust_core::type_err!(
+                "aiter() returned not an async iterator of type '{}'",
+                full_type_name_str(&it)
+            ));
+        }
+        Ok(it)
+    }
+
     /// Implementation of the `anext(aiter[, default])` builtin (issue #2983).
     ///
     /// Resolves `__anext__` on `type(aiter)` (mirroring CPython's
