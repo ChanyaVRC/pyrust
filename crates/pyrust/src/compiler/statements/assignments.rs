@@ -28,10 +28,14 @@ impl Compiler {
                         self.emit(Insn::SyncModuleGlobal(reg, name_idx));
                     }
                 } else {
-                    // global / nonlocal / cell var → go through env
+                    // cell / nonlocal / global
                     let src = self.compile_expr(expr);
-                    let name_idx = self.intern_name(name);
-                    self.emit(Insn::StoreGlobal(name_idx, src));
+                    if let Some(cell_idx) = self.resolve_cell_slot_for_write(name) {
+                        self.emit(Insn::StoreCell(cell_idx, src));
+                    } else {
+                        let name_idx = self.intern_name(name);
+                        self.emit(Insn::StoreGlobal(name_idx, src));
+                    }
                     self.free_temp(src);
                 }
             }
@@ -182,6 +186,8 @@ impl Compiler {
                                     let name_idx = self.intern_name(name);
                                     self.emit(Insn::SyncModuleGlobal(reg, name_idx));
                                 }
+                            } else if let Some(cell_idx) = self.resolve_cell_slot_for_write(name) {
+                                self.emit(Insn::StoreCell(cell_idx, base + i));
                             } else {
                                 let name_idx = self.intern_name(name);
                                 self.emit(Insn::StoreGlobal(name_idx, base + i));
@@ -357,6 +363,8 @@ impl Compiler {
                         let name_idx = self.intern_name(name);
                         self.emit(Insn::SyncModuleGlobal(reg, name_idx));
                     }
+                } else if let Some(cell_idx) = self.resolve_cell_slot_for_write(name) {
+                    self.emit(Insn::StoreCell(cell_idx, src_reg));
                 } else {
                     let name_idx = self.intern_name(name);
                     self.emit(Insn::StoreGlobal(name_idx, src_reg));
@@ -525,15 +533,15 @@ impl Compiler {
                     }
                 } else {
                     // cell / global: load, compute, store.  A function-scope
-                    // cell / nonlocal uses LoadCell/StoreCell (issue #2339);
+                    // cell / nonlocal uses indexed LoadCell/StoreCell (#452 / #2339 / #2348);
                     // this is the hot path for `nonlocal c; c += 1`.
-                    let name_idx = self.intern_name(name);
                     let lhs = self.alloc_temp();
-                    if self.is_function_cell(name) {
-                        self.emit(Insn::LoadCell(lhs, name_idx));
+                    if let Some(cell_idx) = self.resolve_cell_slot_for_write(name) {
+                        self.emit(Insn::LoadCell(lhs, cell_idx));
                         self.emit_aug_binop(lhs, op, expr);
-                        self.emit(Insn::StoreCell(name_idx, lhs));
+                        self.emit(Insn::StoreCell(cell_idx, lhs));
                     } else {
+                        let name_idx = self.intern_name(name);
                         self.emit(Insn::LoadGlobal(lhs, name_idx));
                         self.emit_aug_binop(lhs, op, expr);
                         self.emit(Insn::StoreGlobal(name_idx, lhs));

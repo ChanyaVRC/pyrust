@@ -14,6 +14,7 @@ impl Interpreter {
         kwargs: ExpandedArgBuf,
         class_code: Rc<crate::bytecode::FnCode>,
         local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+        class_cells: CellsBuf,
         proto_qualname: String,
         proto_global_names: Rc<HashSet<String>>,
         proto_nonlocal_names: Rc<HashSet<String>>,
@@ -52,6 +53,7 @@ impl Interpreter {
         } = self.run_class_body(
             &class_code,
             &local_index,
+            class_cells,
             &proto_qualname,
             proto_global_names,
             proto_nonlocal_names,
@@ -109,7 +111,7 @@ impl Interpreter {
         // the env captured by every method defined in the body.
         class_env_rc
             .borrow_mut()
-            .values
+            .namespace_values_mut()
             .insert("__class__", result.clone());
         Ok(result)
     }
@@ -163,6 +165,7 @@ impl Interpreter {
         &mut self,
         class_code: &Rc<crate::bytecode::FnCode>,
         local_index: &Rc<HashMap<String, crate::bytecode::Reg>>,
+        class_cells: CellsBuf,
         proto_qualname: &str,
         proto_global_names: Rc<HashSet<String>>,
         proto_nonlocal_names: Rc<HashSet<String>>,
@@ -223,13 +226,15 @@ impl Interpreter {
         let previous_env = std::mem::replace(&mut self.env, class_env);
         let class_regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(class_regs.as_mut_ptr()) };
         let class_regs_len = class_regs.len();
+        let class_cells_slice = CellSlice::from_slice(&class_cells);
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Class,
             // SAFETY: SmallVec/Vec allocation is always non-null.  `class_regs`
             // lives on this stack frame for the full duration of `run_bytecode`;
-            // the view is popped before `class_regs` is dropped.
+            // the view is popped before `class_regs` / `class_cells` are dropped.
             regs_ptr: class_regs_ptr,
             regs_len: class_regs_len,
+            cells: class_cells_slice,
             local_index: Rc::clone(local_index),
             nonlocal_names: None,
             env: None,
@@ -242,7 +247,8 @@ impl Interpreter {
         // held while the dispatch loop runs (issue #547, PR #646).
         let class_regs_slice =
             unsafe { RegSlice::from_raw(class_regs_ptr.as_ptr(), class_regs_len) };
-        let body_result = self.run_bytecode(class_code, class_regs_slice);
+        let body_result =
+            self.run_bytecode_with_cells(class_code, class_regs_slice, class_cells_slice);
         if body_result.is_err() {
             let tb_lineno = match pyrust_core::get_current_vm_line() {
                 0 => None,

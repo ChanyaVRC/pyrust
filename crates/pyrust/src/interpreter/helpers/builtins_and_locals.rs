@@ -410,8 +410,8 @@ fn frame_cell_context(view: &VmFrameView) -> Option<FrameCellContext> {
         // also where its free variables resolve from.
         Some((
             Rc::clone(&gframe.code),
-            Some(Rc::clone(&gframe.saved_env)),
-            Rc::clone(&gframe.saved_env),
+            Some(Rc::clone(&gframe.function.env)),
+            Rc::clone(&gframe.function.env),
         ))
     }
 }
@@ -426,46 +426,30 @@ pub(crate) fn compiler_owned_frame_local_keys(view: &VmFrameView) -> Vec<PyKey> 
     }
 
     if let Some((code, own_env, defining_env)) = frame_cell_context(view) {
-        names.extend(code.cell_vars.iter().map(|s| s.to_string()));
+        names.extend(code.cell_slots.iter().map(|slot| slot.name.to_string()));
 
-        let declared_global = view
-            .function
-            .as_ref()
-            .map(|function| Rc::clone(&function.global_names))
-            .or_else(|| {
-                own_env
-                    .as_ref()
-                    .map(|env| Rc::clone(&env.borrow().global_names))
-            });
-        for &candidate in code.free_var_candidates() {
-            let cand_str = candidate.as_str();
-            if view.local_index.contains_key(cand_str)
-                || declared_global
-                    .as_ref()
-                    .is_some_and(|globals| globals.contains(cand_str))
-            {
-                continue;
-            }
-
-            // A candidate is a real free variable when lexical scope metadata
-            // in an enclosing non-root environment owns the name. Consult the
-            // declaration set rather than the value map: an empty cell after
-            // `del` is still compiler-owned and must clear a same-named key
-            // inserted through `f_locals`.
-            let mut current = Some(Rc::clone(&defining_env));
-            while let Some(env) = current {
-                let bindings = env.borrow();
-                let parent = bindings.parent.clone();
-                if parent.is_none() {
-                    break;
+        if defining_env.borrow().parent.is_some() {
+            let declared_global = view
+                .function
+                .as_ref()
+                .map(|function| Rc::clone(&function.global_names))
+                .or_else(|| {
+                    own_env
+                        .as_ref()
+                        .map(|env| Rc::clone(&env.borrow().global_names))
+                });
+            for &candidate in code.free_var_candidates() {
+                let cand_str = candidate.as_str();
+                if view.local_index.contains_key(cand_str)
+                    || declared_global
+                        .as_ref()
+                        .is_some_and(|globals| globals.contains(cand_str))
+                {
+                    continue;
                 }
-                let owns_name = bindings.local_names.contains(cand_str);
-                drop(bindings);
-                if owns_name {
+                if lookup_enclosing_function_value(&defining_env, cand_str).is_some() {
                     names.push(cand_str.to_owned());
-                    break;
                 }
-                current = parent;
             }
         }
     }
@@ -494,12 +478,9 @@ pub(crate) fn compiler_owned_frame_local_keys(view: &VmFrameView) -> Vec<PyKey> 
 /// assigned, or `del`-eted) are omitted, as CPython omits an empty cell.
 #[inline]
 fn merge_frame_cells_into_dict(view: &VmFrameView, dict: &mut PyDict) {
-    // Gate for the common frame, inlined into the caller so a plain function
-    // costs no call: one with no cell vars needs no local env, so `env` is
-    // `None`, and one defined at module scope has no enclosing function scope
-    // to read free variables from.  Such a frame has neither group, so it never
-    // touches its code object.
-    if view.env.is_none()
+    // Fast gate for plain functions with no cell slots and no non-root defining
+    // namespace (module-level functions).
+    if view.cells.is_empty()
         && view.gen_frame.is_none()
         && !matches!(&view.function, Some(f) if f.env.borrow().parent.is_some())
     {
@@ -514,104 +495,85 @@ fn merge_frame_cells_into_dict_slow(view: &VmFrameView, dict: &mut PyDict) {
         return;
     };
 
-    // Cell variables: this frame's own captured locals, read out of the env the
-    // callee was given.
-    if !code.cell_vars.is_empty()
-        && let Some(env) = own_env.as_ref()
+    let cell_slice = view.cells.as_slice();
+    let own_count = code.own_cell_count as usize;
+
+    // 1. Own cell variables (`0..own_cell_count`), already sorted by name.
+    for (meta, slot) in code
+        .own_cell_slots()
+        .iter()
+        .zip(cell_slice.iter().take(own_count))
     {
-        let mut names: smallvec::SmallVec<[&str; 4]> =
-            code.cell_vars.iter().map(|s| s.as_str()).collect();
-        names.sort_unstable();
-        let bindings = env.borrow();
-        for name in names {
-            if let Some(value) = bindings.values.get(name)
-                && !value.is_unset()
-            {
-                dict.insert(PyKey::str_from(name), value.clone());
-            }
+        if let Some(value) = slot.get()
+            && !value.is_unset()
+        {
+            dict.insert(PyKey::str_from(meta.name.as_str()), value);
         }
     }
 
-    // Free variables: the names this frame reads from an enclosing *function*
-    // scope, together with the ones it declares `nonlocal` (issue #486).
-    // CPython puts both in `co_freevars`, so they form one sorted group — a
-    // `nonlocal` name that this body only *writes* compiles to no read at all
-    // and so never reaches the candidate set below.
+    // 2. Free variables (`own_cell_count..`), already sorted by name, plus any
+    // non-cell enclosing namespace captures (`__class__` or PEP 695 type params)
+    // when the defining environment is non-root.
     let mut frees: smallvec::SmallVec<[(&str, Value); 4]> = smallvec::SmallVec::new();
-    if let (Some(nonlocal_names), Some(env)) = (&view.nonlocal_names, &view.env) {
-        for name in nonlocal_names.iter() {
-            // `lookup_name_in_enclosing_local_env` walks the env parent chain
-            // from `env` upward to find the first ancestor that declares `name`
-            // as a local and holds its value.  Errors here are internal
-            // inconsistencies (nonlocal declared but no enclosing binding
-            // found); ignore them silently rather than propagating — a missing
-            // nonlocal shouldn't crash `locals()`.
-            if let Ok(Some(value)) = lookup_name_in_enclosing_local_env(env, name) {
-                frees.push((name.as_str(), value));
-            }
+    for (meta, slot) in code
+        .free_var_slots()
+        .iter()
+        .zip(cell_slice.iter().skip(own_count))
+    {
+        if let Some(value) = slot.get()
+            && !value.is_unset()
+        {
+            frees.push((meta.name.as_str(), value));
         }
     }
-    // The candidate set is every name the body reads through the env chain; a
-    // candidate is a free variable exactly when it resolves to a binding in an
-    // enclosing *function* scope, which is the same rule `__closure__` /
-    // `co_freevars` apply (issue #2106), so the two always agree.  One pass over
-    // the chain probing every candidate at each level, rather than one walk per
-    // candidate: a body reads far more globals and builtins (which resolve
-    // nowhere) than free variables, and each of those walks the whole chain.
-    let candidates = code.free_var_candidates();
-    if !candidates.is_empty() {
-        // An explicit `global x` targets the module env even when an enclosing
-        // function happens to bind `x` too, so those names are filtered out.
-        //
-        // The frame's own `UserFunction` is the authoritative source: it carries
-        // the declarations whether or not the frame published an env, which the
-        // env alone does not — `env` is only handed to the view for a frame with
-        // `nonlocal` names or cell vars, and the #2252 trampoline publishes none
-        // at all, so a body whose *only* reason for a local env is a `global`
-        // declaration would have been read as declaring nothing.  A generator
-        // frame has no `UserFunction`, and falls back to its own env, which a
-        // body that declares a `global` is always given.
-        let declared_global = view
-            .function
-            .as_ref()
-            .map(|f| Rc::clone(&f.global_names))
-            .or_else(|| own_env.map(|env| Rc::clone(&env.borrow().global_names)));
-        let mut current = Some(defining_env);
-        while let Some(env) = current {
-            let bindings = env.borrow();
-            let parent = bindings.parent.clone();
-            // The root namespace is not a function scope: a name bound there is
-            // a module global, never a free variable.  A function defined at
-            // module scope stops on its first step.
-            if parent.is_none() {
-                break;
+    // When the defining environment is non-root (e.g., a class method's
+    // `class_env` holding `__class__`, or a PEP 695 `TypeParamEnv` holding
+    // type parameters), also check non-cell namespace free variables so
+    // `locals()` / `f_locals` matches `__closure__` / `co_freevars`.
+    if defining_env.borrow().parent.is_some() {
+        let candidates = code.free_var_candidates();
+        if !candidates.is_empty() {
+            let declared_global = view
+                .function
+                .as_ref()
+                .map(|f| Rc::clone(&f.global_names))
+                .or_else(|| own_env.map(|env| Rc::clone(&env.borrow().global_names)));
+            let mut current = Some(defining_env);
+            while let Some(env) = current {
+                let bindings = env.borrow();
+                let parent = bindings.parent.clone();
+                if parent.is_none() {
+                    break;
+                }
+                if let Some(values) = bindings.try_namespace_values() {
+                    for name in candidates {
+                        if frees.iter().any(|(seen, _)| *seen == name.as_str())
+                            || code
+                                .own_cell_slots()
+                                .iter()
+                                .any(|m| m.name.as_str() == name.as_str())
+                        {
+                            continue;
+                        }
+                        let Some(value) = values.get(name.as_str()) else {
+                            continue;
+                        };
+                        if value.is_unset() {
+                            continue;
+                        }
+                        if view.local_index.contains_key(name.as_str())
+                            || declared_global
+                                .as_ref()
+                                .is_some_and(|g| g.contains(name.as_str()))
+                        {
+                            continue;
+                        }
+                        frees.push((name.as_str(), value.clone()));
+                    }
+                }
+                drop(bindings);
+                current = parent;
             }
-            for name in candidates {
-                // The innermost binding wins, and a `nonlocal` name resolved
-                // above is already at its own binding scope.
-                if frees.iter().any(|(seen, _)| *seen == name.as_str()) {
-                    continue;
-                }
-                let Some(value) = bindings.values.get(name.as_str()) else {
-                    continue;
-                };
-                if value.is_unset() {
-                    continue;
-                }
-                // A name this frame binds itself is a local or a cell, never
-                // free.  Checked here rather than up front because both lookups
-                // hash the name, and only a resolved candidate reaches them.
-                if view.local_index.contains_key(name.as_str())
-                    || declared_global
-                        .as_ref()
-                        .is_some_and(|g| g.contains(name.as_str()))
-                {
-                    continue;
-                }
-                frees.push((name.as_str(), value.clone()));
-            }
-            drop(bindings);
-            current = parent;
         }
     }
     frees.sort_by(|a, b| a.0.cmp(b.0));
@@ -629,10 +591,12 @@ pub(crate) fn snapshot_current_locals(interp: &Interpreter) -> PyDict {
     match interp.vm_frame_views.last() {
         Some(view) => snapshot_view_locals(interp, view),
         None => {
-            // No active VM frame: fall back to env.values.
+            // No active VM frame: fall back to the current namespace bindings.
             let mut dict: PyDict = PyDict::default();
-            for (k, v) in interp.env.borrow().values.iter() {
-                dict.insert(PyKey::str_from(k), v.clone());
+            if let Some(values) = interp.env.borrow().try_namespace_values() {
+                for (k, v) in values.iter() {
+                    dict.insert(PyKey::str_from(k), v.clone());
+                }
             }
             dict
         }

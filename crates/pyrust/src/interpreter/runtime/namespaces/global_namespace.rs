@@ -42,9 +42,9 @@ impl GlobalNamespace {
         let mut root = self.root.borrow_mut();
         if let Some(value) = value {
             root.record_namespace_env_binding(name);
-            root.values.insert(name, value);
+            root.namespace_values_mut().insert(name, value);
         } else {
-            root.values.remove(name);
+            root.namespace_values_mut().remove(name);
         }
     }
 }

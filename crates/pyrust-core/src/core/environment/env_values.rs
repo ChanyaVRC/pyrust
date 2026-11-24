@@ -4,6 +4,99 @@
 
 pub type NameSet = Rc<HashSet<String>>;
 
+/// Shared, reference-counted mutable cell backing one captured function local
+/// (issues #452 / #2339 / #2348).
+///
+/// Replaces the old name-keyed `Environment::values` lookup for closures,
+/// `nonlocal`, and `function.__closure__`: both the owning function frame and
+/// every nested closure / `cell` introspection object hold clones of the same
+/// `CellSlot`, so reads/writes/deletes execute in O(1) by compile-time slot
+/// index without hashing, string comparison, or parent-chain walks.
+///
+/// `None` represents an unbound or deleted cell (raising `UnboundLocalError` /
+/// `NameError` in bytecode or `ValueError: Cell is empty` on
+/// `cell.cell_contents`).
+#[derive(Debug, Clone)]
+pub struct CellSlot(Rc<RefCell<Option<Value>>>);
+
+impl CellSlot {
+    /// Allocate an initially unbound cell slot.
+    #[inline]
+    pub fn new_empty() -> Self {
+        Self(Rc::new(RefCell::new(None)))
+    }
+
+    /// Allocate a cell slot initialized with `val`.
+    #[inline]
+    pub fn new(val: Value) -> Self {
+        Self(Rc::new(RefCell::new(Some(val))))
+    }
+
+    /// Clone the current value if bound, or `None` if empty.
+    #[inline]
+    pub fn get(&self) -> Option<Value> {
+        self.0.borrow().clone()
+    }
+
+    /// Bind or rebind this cell slot to `val`.
+    #[inline]
+    pub fn set(&self, val: Value) {
+        *self.0.borrow_mut() = Some(val);
+    }
+
+    /// Clear this cell slot and return the previous value, if any.
+    #[inline]
+    pub fn take(&self) -> Option<Value> {
+        self.0.borrow_mut().take()
+    }
+
+    /// Return `true` when this cell slot currently holds a value.
+    #[inline]
+    pub fn is_bound(&self) -> bool {
+        self.0.borrow().is_some()
+    }
+
+    /// Inspect the cell's current value without cloning it.
+    #[inline]
+    pub fn with_value<R>(&self, f: impl FnOnce(Option<&Value>) -> R) -> R {
+        let borrow = self.0.borrow();
+        f(borrow.as_ref())
+    }
+
+    /// Return `true` if `self` and `other` point to the exact same cell backing.
+    #[inline]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Stable address of the underlying cell allocation (for Python `cell` identity).
+    #[inline]
+    pub fn as_ptr(&self) -> *const RefCell<Option<Value>> {
+        Rc::as_ptr(&self.0)
+    }
+}
+
+/// Explicit per-scope storage variant for [`Environment`] (issue #452).
+///
+/// Every `Environment` owns *either* a name-keyed namespace dictionary (module,
+/// class body, PEP 695 type-parameter scope, or explicit `exec`/`eval`
+/// namespace) *or* a flat indexed cell array — never both. Function frames
+/// themselves no longer allocate an `Environment` at all; their cells live
+/// directly on the active VM frame / `GeneratorFrame` and `UserFunction::closure_cells`.
+#[derive(Debug, Clone)]
+pub enum EnvironmentStorage {
+    /// Name-keyed bindings for module, class, type-param, and `exec`/`eval` scopes.
+    Namespace(EnvValues),
+    /// Indexed cell slots when a scope must expose cells behind an `EnvRef`.
+    Cells(smallvec::SmallVec<[CellSlot; 4]>),
+}
+
+impl Default for EnvironmentStorage {
+    fn default() -> Self {
+        Self::Namespace(EnvValues::new())
+    }
+}
+
 /// Number of `(name, value)` bindings an `EnvValues` keeps inline before it
 /// promotes to a hashed map.  A closure scope captures very few cells (the
 /// variables that escape into a nested function — almost always 1 or 2), so the

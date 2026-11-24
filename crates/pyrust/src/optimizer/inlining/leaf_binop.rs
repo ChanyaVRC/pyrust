@@ -61,7 +61,7 @@ fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> 
         let code = &p.code;
         if code.is_generator
             || code.is_coroutine
-            || !code.cell_vars.is_empty()
+            || !code.cell_slots.is_empty()
             || !p.global_names.is_empty()
             || !p.nonlocal_names.is_empty()
         {

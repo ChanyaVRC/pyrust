@@ -283,7 +283,9 @@ impl PyModule {
             if let Some(environment) = namespace.environment() {
                 let mut environment = environment.borrow_mut();
                 environment.record_namespace_env_binding(&name);
-                environment.values.insert(&name, value.clone());
+                environment
+                    .namespace_values_mut()
+                    .insert(&name, value.clone());
                 environment.synchronize_namespace_fastlocal_binding(&name, &value, None);
                 environment.bump_namespace_structure_version();
             }
@@ -315,7 +317,7 @@ impl PyModule {
             if removed.is_some() {
                 if let Some(environment) = namespace.environment() {
                     let mut environment = environment.borrow_mut();
-                    environment.values.remove(name);
+                    environment.namespace_values_mut().remove(name);
                     environment.synchronize_namespace_fastlocal_binding(
                         name,
                         &Value::unset(),
@@ -361,7 +363,7 @@ impl PyModule {
                 .dict_clear()
                 .expect("filesystem module globals must remain a dict");
             if let Some(environment) = namespace.environment() {
-                environment.borrow_mut().values.clear();
+                environment.borrow_mut().namespace_values_mut().clear();
             }
             for (name, value) in attrs {
                 let _ = namespace
@@ -370,7 +372,7 @@ impl PyModule {
                 if let Some(environment) = namespace.environment() {
                     let mut environment = environment.borrow_mut();
                     environment.record_namespace_env_binding(&name);
-                    environment.values.insert(&name, value);
+                    environment.namespace_values_mut().insert(&name, value);
                 }
             }
             if let Some(environment) = namespace.environment() {

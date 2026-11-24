@@ -8,6 +8,7 @@ impl Compiler {
         name: &str,
         keywords: &[(Symbol, Expr)],
         body: &[Stmt],
+        type_param_names: &[Symbol],
     ) -> Option<u16> {
         // Class body: zero-param function that returns its locals as class dict.
         // Collect names explicitly declared `global` in the class body so they
@@ -140,6 +141,8 @@ impl Compiler {
             .extend(body_global.iter().cloned());
         sub.class_direct_env_names
             .extend(body_nonlocal.iter().cloned());
+        let enclosing_cells = self.child_enclosing_cell_names(type_param_names);
+        sub.init_class_cells(enclosing_cells, &body_global, &body_nonlocal_rc);
         // Threaded source file (#2438): methods defined in this class body inherit
         // the enclosing scope's `co_filename`.
         sub.filename = self.filename.clone();
@@ -174,6 +177,7 @@ impl Compiler {
                 return None;
             }
         };
+        let closure_capture_map = self.build_capture_map(&body_code);
         if self.fn_protos.len() >= u16::MAX as usize {
             self.failed = true;
             if self.error_msg.is_none() {
@@ -212,6 +216,7 @@ impl Compiler {
             annotation_keys: SmallVec::new(),
             docstring: class_docstring,
             class_kwarg_names: keywords.iter().map(|(k, _)| *k).collect(),
+            closure_capture_map,
         });
 
         Some(proto_idx)
@@ -316,7 +321,11 @@ impl Compiler {
             return;
         }
 
-        let proto_idx = match self.build_class_proto(name, keywords, body) {
+        let type_param_names: SmallVec<[Symbol; 4]> = type_params
+            .iter()
+            .map(|tp| Symbol::intern(&tp.name))
+            .collect();
+        let proto_idx = match self.build_class_proto(name, keywords, body, &type_param_names) {
             Some(idx) => idx,
             None => return,
         };
@@ -330,15 +339,21 @@ impl Compiler {
         // which captures this env — can still resolve them.  The block sits below
         // `dst`; the watermark resets below keep it live until
         // `finish_class_definition` builds the tuple and pops the env.
+        let shadowed_before = self.shadowed_type_params.len();
         if !type_params.is_empty() {
             self.emit(Insn::PushTypeParamEnv);
+            self.shadowed_type_params
+                .extend(type_param_names.iter().copied());
         }
         let (tp_base, tp_n) = self.emit_bind_type_params(type_params);
 
         let (bases_base, bases_n, kwarg_base, kwarg_n) =
             match self.emit_class_bases_and_keywords(bases, keywords) {
                 Some(v) => v,
-                None => return,
+                None => {
+                    self.shadowed_type_params.truncate(shadowed_before);
+                    return;
+                }
             };
 
         let name_idx = self.intern_name(name);
@@ -354,6 +369,7 @@ impl Compiler {
             let saved = self.next_temp;
             self.compile_expr_into(meta_expr, meta_reg);
             self.next_temp = saved;
+            self.shadowed_type_params.truncate(shadowed_before);
             let dst = self.alloc_temp();
             self.emit(Insn::MakeClassMeta(
                 dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n, meta_reg,
@@ -363,6 +379,7 @@ impl Compiler {
             self.next_temp = dst + 1;
             return self.finish_class_definition(name, dst, decorators, tp_base, tp_n);
         }
+        self.shadowed_type_params.truncate(shadowed_before);
 
         let dst = self.alloc_temp();
         self.emit(Insn::MakeClass(

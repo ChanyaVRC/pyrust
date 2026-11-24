@@ -122,6 +122,9 @@ impl Compiler {
                             name_index,
                             delete_module_global: self.is_module_scope,
                         })
+                    } else if let Some(cell_idx) = self.resolve_cell_slot_for_write(var_name) {
+                        self.emit(Insn::StoreCell(cell_idx, subgroup_reg));
+                        Some(ExceptAsVarDel::Cell(cell_idx))
                     } else {
                         let name_idx = self.intern_name(var_name);
                         self.emit(Insn::StoreGlobal(name_idx, subgroup_reg));

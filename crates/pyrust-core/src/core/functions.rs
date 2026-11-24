@@ -16,14 +16,14 @@ pub struct UserFunctionParam {
 ///
 /// `param_binds[i]` is the target for `params[i]`:
 /// - `Reg(r)` → write the bound value into register `r`.
-/// - `Cell` → the parameter is a cell variable; insert it into the local env by
-///   name (rare; only closures that capture a parameter).
+/// - `Cell(idx)` → the parameter is a cell variable; write directly into
+///   `cells[idx]` in O(1) (issue #452 / #2348).
 /// - `None` → the parameter has no local slot (an unused `*args` / `**kwargs`
 ///   placeholder); nothing to bind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamBind {
     Reg(u32),
-    Cell,
+    Cell(u16),
     None,
 }
 
@@ -178,7 +178,13 @@ pub struct UserFunction {
     pub local_index: Rc<HashMap<String, u32>>,
     pub global_names: NameSet,
     pub nonlocal_names: NameSet,
+    /// Defining namespace (`Namespace`-backed `Environment`: module, class, or
+    /// PEP 695 type-param scope). Never an enclosing function call's `Environment`
+    /// (issue #452).
     pub env: EnvRef,
+    /// Captured enclosing cell slots in `co_freevars` order (issues #452 / #2348).
+    /// Inline for 0–2 captures (zero heap allocation for the common closure).
+    pub closure_cells: smallvec::SmallVec<[crate::CellSlot; 2]>,
     /// True when a call to this function may have its result *cached and reused*
     /// for equal arguments — read by the VM's `CallMemo` result cache
     /// (`vm.rs::Insn::CallMemo`).  More permissive than DCE-purity: a benign

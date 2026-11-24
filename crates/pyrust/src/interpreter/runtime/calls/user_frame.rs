@@ -16,8 +16,7 @@ impl Interpreter {
         function: &Rc<UserFunction>,
         code: &Rc<crate::bytecode::FnCode>,
         mut regs: RegsBuf,
-        local_env: Option<EnvRef>,
-        needs_local_env: bool,
+        cells: CellsBuf,
     ) -> Result<Value> {
         let num_regs = code.num_regs as usize;
         let _depth_guard = CallDepthGuard::enter();
@@ -25,12 +24,9 @@ impl Interpreter {
             return Err(self.recursion_limit_error()?);
         }
 
-        // Swap in the callee's env (the local env built above, or the
-        // function's captured env when no local env is needed).
-        let previous_env = match local_env {
-            Some(env) => std::mem::replace(&mut self.env, env),
-            None => std::mem::replace(&mut self.env, Rc::clone(&function.env)),
-        };
+        // Swap in the function's defining namespace env (zero per-call Environment
+        // allocation — all own cells and captured freevars live in `cells`, #452).
+        let previous_env = std::mem::replace(&mut self.env, Rc::clone(&function.env));
 
         // Self-reference for recursive calls (only if not a cell var) —
         // bind slot precomputed at compile time (#1918).
@@ -51,47 +47,31 @@ impl Interpreter {
         // suspendable frame — even with no `await` — so it returns a
         // coroutine object instead of running synchronously.
         if code.is_generator || code.is_coroutine {
-            // Restore env before capturing it into the frame.
-            // (When `needs_local_env` is false, `gen_env` ==
-            // `function.env` — the GeneratorFrame keeps it alive.)
-            let gen_env = std::mem::replace(&mut self.env, previous_env);
-            return Ok(Self::build_generator_value(code, regs, gen_env, function));
+            self.env = previous_env;
+            return Ok(Self::build_generator_value(code, regs, cells, function));
         }
 
-        // Issue #389: publish a view of this function frame so
-        // `locals()` can surface its fastlocal registers
-        // mid-call.  Popped immediately after `run_bytecode`
-        // returns so the raw pointer never outlives `regs`.
-        // Issue #486: also capture nonlocal_names and the
-        // current env so `snapshot_current_locals` can resolve
-        // nonlocal bindings that live in enclosing envs.
         let nonlocal_names_opt = if function.nonlocal_names.is_empty() {
             None
         } else {
             Some(Rc::clone(&function.nonlocal_names))
-        };
-        // Issue #3024: a frame with cell vars must publish its env too — the
-        // cells live in the local env created above, not in the register file,
-        // so `locals()` can only reach them through here.
-        let env_opt = if function.nonlocal_names.is_empty() && code.cell_vars.is_empty() {
-            None
-        } else {
-            Some(Rc::clone(&self.env))
         };
         // Capture the raw pointer and length BEFORE constructing RegSlice
         // so both the VmFrameView and the dispatch loop share the same raw
         // pointer with no &mut [Value] in scope (issue #547 / PR #646).
         let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
         let regs_len = regs.len();
+        let cells_slice = CellSlice::from_slice(&cells);
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Function,
             // SAFETY: SmallVec / Vec allocation is always non-null.
-            // Popped before `regs` is dropped (see above).
+            // Popped before `regs` / `cells` are dropped.
             regs_ptr,
             regs_len,
+            cells: cells_slice,
             local_index: Rc::clone(&function.local_index),
             nonlocal_names: nonlocal_names_opt,
-            env: env_opt,
+            env: None,
             is_class_method: code.is_class_method,
             function: Some(Rc::clone(function)),
             gen_frame: None,
@@ -102,7 +82,7 @@ impl Interpreter {
         // runs; RegSlice (raw pointer + len) is used instead, removing
         // the LLVM noalias constraint (issue #547).
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
-        let vm_result = self.run_bytecode(code, regs_slice);
+        let vm_result = self.run_bytecode_with_cells(code, regs_slice, cells_slice);
         // Lazy traceback: only build + record this frame's `FrameInfo`
         // when the body actually errored.  The no-exception common path
         // does no allocation and touches no traceback thread-local.
@@ -144,10 +124,8 @@ impl Interpreter {
         }
         self.detach_vm_frame_view();
         drop(regs);
-        let used_env = std::mem::replace(&mut self.env, previous_env);
-        if needs_local_env {
-            self.free_env(used_env);
-        }
+        drop(cells);
+        self.env = previous_env;
         self.finish_pop_vm_frame_view();
         let value = vm_result?;
         Ok(value)
@@ -178,26 +156,11 @@ impl Interpreter {
     ) -> Result<Value> {
         let num_regs = code.num_regs as usize;
         let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
-
-        let needs_local_env = !function.global_names.is_empty()
-            || !function.nonlocal_names.is_empty()
-            || !code.cell_vars.is_empty();
-        let local_env = if needs_local_env {
-            let env = self.alloc_env(Some(Rc::clone(&function.env)));
-            {
-                let mut e = env.borrow_mut();
-                e.local_names = Rc::clone(&function.local_names);
-                e.global_names = Rc::clone(&function.global_names);
-                e.nonlocal_names = Rc::clone(&function.nonlocal_names);
-            }
-            Some(env)
-        } else {
-            None
-        };
+        let cells = allocate_frame_cells(code, &function.closure_cells);
 
         // Positionals fill params 0..npos in order.
         for (pi, val) in pos.enumerate().take(npos) {
-            bind_param_direct(function, num_regs, &mut regs, &local_env, pi, val)?;
+            bind_param_direct(function, num_regs, &mut regs, &cells, pi, val)?;
         }
         // Keywords bind to their cached slots.
         for (i, val) in kw.enumerate() {
@@ -205,7 +168,7 @@ impl Interpreter {
                 function,
                 num_regs,
                 &mut regs,
-                &local_env,
+                &cells,
                 slots[i] as usize,
                 val,
             )?;
@@ -225,11 +188,11 @@ impl Interpreter {
                     function.positional_default(pi)
                 };
                 if let Some(d) = default {
-                    bind_param_direct(function, num_regs, &mut regs, &local_env, pi, d)?;
+                    bind_param_direct(function, num_regs, &mut regs, &cells, pi, d)?;
                 }
             }
         }
 
-        self.run_bound_user_frame(function, code, regs, local_env, needs_local_env)
+        self.run_bound_user_frame(function, code, regs, cells)
     }
 }

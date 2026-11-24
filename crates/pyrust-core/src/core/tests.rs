@@ -1130,7 +1130,10 @@ mod tests {
         module.attach_filesystem_namespace(&root);
 
         module.insert_attr("x".to_string(), Value::int(1));
-        assert_eq!(root.borrow().values.get("x"), Some(&Value::int(1)));
+        assert_eq!(
+            root.borrow().namespace_values().get("x"),
+            Some(&Value::int(1))
+        );
         let namespace = module.filesystem_namespace().unwrap();
         assert_eq!(
             namespace
@@ -1930,6 +1933,7 @@ mod tests {
             global_names: Rc::new(HashSet::new()),
             nonlocal_names: Rc::new(HashSet::new()),
             env: Environment::new(None),
+            closure_cells: smallvec::SmallVec::new(),
             is_memo_pure: false,
             iterable_coroutine: std::cell::Cell::new(false),
             precompiled_code: None,

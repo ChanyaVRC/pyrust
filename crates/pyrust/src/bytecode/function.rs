@@ -8,9 +8,36 @@ use smallvec::SmallVec;
 
 use super::{FnCode, Reg};
 
-/// Identifies a named variable that is captured by a nested function via `nonlocal`.
-/// These live in the env (not registers) so nested closures can share them.
+/// Identifies a named variable that is captured by a nested function (or kept
+/// off module fastlocal registers).
 pub type CellVar = Symbol;
+
+/// Compile-time metadata for one slot in a frame's cell array (issues #452 / #2339 / #2348).
+///
+/// A `FnCode`'s `cell_slots` slice is partitioned into two sorted halves:
+/// - `0..own_cell_count`: this scope's own cell variables (`co_cellvars`),
+///   allocated fresh (`CellSlot::new_empty()`) on each call frame.
+/// - `own_cell_count..`: free variables (`co_freevars`, including `nonlocal`
+///   targets and transitive pass-through captures), cloned from
+///   `UserFunction::closure_cells` (or captured during `MakeClass`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellSlotMeta {
+    pub name: Symbol,
+    pub is_own_cell: bool,
+    /// `true` when an unbound read/delete raises free-variable `NameError`
+    /// (`cannot access free variable '...'`); `false` when it raises
+    /// `UnboundLocalError` (own cells and PEP 709 inlined-comprehension reads
+    /// of the immediately-enclosing function's locals).
+    pub is_free_error: bool,
+}
+
+/// How `MakeFunction` / `MakeClass` populates one entry of a child's captured
+/// cell list (1-to-1 parallel with `child.code.free_var_slots()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureSource {
+    /// Clone `enclosing_cells[idx]` in O(1).
+    EnclosingCell(u16),
+}
 
 /// Static parameter metadata for a function prototype.  Shared via `Rc` so that
 /// `MakeFunction` (which may run on every loop iteration) pays only a refcount
@@ -86,27 +113,32 @@ pub struct FnProto {
     /// `SmallVec<[_; 2]>` avoids heap allocation for the typical case of
     /// zero to two keyword arguments in a class header.
     pub class_kwarg_names: SmallVec<[Symbol; 2]>,
+    /// Capture plan for building the child's `closure_cells` in O(1) at
+    /// `MakeFunction` / `MakeClass` time (1-to-1 parallel with
+    /// `self.code.free_var_slots()`).
+    pub closure_capture_map: SmallVec<[CaptureSource; 4]>,
 }
 
 /// Resolve each parameter's static bind target once at compile time
-/// (issue #1918).  A parameter that is captured as a cell var binds into the
-/// local env by name; otherwise it binds into its register slot; a parameter
-/// with no local slot (an unused variadic placeholder) binds to nothing.
+/// (issue #1918 / #452).  A parameter that is captured as a cell var binds
+/// directly into `cells[cell_idx]` via `ParamBind::Cell(cell_idx)`; otherwise
+/// it binds into its register slot; a parameter with no local slot (an unused
+/// variadic placeholder) binds to nothing.
 ///
 /// Mirrors the per-call decision the binding loop used to make, hoisted out of
 /// the hot path so the call only does a direct `match` on the precomputed slot.
 pub fn compute_param_binds(
     param_spec: &FnParamSpec,
     local_index: &HashMap<String, Reg>,
-    cell_vars: &[CellVar],
+    own_cell_slots: &[CellSlotMeta],
 ) -> Vec<pyrust_core::ParamBind> {
     use pyrust_core::ParamBind;
     param_spec
         .names
         .iter()
         .map(|&name| {
-            if cell_vars.contains(&name) {
-                ParamBind::Cell
+            if let Some(cell_idx) = own_cell_slots.iter().position(|slot| slot.name == name) {
+                ParamBind::Cell(cell_idx as u16)
             } else if let Some(&reg) = local_index.get(name.as_str()) {
                 ParamBind::Reg(reg)
             } else {
@@ -122,9 +154,9 @@ pub fn compute_param_binds(
 pub fn compute_self_bind(
     name: &str,
     local_index: &HashMap<String, Reg>,
-    cell_vars: &[CellVar],
+    own_cell_slots: &[CellSlotMeta],
 ) -> Option<Reg> {
-    if cell_vars.iter().any(|c| c.as_str() == name) {
+    if own_cell_slots.iter().any(|c| c.name.as_str() == name) {
         None
     } else {
         local_index.get(name).copied()

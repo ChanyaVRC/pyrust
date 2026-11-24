@@ -697,7 +697,7 @@ impl Interpreter {
             .as_ref()
             .or_else(|| {
                 view.gen_frame
-                    .map(|gen_frame| &unsafe { gen_frame.as_ref() }.saved_env)
+                    .map(|gen_frame| &unsafe { gen_frame.as_ref() }.function.env)
             })
             .unwrap_or(&self.env);
         let globals = self.globals_for_environment(env);
@@ -829,7 +829,7 @@ impl Interpreter {
             code,
             lineno,
             Value::none(),
-            self.globals_for_environment(&frame.saved_env),
+            self.globals_for_environment(&frame.function.env),
             Value::dict_shared(Rc::clone(&locals)),
         );
         let object = pyrust_core::WeakValueCache::new(&frame_object)

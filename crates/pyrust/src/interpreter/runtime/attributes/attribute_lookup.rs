@@ -368,6 +368,9 @@ impl Interpreter {
                 self.get_builtin_function_attribute(target, function_name, name)
             }
             ValueKind::BuiltinObject { .. } => {
+                if name == "cell_contents" && pyrust_builtins::cell::is_cell(target) {
+                    return pyrust_builtins::cell::get_cell_contents(target);
+                }
                 if matches!(name, "f_locals" | "f_back") && pyrust_builtins::frame::is_frame(target)
                 {
                     match name {

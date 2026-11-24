@@ -63,22 +63,29 @@ pub enum Insn {
     LoadClassName(Reg, Reg, u16),
     /// names[name_idx] = R[src]  (write to module / enclosing env)
     StoreGlobal(u16, Reg),
-    /// R[dst] = read a **function-scope cell variable** (a name captured by a
-    /// nested function, or one declared `nonlocal`) directly from the env chain
-    /// (issue #2339).  Unlike `LoadGlobal`, the compiler proves at emit time that
-    /// the name resolves to a cell (never a module global / builtin), so the VM
-    /// skips the `LoadGlobal` inline-cache probe and the module-globals-dict
-    /// fallback entirely — it goes straight to the env-chain cell read.  The
-    /// backing store is still the env (sibling cells, suspended generators, and
-    /// `__closure__` introspection are unchanged); only the per-access
-    /// global/cell multiplexing is removed.
+    /// R[dst] = read a **function-scope cell variable** (own cell or captured
+    /// freevar / `nonlocal`) directly from `cells[cell_idx]` in O(1)
+    /// (issues #452 / #2339 / #2348).  The second operand is an index into the
+    /// active frame's `CellSlot` slice (parallel to `FnCode::cell_slots`), NOT
+    /// an index into `FnCode::names`.
     LoadCell(Reg, u16),
-    /// names[name_idx] = R[src]  — write a **function-scope cell variable**
-    /// (cell or `nonlocal`) directly into the owning env (issue #2339).  The
-    /// compiler proves the target is a cell, so the VM bypasses the module-global
-    /// mirror / globals-dict sync path that `StoreGlobal` carries for true
-    /// globals; `nonlocal` writes still walk to the enclosing owning env.
+    /// `cells[cell_idx] = R[src]` — write a **function-scope cell variable**
+    /// (own cell or `nonlocal`) directly into `cells[cell_idx]` in O(1)
+    /// (issues #452 / #2339 / #2348).  The first operand is an index into the
+    /// active frame's `CellSlot` slice, NOT `FnCode::names`.
     StoreCell(u16, Reg),
+    /// Clear `cells[cell_idx]` (issues #452 / #2348).  When `raise_if_missing`
+    /// is true (source `del x`), an already-empty cell raises
+    /// `UnboundLocalError` (own cell) or free-variable `NameError` (freevar).
+    /// When false (PEP 3110 `except E as e:` cleanup), clearing an already-empty
+    /// cell is an idempotent no-op.
+    DeleteCell(u16, bool),
+    /// Class-body `LOAD_CLASSDEREF` (issue #452): read a variable captured from
+    /// an enclosing function scope inside a class body.  Checks the live class
+    /// namespace dict first (when `f_locals` / metaclass `__prepare__` mapping
+    /// has materialized), then reads `cells[cell_idx]`, raising free-variable
+    /// `NameError` if empty (never falling back to module globals).
+    LoadClassDeref(Reg, u16),
     /// R[dst] = None
     LoadNone(Reg),
     /// R[start], R[start+1], ..., R[start+count-1] = None

@@ -462,7 +462,11 @@ fn split_analysis_owners_compile_class_free_vars_and_comprehension_walrus() {
 
     for expected in ["seed", "total"] {
         assert!(
-            outer.code.cell_vars.iter().any(|name| name == expected),
+            outer
+                .code
+                .own_cell_slots()
+                .iter()
+                .any(|slot| slot.name == expected),
             "{expected} must remain a captured cell after the analysis split"
         );
     }
@@ -496,7 +500,11 @@ def through_definition_header():
             .find(|proto| proto.name.as_ref() == function)
             .unwrap_or_else(|| panic!("{function} prototype"));
         assert!(
-            proto.code.cell_vars.iter().any(|name| name == "x"),
+            proto
+                .code
+                .own_cell_slots()
+                .iter()
+                .any(|slot| slot.name == "x"),
             "{function} must retain x as a cell when a lambda default creates a nested closure"
         );
     }
@@ -517,7 +525,11 @@ fn comprehension_lambda_parameter_does_not_promote_shadowed_outer_name() {
         .expect("outer prototype");
 
     assert!(
-        outer.code.cell_vars.iter().all(|name| name != "x"),
+        outer
+            .code
+            .own_cell_slots()
+            .iter()
+            .all(|slot| slot.name != "x"),
         "a lambda-local parameter nested in a comprehension must not capture outer x"
     );
 }
@@ -669,7 +681,11 @@ fn augmented_targets_and_match_patterns_promote_enclosing_cells() {
         "holder", "items", "position", "lower", "upper", "stride", "owner",
     ] {
         assert!(
-            outer.code.cell_vars.iter().any(|name| name == expected),
+            outer
+                .code
+                .own_cell_slots()
+                .iter()
+                .any(|slot| slot.name == expected),
             "{expected} appears only in an evaluated target/pattern expression and must be captured"
         );
     }

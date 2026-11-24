@@ -10,7 +10,8 @@ use smallvec::SmallVec;
 use crate::value::Value;
 
 use super::{
-    AttrCacheEntry, BinOpCacheEntry, CellVar, FnProto, GlobalCacheEntry, Insn, KwCallCacheEntry,
+    AttrCacheEntry, BinOpCacheEntry, CellSlotMeta, FnProto, GlobalCacheEntry, Insn,
+    KwCallCacheEntry,
 };
 
 /// Maximum register slots allowed in one executable frame.
@@ -71,16 +72,18 @@ pub struct FnCode {
     pub(crate) num_locals: u32,
     /// Nested function / class body prototypes
     pub(crate) fn_protos: Vec<FnProto>,
-    /// Variables captured by nested functions (stored in env, not registers).
-    /// `SmallVec<[_; 4]>` avoids heap allocation for the common case of
-    /// functions with four or fewer captured variables.
-    pub(crate) cell_vars: SmallVec<[CellVar; 4]>,
+    /// Compile-time cell slot table (issues #452 / #2339 / #2348).
+    /// Slots `0..own_cell_count` are this scope's own cell variables (`co_cellvars`,
+    /// sorted by name); slots `own_cell_count..` are captured free variables
+    /// (`co_freevars`, sorted by name, including `nonlocal` targets and transitive
+    /// pass-through captures).
+    pub(crate) cell_slots: SmallVec<[CellSlotMeta; 4]>,
+    /// Number of leading slots in `cell_slots` owned by this frame (`co_cellvars`).
+    pub(crate) own_cell_count: u16,
     /// Memoized result of [`FnCode::free_var_candidates`] — the sorted, distinct
-    /// names this body may read through the environment chain. Besides direct
-    /// global/cell loads, class LOAD_NAME instructions without a lexical local
-    /// slot are candidates because a class-namespace miss falls back to that
-    /// chain. Filled on first use (`__closure__` / `co_freevars` / `locals()`),
-    /// never on the dispatch path.
+    /// non-cell names this body may read through its defining namespace chain
+    /// (e.g. `__class__` in class methods or PEP 695 type parameters). Filled on
+    /// first use, never on the dispatch path.
     pub(crate) free_var_candidates: std::cell::OnceCell<Vec<Symbol>>,
     /// True if this function body contains at least one `Yield` instruction.
     /// The VM creates a generator object instead of executing immediately.
@@ -203,31 +206,32 @@ pub struct FnCode {
 }
 
 impl FnCode {
-    /// The distinct names this body reads through the environment chain, sorted.
-    ///
-    /// A read that is not a fastlocal compiles to `LoadGlobal` (a true module
-    /// global or a module-scope capture), `LoadCell` (a function-scope cell /
-    /// `nonlocal`, issue #2339), or a no-fastlocal `LoadClassName` (whose
-    /// class-namespace miss falls back to the environment), so all three forms
-    /// feed the set. A free variable referenced *only* inside a nested code
-    /// object — a comprehension /
-    /// genexpr, `lambda`, or nested `def` — compiles its read into that nested
-    /// `FnCode`, yet CPython still reports it as a free variable of this one, so
-    /// every nested prototype contributes too.
-    ///
-    /// This is only a *candidate* set: which names are genuinely free variables
-    /// (rather than module globals or builtins) depends on the environment the
-    /// closure captured, so callers filter by resolving each name against that
-    /// chain.  The scan itself depends on nothing but the code object, so it is
-    /// memoized — `locals()` in a nested function would otherwise re-walk every
-    /// instruction on each call.
+    /// Own cell slots defined by this function (`0..own_cell_count`, sorted).
+    #[inline]
+    pub(crate) fn own_cell_slots(&self) -> &[CellSlotMeta] {
+        &self.cell_slots[..self.own_cell_count as usize]
+    }
+
+    /// Captured free-variable slots (`own_cell_count..`, sorted).
+    #[inline]
+    pub(crate) fn free_var_slots(&self) -> &[CellSlotMeta] {
+        &self.cell_slots[self.own_cell_count as usize..]
+    }
+
+    /// True if this function allocates fresh own cells on call entry.
+    #[inline]
+    pub(crate) fn has_own_cells(&self) -> bool {
+        self.own_cell_count > 0
+    }
+
+    /// The distinct non-cell names this body reads through the defining
+    /// namespace chain, sorted (used for non-cell enclosing namespace captures
+    /// such as `__class__` and PEP 695 type parameters).
     pub(crate) fn free_var_candidates(&self) -> &[Symbol] {
         self.free_var_candidates.get_or_init(|| {
             let mut seen: HashSet<Symbol> = HashSet::new();
             let mut names: Vec<Symbol> = Vec::new();
             collect_env_read_names(self, &mut seen, &mut names);
-            // CPython reports `co_freevars` (and orders `__closure__` cells and
-            // the free-variable tail of `locals()`) sorted lexicographically by name.
             names.sort_unstable_by_key(|sym| sym.as_str());
             names
         })
@@ -237,7 +241,7 @@ impl FnCode {
 fn collect_env_read_names(fncode: &FnCode, seen: &mut HashSet<Symbol>, out: &mut Vec<Symbol>) {
     for insn in &fncode.insns {
         let name_idx = match insn {
-            Insn::LoadGlobal(_, idx) | Insn::LoadCell(_, idx) => *idx,
+            Insn::LoadGlobal(_, idx) => *idx,
             Insn::LoadClassName(_, local, idx) if *local == crate::bytecode::NO_CLASS_LOCAL => *idx,
             _ => continue,
         };

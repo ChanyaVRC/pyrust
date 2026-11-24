@@ -214,6 +214,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         LoadGlobal(r, _)
         | LoadClassName(r, _, _)
         | LoadCell(r, _)
+        | LoadClassDeref(r, _)
         | LoadNone(r)
         | DeleteLocal(r, _, _)
         | BinOp(r, _, _, _)

@@ -14,6 +14,7 @@ impl Compiler {
             self.current_lineno,
             None,
             false,
+            &[],
         ) else {
             return 0;
         };

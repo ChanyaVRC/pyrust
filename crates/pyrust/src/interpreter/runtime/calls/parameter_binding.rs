@@ -6,12 +6,12 @@ fn bind_param(
     function: &Rc<UserFunction>,
     num_regs: usize,
     regs: &mut RegsBuf,
-    local_env: &Option<EnvRef>,
+    cells: &CellsBuf,
     pi: usize,
     val: Value,
 ) -> Result<()> {
     bound[pi] = true;
-    bind_param_direct(function, num_regs, regs, local_env, pi, val)
+    bind_param_direct(function, num_regs, regs, cells, pi, val)
 }
 
 #[inline]
@@ -19,7 +19,7 @@ pub(crate) fn bind_param_direct(
     function: &Rc<UserFunction>,
     num_regs: usize,
     regs: &mut RegsBuf,
-    local_env: &Option<EnvRef>,
+    cells: &CellsBuf,
     pi: usize,
     val: Value,
 ) -> Result<()> {
@@ -36,12 +36,8 @@ pub(crate) fn bind_param_direct(
             }
             regs[reg as usize] = val;
         }
-        pyrust_core::ParamBind::Cell => {
-            if let Some(env) = local_env {
-                env.borrow_mut()
-                    .values
-                    .insert(&function.params[pi].name, val);
-            }
+        pyrust_core::ParamBind::Cell(cell_idx) => {
+            cells[cell_idx as usize].set(val);
         }
         pyrust_core::ParamBind::None => {}
     }

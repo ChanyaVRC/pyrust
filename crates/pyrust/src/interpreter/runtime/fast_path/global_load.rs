@@ -147,4 +147,27 @@ impl Interpreter {
             Ok(value.clone())
         }
     }
+
+    /// Class-body `LOAD_CLASSDEREF` (issue #452): consult the live class
+    /// namespace dict first when `locals()`/`f_locals` has materialized, then
+    /// read `cells[cell_idx]`. An empty cell raises free-variable `NameError`
+    /// (never falling back to module globals).
+    pub(super) fn load_class_deref(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        cells: CellSlice,
+        cell_idx: u16,
+    ) -> Result<Value> {
+        let meta = code.cell_slots[cell_idx as usize];
+        if let Some(namespace) = active_live_class_namespace(self)
+            && let Some(value) = namespace
+                .dict_with(|dict| dict.get(&StrKey(meta.name.as_str())).cloned())
+                .flatten()
+        {
+            return Ok(value);
+        }
+        cells.as_slice()[cell_idx as usize]
+            .get()
+            .ok_or_else(|| unbound_binding_error(meta.name.as_str(), true))
+    }
 }

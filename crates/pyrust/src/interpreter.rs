@@ -443,6 +443,11 @@ pub(crate) struct VmFrameView {
     /// and catches null-push bugs at the push site rather than at dereference.
     pub(crate) regs_ptr: std::ptr::NonNull<Value>,
     pub(crate) regs_len: usize,
+    /// Borrowed slice of this frame's indexed [`CellSlot`](pyrust_core::CellSlot)s
+    /// (empty for Script frames and cell-free functions). Valid for the
+    /// lifetime of this `VmFrameView` (popped before the backing `CellsBuf` /
+    /// `UserFunction::closure_cells` / `GeneratorFrame::cells` is dropped).
+    pub(crate) cells: CellSlice,
     pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
     /// Names declared `nonlocal` in this function frame (absent for
     /// `Script` frames which have no enclosing function scope).  Used
@@ -696,6 +701,74 @@ impl std::ops::Index<usize> for RegSlice {
         // SAFETY: i < len, ptr is valid.
         unsafe { &*self.ptr.add(i) }
     }
+}
+
+/// Per-frame indexed cell-slot storage backing the VM (issues #452 / #2348).
+/// Inline for 0–4 cells (zero heap allocation for virtually all closures).
+pub(crate) type CellsBuf = smallvec::SmallVec<[pyrust_core::CellSlot; 4]>;
+
+/// Non-owning slice view of a frame's [`CellSlot`](pyrust_core::CellSlot) array.
+///
+/// Mirrors [`RegSlice`]: allows the VM dispatch loop, `VmFrameView`,
+/// `TrampFrame`, and `GenDriveFrame` to pass the active frame's cell slice
+/// without lifetime gymnastics or cloning `SmallVec`s on every call/yield.
+#[derive(Clone, Copy)]
+pub(crate) struct CellSlice {
+    ptr: *const pyrust_core::CellSlot,
+    len: usize,
+}
+
+impl CellSlice {
+    #[inline]
+    pub(crate) const fn empty() -> Self {
+        Self {
+            ptr: std::ptr::NonNull::dangling().as_ptr(),
+            len: 0,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn from_slice(slice: &[pyrust_core::CellSlot]) -> Self {
+        Self {
+            ptr: slice.as_ptr(),
+            len: slice.len(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[pyrust_core::CellSlot] {
+        if self.len == 0 {
+            &[]
+        } else {
+            // SAFETY: caller upholds backing lifetime while this CellSlice is live.
+            unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+        }
+    }
+}
+
+/// Allocate a function frame's cell array: fresh empty `CellSlot`s for
+/// `0..code.own_cell_count`, followed by clones of `closure_cells`.
+#[inline]
+pub(crate) fn allocate_frame_cells(
+    code: &crate::bytecode::FnCode,
+    closure_cells: &[pyrust_core::CellSlot],
+) -> CellsBuf {
+    let total = code.cell_slots.len();
+    if total == 0 {
+        return CellsBuf::new();
+    }
+    let own = code.own_cell_count as usize;
+    let mut cells = CellsBuf::with_capacity(total);
+    for _ in 0..own {
+        cells.push(pyrust_core::CellSlot::new_empty());
+    }
+    cells.extend(closure_cells.iter().cloned());
+    cells
 }
 
 /// Indexed write: `regs[i] = val` — exclusive reference to slot `i`.

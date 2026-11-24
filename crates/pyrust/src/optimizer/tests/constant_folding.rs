@@ -1007,6 +1007,8 @@ fn named_local_effect_classifier_is_a_conservative_false_whitelist() {
         Insn::StoreGlobal(0, 1),
         Insn::StoreCell(0, 1),
         Insn::DeleteName(0),
+        Insn::DeleteCell(0, true),
+        Insn::LoadClassDeref(0, 0),
         Insn::SyncModuleGlobal(0, 0),
         Insn::DeleteModuleGlobal(0),
         Insn::SetAttr(0, 0, 1),

@@ -2,66 +2,35 @@
 // Name resolution — the env-lookup rule (issue #452)
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// `Environment` (pyrust-core) carries TWO parallel stores for the same
-// conceptual entity (a scope's bindings):
+// Function frames no longer use `Environment` for locals, own cells, or
+// captured `nonlocal` / free variables:
 //
-//   * `values: HashMap<String, Value>` — the name-keyed slow path. Holds
-//     module/class-body bindings, closure/`nonlocal` cells, and any function
-//     local the compiler chose NOT to put in a register.
-//   * fastlocals (register file) — index-keyed fast path. NOT a field of
-//     `Environment`; it lives in the active VM frame (`VmFrameView` /
-//     `regs_ptr`). The compiler assigns each fastlocal a slot via
-//     scope analysis (`local_index`). Most function locals live here.
+//   * Function fastlocals live in the active VM frame's register file
+//     (`RegSlice` / `VmFrameView::regs_ptr`).
+//   * Function cells and captured free variables live in the active VM frame's
+//     indexed `CellSlot` array (`CellSlice` / `UserFunction::closure_cells` /
+//     `GeneratorFrame::cells`) and are accessed in O(1) via `Insn::LoadCell`,
+//     `Insn::StoreCell`, `Insn::DeleteCell`, and `Insn::LoadClassDeref`.
+//   * `Environment` (specifically `EnvironmentStorage::Namespace(EnvValues)`)
+//     is reserved for name-keyed namespaces: module globals, class-body
+//     `__class__` / annotation scopes, PEP 695 type-parameter scopes, and
+//     explicit `exec`/`eval` namespaces.
 //
-// The compiler decides at compile time which store each name uses; the
-// runtime never has to guess. The dispatch is keyed by the per-scope name
-// sets on `Environment` (`global_names`, `nonlocal_names`, `local_names`)
-// plus whether the env is the module/root env (`parent.is_none()`).
+// THE RULE for namespace lookups (`Insn::LoadGlobal` / `StoreGlobal` /
+// `DeleteName`, kept in sync with `runtime/namespaces/names.rs`):
 //
-// THE RULE (single source of truth — keep this and `Interpreter::lookup_name`
-// / `Interpreter::assign_name` in `runtime/namespaces/names.rs` in agreement):
+//   1. Active frame declares `global x` (`active_frame_declares_global(name)`):
+//        read  -> `lookup_name_in_module`: root module `Namespace`, then builtin
+//                 exception classes / builtins provider.
+//        write -> root module `Namespace` (+ live globals dict / module
+//                 fastlocal mirror).
 //
-//   1. Name in `global_names` (a `global x` declaration in scope):
-//        read  -> `lookup_name_in_module`: module-env HashMap, then builtin
-//                 exception classes.
-//        write -> module-env HashMap (+ live globals dict / module fastlocal
-//                 register mirror). See `assign_name`'s `is_global` arm.
-//
-//   2. Name in `nonlocal_names` (a `nonlocal x` declaration in scope):
-//        read  -> `lookup_name_in_enclosing_local_env`: walk to the nearest
-//                 ENCLOSING function scope that declares `x` local, read there.
-//        write -> `env_assign_local` into that same enclosing env.
-//
-//   3. Otherwise (ordinary local / free-variable read):
-//        read  -> `lookup_name_in_env`: this env's HashMap, raising
-//                 `UnboundLocalError` if `x` is a declared local of THIS scope
-//                 but currently unset, otherwise recursing into parents
-//                 (free-variable capture), bottoming out at the module env.
-//        write -> `env_assign_local` into the current env (module-scope writes
-//                 also mirror into the globals dict / bump the LoadGlobal
-//                 inline-cache version).
-//
-// The fastlocal register path is orthogonal: when a name HAS a fastlocal slot
-// in the active frame, the compiler addresses it directly as a register
-// operand (`Insn::Move`, `Insn::BinOp`, … with the slot index) and never
-// reaches these helpers at all. These helpers are the env-HashMap (slow) side
-// of the duality; the name-keyed opcodes `Insn::LoadGlobal` / `Insn::StoreGlobal`
-// fall through to them only for names without a register slot.
-//
-// Parent-chain scanning for rule 2 shares one body,
-// `find_function_scope_with_local` (below). The `nonlocal` READ path
-// (`lookup_name_in_enclosing_local_env`) skips the current env
-// (`include_self == false`), while the `nonlocal` binding-existence CHECK
-// performed at function-definition time (`has_local_binding_in_current_or_ancestor`,
-// rejecting `nonlocal x` with no enclosing binding) includes it
-// (`include_self == true`), since the defining env may itself be the binding scope.
-//
-// #384 (class body cannot resolve module-scope names) would integrate here:
-// a class-body env currently follows rule 3 and bottoms out at the module env,
-// but class bodies should resolve FREE names directly against module scope
-// (skipping intervening function locals). That fix belongs in
-// `lookup_name_in_env`'s parent-walk / a class-body-specific arm; it is OUT OF
-// SCOPE for #452 and intentionally not changed here.
+//   2. Otherwise (ordinary namespace read/write):
+//        read  -> `lookup_name_in_env`: walk `Namespace`-backed `self.env`
+//                 chain (class annotation provider -> type-param / class
+//                 bindings -> module root).
+//        write -> `env_assign_local` into `self.env` (mirroring into globals
+//                 dict and bumping `LoadGlobal` caches at module root).
 pub(crate) fn module_env(env: &EnvRef) -> EnvRef {
     let mut current = Rc::clone(env);
     loop {
@@ -76,9 +45,8 @@ pub(crate) fn module_env(env: &EnvRef) -> EnvRef {
 pub(crate) fn lookup_name_in_module(env: &EnvRef, name: &str) -> Option<Value> {
     module_env(env)
         .borrow()
-        .values
-        .get(name)
-        .cloned()
+        .try_namespace_values()
+        .and_then(|values| values.get(name).cloned())
         .or_else(|| lookup_exc_class(name).map(Value::py_class))
 }
 
@@ -138,69 +106,24 @@ pub(crate) fn sync_module_env_to_globals_dict(interp: &mut Interpreter) {
     }
 }
 
-/// Walk the env parent chain for the first **function scope**
-/// (`parent.is_some()`, i.e. not the module/root env) that declares `name`
-/// as one of its locals (`local_names.contains(name)`), and return that env.
-///
-/// `include_self` controls the start point: `true` begins the scan at `env`
-/// itself, `false` begins at `env`'s parent.  The module/root env can never
-/// match because it has no parent — module-scope names live in the module-env
-/// HashMap and are reached via [`lookup_name_in_module`], not this walk.
-///
-/// This is the single shared scan body for both the `nonlocal`-resolution
-/// READ path ([`find_enclosing_local_env_for_name`], `include_self == false`,
-/// skips the current env to find the enclosing binding scope) and the
-/// `nonlocal` binding-existence CHECK at function-definition time
-/// ([`has_local_binding_in_current_or_ancestor`], `include_self == true`,
-/// since the defining env may itself declare the binding).
-/// The two callers differ only in start point and return shape; the matching
-/// predicate (`parent.is_some() && local_names.contains(name)`) is identical.
-fn find_function_scope_with_local(env: &EnvRef, name: &str, include_self: bool) -> Option<EnvRef> {
-    let mut current = if include_self {
-        Some(Rc::clone(env))
-    } else {
-        env.borrow().parent.clone()
-    };
-    while let Some(candidate) = current {
-        let (is_function_scope, has_name, next) = {
-            let borrowed = candidate.borrow();
-            (
-                borrowed.parent.is_some(),
-                borrowed.local_names.contains(name),
-                borrowed.parent.clone(),
-            )
-        };
-        if is_function_scope && has_name {
-            return Some(candidate);
-        }
-        current = next;
-    }
-    None
-}
-
-fn has_local_binding_in_current_or_ancestor(env: &EnvRef, name: &str) -> bool {
-    find_function_scope_with_local(env, name, true).is_some()
-}
-
-/// Resolve `name` to its captured value in the **non-module** portion of the
-/// `env` chain (issue #2106).  Walks from `env` (the function's captured
-/// enclosing scope) outward, returning the first `values` entry for `name`
-/// found in a function scope (`parent.is_some()`); the module/root env is never
-/// consulted, so a true module global returns `None` and is not reported as a
-/// closure free variable.  Used by `closure_free_vars` to build `__closure__`
-/// cells and `co_freevars`.
+/// Resolve `name` to its value in a **non-module** enclosing `Namespace` env
+/// (e.g. `__class__` in a class env or a PEP 695 type parameter in a
+/// `TypeParamEnv`). Function-scope closure variables live in indexed `CellSlot`s
+/// rather than `Environment`, so they do not pass through here.
 pub(crate) fn lookup_enclosing_function_value(env: &EnvRef, name: &str) -> Option<Value> {
     let mut current = Some(Rc::clone(env));
     while let Some(candidate) = current {
-        let (is_function_scope, value, next) = {
+        let (is_non_root, value, next) = {
             let borrowed = candidate.borrow();
             (
                 borrowed.parent.is_some(),
-                borrowed.values.get(name).cloned(),
+                borrowed
+                    .try_namespace_values()
+                    .and_then(|values| values.get(name).cloned()),
                 borrowed.parent.clone(),
             )
         };
-        if is_function_scope
+        if is_non_root
             && let Some(v) = value
             && !v.is_unset()
         {
@@ -211,25 +134,6 @@ pub(crate) fn lookup_enclosing_function_value(env: &EnvRef, name: &str) -> Optio
     None
 }
 
-fn find_enclosing_local_env_for_name(env: &EnvRef, name: &str) -> Option<EnvRef> {
-    find_function_scope_with_local(env, name, false)
-}
-
-fn lookup_name_in_enclosing_local_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
-    let Some(target_env) = find_enclosing_local_env_for_name(env, name) else {
-        return Err(PyError::Runtime(format!(
-            "no binding for nonlocal '{}' found",
-            name
-        )));
-    };
-    // `target_env` is an *enclosing* function scope (the `nonlocal` binding
-    // site), never the reading function's own env — so an unbound binding here
-    // is a captured free variable, not a local.  CPython 3.12 raises `NameError`
-    // ("cannot access free variable ... in enclosing scope") for this case
-    // (issue #2340).
-    lookup_name_in_env_as_free(&target_env, name)
-}
-
 // Write `value` into `env` for `name`.
 #[inline]
 fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
@@ -237,7 +141,7 @@ fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
     if environment.parent.is_none() {
         environment.record_namespace_env_binding(name);
     }
-    environment.values.insert(name, value);
+    environment.namespace_values_mut().insert(name, value);
 }
 
 fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
@@ -246,8 +150,6 @@ fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
 
 /// Like [`lookup_name_in_env`] but reports an unbound binding as a captured
 /// **free variable** (`NameError`) rather than a local (`UnboundLocalError`).
-/// Used for the `nonlocal` read path, where the resolved env is always an
-/// enclosing scope.
 fn lookup_name_in_env_as_free(env: &EnvRef, name: &str) -> Result<Option<Value>> {
     lookup_name_in_env_impl(env, name, true)
 }
@@ -265,7 +167,9 @@ fn lookup_name_in_env_as_free(env: &EnvRef, name: &str) -> Result<Option<Value>>
 ///     scope.
 fn lookup_name_in_env_impl(env: &EnvRef, name: &str, as_free: bool) -> Result<Option<Value>> {
     let borrowed = env.borrow();
-    let value = borrowed.values.get(name).cloned();
+    let value = borrowed
+        .try_namespace_values()
+        .and_then(|values| values.get(name).cloned());
     let class_annotation_value = borrowed.class_annotation_binding(name);
     let is_local_name = borrowed.local_names.contains(name);
     let parent = borrowed.parent.clone();
@@ -287,7 +191,7 @@ fn lookup_name_in_env_impl(env: &EnvRef, name: &str, as_free: bool) -> Result<Op
 
 /// Build the CPython 3.12 unbound-binding exception: `NameError` for a captured
 /// free variable, `UnboundLocalError` for a plain local (issue #2340).
-fn unbound_binding_error(name: &str, as_free: bool) -> PyError {
+pub(crate) fn unbound_binding_error(name: &str, as_free: bool) -> PyError {
     if as_free {
         PyError::named(
             "NameError",

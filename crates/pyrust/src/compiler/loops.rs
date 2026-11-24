@@ -130,8 +130,12 @@ impl Compiler {
                         self.emit(Insn::SyncModuleGlobal(reg, name_idx));
                     }
                 } else {
-                    let name_idx = self.intern_name(name);
-                    self.emit(Insn::StoreGlobal(name_idx, for_dst));
+                    if let Some(cell_idx) = self.resolve_cell_slot_for_write(name) {
+                        self.emit(Insn::StoreCell(cell_idx, for_dst));
+                    } else {
+                        let name_idx = self.intern_name(name);
+                        self.emit(Insn::StoreGlobal(name_idx, for_dst));
+                    }
                     self.free_temp(for_dst);
                 }
             }

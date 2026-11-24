@@ -616,8 +616,12 @@ pyrust_module! {
         #[positional_only] #[default(OptionalArg::Omitted)] object: OptValueRef,
     ) -> Result<Value> {
         let Some(target) = object.as_value() else {
-            let mut names: Vec<String> =
-                _interp.env.borrow().values.keys().map(String::from).collect();
+            let mut names: Vec<String> = _interp
+                .env
+                .borrow()
+                .try_namespace_values()
+                .map(|values| values.keys().map(String::from).collect())
+                .unwrap_or_default();
             names.sort();
             names.dedup();
             return Ok(Value::list(names.into_iter().map(Value::string).collect()));

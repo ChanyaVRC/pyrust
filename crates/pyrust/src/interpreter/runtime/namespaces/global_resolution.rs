@@ -34,12 +34,10 @@ impl Interpreter {
     ) -> Result<GlobalResolution> {
         if let Some(value) = self.lookup_name_inner(name, is_free)? {
             // Only module-environment mutations are tracked by the global value
-            // version. An intermediate closure environment may have a same-named
-            // module binding and must never be cached under that version.
-            let in_module_environment = {
-                let environment = self.env.borrow();
-                environment.global_names.contains(name) || environment.parent.is_none()
-            };
+            // version. An intermediate class/type-param environment may shadow a
+            // same-named module binding and must never be cached under that version.
+            let in_module_environment =
+                self.active_frame_declares_global(name) || self.env.borrow().parent.is_none();
             return Ok(GlobalResolution {
                 value,
                 cache: if in_module_environment {
@@ -80,39 +78,6 @@ impl Interpreter {
         }
 
         self.resolve_global_via_builtins(name, namespace.globals())
-    }
-
-    /// Cold fallback for `LoadCell` after the lexical environment misses.
-    ///
-    /// A cell result is never written into the global opcode cache.
-    #[cold]
-    #[inline(never)]
-    pub(crate) fn resolve_cell_miss(
-        &mut self,
-        name: &str,
-        namespace: &GlobalNamespace,
-    ) -> Result<Value> {
-        if let Some(value) = namespace
-            .globals()
-            .dict_with(|dict| dict.get(&StrKey(name)).cloned())
-            .flatten()
-        {
-            return Ok(value);
-        }
-        if !namespace.is_explicit()
-            && let Some(value) = self.script_frame_global(name)
-        {
-            return Ok(value);
-        }
-        Ok(self
-            .resolve_global_via_builtins(name, namespace.globals())?
-            .value)
-    }
-
-    fn script_frame_global(&self, name: &str) -> Option<Value> {
-        module_env(&self.env)
-            .borrow()
-            .namespace_fastlocal_value(name)
     }
 
     /// Resolve the builtins tail of Python global lookup.

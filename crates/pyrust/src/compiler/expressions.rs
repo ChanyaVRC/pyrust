@@ -201,7 +201,15 @@ impl Compiler {
                 if let Some(ln) = name_lineno {
                     self.set_lineno(ln);
                 }
-                let result = if let Some(reg) = self.local_reg(name) {
+                let result = if !self.shadowed_type_params.is_empty()
+                    && self.shadowed_type_params.contains(name)
+                {
+                    let name_idx = self.intern_name(name);
+                    let dst = self.alloc_temp();
+                    self.set_col_span_for_next(span);
+                    self.emit(Insn::LoadGlobal(dst, name_idx));
+                    dst
+                } else if let Some(reg) = self.local_reg(name) {
                     if self.is_class_body {
                         let name_idx = self.intern_name(name);
                         let dst = self.alloc_temp();
@@ -235,22 +243,30 @@ impl Compiler {
                     reg
                 } else {
                     // global / nonlocal / cell / free variable
-                    let name_idx = self.intern_name(name);
                     let dst = self.alloc_temp();
-                    // A function-scope cell / nonlocal resolves in the env chain;
-                    // emit LoadCell to skip the LoadGlobal inline-cache + module
-                    // -dict path (issue #2339).  Everything else (true globals,
-                    // builtins, module/class-scope free vars) keeps LoadGlobal.
                     self.set_col_span_for_next(span);
                     if self.is_class_body && !self.class_direct_env_names.contains(name.as_str()) {
-                        self.emit(Insn::LoadClassName(
-                            dst,
-                            crate::bytecode::NO_CLASS_LOCAL,
-                            name_idx,
-                        ));
-                    } else if self.is_function_cell(name) {
-                        self.emit(Insn::LoadCell(dst, name_idx));
+                        if let Some(cell_idx) = self.resolve_class_body_deref(name) {
+                            self.emit(Insn::LoadClassDeref(dst, cell_idx));
+                        } else {
+                            let name_idx = self.intern_name(name);
+                            self.emit(Insn::LoadClassName(
+                                dst,
+                                crate::bytecode::NO_CLASS_LOCAL,
+                                name_idx,
+                            ));
+                        }
+                    } else if self.is_class_body && self.nonlocal_names.contains(name.as_str()) {
+                        if let Some(cell_idx) = self.resolve_cell_slot_for_write(name) {
+                            self.emit(Insn::LoadCell(dst, cell_idx));
+                        } else {
+                            let name_idx = self.intern_name(name);
+                            self.emit(Insn::LoadGlobal(dst, name_idx));
+                        }
+                    } else if let Some(cell_idx) = self.resolve_cell_slot_for_read(name) {
+                        self.emit(Insn::LoadCell(dst, cell_idx));
                     } else {
+                        let name_idx = self.intern_name(name);
                         self.emit(Insn::LoadGlobal(dst, name_idx));
                     }
                     dst
@@ -452,6 +468,8 @@ impl Compiler {
                     }
                     self.maybe_record_class_store(reg);
                     self.mark_def(reg);
+                } else if let Some(cell_idx) = self.resolve_cell_slot_for_write(target) {
+                    self.emit(Insn::StoreCell(cell_idx, val_reg));
                 } else {
                     let name_idx = self.intern_name(target);
                     self.emit(Insn::StoreGlobal(name_idx, val_reg));

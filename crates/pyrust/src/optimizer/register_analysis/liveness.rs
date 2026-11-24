@@ -378,11 +378,13 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         LoadConst(..)
         | LoadGlobal(..)
         | LoadCell(..)
+        | LoadClassDeref(..)
         | LoadNone(..)
         | LoadNoneRange { .. }
         | LoadExc(..)
         | ImportModule(..)
         | DeleteName(..)
+        | DeleteCell(..)
         | PushTypeParamEnv
         | PopTypeParamEnv
         | DeleteLocal(..)
@@ -577,10 +579,12 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
         LoadConst(..)
         | LoadGlobal(..)
         | LoadCell(..)
+        | LoadClassDeref(..)
         | LoadNone(..)
         | LoadExc(..)
         | ImportModule(..)
         | DeleteName(..)
+        | DeleteCell(..)
         | PushTypeParamEnv
         | PopTypeParamEnv
         | DeleteLocal(..)

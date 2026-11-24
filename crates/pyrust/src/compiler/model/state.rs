@@ -68,18 +68,41 @@ enum ExceptAsVarDel {
         name_index: u16,
         delete_module_global: bool,
     },
+    /// Variable lives in a function-scope cell slot; emit `DeleteCell(idx, false)`.
+    Cell(u16),
     /// Variable lives in env (no local slot); emit `DeleteName(name_idx)`.
     Name(u16),
 }
 
 struct Compiler {
     local_index: Rc<HashMap<String, Reg>>,
+    /// Names kept off fastlocal registers in this scope:
+    /// - For function scopes: this function's own cell variables (`0..own_cell_count`).
+    /// - For module scopes: module names that stay in `module_env.namespace_values`
+    ///   (never emitted into `FnCode::cell_slots`).
     cell_vars: HashSet<Symbol>,
-    /// Names declared `nonlocal` in this function body (issue #2339).  A
-    /// `nonlocal x` read/write resolves to an enclosing function scope's cell,
-    /// so — like `cell_vars` — it can use the dedicated `LoadCell`/`StoreCell`
-    /// opcodes that skip the global inline-cache / module-dict path.  Empty for
-    /// module and class scopes (`nonlocal` is invalid there).
+    /// Positional cell-slot table built for this scope (issues #452 / #2339 / #2348).
+    /// Slots `0..own_cell_count` are own cells (pre-sorted); slots `own_cell_count..`
+    /// are free variables (sorted & remapped in `finish()`).
+    cell_slots: SmallVec<[CellSlotMeta; 4]>,
+    /// Leading slice of `cell_slots` owned by this frame (`co_cellvars`).
+    own_cell_count: u16,
+    /// O(1) lookup from cell/freevar name to its current slot index in `cell_slots`.
+    cell_slot_map: HashMap<Symbol, u16>,
+    /// Names backed by a cell in some enclosing function scope (available to
+    /// capture as free variables unless shadowed by a local, `global`, or
+    /// PEP 695 type parameter). Empty at module scope.
+    enclosing_cell_names: HashSet<Symbol>,
+    /// Names explicitly declared `global` in this scope (must never resolve to
+    /// an enclosing function cell).
+    global_names: HashSet<Symbol>,
+    /// Active PEP 695 type-parameter names temporarily in scope while compiling
+    /// annotations, base classes, or type-alias / TypeVar-bound thunks. These
+    /// names resolve via `LoadGlobal` in the active `TypeParamEnv`, never via
+    /// an enclosing function's same-named cell or local.
+    shadowed_type_params: SmallVec<[Symbol; 4]>,
+    /// Names declared `nonlocal` in this function or class body (issue #2339).
+    /// Empty for module scopes (`nonlocal` is invalid there).
     nonlocal_names: HashSet<String>,
     /// Names declared `global` or `nonlocal` in a class body. Unlike ordinary
     /// unresolved class names, these must bypass the class namespace and keep

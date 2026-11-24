@@ -1,21 +1,18 @@
-//! `cell` object — an element of `function.__closure__` (issue #2106).
+//! `cell` object — an element of `function.__closure__` (issues #2106 / #452).
 //!
-//! pyrust resolves a closure's free variables through the captured `env` chain
-//! rather than CPython-style cell objects.  `function.__closure__` still has to
-//! report a tuple of `cell` objects (one per free variable, in `co_freevars`
-//! order), each exposing a readable `cell_contents`.  This is a lightweight
-//! `BuiltinObject` carrying the captured value; pyrust does not model cell
-//! mutation through this object (closures read the live env entry directly), so
-//! `cell_contents` is a snapshot taken when `__closure__` is accessed — which
-//! is sufficient for the introspection consumers (`inspect`, REPL) that read it.
+//! Wraps a live [`CellSlot`] shared with the owning frame and every closure
+//! capturing that variable. Reading `cell_contents` reflects live mutations and
+//! raises `ValueError: Cell is empty` when unbound; assigning or deleting
+//! `cell_contents` updates the shared cell directly so closures observe the
+//! change immediately (matching CPython 3.12).
 
 use std::any::Any;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, Value};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, CellSlot, PyError, Result, Value, ValueKind};
 
 pub struct CellState {
-    /// `cell_contents` — the captured free-variable value.
-    pub contents: Value,
+    /// Live shared cell backing this closure variable.
+    pub slot: CellSlot,
 }
 
 pub struct CellOps;
@@ -27,17 +24,23 @@ impl BuiltinTypeOps for CellOps {
         TYPE_NAME
     }
 
+    fn identity_payload(&self, state: &BuiltinState) -> Option<u64> {
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<CellState>()?;
+        Some(s.slot.as_ptr() as usize as u64)
+    }
+
     fn repr(&self, state: &BuiltinState) -> String {
-        // CPython: `<cell at 0x...: int object at 0x...>`.  The addresses are
-        // implementation-specific; report 0x0 (matching the convention used by
-        // pyrust's other lightweight introspection objects, e.g. `code`).  The
-        // contents' type name is reported so the structure matches CPython.
+        // CPython: `<cell at 0x...: int object at 0x...>` or `<cell at 0x...: empty>`.
         let borrow = state.borrow();
         match borrow.downcast_ref::<CellState>() {
-            Some(s) => {
-                let type_name = pyrust_core::builtin_type_name(&s.contents);
-                format!("<cell at 0x0: {type_name} object at 0x0>")
-            }
+            Some(s) => match s.slot.get() {
+                Some(contents) => {
+                    let type_name = pyrust_core::builtin_type_name(&contents);
+                    format!("<cell at 0x0: {type_name} object at 0x0>")
+                }
+                None => "<cell at 0x0: empty>".to_string(),
+            },
             None => "<cell at 0x0: empty>".to_string(),
         }
     }
@@ -46,18 +49,119 @@ impl BuiltinTypeOps for CellOps {
         true
     }
 
+    fn eq(&self, state: &BuiltinState, other: &Value) -> bool {
+        let ValueKind::BuiltinObject {
+            ops: other_ops,
+            state: other_state,
+        } = other.kind()
+        else {
+            return false;
+        };
+        if !pyrust_core::builtin_ops_is::<CellOps>(other_ops) {
+            return false;
+        }
+        let a = {
+            let borrow = state.borrow();
+            let Some(s) = borrow.downcast_ref::<CellState>() else {
+                return false;
+            };
+            s.slot.get()
+        };
+        let b = {
+            let borrow = other_state.borrow();
+            let Some(s) = borrow.downcast_ref::<CellState>() else {
+                return false;
+            };
+            s.slot.get()
+        };
+        match (a, b) {
+            (None, None) => true,
+            (Some(va), Some(vb)) => va == vb,
+            _ => false,
+        }
+    }
+
     fn getattr(&self, state: &BuiltinState, name: &str) -> Option<Value> {
+        if name != "cell_contents" {
+            return None;
+        }
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<CellState>()?;
-        match name {
-            "cell_contents" => Some(s.contents.clone()),
-            _ => None,
+        s.slot.get()
+    }
+
+    fn setattr(&self, state: &BuiltinState, name: &str, value: Value) -> Result<()> {
+        if name == "cell_contents" {
+            let borrow = state.borrow();
+            if let Some(s) = borrow.downcast_ref::<CellState>() {
+                s.slot.set(value);
+                return Ok(());
+            }
         }
+        Err(PyError::named(
+            "AttributeError",
+            format!("'cell' object has no attribute '{name}'"),
+        ))
     }
 }
 
-/// Construct a `cell` object wrapping `contents`.
-pub fn cell(contents: Value) -> Value {
-    let state: Box<dyn Any> = Box::new(CellState { contents });
+/// Construct a `cell` object wrapping a live [`CellSlot`].
+pub fn cell(slot: CellSlot) -> Value {
+    let state: Box<dyn Any> = Box::new(CellState { slot });
     Value::builtin_object(CELL_OPS, state)
+}
+
+/// Construct a standalone `cell` object initialized with `contents`.
+pub fn cell_with_value(contents: Value) -> Value {
+    cell(CellSlot::new(contents))
+}
+
+/// Return `true` if `value` is a `cell` object.
+#[inline]
+pub fn is_cell(value: &Value) -> bool {
+    matches!(
+        value.kind(),
+        ValueKind::BuiltinObject { ops, .. } if pyrust_core::builtin_ops_is::<CellOps>(ops)
+    )
+}
+
+/// Read `cell.cell_contents`, raising `ValueError: Cell is empty` when unbound.
+pub fn get_cell_contents(value: &Value) -> Result<Value> {
+    let ValueKind::BuiltinObject { state, .. } = value.kind() else {
+        return Err(PyError::named("TypeError", "expected cell object"));
+    };
+    let slot = {
+        let borrow = state.borrow();
+        let Some(s) = borrow.downcast_ref::<CellState>() else {
+            return Err(PyError::named("ValueError", "Cell is empty"));
+        };
+        s.slot.clone()
+    };
+    slot.get()
+        .ok_or_else(|| PyError::named("ValueError", "Cell is empty"))
+}
+
+/// Write `cell.cell_contents = contents`.
+pub fn set_cell_contents(value: &Value, contents: Value) -> Result<()> {
+    let ValueKind::BuiltinObject { state, .. } = value.kind() else {
+        return Err(PyError::named("TypeError", "expected cell object"));
+    };
+    let borrow = state.borrow();
+    if let Some(s) = borrow.downcast_ref::<CellState>() {
+        s.slot.set(contents);
+    }
+    Ok(())
+}
+
+/// Delete `cell.cell_contents` (idempotent in CPython 3.12 — clearing an
+/// already-empty cell succeeds silently).
+pub fn delete_cell_contents(value: &Value) -> Result<()> {
+    let ValueKind::BuiltinObject { state, .. } = value.kind() else {
+        return Err(PyError::named("TypeError", "expected cell object"));
+    };
+    let borrow = state.borrow();
+    if let Some(s) = borrow.downcast_ref::<CellState>() {
+        let _ = s.slot.take();
+    }
+    Ok(())
 }
