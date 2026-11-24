@@ -340,7 +340,8 @@ impl Interpreter {
                 && !mro_slot_allows(&class, name)
                 && !mro_has_unslotted_ancestor(&class)
             {
-                let class_name = class.borrow().name.clone();
+                let class_name =
+                    pyrust_core::error_type_name(&Value::py_instance(Rc::clone(instance)));
                 return Err(pyrust_core::py_err!(
                     "AttributeError",
                     "'{class_name}' object has no attribute '{name}'"

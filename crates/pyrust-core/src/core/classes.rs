@@ -285,7 +285,7 @@ fn str_subclass_module_text(value: &Value) -> Option<Value> {
     if !class_chain_is_str(&borrowed.class) {
         return None;
     }
-    let backing = borrowed.attrs.get("__builtin_data__")?;
+    let backing = borrowed.attrs.builtin_data()?;
     backing.is_str().then(|| backing.clone())
 }
 

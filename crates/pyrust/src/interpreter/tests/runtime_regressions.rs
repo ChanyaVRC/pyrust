@@ -437,13 +437,11 @@ fn backingless_builtin_subclass_instances_raise_runtime_error_without_stack_over
         make_backingless(&mut interpreter, cls, var);
     }
 
-    // Also test a self-referential `__builtin_data__` cycle (`d_cyc.__builtin_data__ = d_cyc`).
+    // Also test a self-referential `builtin_data` cycle.
     make_backingless(&mut interpreter, "MyDict", "d_cyc");
     let d_cyc = interpreter.lookup_name("d_cyc").unwrap().unwrap();
     if let ValueKind::PyInstance(rc) = d_cyc.kind() {
-        rc.borrow_mut()
-            .attrs
-            .insert("__builtin_data__", d_cyc.clone());
+        rc.borrow_mut().attrs.set_builtin_data(d_cyc.clone());
     }
 
     let must_fail_with_runtime_error = [

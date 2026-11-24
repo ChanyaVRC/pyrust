@@ -287,26 +287,30 @@ fn collections_counter_dunder_dispatch_exercises_each_site() {
 }
 
 #[test]
-fn collections_counter_corrupted_counts_surfaces_type_error() {
-    // `c.__builtin_data__ = "lol"` overwrites the internal storage with
-    // a non-dict.  (Issue #2010 moved the backing dict to the
-    // `__builtin_data__` slot that the generic dict-subclass machinery
-    // reads, since Counter is now a real `dict` subclass.)  The next
-    // `c[k]` access should surface a TypeError pointing at the user's
-    // tampering — not a `Runtime("internal: …")` that looks like an
-    // interpreter bug.
-    let err = run_program_expect_error(
-        "from collections import Counter\nc = Counter('a')\nc.__builtin_data__ = 'lol'\nc['a']\n",
+fn collections_counter_builtin_data_attr_cannot_corrupt_backing() {
+    // Issue #2968: built-in subclass backing lives in opaque `InstanceAttrs`
+    // storage outside Python `__dict__`. Assigning `c.__builtin_data__ = 'lol'`
+    // sets an ordinary user attribute without corrupting Counter's backing.
+    let interp = run_program(
+        "from collections import Counter\n\
+         c = Counter('a')\n\
+         had_before = hasattr(c, '__builtin_data__')\n\
+         vars_before = dict(vars(c))\n\
+         c.__builtin_data__ = 'lol'\n\
+         count_a = c['a']\n\
+         attr_val = c.__builtin_data__\n",
     );
-    let msg = err.to_string();
-    assert!(
-        msg.contains("TypeError"),
-        "expected TypeError diagnostic, got: {msg}"
+    assert_eq!(
+        interp.lookup_name("had_before").unwrap(),
+        Some(Value::bool_(false))
     );
-    assert!(
-        msg.contains("backing store"),
-        "error should describe the corrupted backing store, got: {msg}"
+    assert_eq!(interp.lookup_name("count_a").unwrap(), Some(Value::int(1)));
+    assert_eq!(
+        interp.lookup_name("attr_val").unwrap(),
+        Some(Value::string("lol"))
     );
+    let vars_before = interp.lookup_name("vars_before").unwrap().unwrap();
+    assert_eq!(vars_before.dict_len(), Some(0));
 }
 
 #[test]

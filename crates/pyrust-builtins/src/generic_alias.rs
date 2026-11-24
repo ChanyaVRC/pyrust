@@ -533,7 +533,7 @@ fn raw_string_text(value: &Value) -> Option<String> {
     }
     instance
         .attrs
-        .get("__builtin_data__")
+        .builtin_data()
         .and_then(Value::as_str)
         .map(str::to_string)
 }

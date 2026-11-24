@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{BUILTIN_DATA_ATTR, ExpandedCallArg, Interpreter};
+use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::value::{InstanceAttrs, PyClass, PyInstance, PyKey, Value, ValueKind};
 
 use super::arguments::require_self;
@@ -101,7 +101,7 @@ fn make_result_instance(
     named_attrs: impl IntoIterator<Item = (&'static str, Value)>,
 ) -> Value {
     let mut attrs = InstanceAttrs::new();
-    attrs.insert(BUILTIN_DATA_ATTR, Value::tuple(sequence));
+    attrs.set_builtin_data(Value::tuple(sequence));
     for (name, value) in named_attrs {
         attrs.insert(name, value);
     }
@@ -298,7 +298,7 @@ pub(super) fn stat_result_repr(args: &[ExpandedCallArg], fn_name: &str) -> Resul
     // such as `st_atime`, but it does not rewrite tuple slots or their repr.
     let sequence = instance
         .attrs
-        .get(BUILTIN_DATA_ATTR)
+        .builtin_data()
         .and_then(|value| match value.kind() {
             ValueKind::Tuple(values) => Some(values),
             _ => None,

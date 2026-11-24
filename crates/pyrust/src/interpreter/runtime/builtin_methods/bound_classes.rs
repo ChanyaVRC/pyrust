@@ -131,7 +131,7 @@ impl Interpreter {
                     inst_rc
                         .borrow_mut()
                         .attrs
-                        .insert(BUILTIN_DATA_ATTR, Value::dict(map));
+                        .set_builtin_data(Value::dict(map));
                 }
                 Ok(instance)
             }

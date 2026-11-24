@@ -41,7 +41,7 @@ fn expect_self_one_arg<'a>(
 /// mutation so the iterator's snapshotted state diverges and `__next__` raises
 /// `RuntimeError: deque mutated during iteration`.
 fn deque_bump_state(inst: &Rc<RefCell<PyInstance>>) {
-    let storage = inst.borrow().attrs.get("_items").cloned();
+    let storage = inst.borrow().attrs.get_slot("_items").cloned();
     if let Some(storage) = storage {
         pyrust_builtins::deque_storage::bump_mutation_state(&storage);
     }
@@ -283,7 +283,7 @@ fn deque_push_one(
 fn deque_storage_value(inst: &Rc<RefCell<PyInstance>>) -> Result<Value> {
     {
         let borrow = inst.borrow();
-        if let Some(value) = borrow.attrs.get("_items") {
+        if let Some(value) = borrow.attrs.get_slot("_items") {
             if pyrust_builtins::deque_storage::is_storage(value) {
                 return Ok(value.clone());
             }
@@ -297,7 +297,9 @@ fn deque_storage_value(inst: &Rc<RefCell<PyInstance>>) -> Result<Value> {
     }
 
     let storage = pyrust_builtins::deque_storage::deque_storage(Vec::new());
-    inst.borrow_mut().attrs.insert("_items", storage.clone());
+    inst.borrow_mut()
+        .attrs
+        .insert_slot("_items", storage.clone());
     Ok(storage)
 }
 
@@ -410,7 +412,7 @@ pub(crate) fn deque_iterator_replacement(
     ) {
         return None;
     }
-    let storage = inst.borrow().attrs.get("_items").cloned()?;
+    let storage = inst.borrow().attrs.get_slot("_items").cloned()?;
     let data = pyrust_builtins::deque_storage::data(&storage)?;
     let counter = pyrust_builtins::deque_storage::mutation_state(&storage)?;
     Some((data, counter))
@@ -581,7 +583,7 @@ fn deque_ordering_compare(
 /// Read the maxlen from `self.maxlen` — returns `None` for unbounded.
 fn deque_maxlen(inst: &Rc<RefCell<PyInstance>>) -> Option<usize> {
     let borrow = inst.borrow();
-    match borrow.attrs.get("maxlen").map(|v| v.kind()) {
+    match borrow.attrs.get_slot("maxlen").map(|v| v.kind()) {
         Some(ValueKind::Int(n)) if n >= 0 => Some(n as usize),
         Some(ValueKind::Bool(b)) => Some(b as usize),
         _ => None,
@@ -598,7 +600,7 @@ fn deque_items_of(value: &Value) -> Option<Vec<Value>> {
     if !is_canonical_collection_class_or_subclass(&borrow.class, CanonicalCollectionKind::Deque) {
         return None;
     }
-    match borrow.attrs.get("_items") {
+    match borrow.attrs.get_slot("_items") {
         Some(value) => pyrust_builtins::deque_storage::snapshot(value),
         None => Some(Vec::new()),
     }
@@ -676,11 +678,11 @@ fn deque_from_items(
     };
     let class = Rc::clone(&proto.borrow().class);
     let mut attrs = InstanceAttrs::new();
-    attrs.insert(
+    attrs.insert_slot(
         "_items",
         pyrust_builtins::deque_storage::deque_storage(items),
     );
-    attrs.insert("maxlen", maxlen_val);
+    attrs.insert_slot("maxlen", maxlen_val);
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 

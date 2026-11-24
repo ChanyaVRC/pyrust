@@ -7,7 +7,7 @@ pub(crate) fn is_str_or_str_subclass(v: &Value) -> bool {
     match v.kind() {
         ValueKind::Str(_) => true,
         ValueKind::PyInstance(inst) => matches!(
-            inst.borrow().attrs.get(BUILTIN_DATA_ATTR).map(|b| b.kind()),
+            inst.borrow().attrs.builtin_data().map(|b| b.kind()),
             Some(ValueKind::Str(_))
         ),
         _ => false,
@@ -26,7 +26,7 @@ pub(crate) fn extract_str_value(v: &Value) -> String {
         ValueKind::Str(s) => s.to_string(),
         ValueKind::PyInstance(inst) => {
             let borrowed = inst.borrow();
-            if let Some(backing) = borrowed.attrs.get(BUILTIN_DATA_ATTR)
+            if let Some(backing) = borrowed.attrs.builtin_data()
                 && let ValueKind::Str(s) = backing.kind()
             {
                 return s.to_string();
@@ -49,12 +49,12 @@ pub(crate) fn extract_str_value(v: &Value) -> String {
 /// The common case (an exact `str`, or any non-`PyInstance` value) is returned
 /// untouched after a single cheap tag check, so genuinely-wrong-type arguments
 /// still reach the extractor and raise the existing `TypeError`.  Only a
-/// `PyInstance` whose `__builtin_data__` backing is `Str` is rewritten.
+/// `PyInstance` whose opaque `builtin_data` backing is `Str` is rewritten.
 pub(crate) fn coerce_str_subclass_arg(v: Value) -> Value {
     let backing = if let ValueKind::PyInstance(inst) = v.kind() {
         inst.borrow()
             .attrs
-            .get(BUILTIN_DATA_ATTR)
+            .builtin_data()
             .filter(|b| matches!(b.kind(), ValueKind::Str(_)))
             .cloned()
     } else {
@@ -69,7 +69,7 @@ pub(crate) fn coerce_str_subclass_arg(v: Value) -> Value {
 /// any `bytes` subclass argument, #1928.
 ///
 /// Like [`coerce_str_subclass_arg`], the common case is returned untouched
-/// after a single tag check; only a `PyInstance` with a `Bytes` backing (a
+/// after a single cheap tag check; only a `PyInstance` with a `Bytes` backing (a
 /// `bytes` subclass) or a `bytearray` is rewritten to a real `Bytes` value.
 /// CPython treats both as bytes-like objects accepted by `bytes` methods.
 pub(crate) fn coerce_bytes_subclass_arg(v: Value) -> Value {
@@ -85,13 +85,13 @@ pub(crate) fn coerce_bytes_subclass_arg(v: Value) -> Value {
     };
     match kind {
         Kind::Instance => {
-            // A bytes subclass backs `__builtin_data__` with a `Bytes`; a
+            // A bytes subclass backs `builtin_data` with a `Bytes`; a
             // bytearray subclass backs it with a `bytearray` (`BuiltinObject`).
             // Both are bytes-like; normalise either to a plain `Bytes` value so
             // every bytes/bytearray method's argument check accepts it (#2677),
             // mirroring the `Kind::Builtin` arm's treatment of a plain bytearray.
             let backing = v.as_py_instance_rc().and_then(|inst| {
-                let raw = inst.borrow().attrs.get(BUILTIN_DATA_ATTR).cloned()?;
+                let raw = inst.borrow().attrs.builtin_data().cloned()?;
                 if matches!(raw.kind(), ValueKind::Bytes(_)) {
                     Some(raw)
                 } else {
@@ -268,7 +268,7 @@ pub(crate) fn coerce_str_subclass_join_iterable(iterable: Value) -> Value {
     let needs_coerce = |v: &Value| {
         matches!(v.kind(), ValueKind::PyInstance(inst)
         if matches!(
-            inst.borrow().attrs.get(BUILTIN_DATA_ATTR).map(|b| b.kind()),
+            inst.borrow().attrs.builtin_data().map(|b| b.kind()),
             Some(ValueKind::Str(_))
         ))
     };
@@ -313,7 +313,7 @@ pub(crate) fn coerce_bytes_subclass_join_iterable(iterable: Value) -> Value {
     };
     let needs = items.iter().any(|v| match v.kind() {
         ValueKind::PyInstance(inst) => matches!(
-            inst.borrow().attrs.get(BUILTIN_DATA_ATTR).map(|b| b.kind()),
+            inst.borrow().attrs.builtin_data().map(|b| b.kind()),
             Some(ValueKind::Bytes(_))
         ),
         ValueKind::BuiltinObject { ops, .. } => {

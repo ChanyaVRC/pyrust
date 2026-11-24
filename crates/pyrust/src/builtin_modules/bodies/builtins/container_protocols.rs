@@ -28,7 +28,7 @@ pyrust_module! {
             })?;
             // Pass the iterable arg if present, or empty args to get an empty list.
             let new_backing = list_dispatch(_interp, args.get(1).map_or(&[], std::slice::from_ref))?;
-            inst_rc.borrow_mut().attrs.insert("__builtin_data__", new_backing);
+            inst_rc.borrow_mut().attrs.set_builtin_data(new_backing);
         }
         Ok(Value::none())
     }
@@ -304,7 +304,7 @@ pyrust_module! {
             })?;
             // Pass the iterable arg if present, or empty args to get an empty set.
             let new_backing = set_dispatch(_interp, args.get(1).map_or(&[], std::slice::from_ref))?;
-            inst_rc.borrow_mut().attrs.insert("__builtin_data__", new_backing);
+            inst_rc.borrow_mut().attrs.set_builtin_data(new_backing);
         }
         Ok(Value::none())
     }

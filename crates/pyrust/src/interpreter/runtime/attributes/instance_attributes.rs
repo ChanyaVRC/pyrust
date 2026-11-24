@@ -17,7 +17,8 @@ impl Interpreter {
             // unslotted ancestor) suppresses the instance `__dict__` entirely —
             // `inst.__dict__` raises AttributeError (so `hasattr` is False).
             if class_suppresses_instance_dict(&instance.borrow().class) {
-                let class_name = instance.borrow().class.borrow().name.clone();
+                let class_name =
+                    pyrust_core::error_type_name(&Value::py_instance(Rc::clone(&instance)));
                 return Err(pyrust_core::py_err!(
                     "AttributeError",
                     "'{class_name}' object has no attribute '__dict__'"

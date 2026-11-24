@@ -16,7 +16,7 @@
 fn snapshot_counts(args: &[ExpandedCallArg], fn_name: &str) -> Result<PyDict> {
     let inst = expect_self(args, fn_name)?;
     let borrow = inst.borrow();
-    match borrow.attrs.get(BUILTIN_DATA_ATTR) {
+    match borrow.attrs.builtin_data() {
         Some(v) => match v.kind() {
             ValueKind::Dict(map) => Ok(map.clone()),
             _ => Err(PyError::named(
@@ -31,7 +31,7 @@ fn snapshot_counts(args: &[ExpandedCallArg], fn_name: &str) -> Result<PyDict> {
     }
 }
 
-/// Return the live `__builtin_data__` dict `Value` for Counter/defaultdict.
+/// Return the live `builtin_data` dict `Value` for Counter/defaultdict.
 ///
 /// Cloning the `Value` only increments the backing `Rc`; it does not clone the
 /// `IndexMap`.  Read paths can therefore use `Interpreter::dict_lookup`
@@ -41,7 +41,7 @@ fn collection_backing(args: &[ExpandedCallArg], fn_name: &str, type_name: &str) 
     let inst = expect_self(args, fn_name)?;
     {
         let borrow = inst.borrow();
-        match borrow.attrs.get(BUILTIN_DATA_ATTR) {
+        match borrow.attrs.builtin_data() {
             Some(v) if matches!(v.kind(), ValueKind::Dict(_)) => return Ok(v.clone()),
             Some(_) => {
                 return Err(PyError::named(
@@ -58,9 +58,7 @@ fn collection_backing(args: &[ExpandedCallArg], fn_name: &str, type_name: &str) 
     // No backing yet (e.g. raw PyInstance, `__init__` not run): install one
     // so views and subsequent direct operations share the same Rc.
     let backing = Value::dict(PyDict::default());
-    inst.borrow_mut()
-        .attrs
-        .insert(BUILTIN_DATA_ATTR, backing.clone());
+    inst.borrow_mut().attrs.set_builtin_data(backing.clone());
     Ok(backing)
 }
 
@@ -75,7 +73,7 @@ fn defaultdict_backing(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value>
 fn read_items(args: &[ExpandedCallArg], fn_name: &str) -> Result<PyDict> {
     let inst = expect_self(args, fn_name)?;
     let borrow = inst.borrow();
-    match borrow.attrs.get(BUILTIN_DATA_ATTR) {
+    match borrow.attrs.builtin_data() {
         Some(v) => match v.kind() {
             ValueKind::Dict(map) => Ok(map.clone()),
             _ => Err(PyError::named(

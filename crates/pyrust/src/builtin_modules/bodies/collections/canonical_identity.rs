@@ -101,6 +101,13 @@ pub(crate) fn is_canonical_deque_class(class: &Rc<RefCell<PyClass>>) -> bool {
     })
 }
 
+/// Whether `class` is a canonical `collections.Counter` class or any subclass
+/// thereof (used by `copy.deepcopy` to match CPython's Counter reduction
+/// ordering without relying on mutable class names, issue #2968).
+pub(crate) fn is_canonical_counter_class_or_subclass(class: &Rc<RefCell<PyClass>>) -> bool {
+    is_canonical_collection_class_or_subclass(class, CanonicalCollectionKind::Counter)
+}
+
 /// Return the canonical base class from a concrete receiver's generation.
 ///
 /// Counter arithmetic and unary normalization are specified to return a base

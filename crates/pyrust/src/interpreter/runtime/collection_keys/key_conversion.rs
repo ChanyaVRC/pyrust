@@ -163,10 +163,7 @@ impl Interpreter {
             }
             let (class, has_builtin_data) = {
                 let b = inst.borrow();
-                (
-                    Rc::clone(&b.class),
-                    b.attrs.contains_key(crate::interpreter::BUILTIN_DATA_ATTR),
-                )
+                (Rc::clone(&b.class), b.attrs.builtin_data().is_some())
             };
             // Issue #2324: an instance of a subclass of an unhashable builtin
             // (`list`/`dict`/`set`/`bytearray`) with no `__hash__`-re-enabling

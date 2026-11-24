@@ -275,19 +275,13 @@ pub(crate) fn find_scalar_primitive_base(class: &Rc<RefCell<PyClass>>) -> Option
     base.and_then(|b| find_scalar_primitive_base(&b))
 }
 
-/// Constant key used to store the backing primitive value inside a
-/// `PyInstance` that subclasses `dict`, `list`, or `set`.
-pub(crate) const BUILTIN_DATA_ATTR: &str = "__builtin_data__";
-
-/// Extract the backing primitive value stored on a `PyInstance`.
+/// Extract the opaque backing primitive value stored on a `PyInstance`.
 ///
-/// This is the raw, hot-path accessor: the storage attribute is writable by
-/// Python code, so finding it alone does not prove that the instance really
-/// belongs to the backing primitive's hierarchy.  Consumers reached from a
+/// This is the raw, hot-path accessor. Consumers reached from a
 /// user-controlled protocol boundary must use [`effective_builtin_receiver`],
-/// which validates that ancestry before exposing the backing.
+/// which validates canonical ancestry before exposing the backing.
 pub(crate) fn instance_builtin_data(inst: &Rc<RefCell<PyInstance>>) -> Option<Value> {
-    inst.borrow().attrs.get(BUILTIN_DATA_ATTR).cloned()
+    inst.borrow().attrs.builtin_data().cloned()
 }
 
 /// The raw storage core used by trusted hot paths: the value found in a

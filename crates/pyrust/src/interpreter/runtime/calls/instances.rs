@@ -271,10 +271,7 @@ impl Interpreter {
             // the None arm below replaces it with the args-populated value.
             PrimitiveLayout::Mutable(kind) => {
                 let backing = crate::interpreter::construct_primitive_backing(self, kind, &[])?;
-                instance
-                    .borrow_mut()
-                    .attrs
-                    .insert(BUILTIN_DATA_ATTR, backing);
+                instance.borrow_mut().attrs.set_builtin_data(backing);
             }
             // Issue #994 (frozenset/tuple) and #1204 (str/int/float/bytes/…):
             // immutable / scalar primitives build the backing from the
@@ -282,10 +279,7 @@ impl Interpreter {
             // construction and __init__ cannot change it.
             PrimitiveLayout::Immutable(kind) | PrimitiveLayout::Scalar(kind) => {
                 let backing = crate::interpreter::construct_primitive_backing(self, kind, args)?;
-                instance
-                    .borrow_mut()
-                    .attrs
-                    .insert(BUILTIN_DATA_ATTR, backing);
+                instance.borrow_mut().attrs.set_builtin_data(backing);
             }
             PrimitiveLayout::None => {}
         }
@@ -365,10 +359,7 @@ impl Interpreter {
                     PrimitiveLayout::Mutable(kind) => {
                         let backing =
                             crate::interpreter::construct_primitive_backing(self, kind, args)?;
-                        instance
-                            .borrow_mut()
-                            .attrs
-                            .insert(BUILTIN_DATA_ATTR, backing);
+                        instance.borrow_mut().attrs.set_builtin_data(backing);
                     }
                     PrimitiveLayout::None => {
                         // Excess args with no `__init__`/`__new__` are already

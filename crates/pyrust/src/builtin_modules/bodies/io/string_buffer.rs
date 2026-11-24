@@ -14,26 +14,38 @@ use super::{get_pos, set_pos};
 
 pub(super) fn initialize(inst: &Rc<RefCell<PyInstance>>, initial: &str) {
     let mut attrs = inst.borrow_mut();
-    attrs.attrs.insert("_buf", Value::string(initial));
-    attrs.attrs.insert("_pos", Value::int(0));
-    attrs.attrs.insert("_closed", Value::bool_(false));
+    attrs.attrs.insert_slot("_buf", Value::string(initial));
+    attrs.attrs.insert_slot("_pos", Value::int(0));
+    attrs.attrs.insert_slot("_closed", Value::bool_(false));
 }
 
 pub(super) fn contents(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<String> {
-    match inst.borrow().attrs.get("_buf").map(|value| value.kind()) {
+    match inst
+        .borrow()
+        .attrs
+        .get_slot("_buf")
+        .map(|value| value.kind())
+    {
         Some(ValueKind::Str(buffer)) => Ok(buffer.to_string()),
-        _ => Err(PyError::Runtime(format!(
-            "internal: {fn_name}() StringIO._buf corrupted",
-        ))),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() StringIO object is not initialized"),
+        )),
     }
 }
 
 fn character_len(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<usize> {
-    match inst.borrow().attrs.get("_buf").map(|value| value.kind()) {
+    match inst
+        .borrow()
+        .attrs
+        .get_slot("_buf")
+        .map(|value| value.kind())
+    {
         Some(ValueKind::Str(buffer)) => Ok(buffer.chars().count()),
-        _ => Err(PyError::Runtime(format!(
-            "internal: {fn_name}() StringIO._buf corrupted",
-        ))),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() StringIO object is not initialized"),
+        )),
     }
 }
 
@@ -135,7 +147,12 @@ pub(super) fn write(inst: &Rc<RefCell<PyInstance>>, text: &str) -> Result<usize>
         .map_err(|_| PyError::named("OverflowError", "new position too large".to_string()))?;
     let new_pos = usize::try_from(new_pos_i64)
         .map_err(|_| PyError::named("OverflowError", "new position too large".to_string()))?;
-    let buffer = match inst.borrow().attrs.get("_buf").map(|value| value.kind()) {
+    let buffer = match inst
+        .borrow()
+        .attrs
+        .get_slot("_buf")
+        .map(|value| value.kind())
+    {
         Some(ValueKind::Str(buffer)) => buffer.to_string(),
         _ => String::new(),
     };
@@ -191,7 +208,7 @@ pub(super) fn write(inst: &Rc<RefCell<PyInstance>>, text: &str) -> Result<usize>
     }
     inst.borrow_mut()
         .attrs
-        .insert("_buf", Value::string(new_buffer));
+        .insert_slot("_buf", Value::string(new_buffer));
     set_pos(inst, new_pos_i64);
     Ok(written_len)
 }
@@ -252,7 +269,7 @@ pub(super) fn truncate(inst: &Rc<RefCell<PyInstance>>, size: i64, fn_name: &str)
         let new_buffer: String = buffer.chars().take(new_len).collect();
         inst.borrow_mut()
             .attrs
-            .insert("_buf", Value::string(new_buffer));
+            .insert_slot("_buf", Value::string(new_buffer));
     }
     // CPython reports the requested size even though truncating past EOF does
     // not extend an in-memory stream.

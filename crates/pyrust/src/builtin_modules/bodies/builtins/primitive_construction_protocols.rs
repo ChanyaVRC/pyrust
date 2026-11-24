@@ -45,10 +45,7 @@ pyrust_module! {
             }
         };
         let mut attrs = InstanceAttrs::new();
-        attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR,
-            backing,
-        );
+        attrs.set_builtin_data(backing);
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
             crate::value::PyInstance {
                 class: class_rc,
@@ -121,10 +118,7 @@ pyrust_module! {
             }
         };
         let mut attrs = InstanceAttrs::new();
-        attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR,
-            backing,
-        );
+        attrs.set_builtin_data(backing);
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
             crate::value::PyInstance {
                 class: class_rc,
@@ -210,10 +204,7 @@ pyrust_module! {
             return Err(PyError::Runtime("internal: int not in registry".to_string()));
         };
         let mut attrs = InstanceAttrs::new();
-        attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR,
-            backing,
-        );
+        attrs.set_builtin_data(backing);
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
             crate::value::PyInstance {
                 class: class_rc,
@@ -258,10 +249,7 @@ pyrust_module! {
             return Err(PyError::Runtime("internal: str not in registry".to_string()));
         };
         let mut attrs = InstanceAttrs::new();
-        attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR,
-            backing,
-        );
+        attrs.set_builtin_data(backing);
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
             crate::value::PyInstance {
                 class: class_rc,
@@ -308,10 +296,7 @@ pyrust_module! {
             ));
         };
         let mut attrs = InstanceAttrs::new();
-        attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR,
-            backing,
-        );
+        attrs.set_builtin_data(backing);
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
             crate::value::PyInstance {
                 class: class_rc,
@@ -358,10 +343,7 @@ pyrust_module! {
             ));
         };
         let mut attrs = InstanceAttrs::new();
-        attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR,
-            backing,
-        );
+        attrs.set_builtin_data(backing);
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
             crate::value::PyInstance {
                 class: class_rc,

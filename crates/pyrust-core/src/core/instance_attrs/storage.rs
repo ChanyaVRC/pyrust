@@ -66,14 +66,18 @@ pub struct InstanceAttrs {
 /// Uncommon per-instance state.
 ///
 /// `index` accelerates wide visible dictionaries. `native_slots` stores
-/// interpreter-owned named fields such as BaseException's C-style members.
-/// `member_slots` stores Python `__slots__` cells by descriptor identity.
-/// Both are physically separate from each other and from visible `__dict__`.
+/// interpreter-owned named fields such as BaseException's C-style members and
+/// opaque stdlib payloads (`_cursor`, `_items`, `_buf`). `member_slots` stores
+/// Python `__slots__` cells by descriptor identity. `builtin_data` stores the
+/// opaque backing value for built-in subclasses (`list`, `dict`, `set`,
+/// `bytearray`, `int`, `str`, …). All are physically separate from each other
+/// and from the Python-visible `__dict__` (#2968).
 #[derive(Debug, Clone, Default)]
 struct InstanceAttrsAux {
     index: Option<HashMap<Rc<str>, usize, FxBuildHasher>>,
     native_slots: Vec<(Rc<str>, Value)>,
     member_slots: smallvec::SmallVec<[(MemberSlotId, Value); 2]>,
+    builtin_data: Option<Value>,
 }
 
 /// Attribute count above which [`InstanceAttrs`] builds a hash index for
@@ -109,6 +113,7 @@ impl InstanceAttrs {
                 index: None,
                 native_slots: Vec::with_capacity(cap),
                 member_slots: smallvec::SmallVec::new(),
+                builtin_data: None,
             })),
             dict_ref: None,
         }
@@ -192,6 +197,42 @@ impl InstanceAttrs {
     #[inline]
     pub fn slot_len(&self) -> usize {
         self.aux.as_ref().map_or(0, |aux| aux.native_slots.len())
+    }
+
+    /// Snapshot all populated C-style native slots (physically separate from
+    /// Python-visible `__dict__`).
+    pub fn slots_snapshot(&self) -> Vec<(Rc<str>, Value)> {
+        self.aux
+            .as_ref()
+            .map(|aux| aux.native_slots.clone())
+            .unwrap_or_default()
+    }
+
+    /// Read the opaque built-in subclass backing value (physically separate
+    /// from Python-visible `__dict__` / `vars()` / `dir()`, issue #2968).
+    #[inline]
+    pub fn builtin_data(&self) -> Option<&Value> {
+        self.aux.as_ref()?.builtin_data.as_ref()
+    }
+
+    /// Store or replace the opaque built-in subclass backing value without
+    /// touching the Python-visible attribute mapping (#2968).
+    #[inline]
+    pub fn set_builtin_data(&mut self, value: Value) -> Option<Value> {
+        self.aux
+            .get_or_insert_with(|| Box::new(InstanceAttrsAux::default()))
+            .builtin_data
+            .replace(value)
+    }
+
+    /// Remove the opaque built-in subclass backing value, if present.
+    #[inline]
+    pub fn remove_builtin_data(&mut self) -> Option<Value> {
+        let removed = self.aux.as_mut()?.builtin_data.take();
+        if removed.is_some() {
+            self.drop_empty_aux();
+        }
+        removed
     }
 
     /// Read one Python member-descriptor cell by its physical identity.
@@ -303,7 +344,10 @@ impl InstanceAttrs {
     #[inline]
     fn drop_empty_aux(&mut self) {
         if self.aux.as_ref().is_some_and(|aux| {
-            aux.index.is_none() && aux.native_slots.is_empty() && aux.member_slots.is_empty()
+            aux.index.is_none()
+                && aux.native_slots.is_empty()
+                && aux.member_slots.is_empty()
+                && aux.builtin_data.is_none()
         }) {
             self.aux = None;
         }
