@@ -10,19 +10,20 @@
 //! resize check is already enforced in
 //! `pyrust::interpreter::runtime::expr::binary_inplace`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use pyrust_core::{PyError, Result, Value, ValueKind};
 
-use super::bytearray;
 use super::indexing::{bytes_from_value, value_to_byte};
+use super::{bytearray, check_resizable};
 
 /// Dispatch methods that can work directly against the shared bytearray
 /// storage. Returning `None` leaves read-only methods to the bytes-compatible
 /// snapshot path in `ByteArrayOps::call_method`.
 pub(super) fn call_storage_method(
     data_rc: &Rc<RefCell<Vec<u8>>>,
+    exports_rc: &Rc<Cell<usize>>,
     method: &str,
     args: &[Value],
 ) -> Result<Option<Value>> {
@@ -35,6 +36,7 @@ pub(super) fn call_storage_method(
                 )
             })?;
             let byte = value_to_byte(byte_val, "bytearray.append")?;
+            check_resizable(exports_rc)?;
             data_rc.borrow_mut().push(byte);
             Ok(Some(Value::none()))
         }
@@ -48,6 +50,9 @@ pub(super) fn call_storage_method(
             // Snapshot before taking the write borrow so `data.extend(data)`
             // remains safe and has Python's aliasing semantics.
             let bytes = bytes_from_value(iterable, "bytearray.extend")?;
+            if !bytes.is_empty() {
+                check_resizable(exports_rc)?;
+            }
             data_rc.borrow_mut().extend_from_slice(&bytes);
             Ok(Some(Value::none()))
         }
@@ -77,6 +82,7 @@ pub(super) fn call_storage_method(
                 }
             };
             let byte = value_to_byte(&args[1], "bytearray.insert")?;
+            check_resizable(exports_rc)?;
             let mut data = data_rc.borrow_mut();
             let len = data.len();
             let pos = if idx < 0 {
@@ -142,6 +148,7 @@ pub(super) fn call_storage_method(
                     }
                 }
             };
+            check_resizable(exports_rc)?;
             Ok(Some(Value::int(data.remove(idx) as i64)))
         }
         "remove" => {
@@ -156,6 +163,7 @@ pub(super) fn call_storage_method(
             let pos = data.iter().position(|&b| b == byte).ok_or_else(|| {
                 PyError::named("ValueError", "value not found in bytearray".to_string())
             })?;
+            check_resizable(exports_rc)?;
             data.remove(pos);
             Ok(Some(Value::none()))
         }
@@ -164,6 +172,9 @@ pub(super) fn call_storage_method(
             Ok(Some(Value::none()))
         }
         "clear" => {
+            if !data_rc.borrow().is_empty() {
+                check_resizable(exports_rc)?;
+            }
             data_rc.borrow_mut().clear();
             Ok(Some(Value::none()))
         }

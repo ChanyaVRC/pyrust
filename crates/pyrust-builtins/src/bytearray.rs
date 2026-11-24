@@ -15,7 +15,7 @@ mod storage;
 mod tests;
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use indexmap::IndexMap;
@@ -158,6 +158,18 @@ pub fn validate_method_keywords(method: &str, has_keywords: bool) -> Result<()> 
 /// `Value::bytearray` shares the backing storage (Python reference semantics).
 pub struct ByteArrayState {
     pub data: Rc<RefCell<Vec<u8>>>,
+    pub exports: Rc<Cell<usize>>,
+}
+
+/// Raise `BufferError` if this bytearray currently has active buffer exports.
+pub fn check_resizable(exports: &Rc<Cell<usize>>) -> Result<()> {
+    if exports.get() > 0 {
+        return Err(PyError::named(
+            "BufferError",
+            "Existing exports of data: object cannot be re-sized".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub struct ByteArrayOps;
@@ -217,6 +229,12 @@ impl BuiltinTypeOps for ByteArrayOps {
                 let rhs_data = rhs.data.borrow();
                 Rc::ptr_eq(&s.data, &rhs.data) || lhs.as_slice() == rhs_data.as_slice()
             }
+            ValueKind::BuiltinObject { ops, .. } if crate::memoryview::is_memoryview_ops(ops) => {
+                drop(lhs);
+                let data_rc = Rc::clone(&s.data);
+                drop(borrow);
+                crate::memoryview::eq_with_bytearray_rc(other, &data_rc)
+            }
             _ => false,
         }
     }
@@ -265,6 +283,10 @@ impl BuiltinTypeOps for ByteArrayOps {
                     .expect("bytearray state");
                 let item_data = item_s.data.borrow();
                 Ok(crate::bytes::find_subsequence(&data, &item_data).is_some())
+            }
+            ValueKind::BuiltinObject { ops, .. } if crate::memoryview::is_memoryview_ops(ops) => {
+                let item_bytes = crate::memoryview::to_bytes_checked(item)?;
+                Ok(crate::bytes::find_subsequence(&data, &item_bytes).is_some())
             }
             _ => Err(PyError::named(
                 "TypeError",
@@ -334,12 +356,12 @@ impl BuiltinTypeOps for ByteArrayOps {
     }
 
     fn set_item(&self, state: &BuiltinState, key: &Value, value: Value) -> Result<()> {
-        let data_rc = {
+        let (data_rc, exports_rc) = {
             let borrow = state.borrow();
             let s = borrow
                 .downcast_ref::<ByteArrayState>()
                 .expect("bytearray state");
-            Rc::clone(&s.data)
+            (Rc::clone(&s.data), Rc::clone(&s.exports))
         };
         // Slice assignment.
         if let ValueKind::BuiltinObject {
@@ -369,6 +391,9 @@ impl BuiltinTypeOps for ByteArrayOps {
                 // matching CPython (e.g. `ba[5:2] = b"XY"` inserts at 5).
                 let s2 = (start.max(0) as usize).min(data.len());
                 let e2 = (stop.max(0) as usize).min(data.len()).max(s2);
+                if replacement.len() != e2 - s2 {
+                    check_resizable(&exports_rc)?;
+                }
                 data.splice(s2..e2, replacement);
             } else {
                 // Extended slice: replacement must have the exact same length.
@@ -424,6 +449,9 @@ impl BuiltinTypeOps for ByteArrayOps {
                 // An empty/reversed range (start > stop) deletes nothing.
                 let s2 = (start.max(0) as usize).min(data.len());
                 let e2 = (stop.max(0) as usize).min(data.len()).max(s2);
+                if e2 > s2 {
+                    check_resizable(&s.exports)?;
+                }
                 data.drain(s2..e2);
             } else {
                 // Extended slice deletion. `slice_indices` is already monotonic:
@@ -435,6 +463,9 @@ impl BuiltinTypeOps for ByteArrayOps {
                 let mut indices: Vec<usize> = slice_indices(start, stop, step)
                     .filter(|&i| i < data.len())
                     .collect();
+                if !indices.is_empty() {
+                    check_resizable(&s.exports)?;
+                }
                 if step < 0 {
                     indices.reverse();
                 }
@@ -453,6 +484,7 @@ impl BuiltinTypeOps for ByteArrayOps {
         }
         // Integer deletion.
         let idx = value_to_index(key, data.len(), "bytearray")?;
+        check_resizable(&s.exports)?;
         data.remove(idx);
         Ok(())
     }
@@ -489,14 +521,14 @@ impl BuiltinTypeOps for ByteArrayOps {
         // methods operate directly on this Rc and return before read-only
         // dispatch takes its snapshot, so `append`/`pop`/etc. stay O(1) where
         // their underlying Vec operation is O(1).
-        let data_rc: Rc<RefCell<Vec<u8>>> = {
+        let (data_rc, exports_rc): (Rc<RefCell<Vec<u8>>>, Rc<Cell<usize>>) = {
             let borrow = state.borrow();
             let s = borrow
                 .downcast_ref::<ByteArrayState>()
                 .expect("bytearray state");
-            Rc::clone(&s.data)
+            (Rc::clone(&s.data), Rc::clone(&s.exports))
         };
-        if let Some(result) = call_storage_method(&data_rc, method, &args)? {
+        if let Some(result) = call_storage_method(&data_rc, &exports_rc, method, &args)? {
             return Ok(result);
         }
 
@@ -638,12 +670,17 @@ impl BuiltinTypeOps for ByteArrayOps {
 pub fn bytearray(data: Vec<u8>) -> Value {
     let state: Box<dyn Any> = Box::new(ByteArrayState {
         data: Rc::new(RefCell::new(data)),
+        exports: Rc::new(Cell::new(0)),
     });
     Value::builtin_object(BYTEARRAY_OPS, state)
 }
 
-/// Return the backing `Rc<RefCell<Vec<u8>>>` if `v` is a `bytearray`.
-pub fn as_bytearray_rc(v: &Value) -> Option<Rc<RefCell<Vec<u8>>>> {
+/// Backing storage and active export count of a `bytearray`.
+pub type ByteArrayBuffer = (Rc<RefCell<Vec<u8>>>, Rc<Cell<usize>>);
+
+/// Return both the backing `Rc<RefCell<Vec<u8>>>` and its active export counter
+/// if `v` is a `bytearray`.
+pub fn as_bytearray_buffer(v: &Value) -> Option<ByteArrayBuffer> {
     let ValueKind::BuiltinObject { ops, state } = v.kind() else {
         return None;
     };
@@ -652,7 +689,12 @@ pub fn as_bytearray_rc(v: &Value) -> Option<Rc<RefCell<Vec<u8>>>> {
     }
     let borrow = state.borrow();
     let s = borrow.downcast_ref::<ByteArrayState>()?;
-    Some(Rc::clone(&s.data))
+    Some((Rc::clone(&s.data), Rc::clone(&s.exports)))
+}
+
+/// Return the backing `Rc<RefCell<Vec<u8>>>` if `v` is a `bytearray`.
+pub fn as_bytearray_rc(v: &Value) -> Option<Rc<RefCell<Vec<u8>>>> {
+    as_bytearray_buffer(v).map(|(data, _)| data)
 }
 
 /// Extract a byte slice from a value if it is bytearray.  Returns `None`

@@ -371,6 +371,11 @@ impl Interpreter {
                 if name == "cell_contents" && pyrust_builtins::cell::is_cell(target) {
                     return pyrust_builtins::cell::get_cell_contents(target);
                 }
+                if pyrust_builtins::memoryview::is_memoryview(target)
+                    && let Some(val) = pyrust_builtins::memoryview::getattr_checked(target, name)?
+                {
+                    return Ok(val);
+                }
                 if matches!(name, "f_locals" | "f_back") && pyrust_builtins::frame::is_frame(target)
                 {
                     match name {

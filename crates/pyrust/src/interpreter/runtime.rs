@@ -22,9 +22,11 @@ mod value_protocols {
     include!("runtime/value_protocols.rs");
 }
 pub(crate) use value_protocols::{
-    coerce_numeric, coerce_subclass_backing, lookup_value_special_method,
+    BUF_FULL_RO, acquire_buffer_view, acquire_writable_buffer, coerce_numeric,
+    coerce_subclass_backing, extract_buffer_bytes, lookup_value_special_method,
     normalize_complex_slot_result, normalize_float_slot_result, normalize_int_slot_result,
-    slot_is_callable, slot_is_descriptor, slot_is_dispatchable, slot_supports_descriptor_get,
+    release_memoryview_with_interp, slot_is_callable, slot_is_descriptor, slot_is_dispatchable,
+    slot_supports_descriptor_get, try_extract_buffer_bytes,
 };
 use value_protocols::{coerce_operand_backing, is_not_implemented};
 

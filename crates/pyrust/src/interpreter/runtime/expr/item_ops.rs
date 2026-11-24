@@ -403,6 +403,48 @@ impl Interpreter {
                 ));
             }
             4 => {
+                let obj_val = vm_read(regs, obj, num_locals)?;
+                let is_memoryview = pyrust_builtins::memoryview::is_memoryview(&obj_val);
+                if is_memoryview {
+                    if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                        let lo = self.resolve_slice_bound_val(lo)?;
+                        let hi = self.resolve_slice_bound_val(hi)?;
+                        let st = self.resolve_slice_bound_val(st)?;
+                        let slice_val = make_slice_value(lo, hi, st);
+                        // If RHS is a PyInstance implementing PEP 688 `__buffer__`,
+                        // acquire a temporary memoryview and release it after assignment.
+                        let (rhs_val, temp_mv) =
+                            if matches!(val_val.kind(), ValueKind::PyInstance(_)) {
+                                let mv = crate::interpreter::acquire_buffer_view(
+                                    self,
+                                    &val_val,
+                                    crate::interpreter::BUF_FULL_RO,
+                                )?;
+                                (mv.clone(), Some(mv))
+                            } else {
+                                (val_val, None)
+                            };
+                        let res = if let ValueKind::BuiltinObject { ops, state } = obj_val.kind() {
+                            ops.set_item(state, &slice_val, rhs_val)
+                        } else {
+                            Ok(())
+                        };
+                        if let Some(mv) = temp_mv {
+                            let _ = crate::interpreter::release_memoryview_with_interp(self, &mv);
+                        }
+                        res?;
+                    } else {
+                        let resolved_idx = if matches!(idx_val.kind(), ValueKind::PyInstance(_)) {
+                            self.call_index_protocol(&idx_val, "memoryview")?
+                        } else {
+                            idx_val
+                        };
+                        if let ValueKind::BuiltinObject { ops, state } = obj_val.kind() {
+                            ops.set_item(state, &resolved_idx, val_val)?;
+                        }
+                    }
+                    return Ok(());
+                }
                 // bytearray item assignment honors the __index__ protocol on
                 // both the index and the assigned value (#1908). bytearray's
                 // receiver-only set_item can't reach user dunders, so resolve
@@ -415,13 +457,13 @@ impl Interpreter {
                     idx_val.kind(),
                     ValueKind::PyInstance(_) | ValueKind::BuiltinObject { .. }
                 ) || matches!(val_val.kind(), ValueKind::PyInstance(_));
-                let (idx_val, val_val) = if needs_resolve
-                    && matches!(
-                        vm_read(regs, obj, num_locals)?.kind(),
-                        ValueKind::BuiltinObject { ops, .. }
-                            if ops.canonical_class_tag()
-                                == Some(pyrust_core::CanonicalClassTag::Bytearray)
-                    ) {
+                let is_bytearray = matches!(
+                    obj_val.kind(),
+                    ValueKind::BuiltinObject { ops, .. }
+                        if ops.canonical_class_tag()
+                            == Some(pyrust_core::CanonicalClassTag::Bytearray)
+                );
+                let (idx_val, val_val) = if needs_resolve && is_bytearray {
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
                         // Slice assignment: resolve the __index__ bounds and
                         // rebuild the slice; element resolution stays in
@@ -443,7 +485,7 @@ impl Interpreter {
                 } else {
                     (idx_val, val_val)
                 };
-                let val_val = if Self::unpack_slice_key(&idx_val).is_some() {
+                let val_val = if is_bytearray && Self::unpack_slice_key(&idx_val).is_some() {
                     self.prepare_bytearray_slice_rhs(val_val)?
                 } else {
                     val_val

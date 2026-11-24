@@ -445,7 +445,12 @@ thread_local! {
             // non-subclassable, but still exposes its native `__new__` slot.
             let qualified = registered_builtin_method_name(name, "__new__");
             attrs.insert("__new__".to_string(), Value::builtin_function(qualified));
-            if kind != BuiltinTypeClass::Slice {
+            if kind == BuiltinTypeClass::MemoryView {
+                for method in ["__buffer__", "__release_buffer__"] {
+                    let qualified = registered_builtin_method_name(name, method);
+                    attrs.insert(method.to_string(), Value::builtin_function(qualified));
+                }
+            } else if kind != BuiltinTypeClass::Slice {
                 for method in ["__iter__", "__next__"] {
                     let qualified = registered_builtin_method_name(name, method);
                     attrs.insert(method.to_string(), Value::builtin_function(qualified));

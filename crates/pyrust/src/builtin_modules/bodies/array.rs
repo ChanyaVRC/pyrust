@@ -32,7 +32,7 @@ const ARRAY_PY_SOURCE: &str = include_str!("array_py.py");
 
 /// Internal native helpers seeded into the injected exec namespace and removed
 /// from `array.__dict__` after injection so `dir(array)` matches CPython.
-const ARRAY_NATIVE_HELPERS: [&str; 9] = [
+const ARRAY_NATIVE_HELPERS: [&str; 10] = [
     "_typecode_itemsize",
     "_encode_item",
     "_encode_items",
@@ -42,6 +42,7 @@ const ARRAY_NATIVE_HELPERS: [&str; 9] = [
     "_decode_unicode",
     "_byteswap",
     "_as_index",
+    "_make_buffer_view",
 ];
 
 /// Public names exported from `ARRAY_PY_SOURCE` onto the `array` module.
@@ -695,5 +696,19 @@ pyrust_module! {
     fn _as_index(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         _interp.call_index_protocol(&args[0].value, "array")
+    }
+
+    /// `_make_buffer_view(owner, buf_bytearray, typecode, flags)` -> live zero-copy `memoryview`.
+    fn _make_buffer_view(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        let owner = args[0].value.clone();
+        let (data, exports) = pyrust_builtins::bytearray::as_bytearray_buffer(&args[1].value)
+            .ok_or_else(|| PyError::runtime("array: internal buffer must be bytearray".into()))?;
+        let tc_str = args[2]
+            .value
+            .as_str()
+            .ok_or_else(|| PyError::runtime("array: internal typecode must be str".into()))?;
+        let _flags = _interp.call_index_protocol(&args[3].value, "array.__buffer__")?;
+        pyrust_builtins::memoryview::from_mutable_buffer(data, Some(exports), owner, tc_str, false)
     }
 }

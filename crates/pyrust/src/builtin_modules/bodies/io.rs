@@ -161,8 +161,7 @@ pyrust_module! {
         /// `BytesIO(initial_bytes=b'')` — creates an in-memory bytes stream.
         /// <https://docs.python.org/3/library/io.html#io.BytesIO>
         fn __init__(args) -> Result<Value> {
-            let _ = _interp;
-            bytes_io::init(args, FN_NAME)
+            bytes_io::init(_interp, args, FN_NAME)
         }
 
         fn read(args) -> Result<Value> {
@@ -181,13 +180,17 @@ pyrust_module! {
         }
 
         fn write(args) -> Result<Value> {
-            let _ = _interp;
-            bytes_io::write(args, FN_NAME)
+            bytes_io::write(_interp, args, FN_NAME)
         }
 
         fn getvalue(args) -> Result<Value> {
             let _ = _interp;
             bytes_io::getvalue(args, FN_NAME)
+        }
+
+        fn getbuffer(args) -> Result<Value> {
+            let _ = _interp;
+            bytes_io::getbuffer(args, FN_NAME)
         }
 
         fn seek(args) -> Result<Value> {
@@ -207,7 +210,7 @@ pyrust_module! {
 
         fn close(args) -> Result<Value> {
             let _ = _interp;
-            stream_close(args, FN_NAME)
+            bytes_io::close(args, FN_NAME)
         }
 
         fn __enter__(args) -> Result<Value> {
@@ -217,7 +220,7 @@ pyrust_module! {
 
         fn __exit__(args) -> Result<Value> {
             let _ = _interp;
-            stream_exit(args, FN_NAME)
+            bytes_io::exit(args, FN_NAME)
         }
 
         fn writelines(args) -> Result<Value> {
@@ -225,8 +228,7 @@ pyrust_module! {
         }
 
         fn readinto(args) -> Result<Value> {
-            let _ = _interp;
-            bytes_io::readinto(args, FN_NAME)
+            bytes_io::readinto(_interp, args, FN_NAME)
         }
 
         fn read1(args) -> Result<Value> {

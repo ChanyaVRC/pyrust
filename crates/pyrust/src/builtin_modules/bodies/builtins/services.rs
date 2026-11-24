@@ -628,4 +628,92 @@ pyrust_module! {
         Ok(pyrust_builtins::slice::make_slice(start, stop, step))
     }
 
+    /// CPython: memoryview(obj) — create a memoryview object referencing `obj`'s buffer.
+    /// <https://docs.python.org/3/library/stdtypes.html#memoryview>
+    #[py_name = "memoryview.__new__"]
+    fn memoryview_new(args) -> Result<Value> {
+        builtin_type_new(_interp, args, BuiltinTypeClass::MemoryView)
+    }
+
+    #[arity_style(takes_exactly_one)]
+    fn memoryview(#[positional_only] obj: PyValue) -> Result<Value> {
+        crate::interpreter::acquire_buffer_view(
+            _interp,
+            &obj.0,
+            crate::interpreter::BUF_FULL_RO,
+        )
+    }
+
+    /// PEP 688: `bytes.__buffer__(self, flags)` -> readonly `memoryview`.
+    #[py_name = "bytes.__buffer__"]
+    fn bytes_buffer(args) -> Result<Value> {
+        if args.iter().any(|a| a.name.is_some()) {
+            return Err(PyError::named(
+                "TypeError",
+                "bytes.__buffer__() takes no keyword arguments".to_string(),
+            ));
+        }
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("bytes.__buffer__() takes exactly one argument ({} given)", args.len().saturating_sub(1)),
+            ));
+        }
+        let flags_val = _interp.call_index_protocol(&args[1].value, "bytes.__buffer__")?;
+        let flags = flags_val.as_int().unwrap_or(0);
+        crate::interpreter::acquire_buffer_view(_interp, &args[0].value, flags)
+    }
+
+    /// PEP 688: `bytearray.__buffer__(self, flags)` -> writable `memoryview`.
+    #[py_name = "bytearray.__buffer__"]
+    fn bytearray_buffer(args) -> Result<Value> {
+        if args.iter().any(|a| a.name.is_some()) {
+            return Err(PyError::named(
+                "TypeError",
+                "bytearray.__buffer__() takes no keyword arguments".to_string(),
+            ));
+        }
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("bytearray.__buffer__() takes exactly one argument ({} given)", args.len().saturating_sub(1)),
+            ));
+        }
+        let flags_val = _interp.call_index_protocol(&args[1].value, "bytearray.__buffer__")?;
+        let flags = flags_val.as_int().unwrap_or(0);
+        crate::interpreter::acquire_buffer_view(_interp, &args[0].value, flags)
+    }
+
+    /// PEP 688: `memoryview.__buffer__(self, flags)` -> `memoryview`.
+    #[py_name = "memoryview.__buffer__"]
+    fn memoryview_buffer(args) -> Result<Value> {
+        if args.iter().any(|a| a.name.is_some()) {
+            return Err(PyError::named(
+                "TypeError",
+                "memoryview.__buffer__() takes no keyword arguments".to_string(),
+            ));
+        }
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("memoryview.__buffer__() takes exactly one argument ({} given)", args.len().saturating_sub(1)),
+            ));
+        }
+        let flags_val = _interp.call_index_protocol(&args[1].value, "memoryview.__buffer__")?;
+        let flags = flags_val.as_int().unwrap_or(0);
+        crate::interpreter::acquire_buffer_view(_interp, &args[0].value, flags)
+    }
+
+    /// PEP 688: `memoryview.__release_buffer__(self, buffer)` -> `None`.
+    #[py_name = "memoryview.__release_buffer__"]
+    fn memoryview_release_buffer(args) -> Result<Value> {
+        if args.iter().any(|a| a.name.is_some()) || args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                "memoryview.__release_buffer__() takes exactly one argument".to_string(),
+            ));
+        }
+        Ok(Value::none())
+    }
+
 }

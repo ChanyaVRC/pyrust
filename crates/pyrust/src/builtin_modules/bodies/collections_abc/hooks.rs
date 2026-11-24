@@ -21,12 +21,16 @@ use super::definitions::{
 fn primitive_value_has_dunder(value: &Value, dunder: &str) -> bool {
     match value.kind() {
         ValueKind::Str(_)
-        | ValueKind::Bytes(_)
         | ValueKind::Tuple(_)
         | ValueKind::Range { .. }
         | ValueKind::BigRange { .. } => matches!(
             dunder,
             "__iter__" | "__len__" | "__contains__" | "__hash__" | "__reversed__"
+        ),
+
+        ValueKind::Bytes(_) => matches!(
+            dunder,
+            "__iter__" | "__len__" | "__contains__" | "__hash__" | "__reversed__" | "__buffer__"
         ),
 
         ValueKind::List(_) | ValueKind::Dict(_) => matches!(
@@ -86,12 +90,27 @@ fn primitive_value_has_dunder(value: &Value, dunder: &str) -> bool {
                         "__iter__" | "__len__" | "__reversed__" | "__contains__"
                     ),
                 }
-            } else if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray)
-                || ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::MappingProxy)
+            } else if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) {
+                matches!(
+                    dunder,
+                    "__iter__" | "__len__" | "__contains__" | "__reversed__" | "__buffer__"
+                )
+            } else if ops.canonical_class_tag()
+                == Some(pyrust_core::CanonicalClassTag::MappingProxy)
             {
                 matches!(
                     dunder,
                     "__iter__" | "__len__" | "__contains__" | "__reversed__"
+                )
+            } else if pyrust_builtins::memoryview::is_memoryview_ops(ops) {
+                matches!(
+                    dunder,
+                    "__iter__"
+                        | "__len__"
+                        | "__contains__"
+                        | "__hash__"
+                        | "__reversed__"
+                        | "__buffer__"
                 )
             } else if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) {
                 matches!(dunder, "__iter__" | "__len__" | "__contains__" | "__hash__")
@@ -251,7 +270,7 @@ pub(super) fn instancecheck(args: &[ExpandedCallArg], fn_name: &str) -> Result<V
             let meta = cls_rc.borrow().metatype.clone();
             Some(meta.unwrap_or_else(crate::interpreter::type_class_singleton))
         }
-        _ => crate::interpreter::primitive_class_for_value(instance),
+        _ => crate::interpreter::value_class_object(instance),
     };
 
     if let Some(actual) = actual_class {

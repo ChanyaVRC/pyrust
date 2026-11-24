@@ -589,6 +589,7 @@ pyrust_module! {
             // reversible in CPython, yielding its bytes as ints (#2005).
             ValueKind::BuiltinObject { ops, .. } => {
                 ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray)
+                    || pyrust_builtins::memoryview::is_memoryview_ops(ops)
             }
             _ => false,
         };
@@ -598,6 +599,13 @@ pyrust_module! {
                 "TypeError",
                 format!("'{}' object is not reversible", type_name),
             ));
+        }
+        if pyrust_builtins::memoryview::is_memoryview(&seq.0) {
+            let mut items = pyrust_builtins::memoryview::iter_elements(&seq.0)?;
+            items.reverse();
+            return Ok(Value::generator(Box::new(
+                crate::interpreter::NativeIterFrame::new(items, "reversed"),
+            )));
         }
         if matches!(
             seq.0.kind(),

@@ -42,6 +42,7 @@ pub(crate) fn prepare_builtins_module(module: &Value) {
         "int",
         "list",
         "map",
+        "memoryview",
         "range",
         "reversed",
         "set",

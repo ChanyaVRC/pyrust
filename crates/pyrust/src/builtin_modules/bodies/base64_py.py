@@ -45,8 +45,13 @@ def _is_array_instance(obj):
 def _as_bytes_like(s):
     if isinstance(s, bytes_types):
         return s
+    if isinstance(s, memoryview):
+        return s.tobytes()
     if _is_array_instance(s):
         return s.tobytes()
+    if hasattr(type(s), "__buffer__"):
+        with memoryview(s) as _mv:
+            return _mv.tobytes()
     raise TypeError(
         "a bytes-like object is required, not '%s'" % s.__class__.__name__
     )
@@ -62,8 +67,13 @@ def _bytes_from_decode_data(s):
             )
     if isinstance(s, bytes_types):
         return s
+    if isinstance(s, memoryview):
+        return s.tobytes()
     if _is_array_instance(s):
         return s.tobytes()
+    if hasattr(type(s), "__buffer__"):
+        with memoryview(s) as _mv:
+            return _mv.tobytes()
     raise TypeError(
         "argument should be a bytes-like object or ASCII string, not %r"
         % s.__class__.__name__
@@ -439,18 +449,25 @@ def decode(input, output):
 
 
 def _input_type_check(s):
-    if isinstance(s, bytes_types):
-        return s
-    if _is_array_instance(s):
-        if s.typecode not in ("b", "B"):
-            raise TypeError(
-                "expected single byte elements, not %r from %s"
-                % (s.typecode, s.__class__.__name__)
+    try:
+        m = memoryview(s)
+    except TypeError as err:
+        msg = "expected bytes-like object, not %s" % s.__class__.__name__
+        raise TypeError(msg) from err
+    with m:
+        if m.format not in ("c", "b", "B"):
+            msg = "expected single byte elements, not %r from %s" % (
+                m.format,
+                s.__class__.__name__,
             )
-        return s.tobytes()
-    raise TypeError(
-        "expected bytes-like object, not %s" % s.__class__.__name__
-    )
+            raise TypeError(msg)
+        if m.ndim != 1:
+            msg = "expected 1-D data, not %d-D data from %s" % (
+                m.ndim,
+                s.__class__.__name__,
+            )
+            raise TypeError(msg)
+        return s if isinstance(s, bytes_types) else m.tobytes()
 
 
 def encodebytes(s):

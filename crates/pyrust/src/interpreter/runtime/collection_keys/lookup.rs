@@ -246,10 +246,16 @@ impl Interpreter {
                     .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
                 set.get_index_of(&probe)
             };
-            if hit.is_some() || !key.is_none() {
+            if hit.is_some() {
                 return Ok(hit);
             }
-            return self.set_lookup(receiver, &PyKey::None);
+            if key.is_none() {
+                return self.set_lookup(receiver, &PyKey::None);
+            }
+            if let ValueKind::Bytes(rc) = key.kind() {
+                return self.set_lookup(receiver, &PyKey::Bytes(Rc::clone(rc)));
+            }
+            return Ok(None);
         }
         let py_key = self.value_to_pykey(key)?;
         self.set_lookup(receiver, &py_key)
@@ -265,10 +271,16 @@ impl Interpreter {
     ) -> Result<Option<usize>> {
         if let Some(probe) = pyrust_core::ValueKeyRef::try_new(key) {
             let hit = set.get_index_of(&probe);
-            if hit.is_some() || !key.is_none() {
+            if hit.is_some() {
                 return Ok(hit);
             }
-            return self.set_lookup_in(set, &PyKey::None);
+            if key.is_none() {
+                return self.set_lookup_in(set, &PyKey::None);
+            }
+            if let ValueKind::Bytes(rc) = key.kind() {
+                return self.set_lookup_in(set, &PyKey::Bytes(Rc::clone(rc)));
+            }
+            return Ok(None);
         }
         let py_key = self.value_to_pykey(key)?;
         self.set_lookup_in(set, &py_key)
@@ -314,6 +326,47 @@ impl Interpreter {
                 let cand_val = pykey_object_or_none_value(&cand);
                 if self.values_user_eq(&cand_val, target)? {
                     return self.set_index_by_key(receiver, &cand);
+                }
+            }
+            if pyrust_builtins::memoryview::is_memoryview(target)
+                && let Ok(bytes) = pyrust_builtins::memoryview::to_bytes_checked(target)
+            {
+                let probe = PyKey::Bytes(Rc::new(bytes));
+                let hit = {
+                    let set = receiver
+                        .as_set()
+                        .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
+                    set.get_index_of(&probe)
+                };
+                if let Some(idx) = hit {
+                    let bytes_val = crate::interpreter::key_to_value(probe);
+                    if self.values_user_eq(&bytes_val, target)? {
+                        return Ok(Some(idx));
+                    }
+                }
+            }
+        }
+        // Cross-variant slow path: Bytes key vs Object entries (e.g. memoryview)
+        // sharing the same Python hash.
+        if let PyKey::Bytes(raw) = key {
+            let py_hash = pyrust_core::py_hash_pykey(key) as u64;
+            let candidate_keys = {
+                let set = receiver
+                    .as_set()
+                    .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
+                collect_object_hash_bucket_keys_set(
+                    &set,
+                    py_hash,
+                    |k| matches!(k, PyKey::Object { hash, .. } if *hash == py_hash),
+                )
+            };
+            if !candidate_keys.is_empty() {
+                let bytes_val = Value::bytes(raw.to_vec());
+                for cand in candidate_keys {
+                    let cand_val = pykey_object_or_none_value(&cand);
+                    if self.values_user_eq(&bytes_val, &cand_val)? {
+                        return self.set_index_by_key(receiver, &cand);
+                    }
                 }
             }
         }
@@ -392,6 +445,36 @@ impl Interpreter {
                 let cand_val = pykey_object_or_none_value(&cand);
                 if self.values_user_eq(&cand_val, target)? {
                     return Ok(set.get_index_of(&cand));
+                }
+            }
+            if pyrust_builtins::memoryview::is_memoryview(target)
+                && let Ok(bytes) = pyrust_builtins::memoryview::to_bytes_checked(target)
+            {
+                let probe = PyKey::Bytes(Rc::new(bytes));
+                if let Some(idx) = set.get_index_of(&probe) {
+                    let bytes_val = crate::interpreter::key_to_value(probe);
+                    if self.values_user_eq(&bytes_val, target)? {
+                        return Ok(Some(idx));
+                    }
+                }
+            }
+        }
+        // Cross-variant slow path: Bytes key vs Object entries (e.g. memoryview)
+        // sharing the same Python hash.
+        if let PyKey::Bytes(raw) = key {
+            let py_hash = pyrust_core::py_hash_pykey(key) as u64;
+            let candidate_keys = collect_object_hash_bucket_keys_set(
+                set,
+                py_hash,
+                |k| matches!(k, PyKey::Object { hash, .. } if *hash == py_hash),
+            );
+            if !candidate_keys.is_empty() {
+                let bytes_val = Value::bytes(raw.to_vec());
+                for cand in candidate_keys {
+                    let cand_val = pykey_object_or_none_value(&cand);
+                    if self.values_user_eq(&bytes_val, &cand_val)? {
+                        return Ok(set.get_index_of(&cand));
+                    }
                 }
             }
         }

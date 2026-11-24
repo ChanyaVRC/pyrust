@@ -214,6 +214,20 @@ fn collect_object_bucket_keys_set(
     probe.collected.into_inner()
 }
 
+fn collect_object_hash_bucket_keys_set(
+    set: &PySet,
+    python_hash: u64,
+    is_match: impl Fn(&PyKey) -> bool,
+) -> Vec<PyKey> {
+    let probe = ObjectHashBucketProbe {
+        python_hash,
+        is_match,
+        collected: std::cell::RefCell::new(Vec::new()),
+    };
+    let _ = set.get_index_of(&probe);
+    probe.collected.into_inner()
+}
+
 /// Extract the Python-level `Value` from an `Object`/`None` candidate key for
 /// dispatching user `__eq__`.  Bucket candidates are always `Object` or `None`.
 fn pykey_object_or_none_value(key: &PyKey) -> Value {

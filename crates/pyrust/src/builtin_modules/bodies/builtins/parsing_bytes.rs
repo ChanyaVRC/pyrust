@@ -103,7 +103,13 @@ fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result<Val
 fn float_bytes_like(v: &Value) -> Option<(Vec<u8>, String)> {
     match v.kind() {
         ValueKind::Bytes(rc) => Some((rc.as_slice().to_vec(), v.repr_raw())),
-        _ => pyrust_builtins::bytearray::as_bytearray_snapshot(v).map(|data| (data, v.repr_raw())),
+        _ => pyrust_builtins::bytearray::as_bytearray_snapshot(v)
+            .or_else(|| {
+                pyrust_builtins::memoryview::is_memoryview(v)
+                    .then(|| pyrust_builtins::memoryview::to_bytes_checked(v).ok())
+                    .flatten()
+            })
+            .map(|data| (data, v.repr_raw())),
     }
 }
 

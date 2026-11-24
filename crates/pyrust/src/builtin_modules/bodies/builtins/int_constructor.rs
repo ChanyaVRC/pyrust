@@ -172,6 +172,11 @@ pyrust_module! {
                     let repr = Value::bytes(data.clone()).repr_raw();
                     int_parse_bytes_like(&data, &repr, 10)
                 }
+                _ if pyrust_builtins::memoryview::is_memoryview(val) => {
+                    let data = pyrust_builtins::memoryview::to_bytes_checked(val)?;
+                    let repr = Value::bytes(data.clone()).repr_raw();
+                    int_parse_bytes_like(&data, &repr, 10)
+                }
                 _ => Err(PyError::named(
                     "TypeError",
                     format!(

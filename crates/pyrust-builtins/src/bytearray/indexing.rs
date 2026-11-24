@@ -225,6 +225,9 @@ pub(super) fn bytes_from_value(v: &Value, context: &str) -> Result<Vec<u8>> {
                 .expect("bytearray state");
             Ok(s.data.borrow().clone())
         }
+        ValueKind::BuiltinObject { ops, .. } if crate::memoryview::is_memoryview_ops(ops) => {
+            crate::memoryview::to_bytes_checked(v)
+        }
         ValueKind::List(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items.iter() {

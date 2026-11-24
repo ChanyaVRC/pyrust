@@ -111,7 +111,7 @@ pyrust_module! {
 
     /// `_unpack(error_cls, format, buffer)` -> `tuple`.
     fn _unpack(args) -> Result<Value> {
-        unpack::unpack_entry(FN_NAME, args)
+        unpack::unpack_entry(_interp, FN_NAME, args)
     }
 
     /// `_pack_into(error_cls, format, buffer, offset, values_tuple)` -> `None`.
@@ -126,6 +126,6 @@ pyrust_module! {
 
     /// `_check_iter_unpack(error_cls, format, buffer)` -> `(size, buf_len)`.
     fn _check_iter_unpack(args) -> Result<Value> {
-        unpack::check_iter_unpack_entry(FN_NAME, args)
+        unpack::check_iter_unpack_entry(_interp, FN_NAME, args)
     }
 }

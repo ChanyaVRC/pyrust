@@ -38,6 +38,7 @@ pub(crate) enum BuiltinTypeClass {
     Enumerate,
     Slice,
     Reversed,
+    MemoryView,
 }
 
 /// The six opaque dictionary-view classes in CPython: three plain views and
@@ -200,18 +201,19 @@ impl DictViewClass {
 
 impl BuiltinTypeClass {
     /// Every member, in the order the per-thread singleton array stores them.
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Zip,
         Self::Map,
         Self::Filter,
         Self::Enumerate,
         Self::Slice,
         Self::Reversed,
+        Self::MemoryView,
     ];
 
     /// Members whose native iterator layout may be inherited by a Python
-    /// subclass.  `slice` is deliberately absent because CPython does not set
-    /// `Py_TPFLAGS_BASETYPE` on it.
+    /// subclass.  `slice` and `memoryview` are deliberately absent because
+    /// CPython does not set `Py_TPFLAGS_BASETYPE` on them.
     pub(crate) const SUBCLASSABLE: [Self; 5] = [
         Self::Zip,
         Self::Map,
@@ -230,6 +232,7 @@ impl BuiltinTypeClass {
             Self::Enumerate => "enumerate",
             Self::Slice => "slice",
             Self::Reversed => "reversed",
+            Self::MemoryView => "memoryview",
         }
     }
 
@@ -241,6 +244,7 @@ impl BuiltinTypeClass {
             Self::Enumerate => pyrust_core::BuiltinTypeClassTag::Enumerate,
             Self::Slice => pyrust_core::BuiltinTypeClassTag::Slice,
             Self::Reversed => pyrust_core::BuiltinTypeClassTag::Reversed,
+            Self::MemoryView => pyrust_core::BuiltinTypeClassTag::MemoryView,
         }
     }
 
@@ -252,16 +256,18 @@ impl BuiltinTypeClass {
             pyrust_core::BuiltinTypeClassTag::Enumerate => Self::Enumerate,
             pyrust_core::BuiltinTypeClassTag::Slice => Self::Slice,
             pyrust_core::BuiltinTypeClassTag::Reversed => Self::Reversed,
+            pyrust_core::BuiltinTypeClassTag::MemoryView => Self::MemoryView,
         }
     }
 
     /// CPython gives `zip` / `map` / `filter` / `enumerate` / `reversed` the
-    /// `Py_TPFLAGS_BASETYPE` flag, so they may be subclassed; `slice` does not
-    /// have it and raises `TypeError: type 'slice' is not an acceptable base
-    /// type`.
+    /// `Py_TPFLAGS_BASETYPE` flag, so they may be subclassed; `slice` and
+    /// `memoryview` do not have it and raise `TypeError: type '<name>' is not
+    /// an acceptable base type`.
     const fn non_subclassable_name(self) -> Option<&'static str> {
         match self {
             Self::Slice => Some("slice"),
+            Self::MemoryView => Some("memoryview"),
             _ => None,
         }
     }

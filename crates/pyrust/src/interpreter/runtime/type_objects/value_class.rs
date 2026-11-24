@@ -105,6 +105,9 @@ pub(crate) fn value_class(value: &Value) -> Value {
             if pyrust_builtins::slice::is_slice_ops(ops) {
                 return Value::py_class(BuiltinTypeClass::Slice.singleton());
             }
+            if pyrust_builtins::memoryview::is_memoryview_ops(ops) {
+                return Value::py_class(BuiltinTypeClass::MemoryView.singleton());
+            }
             Value::builtin_function(ops.type_name())
         }
         ValueKind::Bool(_)

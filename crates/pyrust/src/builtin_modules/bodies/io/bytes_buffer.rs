@@ -7,46 +7,60 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use pyrust_builtins::bytearray::ByteArrayBuffer;
+
 use crate::error::{PyError, Result};
-use crate::value::{PyInstance, Value, ValueKind};
+use crate::value::{PyInstance, Value};
 
 use super::{get_pos, set_pos};
 
 pub(super) fn initialize(inst: &Rc<RefCell<PyInstance>>, initial: Vec<u8>) {
     let mut attrs = inst.borrow_mut();
-    attrs.attrs.insert_slot("_buf", Value::bytes(initial));
+    attrs
+        .attrs
+        .insert_slot("_buf", pyrust_builtins::bytearray::bytearray(initial));
     attrs.attrs.insert_slot("_pos", Value::int(0));
     attrs.attrs.insert_slot("_closed", Value::bool_(false));
 }
 
-pub(super) fn contents(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<Vec<u8>> {
-    match inst
+pub(super) fn buffer_handle(
+    inst: &Rc<RefCell<PyInstance>>,
+    fn_name: &str,
+) -> Result<ByteArrayBuffer> {
+    inst.borrow()
+        .attrs
+        .get_slot("_buf")
+        .and_then(pyrust_builtins::bytearray::as_bytearray_buffer)
+        .ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                format!("{fn_name}() BytesIO object is not initialized"),
+            )
+        })
+}
+
+pub(super) fn check_no_exports(inst: &Rc<RefCell<PyInstance>>) -> Result<()> {
+    if let Some((_, exports)) = inst
         .borrow()
         .attrs
         .get_slot("_buf")
-        .map(|value| value.kind())
+        .and_then(pyrust_builtins::bytearray::as_bytearray_buffer)
     {
-        Some(ValueKind::Bytes(buffer)) => Ok(buffer.to_vec()),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}() BytesIO object is not initialized"),
-        )),
+        pyrust_builtins::bytearray::check_resizable(&exports)?;
     }
+    Ok(())
+}
+
+pub(super) fn contents(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<Vec<u8>> {
+    let (data, _) = buffer_handle(inst, fn_name)?;
+    let snap = data.borrow().clone();
+    Ok(snap)
 }
 
 fn buffer_len(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<usize> {
-    match inst
-        .borrow()
-        .attrs
-        .get_slot("_buf")
-        .map(|value| value.kind())
-    {
-        Some(ValueKind::Bytes(buffer)) => Ok(buffer.len()),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}() BytesIO object is not initialized"),
-        )),
-    }
+    let (data, _) = buffer_handle(inst, fn_name)?;
+    let len = data.borrow().len();
+    Ok(len)
 }
 
 pub(super) fn read(
@@ -123,6 +137,7 @@ pub(super) fn read_lines(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Resul
 /// Splice bytes at the current cursor, overwriting existing data, NUL-padding
 /// a gap past EOF, and advancing the cursor.
 pub(super) fn write(inst: &Rc<RefCell<PyInstance>>, data: &[u8]) -> Result<usize> {
+    check_no_exports(inst)?;
     // CPython leaves both the cursor and backing buffer untouched for an empty
     // write, including when the cursor is positioned far beyond EOF.
     if data.is_empty() {
@@ -139,34 +154,18 @@ pub(super) fn write(inst: &Rc<RefCell<PyInstance>>, data: &[u8]) -> Result<usize
         .map_err(|_| PyError::named("OverflowError", "new buffer size too large".to_string()))?;
     let new_pos = usize::try_from(new_pos_i64)
         .map_err(|_| PyError::named("OverflowError", "new buffer size too large".to_string()))?;
-    let buffer = match inst
-        .borrow()
-        .attrs
-        .get_slot("_buf")
-        .map(|value| value.kind())
-    {
-        Some(ValueKind::Bytes(buffer)) => buffer.to_vec(),
-        _ => Vec::new(),
-    };
+    let (buf_rc, _) = buffer_handle(inst, "write")?;
+    let mut buffer = buf_rc.borrow_mut();
     let total = buffer.len();
-    let mut new_buffer = Vec::new();
-    new_buffer
-        .try_reserve_exact(total.max(new_pos))
-        .map_err(|_| PyError::named("MemoryError", String::new()))?;
-    if pos > total {
-        new_buffer.extend_from_slice(&buffer);
-        new_buffer.extend(std::iter::repeat_n(0, pos - total));
-    } else {
-        new_buffer.extend_from_slice(&buffer[..pos]);
+    let target_len = total.max(new_pos);
+    if target_len > total {
+        buffer
+            .try_reserve(target_len - total)
+            .map_err(|_| PyError::named("MemoryError", String::new()))?;
+        buffer.resize(target_len, 0);
     }
-    new_buffer.extend_from_slice(data);
-    let end = new_pos.min(total);
-    if end < total {
-        new_buffer.extend_from_slice(&buffer[end..]);
-    }
-    inst.borrow_mut()
-        .attrs
-        .insert_slot("_buf", Value::bytes(new_buffer));
+    buffer[pos..pos + written_len].copy_from_slice(data);
+    drop(buffer);
     set_pos(inst, new_pos_i64);
     Ok(written_len)
 }
@@ -205,13 +204,12 @@ pub(super) fn seek(
 }
 
 pub(super) fn truncate(inst: &Rc<RefCell<PyInstance>>, size: i64, fn_name: &str) -> Result<i64> {
-    let current_len = buffer_len(inst, fn_name)?;
-    if size < current_len as i64 {
-        let buffer = contents(inst, fn_name)?;
+    check_no_exports(inst)?;
+    let (buf_rc, _) = buffer_handle(inst, fn_name)?;
+    let mut buffer = buf_rc.borrow_mut();
+    if size < buffer.len() as i64 {
         let new_len = usize::try_from(size).expect("truncate size is validated as non-negative");
-        inst.borrow_mut()
-            .attrs
-            .insert_slot("_buf", Value::bytes(buffer[..new_len].to_vec()));
+        buffer.truncate(new_len);
     }
     // CPython reports the requested size even though truncating past EOF does
     // not extend an in-memory stream.

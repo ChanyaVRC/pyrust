@@ -166,6 +166,11 @@ class array:
             raw = bytes(buffer)
         elif isinstance(buffer, bytes):
             raw = buffer
+        elif isinstance(buffer, memoryview):
+            raw = buffer.tobytes()
+        elif hasattr(type(buffer), "__buffer__"):
+            with memoryview(buffer) as _mv:
+                raw = _mv.tobytes()
         else:
             raise TypeError(
                 "a bytes-like object is required, not '" + type(buffer).__name__ + "'"
@@ -173,6 +178,9 @@ class array:
         if len(raw) % self._itemsize != 0:
             raise ValueError("bytes length not a multiple of item size")
         self._buf.extend(raw)
+
+    def __buffer__(self, flags, /):
+        return _make_buffer_view(self, self._buf, self._typecode, flags)
 
     def tolist(self):
         return _decode_all(self._typecode, self._buf)

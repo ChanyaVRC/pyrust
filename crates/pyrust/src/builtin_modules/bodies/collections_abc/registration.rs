@@ -112,6 +112,7 @@ fn init_abc_hierarchy_and_registry() {
     let async_iterable = Abc::AsyncIterable.class();
     let async_iterator = Abc::AsyncIterator.class();
     let async_generator = Abc::AsyncGenerator.class();
+    let buffer_abc = Abc::Buffer.class();
 
     // Real ABC-to-ABC inheritance hierarchy (CPython 3.12).
     set_bases(&coroutine, &[&awaitable]);
@@ -160,7 +161,11 @@ fn init_abc_hierarchy_and_registry() {
     reg_prim(&sequence, "tuple");
     reg_prim(&sequence, "str");
     reg_prim(&sequence, "bytes");
+    reg_prim(&sequence, "memoryview");
     register_virtual_subclass(&sequence, &range_cls);
+    reg_prim(&buffer_abc, "bytes");
+    reg_prim(&buffer_abc, "bytearray");
+    reg_prim(&buffer_abc, "memoryview");
     reg_prim(&mut_set, "set");
     reg_prim(&set_abc, "frozenset");
 
@@ -170,6 +175,7 @@ fn init_abc_hierarchy_and_registry() {
         "complex",
         "str",
         "bytes",
+        "memoryview",
         "tuple",
         "frozenset",
         "bool",

@@ -114,6 +114,11 @@ fn bytes_strip(bytes: &[u8], args: &[Value], left: bool, right: bool) -> Result<
         Some(v) => match v.kind() {
             ValueKind::None => None,
             ValueKind::Bytes(rc) => Some(std::borrow::Cow::Borrowed(rc.as_slice())),
+            ValueKind::BuiltinObject { ops, .. } if crate::memoryview::is_memoryview_ops(ops) => {
+                Some(std::borrow::Cow::Owned(
+                    crate::memoryview::to_bytes_checked(v)?,
+                ))
+            }
             // Accept any bytes-like object (bytearray, ...) per CPython; reject
             // genuinely-wrong types (str, int, ...) with CPython's message.
             _ => match crate::bytearray::as_bytearray_snapshot(v) {

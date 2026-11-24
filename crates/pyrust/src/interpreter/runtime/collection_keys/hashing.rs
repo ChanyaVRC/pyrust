@@ -243,7 +243,8 @@ pub(crate) fn value_needs_interp(v: &Value) -> bool {
         ValueKind::Tuple(inner) => tuple_needs_interp(inner),
         ValueKind::BuiltinObject { ops, .. }
             if pyrust_builtins::mapping_proxy::is_exact_proxy_ops(ops)
-                || pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops) =>
+                || pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops)
+                || pyrust_builtins::memoryview::is_memoryview_ops(ops) =>
         {
             true
         }
@@ -346,6 +347,22 @@ pub(crate) fn hash_value_with_interp(
             let proxied = pyrust_builtins::mapping_proxy::proxied_value(value)
                 .expect("mappingproxy must yield proxied value");
             hash_value_with_interp(interp, &proxied)
+        }
+        ValueKind::BuiltinObject { ops, .. }
+            if pyrust_builtins::memoryview::is_memoryview_ops(ops) =>
+        {
+            let (obj, bytes) = pyrust_builtins::memoryview::hash_prepare(value)?;
+            // CPython 3.12 requires the underlying exporter object to be hashable
+            // (so e.g. `hash(memoryview(bytearray(b'a')).toreadonly())` raises
+            // `TypeError: unhashable type: 'bytearray'`).
+            let _ = hash_value_with_interp(interp, &obj)?;
+            let mut h: u64 = 14695981039346656037u64;
+            for b in bytes.iter() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(1099511628211u64);
+            }
+            let result = h as i64;
+            Ok(if result == -1 { -2 } else { result })
         }
         ValueKind::Tuple(items) => {
             // Fast path: if no element at any depth requires the slow path

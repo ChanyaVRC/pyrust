@@ -113,6 +113,10 @@ pyrust_module! {
                 let (data, repr) = float_bytes_like(arg).unwrap();
                 float_parse_bytes_like(&data, &repr)
             }
+            _ if pyrust_builtins::memoryview::is_memoryview(arg) => {
+                let data = pyrust_builtins::memoryview::to_bytes_checked(arg)?;
+                float_parse_bytes_like(&data, &arg.repr_raw())
+            }
             _ => Err(PyError::named(
                 "TypeError",
                 format!(
