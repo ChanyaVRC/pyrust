@@ -162,8 +162,8 @@ impl Compiler {
         // order the keyword values occupy in the register window).
         let kw_names: Vec<Value> = args
             .iter()
-            .filter_map(|a| a.name.as_ref())
-            .map(|n| Value::string(n.clone()))
+            .filter_map(|a| a.name)
+            .map(|n| Value::string(n.as_str()))
             .collect();
         let kwnames_idx = self.intern_const(Value::tuple(kw_names));
 
@@ -242,7 +242,7 @@ impl Compiler {
             return self.compile_variadic_call(
                 &Expr::Attr {
                     target: Box::new(target.clone()),
-                    name: method_name.to_string(),
+                    name: Symbol::intern(method_name),
                     span: None,
                 },
                 args,
@@ -255,8 +255,8 @@ impl Compiler {
         // the keyword values occupy in the register window).
         let kw_names: Vec<Value> = args
             .iter()
-            .filter_map(|a| a.name.as_ref())
-            .map(|n| Value::string(n.clone()))
+            .filter_map(|a| a.name)
+            .map(|n| Value::string(n.as_str()))
             .collect();
         let kwnames_idx = self.intern_const(Value::tuple(kw_names));
 
@@ -543,9 +543,9 @@ impl Compiler {
                         },
                     });
                     self.free_temp(val);
-                } else if let Some(kw_name) = &arg.name {
+                } else if let Some(kw_name) = arg.name {
                     let val = self.compile_expr(&arg.value);
-                    let key_idx = self.intern_const(Value::string(kw_name.clone()));
+                    let key_idx = self.intern_const(Value::string(kw_name.as_str()));
                     let key_reg = self.alloc_temp();
                     self.emit(Insn::LoadConst(key_reg, key_idx));
                     if has_kw_splat {
@@ -647,9 +647,9 @@ impl Compiler {
                     name: crate::bytecode::KwCallName::Callee(func_reg),
                 });
                 self.free_temp(val);
-            } else if let Some(kw_name) = &arg.name {
+            } else if let Some(kw_name) = arg.name {
                 let val = self.compile_expr(&arg.value);
-                let key_idx = self.intern_const(Value::string(kw_name.clone()));
+                let key_idx = self.intern_const(Value::string(kw_name.as_str()));
                 let key_reg = self.alloc_temp();
                 self.emit(Insn::LoadConst(key_reg, key_idx));
                 if has_kw_splat {
@@ -839,9 +839,8 @@ impl Compiler {
         for (i, arg) in (0u32..).zip(args[npos + 1..npos + 1 + nkw].iter()) {
             let name = arg
                 .name
-                .as_ref()
                 .expect("literal keyword after splat (shape-checked)");
-            kw_names.push(Value::string(name.clone()));
+            kw_names.push(Value::string(name.as_str()));
             compile_into_slot(self, &arg.value, litkw_base + i);
         }
         let kwnames_idx = self.intern_const(Value::tuple(kw_names));

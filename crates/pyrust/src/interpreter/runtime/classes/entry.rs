@@ -46,7 +46,7 @@ impl Interpreter {
                 None
             };
             params.push(UserFunctionParam {
-                name: param_spec.names[i].clone(),
+                name: param_spec.names[i],
                 default,
                 is_args: param_spec.is_args[i],
                 is_kwargs: param_spec.is_kwargs[i],
@@ -153,7 +153,7 @@ impl Interpreter {
                     code.names.len()
                 ))
             })?
-            .clone();
+            .to_string();
         let proto = code.fn_protos.get(proto_idx as usize).ok_or_else(|| {
             PyError::Runtime(format!(
                 "bytecode error: fn_proto index {} out of range (pool size {})",
@@ -196,7 +196,7 @@ impl Interpreter {
                 .map(|(i, key)| {
                     let reg = (kwarg_base as usize + i) as crate::bytecode::Reg;
                     ExpandedCallArg {
-                        name: Some(key.clone()),
+                        name: Some(key.to_string()),
                         value: regs[reg as usize].clone(),
                     }
                 })
@@ -251,7 +251,7 @@ impl Interpreter {
             .map(|(index, name)| {
                 let reg = (kwarg_base as usize + index) as crate::bytecode::Reg;
                 ExpandedCallArg {
-                    name: Some(name.clone()),
+                    name: Some(name.to_string()),
                     value: regs[reg as usize].clone(),
                 }
             })
@@ -341,7 +341,7 @@ impl Interpreter {
                     code.names.len()
                 ))
             })?
-            .clone();
+            .to_string();
         let proto = code.fn_protos.get(proto_idx as usize).ok_or_else(|| {
             PyError::Runtime(format!(
                 "bytecode error: fn_proto index {} out of range (pool size {})",
@@ -380,7 +380,7 @@ impl Interpreter {
             .map(|(i, key)| {
                 let reg = (kwarg_base as usize + i) as crate::bytecode::Reg;
                 ExpandedCallArg {
-                    name: Some(key.clone()),
+                    name: Some(key.to_string()),
                     value: regs[reg as usize].clone(),
                 }
             })

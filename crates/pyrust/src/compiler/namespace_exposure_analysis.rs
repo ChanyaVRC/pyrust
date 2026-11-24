@@ -17,7 +17,7 @@ fn is_namespace_exposing_attr(name: &str) -> bool {
 
 fn import_from_may_expose_module_namespace(
     module: &str,
-    names: &[(String, Option<String>)],
+    names: &[(Symbol, Option<Symbol>)],
 ) -> bool {
     match module {
         "builtins" => names.iter().any(|(name, _)| {
@@ -28,7 +28,7 @@ fn import_from_may_expose_module_namespace(
     }
 }
 
-fn import_may_expose_module_namespace(names: &[(String, Option<String>)]) -> bool {
+fn import_may_expose_module_namespace(names: &[(Symbol, Option<Symbol>)]) -> bool {
     names.iter().any(|(module, _)| module == "builtins")
 }
 

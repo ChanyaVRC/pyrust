@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use pyrust_core::Symbol;
 use smallvec::SmallVec;
 
 use crate::value::Value;
@@ -60,8 +61,8 @@ pub struct FnCode {
     pub(crate) first_lineno: u32,
     /// Constant pool (literals used in the function body)
     pub(crate) consts: Vec<Value>,
-    /// Name pool (global variable names and attribute names)
-    pub(crate) names: Vec<String>,
+    /// Name pool (interned global variable names and attribute names)
+    pub(crate) names: Vec<Symbol>,
     /// Number of registers needed (locals + max temporaries)
     pub(crate) num_regs: u32,
     /// Number of iterator slots needed
@@ -80,7 +81,7 @@ pub struct FnCode {
     /// slot are candidates because a class-namespace miss falls back to that
     /// chain. Filled on first use (`__closure__` / `co_freevars` / `locals()`),
     /// never on the dispatch path.
-    pub(crate) free_var_candidates: std::cell::OnceCell<Vec<String>>,
+    pub(crate) free_var_candidates: std::cell::OnceCell<Vec<Symbol>>,
     /// True if this function body contains at least one `Yield` instruction.
     /// The VM creates a generator object instead of executing immediately.
     pub(crate) is_generator: bool,
@@ -116,7 +117,7 @@ pub struct FnCode {
     /// surface as the free-variable `NameError` instead (issue #2457).  `None`
     /// for every non-comp code object (and for a comp not directly enclosed by a
     /// function, where there are no enclosing locals to distinguish).
-    pub(crate) comp_enclosing_locals: Option<Rc<HashSet<String>>>,
+    pub(crate) comp_enclosing_locals: Option<Rc<HashSet<Symbol>>>,
     /// Per-instruction inline cache for `GetAttr` and `CallMethod`.
     ///
     /// Indexed by instruction position (`pc`) — same length as `insns`.
@@ -220,30 +221,30 @@ impl FnCode {
     /// chain.  The scan itself depends on nothing but the code object, so it is
     /// memoized — `locals()` in a nested function would otherwise re-walk every
     /// instruction on each call.
-    pub(crate) fn free_var_candidates(&self) -> &[String] {
+    pub(crate) fn free_var_candidates(&self) -> &[Symbol] {
         self.free_var_candidates.get_or_init(|| {
-            let mut seen: HashSet<String> = HashSet::new();
-            let mut names: Vec<String> = Vec::new();
+            let mut seen: HashSet<Symbol> = HashSet::new();
+            let mut names: Vec<Symbol> = Vec::new();
             collect_env_read_names(self, &mut seen, &mut names);
             // CPython reports `co_freevars` (and orders `__closure__` cells and
-            // the free-variable tail of `locals()`) sorted by name.
-            names.sort_unstable();
+            // the free-variable tail of `locals()`) sorted lexicographically by name.
+            names.sort_unstable_by_key(|sym| sym.as_str());
             names
         })
     }
 }
 
-fn collect_env_read_names(fncode: &FnCode, seen: &mut HashSet<String>, out: &mut Vec<String>) {
+fn collect_env_read_names(fncode: &FnCode, seen: &mut HashSet<Symbol>, out: &mut Vec<Symbol>) {
     for insn in &fncode.insns {
         let name_idx = match insn {
             Insn::LoadGlobal(_, idx) | Insn::LoadCell(_, idx) => *idx,
             Insn::LoadClassName(_, local, idx) if *local == crate::bytecode::NO_CLASS_LOCAL => *idx,
             _ => continue,
         };
-        if let Some(name) = fncode.names.get(name_idx as usize)
-            && seen.insert(name.clone())
+        if let Some(&name) = fncode.names.get(name_idx as usize)
+            && seen.insert(name)
         {
-            out.push(name.clone());
+            out.push(name);
         }
     }
     for proto in &fncode.fn_protos {

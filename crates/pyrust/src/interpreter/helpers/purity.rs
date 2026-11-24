@@ -192,7 +192,7 @@ fn is_pure_binding_target(
     local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
 ) -> bool {
     match target {
-        AssignTarget::Name(name) => local_names.contains_key(name),
+        AssignTarget::Name(name) => local_names.contains_key(name.as_str()),
         AssignTarget::Tuple(targets) => targets
             .iter()
             .all(|target| is_pure_binding_target(target, local_names)),
@@ -210,7 +210,7 @@ fn is_pure_aug_assign_target(
     op: crate::ast::BinaryOp,
     local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
 ) -> bool {
-    matches!(target, AssignTarget::Name(name) if local_names.contains_key(name))
+    matches!(target, AssignTarget::Name(name) if local_names.contains_key(name.as_str()))
         && !binop_may_raise(op)
 }
 

@@ -481,7 +481,7 @@ impl Parser {
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
-    fn expect_ident(&mut self, ctx: &str) -> Result<String> {
+    fn expect_ident(&mut self, ctx: &str) -> Result<pyrust_core::Symbol> {
         match self.current().cloned() {
             Some(Token::Ident(name)) => {
                 self.bump();

@@ -381,7 +381,7 @@ impl Compiler {
 fn collect_comp_target_names(target: &AssignTarget, out: &mut HashSet<String>) {
     match target {
         AssignTarget::Name(name) => {
-            out.insert(name.clone());
+            out.insert(name.to_string());
         }
         AssignTarget::Tuple(targets) => {
             for t in targets {
@@ -600,7 +600,7 @@ fn lambda_captures_in_expr(
                 let mut body_uses = HashSet::new();
                 collect_free_var_reads_in_expr(body, &mut body_uses);
                 for param in params {
-                    body_uses.remove(&param.name);
+                    body_uses.remove(param.name.as_str());
                 }
                 for name in body_uses {
                     if local_index.contains_key(&name) {

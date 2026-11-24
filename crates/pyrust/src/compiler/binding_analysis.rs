@@ -7,7 +7,7 @@
 fn collect_written_target(target: &AssignTarget, names: &mut HashSet<String>) {
     match target {
         AssignTarget::Name(name) => {
-            names.insert(name.clone());
+            names.insert(name.to_string());
         }
         AssignTarget::Tuple(targets) => {
             for target in targets {

@@ -271,7 +271,7 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
             collect_free_var_reads_in_expr(body, &mut body_uses);
             collect_transitive_free_vars_in_expr(body, &mut body_uses);
             for p in params {
-                body_uses.remove(&p.name);
+                body_uses.remove(p.name.as_str());
             }
             uses.extend(body_uses);
 

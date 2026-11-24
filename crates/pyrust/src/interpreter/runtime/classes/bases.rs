@@ -224,7 +224,7 @@ impl Interpreter {
         class: &Rc<RefCell<PyClass>>,
         regs: &RegSlice,
         kwarg_base: crate::bytecode::Reg,
-        class_kwarg_names: &[String],
+        class_kwarg_names: &[pyrust_core::Symbol],
     ) -> Result<()> {
         let kwarg_args: ExpandedArgBuf = class_kwarg_names
             .iter()
@@ -232,7 +232,7 @@ impl Interpreter {
             .map(|(i, key)| {
                 let reg = (kwarg_base as usize + i) as crate::bytecode::Reg;
                 ExpandedCallArg {
-                    name: Some(key.clone()),
+                    name: Some(key.to_string()),
                     value: regs[reg as usize].clone(),
                 }
             })

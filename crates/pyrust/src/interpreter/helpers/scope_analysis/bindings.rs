@@ -5,7 +5,7 @@ pub(crate) fn collect_local_names(
     nonlocal_names: &HashSet<String>,
 ) -> indexmap::IndexSet<String> {
     let mut names: indexmap::IndexSet<String> =
-        params.iter().map(|param| param.name.clone()).collect();
+        params.iter().map(|param| param.name.to_string()).collect();
     collect_local_names_from_block(body, &mut names, global_names, nonlocal_names);
     names
 }
@@ -35,16 +35,18 @@ fn collect_local_names_from_block(
                 stmt.visit_evaluated_exprs(&mut |expr| {
                     collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names)
                 });
-                if !global_names.contains(name) && !nonlocal_names.contains(name) {
-                    names.insert(name.clone());
+                if !global_names.contains(name.as_str()) && !nonlocal_names.contains(name.as_str())
+                {
+                    names.insert(name.to_string());
                 }
             }
             stmt @ Stmt::Class { name, .. } => {
                 stmt.visit_evaluated_exprs(&mut |expr| {
                     collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names)
                 });
-                if !global_names.contains(name) && !nonlocal_names.contains(name) {
-                    names.insert(name.clone());
+                if !global_names.contains(name.as_str()) && !nonlocal_names.contains(name.as_str())
+                {
+                    names.insert(name.to_string());
                 }
             }
             Stmt::Global(_) | Stmt::Nonlocal(_) => {}
@@ -52,9 +54,13 @@ fn collect_local_names_from_block(
                 names: import_names,
             } => {
                 for (module, alias) in import_names {
-                    let bound = alias
-                        .clone()
-                        .unwrap_or_else(|| module.split('.').next().unwrap_or(module).to_string());
+                    let bound = alias.map(|s| s.to_string()).unwrap_or_else(|| {
+                        module
+                            .split('.')
+                            .next()
+                            .unwrap_or(module.as_str())
+                            .to_string()
+                    });
                     if !global_names.contains(&bound) && !nonlocal_names.contains(&bound) {
                         names.insert(bound);
                     }
@@ -68,9 +74,11 @@ fn collect_local_names_from_block(
                     if attr_name == "*" {
                         continue;
                     }
-                    let bound = alias.clone().unwrap_or_else(|| attr_name.clone());
-                    if !global_names.contains(&bound) && !nonlocal_names.contains(&bound) {
-                        names.insert(bound);
+                    let bound = alias.unwrap_or(*attr_name);
+                    if !global_names.contains(bound.as_str())
+                        && !nonlocal_names.contains(bound.as_str())
+                    {
+                        names.insert(bound.to_string());
                     }
                 }
             }
@@ -83,8 +91,9 @@ fn collect_local_names_from_block(
                 // a local slot.  At function scope the bare form causes UnboundLocalError
                 // on read (matching CPython); at class scope the slot is allocated but
                 // never stored via RecordClassStore so it does not appear in vars(C).
-                if !global_names.contains(name) && !nonlocal_names.contains(name) {
-                    names.insert(name.clone());
+                if !global_names.contains(name.as_str()) && !nonlocal_names.contains(name.as_str())
+                {
+                    names.insert(name.to_string());
                 }
                 // Walrus targets inside a comprehension on the RHS escape to this
                 // function's scope (PEP 572).
@@ -213,11 +222,11 @@ fn collect_local_names_from_block(
                     if let Some(kind) = &handler.kind {
                         collect_walrus_targets_in_expr(kind, names, global_names, nonlocal_names);
                     }
-                    if let Some(name) = &handler.name
-                        && !global_names.contains(name)
-                        && !nonlocal_names.contains(name)
+                    if let Some(name) = handler.name
+                        && !global_names.contains(name.as_str())
+                        && !nonlocal_names.contains(name.as_str())
                     {
-                        names.insert(name.clone());
+                        names.insert(name.to_string());
                     }
                     collect_local_names_from_block(
                         &handler.body,
@@ -268,8 +277,9 @@ fn collect_local_names_from_block(
             // The type params (T) are NOT local names — they are temporaries
             // visible only during RHS evaluation and do not escape to the scope.
             stmt @ Stmt::TypeAlias { name, .. } => {
-                if !global_names.contains(name) && !nonlocal_names.contains(name) {
-                    names.insert(name.clone());
+                if !global_names.contains(name.as_str()) && !nonlocal_names.contains(name.as_str())
+                {
+                    names.insert(name.to_string());
                 }
                 stmt.visit_evaluated_exprs(&mut |expr| {
                     collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names)
@@ -291,8 +301,8 @@ fn collect_pattern_names(
     match pattern {
         Pattern::Wildcard | Pattern::Literal(_) | Pattern::Value(_) => {}
         Pattern::Capture(name) => {
-            if !global_names.contains(name) && !nonlocal_names.contains(name) {
-                names.insert(name.clone());
+            if !global_names.contains(name.as_str()) && !nonlocal_names.contains(name.as_str()) {
+                names.insert(name.to_string());
             }
         }
         Pattern::Or(alts) => {
@@ -310,10 +320,10 @@ fn collect_pattern_names(
                 collect_pattern_names(val_pat, names, global_names, nonlocal_names);
             }
             if let Some(rest_name) = rest
-                && !global_names.contains(rest_name)
-                && !nonlocal_names.contains(rest_name)
+                && !global_names.contains(rest_name.as_str())
+                && !nonlocal_names.contains(rest_name.as_str())
             {
-                names.insert(rest_name.clone());
+                names.insert(rest_name.to_string());
             }
         }
         Pattern::Class {
@@ -328,8 +338,8 @@ fn collect_pattern_names(
         }
         Pattern::As { pattern, name } => {
             collect_pattern_names(pattern, names, global_names, nonlocal_names);
-            if !global_names.contains(name) && !nonlocal_names.contains(name) {
-                names.insert(name.clone());
+            if !global_names.contains(name.as_str()) && !nonlocal_names.contains(name.as_str()) {
+                names.insert(name.to_string());
             }
         }
     }
@@ -357,8 +367,8 @@ fn collect_assign_target_names(
 ) {
     match target {
         AssignTarget::Name(n) => {
-            if !global_names.contains(n) && !nonlocal_names.contains(n) {
-                names.insert(n.clone());
+            if !global_names.contains(n.as_str()) && !nonlocal_names.contains(n.as_str()) {
+                names.insert(n.to_string());
             }
         }
         AssignTarget::Tuple(targets) => {
@@ -384,8 +394,8 @@ fn collect_delete_target_names(
 ) {
     match target {
         Expr::Var(name, _) => {
-            if !global_names.contains(name) && !nonlocal_names.contains(name) {
-                names.insert(name.clone());
+            if !global_names.contains(name.as_str()) && !nonlocal_names.contains(name.as_str()) {
+                names.insert(name.to_string());
             }
         }
         Expr::Tuple(items) | Expr::List(items) => {

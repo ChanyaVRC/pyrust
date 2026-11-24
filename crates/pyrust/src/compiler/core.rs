@@ -5,7 +5,7 @@ impl Compiler {
         cell_vars: Vec<CellVar>,
     ) -> Self {
         let n = local_index.len();
-        let cell_set: HashSet<String> = cell_vars.into_iter().collect();
+        let cell_set: HashSet<Symbol> = cell_vars.into_iter().collect();
         // base_temp must cover ALL local_index slots (including cell vars) so
         // that temp registers never overlap with local-variable slot numbers.
         let base_temp = Reg::try_from(n).unwrap_or(Reg::MAX);
@@ -117,8 +117,8 @@ impl Compiler {
         }
     }
 
-    fn intern_name(&mut self, name: &str) -> u16 {
-        if let Some(&idx) = self.name_map.get(name) {
+    fn intern_symbol(&mut self, sym: Symbol) -> u16 {
+        if let Some(&idx) = self.name_map.get(&sym) {
             return idx;
         }
         if self.names.len() >= u16::MAX as usize {
@@ -129,9 +129,13 @@ impl Compiler {
             return 0;
         }
         let idx = self.names.len() as u16;
-        self.names.push(name.to_string());
-        self.name_map.insert(name.to_string(), idx);
+        self.names.push(sym);
+        self.name_map.insert(sym, idx);
         idx
+    }
+
+    fn intern_name(&mut self, name: &str) -> u16 {
+        self.intern_symbol(Symbol::intern(name))
     }
 
     fn intern_const(&mut self, val: Value) -> u16 {
@@ -300,7 +304,7 @@ impl Compiler {
 
     /// True if `name` is a cell variable (lives in env, not registers).
     fn is_cell(&self, name: &str) -> bool {
-        self.cell_vars.contains(name)
+        !self.cell_vars.is_empty() && self.cell_vars.contains(&Symbol::intern(name))
     }
 
     /// True when a non-register name is guaranteed to resolve to a

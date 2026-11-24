@@ -7,7 +7,7 @@ fn collect_cell_vars(body: &[Stmt], local_index: &HashMap<String, Reg>) -> Vec<C
     let mut cells: HashSet<String> = HashSet::new();
     collect_cell_vars_in(body, local_index, false, &mut cells);
     collect_lambda_captures(body, local_index, false, &mut cells);
-    cells.into_iter().collect()
+    cells.into_iter().map(Symbol::from).collect()
 }
 
 /// Like `collect_cell_vars` but called when `local_index` is a class body's
@@ -21,7 +21,7 @@ fn collect_cell_vars_for_class_body(
     let mut cells: HashSet<String> = HashSet::new();
     collect_cell_vars_in(body, local_index, true, &mut cells);
     collect_lambda_captures(body, local_index, true, &mut cells);
-    cells.into_iter().collect()
+    cells.into_iter().map(Symbol::from).collect()
 }
 
 /// `is_class_scope`: when true, the names in `local_index` belong to a class
@@ -176,7 +176,7 @@ fn collect_cell_vars_in(
                             ..
                         } = stmt
                         {
-                            class_aug_targets.insert(n.clone());
+                            class_aug_targets.insert(n.to_string());
                         }
                     }
                     let mut body_uses: HashSet<String> = HashSet::new();
@@ -280,7 +280,7 @@ fn collect_nonlocal_names_through_classes(body: &[Stmt], out: &mut HashSet<Strin
     for stmt in body {
         match stmt {
             Stmt::Nonlocal(names) => {
-                out.extend(names.iter().cloned());
+                out.extend(names.iter().map(|s| s.to_string()));
             }
             Stmt::Class {
                 body: class_body, ..
@@ -358,7 +358,7 @@ fn collect_transitive_global_names(body: &[Stmt], out: &mut HashSet<String>) {
     for stmt in body {
         match stmt {
             Stmt::Global(names) => {
-                out.extend(names.iter().cloned());
+                out.extend(names.iter().map(|s| s.to_string()));
             }
             Stmt::Def {
                 body: nested_body, ..
@@ -445,7 +445,7 @@ fn collect_global_names_via_class_chain_into(body: &[Stmt], out: &mut HashSet<St
     for stmt in body {
         match stmt {
             Stmt::Global(names) => {
-                out.extend(names.iter().cloned());
+                out.extend(names.iter().map(|s| s.to_string()));
             }
             Stmt::Class { body: nested, .. } => {
                 collect_global_names_via_class_chain_into(nested, out);

@@ -38,7 +38,7 @@ fn versioned(input: Vec<Insn>, constants: &[Value]) -> IntLoopVersioningResult {
 fn versioned_with_names(
     input: Vec<Insn>,
     constants: &[Value],
-    names: &[String],
+    names: &[pyrust_core::Symbol],
 ) -> IntLoopVersioningResult {
     let mut num_regs = 16;
     let mut constants = constants.to_vec();
@@ -902,8 +902,10 @@ fn const_range_loop(args: &[u16], body: Vec<Insn>) -> Vec<Insn> {
     insns
 }
 
-fn range_names() -> Vec<String> {
-    vec!["range".to_string(), "total".to_string(), "v".to_string()]
+fn range_names() -> Vec<pyrust_core::Symbol> {
+    ["range", "total", "v"]
+        .map(pyrust_core::Symbol::intern)
+        .to_vec()
 }
 
 /// `for v in range(<args>): total += 1` — the shape
@@ -1236,7 +1238,9 @@ fn closed_form_declines_a_shadowed_range_name() {
     // The producing call resolves some other global. A rebound `range` would
     // still be caught by the runtime guard, but the pass has no reason to
     // propose a triple for a name it cannot recognise.
-    let names = vec!["shadow".to_string(), "total".to_string(), "v".to_string()];
+    let names = ["shadow", "total", "v"]
+        .map(pyrust_core::Symbol::intern)
+        .to_vec();
 
     let result = versioned_with_names(counted_loop(&[0]), &[Value::int(1000)], &names);
 
@@ -1549,7 +1553,7 @@ fn sync_deferral_declines_two_names_from_one_scratch_register() {
         Insn::CmpJumpIfTrueConst(0, BinaryOp::Lt, 0, -8),
         Insn::Return(1),
     ];
-    let names = ["a".to_string(), "c".to_string()];
+    let names = ["a", "c"].map(pyrust_core::Symbol::intern);
 
     let result = versioned_with_names(
         input.clone(),
@@ -1577,7 +1581,7 @@ fn sync_deferral_accepts_a_source_that_survives_to_the_exit() {
         Insn::CmpJumpIfTrueConst(0, BinaryOp::Lt, 0, -5),
         Insn::Return(1),
     ];
-    let names = ["i".to_string(), "total".to_string()];
+    let names = ["i", "total"].map(pyrust_core::Symbol::intern);
 
     let result = versioned_with_names(input.clone(), &[Value::int(40)], &names);
 
@@ -1610,7 +1614,7 @@ fn a_continue_reentered_header_exit_flushes_the_deferred_syncs() {
         Insn::CmpJumpIfTrueConst(0, BinaryOp::Lt, 0, -8),
         Insn::Return(1),
     ];
-    let names = ["i".to_string(), "acc".to_string()];
+    let names = ["i", "acc"].map(pyrust_core::Symbol::intern);
 
     let result = versioned_with_names(
         input,
@@ -1639,8 +1643,10 @@ fn a_continue_reentered_header_exit_flushes_the_deferred_syncs() {
 
 // ── `while i < len(seq):` headers ─────────────────────────────────────────
 
-fn len_names() -> Vec<String> {
-    ["len", "total", "i"].map(String::from).to_vec()
+fn len_names() -> Vec<pyrust_core::Symbol> {
+    ["len", "total", "i"]
+        .map(pyrust_core::Symbol::intern)
+        .to_vec()
 }
 
 /// The module-scope shape the compiler emits for
@@ -1994,7 +2000,9 @@ fn len_header_declines_when_the_comparison_ignores_the_length() {
 
 #[test]
 fn len_header_declines_for_a_non_len_global() {
-    let names = ["size", "total", "i"].map(String::from).to_vec();
+    let names = ["size", "total", "i"]
+        .map(pyrust_core::Symbol::intern)
+        .to_vec();
     let input = len_header_loop(len_header_body());
     assert_eq!(
         versioned_with_names(input.clone(), &[Value::int(1)], &names).insns,

@@ -426,7 +426,7 @@ pub(crate) fn compiler_owned_frame_local_keys(view: &VmFrameView) -> Vec<PyKey> 
     }
 
     if let Some((code, own_env, defining_env)) = frame_cell_context(view) {
-        names.extend(code.cell_vars.iter().cloned());
+        names.extend(code.cell_vars.iter().map(|s| s.to_string()));
 
         let declared_global = view
             .function
@@ -437,11 +437,12 @@ pub(crate) fn compiler_owned_frame_local_keys(view: &VmFrameView) -> Vec<PyKey> 
                     .as_ref()
                     .map(|env| Rc::clone(&env.borrow().global_names))
             });
-        for candidate in code.free_var_candidates() {
-            if view.local_index.contains_key(candidate)
+        for &candidate in code.free_var_candidates() {
+            let cand_str = candidate.as_str();
+            if view.local_index.contains_key(cand_str)
                 || declared_global
                     .as_ref()
-                    .is_some_and(|globals| globals.contains(candidate))
+                    .is_some_and(|globals| globals.contains(cand_str))
             {
                 continue;
             }
@@ -458,10 +459,10 @@ pub(crate) fn compiler_owned_frame_local_keys(view: &VmFrameView) -> Vec<PyKey> 
                 if parent.is_none() {
                     break;
                 }
-                let owns_name = bindings.local_names.contains(candidate);
+                let owns_name = bindings.local_names.contains(cand_str);
                 drop(bindings);
                 if owns_name {
-                    names.push(candidate.clone());
+                    names.push(cand_str.to_owned());
                     break;
                 }
                 current = parent;
@@ -519,7 +520,7 @@ fn merge_frame_cells_into_dict_slow(view: &VmFrameView, dict: &mut PyDict) {
         && let Some(env) = own_env.as_ref()
     {
         let mut names: smallvec::SmallVec<[&str; 4]> =
-            code.cell_vars.iter().map(String::as_str).collect();
+            code.cell_vars.iter().map(|s| s.as_str()).collect();
         names.sort_unstable();
         let bindings = env.borrow();
         for name in names {
@@ -600,8 +601,10 @@ fn merge_frame_cells_into_dict_slow(view: &VmFrameView, dict: &mut PyDict) {
                 // A name this frame binds itself is a local or a cell, never
                 // free.  Checked here rather than up front because both lookups
                 // hash the name, and only a resolved candidate reaches them.
-                if view.local_index.contains_key(name)
-                    || declared_global.as_ref().is_some_and(|g| g.contains(name))
+                if view.local_index.contains_key(name.as_str())
+                    || declared_global
+                        .as_ref()
+                        .is_some_and(|g| g.contains(name.as_str()))
                 {
                     continue;
                 }

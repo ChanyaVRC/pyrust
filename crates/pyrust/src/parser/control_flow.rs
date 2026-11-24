@@ -150,14 +150,18 @@ impl Parser {
         }
     }
 
-    fn parse_dotted_name(&mut self) -> Result<String> {
+    fn parse_dotted_name(&mut self) -> Result<pyrust_core::Symbol> {
         let first = self.expect_ident("module name")?;
-        let mut parts = vec![first];
+        if !self.is(&Token::Dot) {
+            return Ok(first);
+        }
+        let mut dotted = first.as_str().to_owned();
         while self.is(&Token::Dot) {
             self.bump();
-            parts.push(self.expect_ident("module name after '.'")?)
+            dotted.push('.');
+            dotted.push_str(self.expect_ident("module name after '.'")?.as_str());
         }
-        Ok(parts.join("."))
+        Ok(pyrust_core::Symbol::intern(&dotted))
     }
 
     fn parse_import(&mut self) -> Result<Stmt> {
@@ -198,17 +202,19 @@ impl Parser {
             }
         }
         // The module name is optional when dots are present (`from . import x`).
-        let base = if !dots.is_empty() && self.is(&Token::Import) {
-            String::new()
-        } else {
+        let module = if dots.is_empty() {
             self.parse_dotted_name()?
+        } else if self.is(&Token::Import) {
+            pyrust_core::Symbol::intern(&dots)
+        } else {
+            dots.push_str(self.parse_dotted_name()?.as_str());
+            pyrust_core::Symbol::intern(&dots)
         };
-        let module = format!("{}{}", dots, base);
         self.expect(&Token::Import)?;
         let mut names = Vec::new();
         if self.is(&Token::Star) {
             self.bump();
-            names.push(("*".to_string(), None));
+            names.push((pyrust_core::Symbol::intern("*"), None));
         } else {
             let paren = self.is(&Token::LParen);
             if paren {

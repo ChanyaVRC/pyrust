@@ -27,11 +27,11 @@ impl Compiler {
         // (resp. `... and nonlocal`).  This conflict wins over the later
         // ordering / annotation / no-binding diagnostics, so check it first.
         for p in params {
-            if inner_global.contains(&p.name) {
+            if inner_global.contains(p.name.as_str()) {
                 self.set_syntax_error(&format!("name '{}' is parameter and global", p.name));
                 return None;
             }
-            if inner_nonlocal.contains(&p.name) {
+            if inner_nonlocal.contains(p.name.as_str()) {
                 self.set_syntax_error(&format!("name '{}' is parameter and nonlocal", p.name));
                 return None;
             }
@@ -45,8 +45,8 @@ impl Compiler {
         let mut inner_index: HashMap<String, Reg> = HashMap::new();
         let mut slot: Reg = 0;
         for param in params {
-            if inner_local.contains(&param.name) {
-                inner_index.insert(param.name.clone(), slot);
+            if inner_local.contains(param.name.as_str()) {
+                inner_index.insert(param.name.to_string(), slot);
                 slot += 1;
             }
         }
@@ -238,11 +238,11 @@ impl Compiler {
         // Collect annotation keys: annotated param names (in declaration order) then
         // "return" if there is a return annotation.  These are parallel to the
         // annotation register window emitted just before MakeFunction.
-        let annotation_keys: SmallVec<[String; 4]> = params
+        let annotation_keys: SmallVec<[Symbol; 4]> = params
             .iter()
             .filter(|p| p.annotation.is_some())
-            .map(|p| p.name.clone())
-            .chain(return_annotation.map(|_| "return".to_string()))
+            .map(|p| p.name)
+            .chain(return_annotation.map(|_| Symbol::intern("return")))
             .collect();
         // Extract docstring: if the first statement in the body is a bare
         // string literal, capture it as the function's __doc__ (CPython parity).
@@ -251,7 +251,7 @@ impl Compiler {
             _ => None,
         };
         let param_spec = Rc::new(FnParamSpec {
-            names: params.iter().map(|p| p.name.clone()).collect(),
+            names: params.iter().map(|p| p.name).collect(),
             has_default: params.iter().map(|p| p.default.is_some()).collect(),
             is_args: params.iter().map(|p| p.is_args).collect(),
             is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),

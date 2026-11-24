@@ -16,7 +16,7 @@ fn collect_free_var_reads_in_stmts(stmts: &[Stmt], uses: &mut HashSet<String>) {
 fn collect_aug_assign_name_reads(target: &AssignTarget, uses: &mut HashSet<String>) {
     match target {
         AssignTarget::Name(name) => {
-            uses.insert(name.clone());
+            uses.insert(name.to_string());
         }
         AssignTarget::Tuple(targets) => {
             for target in targets {
@@ -207,7 +207,7 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
 fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
     match expr {
         Expr::Var(n, _) => {
-            uses.insert(n.clone());
+            uses.insert(n.to_string());
         }
         Expr::Binary { left, right, .. } => {
             collect_free_var_reads_in_expr(left, uses);
@@ -297,7 +297,7 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
             let mut body_uses = HashSet::new();
             collect_free_var_reads_in_expr(body, &mut body_uses);
             for parameter in params {
-                body_uses.remove(&parameter.name);
+                body_uses.remove(parameter.name.as_str());
             }
             uses.extend(body_uses);
         }
@@ -343,7 +343,7 @@ fn merge_lexical_free_var_candidates(
         .free_var_candidates
         .get_mut()
         .expect("free-variable candidates initialized above");
-    free_var_candidates.extend(lexical_free_names);
-    free_var_candidates.sort_unstable();
+    free_var_candidates.extend(lexical_free_names.into_iter().map(Symbol::from));
+    free_var_candidates.sort_unstable_by_key(|sym| sym.as_str());
     free_var_candidates.dedup();
 }

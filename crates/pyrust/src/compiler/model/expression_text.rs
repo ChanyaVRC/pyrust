@@ -44,7 +44,7 @@ fn py_repr_str(s: &str) -> String {
 /// (e.g. `x: 'Foo'` → `"'Foo'"`), consistent with CPython 3.12 behaviour.
 fn stringify_annotation(expr: &Expr) -> String {
     match expr {
-        Expr::Var(name, _) => name.clone(),
+        Expr::Var(name, _) => name.to_string(),
         Expr::None => "None".to_string(),
         Expr::Ellipsis => "...".to_string(),
         Expr::Bool(b) => if *b { "True" } else { "False" }.to_string(),

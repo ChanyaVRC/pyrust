@@ -5,12 +5,12 @@ fn pattern_bound_names(pat: &Pattern) -> HashSet<String> {
     match pat {
         Pattern::Capture(name) => {
             let mut s = HashSet::new();
-            s.insert(name.clone());
+            s.insert(name.to_string());
             s
         }
         Pattern::As { pattern, name } => {
             let mut s = pattern_bound_names(pattern);
-            s.insert(name.clone());
+            s.insert(name.to_string());
             s
         }
         Pattern::Sequence(elements) => {
@@ -26,7 +26,7 @@ fn pattern_bound_names(pat: &Pattern) -> HashSet<String> {
                 s.extend(pattern_bound_names(val_pat));
             }
             if let Some(rest) = rest_name {
-                s.insert(rest.clone());
+                s.insert(rest.to_string());
             }
             s
         }

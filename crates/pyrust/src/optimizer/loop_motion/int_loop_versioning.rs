@@ -250,7 +250,7 @@ struct ClosedForm {
 fn traced_const_range_bounds(
     insns: &[Insn],
     consts: &[Value],
-    names: &[String],
+    names: &[pyrust_core::Symbol],
     reaching_consts: &HashMap<(usize, Reg), u16>,
     head: usize,
     slot: u8,
@@ -279,7 +279,7 @@ fn traced_const_range_bounds(
             insns[i],
             Insn::LoadGlobal(dst, name_idx)
                 if dst == base
-                    && names.get(usize::from(name_idx)).map(String::as_str) == Some("range")
+                    && names.get(usize::from(name_idx)).map(|s| s.as_str()) == Some("range")
         )
     })?;
 
@@ -361,7 +361,7 @@ fn traced_const_range_bounds(
 fn closed_form_for(
     insns: &[Insn],
     consts: &[Value],
-    names: &[String],
+    names: &[pyrust_core::Symbol],
     reaching_consts: &HashMap<(usize, Reg), u16>,
     head: usize,
     back: usize,
@@ -589,7 +589,7 @@ fn classify_int_loop_region_insn(insn: &Insn) -> Option<IntLoopRegionInsn> {
 fn pass_int_loop_version(
     insns: Vec<Insn>,
     consts: &mut Vec<Value>,
-    names: &[String],
+    names: &[pyrust_core::Symbol],
     num_locals: u32,
     num_regs: &mut u32,
 ) -> IntLoopVersioningResult {
@@ -934,7 +934,7 @@ fn pass_int_loop_version(
         let Insn::LoadGlobal(callee, name_idx) = insns[h] else {
             return None;
         };
-        if names.get(usize::from(name_idx)).map(String::as_str) != Some("len") {
+        if names.get(usize::from(name_idx)).map(|s| s.as_str()) != Some("len") {
             return None;
         }
         // The call convention places the sole argument at `callee + 1`.  Both

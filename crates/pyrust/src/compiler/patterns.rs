@@ -555,7 +555,7 @@ impl Compiler {
         subj: Reg,
         cls: &Expr,
         positional: &[Pattern],
-        kwargs: &[(String, Pattern)],
+        kwargs: &[(Symbol, Pattern)],
         fail_patches: &mut Vec<usize>,
     ) {
         // isinstance(subj, cls) check must come FIRST so that attribute

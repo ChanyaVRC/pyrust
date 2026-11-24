@@ -74,7 +74,7 @@ enum ExceptAsVarDel {
 
 struct Compiler {
     local_index: Rc<HashMap<String, Reg>>,
-    cell_vars: HashSet<String>,
+    cell_vars: HashSet<Symbol>,
     /// Names declared `nonlocal` in this function body (issue #2339).  A
     /// `nonlocal x` read/write resolves to an enclosing function scope's cell,
     /// so — like `cell_vars` — it can use the dedicated `LoadCell`/`StoreCell`
@@ -122,8 +122,8 @@ struct Compiler {
     qualname: std::sync::Arc<str>,
     consts: Vec<Value>,
     const_index: HashMap<crate::value::PyKey, u16>,
-    names: Vec<String>,
-    name_map: HashMap<String, u16>,
+    names: Vec<Symbol>,
+    name_map: HashMap<Symbol, u16>,
     next_temp: Reg,
     base_temp: Reg,
     iter_depth: u8,
@@ -250,7 +250,7 @@ struct Compiler {
     /// at runtime to decide whether an unbound read is a local of that frame
     /// (`UnboundLocalError`) or a free variable owned by a grandparent scope
     /// (`NameError`) — see issue #2457.  `None` outside an inlined comp.
-    comp_enclosing_locals: Option<Rc<HashSet<String>>>,
+    comp_enclosing_locals: Option<Rc<HashSet<Symbol>>>,
     /// PEP 657 caret span covering an inlined comprehension (`[...]` / `{...}`),
     /// attached to its outermost `.0` iteration (`GetIter`/`ForIter` or
     /// `async for` await drive) so exceptions from iterating the comprehension

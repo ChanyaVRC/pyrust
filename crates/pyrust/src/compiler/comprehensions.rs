@@ -102,7 +102,7 @@ impl Compiler {
         (body, body_linenos) = wrap_filters(&clauses[0], body, body_linenos);
         body = vec![Stmt::For {
             target: clauses[0].target.clone(),
-            iter: Expr::Var(IT_PARAM.to_string(), None),
+            iter: Expr::Var(Symbol::intern(IT_PARAM), None),
             body,
             else_branch: None,
             body_linenos,
@@ -198,7 +198,7 @@ impl Compiler {
         const IT_PARAM: &str = ".0";
 
         let params = vec![FunctionParam {
-            name: IT_PARAM.to_string(),
+            name: Symbol::intern(IT_PARAM),
             default: None,
             annotation: None,
             is_args: false,
@@ -214,8 +214,8 @@ impl Compiler {
         let mut inner_index: HashMap<String, Reg> = HashMap::new();
         let mut slot: Reg = 0;
         for param in &params {
-            if scope.locals.contains(&param.name) {
-                inner_index.insert(param.name.clone(), slot);
+            if scope.locals.contains(param.name.as_str()) {
+                inner_index.insert(param.name.to_string(), slot);
                 slot += 1;
             }
         }
@@ -275,7 +275,9 @@ impl Compiler {
         sub.comp_enclosing_locals = if self.is_inlined_comp {
             self.comp_enclosing_locals.clone()
         } else if self.is_function_scope {
-            Some(Rc::new(self.local_index.keys().cloned().collect()))
+            Some(Rc::new(
+                self.local_index.keys().map(|k| Symbol::intern(k)).collect(),
+            ))
         } else {
             None
         };
@@ -314,7 +316,7 @@ impl Compiler {
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
         let display = format!("<{}>", comp_name);
         let param_spec = Rc::new(FnParamSpec {
-            names: params.iter().map(|p| p.name.clone()).collect(),
+            names: params.iter().map(|p| p.name).collect(),
             has_default: params.iter().map(|p| p.default.is_some()).collect(),
             is_args: params.iter().map(|p| p.is_args).collect(),
             is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
@@ -409,12 +411,13 @@ impl Compiler {
         let iter_reg = self.compile_expr(&clauses[0].iter);
 
         // Build the innermost statement: .acc.append(elt)
+        let acc_sym = Symbol::intern(ACC_NAME);
         let innermost = Stmt::Expr(Expr::Call {
             span: None,
             lineno: 0,
             func: Box::new(Expr::Attr {
-                target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
-                name: "append".to_string(),
+                target: Box::new(Expr::Var(acc_sym, None)),
+                name: Symbol::intern("append"),
                 span: None,
             }),
             args: vec![CallArg {
@@ -427,11 +430,11 @@ impl Compiler {
 
         // Build loop nest around the innermost statement.
         let mut fn_body = vec![Stmt::Assign(
-            AssignTarget::Name(ACC_NAME.to_string()),
+            AssignTarget::Name(acc_sym),
             Expr::List(vec![]),
         )];
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
-        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string(), None))));
+        fn_body.push(Stmt::Return(Some(Expr::Var(acc_sym, None))));
 
         // Pre-size the accumulator when the produced element count is exactly the
         // source length: a single clause with no `if` condition and not async.
@@ -475,18 +478,19 @@ impl Compiler {
         let iter_reg = self.compile_expr(&clauses[0].iter);
 
         // Build the innermost statement: .acc[key] = val
+        let acc_sym = Symbol::intern(ACC_NAME);
         let innermost = Stmt::IndexAssign {
-            target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
+            target: Box::new(Expr::Var(acc_sym, None)),
             index: Box::new(key.clone()),
             expr: val.clone(),
         };
 
         let mut fn_body = vec![Stmt::Assign(
-            AssignTarget::Name(ACC_NAME.to_string()),
+            AssignTarget::Name(acc_sym),
             Expr::Dict(vec![]),
         )];
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
-        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string(), None))));
+        fn_body.push(Stmt::Return(Some(Expr::Var(acc_sym, None))));
 
         self.compile_collection_comp_impl(iter_reg, fn_body, "dictcomp", is_async, false, comp_span)
     }
@@ -595,12 +599,13 @@ impl Compiler {
         let iter_reg = self.compile_expr(&clauses[0].iter);
 
         // Build the innermost statement: .acc.add(elt)
+        let acc_sym = Symbol::intern(ACC_NAME);
         let innermost = Stmt::Expr(Expr::Call {
             span: None,
             lineno: 0,
             func: Box::new(Expr::Attr {
-                target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
-                name: "add".to_string(),
+                target: Box::new(Expr::Var(acc_sym, None)),
+                name: Symbol::intern("add"),
                 span: None,
             }),
             args: vec![CallArg {
@@ -615,15 +620,12 @@ impl Compiler {
         let acc_init = Expr::Call {
             span: None,
             lineno: 0,
-            func: Box::new(Expr::Var("set".to_string(), None)),
+            func: Box::new(Expr::Var(Symbol::intern("set"), None)),
             args: vec![],
         };
-        let mut fn_body = vec![Stmt::Assign(
-            AssignTarget::Name(ACC_NAME.to_string()),
-            acc_init,
-        )];
+        let mut fn_body = vec![Stmt::Assign(AssignTarget::Name(acc_sym), acc_init)];
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
-        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string(), None))));
+        fn_body.push(Stmt::Return(Some(Expr::Var(acc_sym, None))));
 
         self.compile_collection_comp_impl(iter_reg, fn_body, "setcomp", is_async, false, comp_span)
     }
@@ -705,7 +707,7 @@ impl Compiler {
 
         // Parameter spec for the anonymous generator function.
         let params = vec![FunctionParam {
-            name: IT_PARAM.to_string(),
+            name: Symbol::intern(IT_PARAM),
             default: None,
             annotation: None,
             is_args: false,
@@ -725,8 +727,8 @@ impl Compiler {
         let mut inner_index: HashMap<String, Reg> = HashMap::new();
         let mut slot: Reg = 0;
         for param in &params {
-            if scope.locals.contains(&param.name) {
-                inner_index.insert(param.name.clone(), slot);
+            if scope.locals.contains(param.name.as_str()) {
+                inner_index.insert(param.name.to_string(), slot);
                 slot += 1;
             }
         }
@@ -803,7 +805,7 @@ impl Compiler {
         let proto_idx = self.fn_protos.len() as u16;
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
         let param_spec = Rc::new(FnParamSpec {
-            names: params.iter().map(|p| p.name.clone()).collect(),
+            names: params.iter().map(|p| p.name).collect(),
             has_default: params.iter().map(|p| p.default.is_some()).collect(),
             is_args: params.iter().map(|p| p.is_args).collect(),
             is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),

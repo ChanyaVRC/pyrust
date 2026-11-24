@@ -3,13 +3,14 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use pyrust_core::Symbol;
 use smallvec::SmallVec;
 
 use super::{FnCode, Reg};
 
 /// Identifies a named variable that is captured by a nested function via `nonlocal`.
 /// These live in the env (not registers) so nested closures can share them.
-pub type CellVar = String;
+pub type CellVar = Symbol;
 
 /// Static parameter metadata for a function prototype.  Shared via `Rc` so that
 /// `MakeFunction` (which may run on every loop iteration) pays only a refcount
@@ -19,7 +20,7 @@ pub type CellVar = String;
 /// with six or fewer parameters.
 #[derive(Debug, Clone)]
 pub struct FnParamSpec {
-    pub names: SmallVec<[String; 6]>,
+    pub names: SmallVec<[Symbol; 6]>,
     pub has_default: SmallVec<[bool; 6]>,
     pub is_args: SmallVec<[bool; 6]>,
     pub is_kwargs: SmallVec<[bool; 6]>,
@@ -73,7 +74,7 @@ pub struct FnProto {
     /// Empty when the function has no annotations.
     /// `SmallVec<[_; 4]>` avoids heap allocation for the common case of
     /// functions with four or fewer annotated parameters.
-    pub annotation_keys: SmallVec<[String; 4]>,
+    pub annotation_keys: SmallVec<[Symbol; 4]>,
     /// Docstring extracted from the first statement of the body if it is a
     /// bare string literal (`Stmt::Expr(Expr::Str(...))`), matching CPython's
     /// `co_consts[0]` / `__doc__` extraction.  `None` when no docstring
@@ -84,7 +85,7 @@ pub struct FnProto {
     /// `MakeClass` (`kwarg_base..kwarg_base+kwarg_n`).  Empty for functions.
     /// `SmallVec<[_; 2]>` avoids heap allocation for the typical case of
     /// zero to two keyword arguments in a class header.
-    pub class_kwarg_names: SmallVec<[String; 2]>,
+    pub class_kwarg_names: SmallVec<[Symbol; 2]>,
 }
 
 /// Resolve each parameter's static bind target once at compile time
@@ -103,10 +104,10 @@ pub fn compute_param_binds(
     param_spec
         .names
         .iter()
-        .map(|name| {
-            if cell_vars.iter().any(|c| c == name) {
+        .map(|&name| {
+            if cell_vars.contains(&name) {
                 ParamBind::Cell
-            } else if let Some(&reg) = local_index.get(name) {
+            } else if let Some(&reg) = local_index.get(name.as_str()) {
                 ParamBind::Reg(reg)
             } else {
                 ParamBind::None
@@ -123,7 +124,7 @@ pub fn compute_self_bind(
     local_index: &HashMap<String, Reg>,
     cell_vars: &[CellVar],
 ) -> Option<Reg> {
-    if cell_vars.iter().any(|c| c == name) {
+    if cell_vars.iter().any(|c| c.as_str() == name) {
         None
     } else {
         local_index.get(name).copied()

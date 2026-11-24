@@ -10,12 +10,12 @@ fn collect_var_refs_in_expr(
 ) {
     match expr {
         Expr::Var(name, _) => {
-            used.insert(name.clone());
+            used.insert(name.to_string());
         }
         Expr::Named { target, value } => {
             // Walrus operator — the target is a binding in the outer scope
             // ("assigned to"), not merely a use.
-            assigned.insert(target.clone());
+            assigned.insert(target.to_string());
             collect_var_refs_in_expr(value, used, assigned);
         }
         Expr::Lambda { params, .. } => {
@@ -152,7 +152,7 @@ fn collect_var_refs_in_fstring_parts(
 fn collect_assign_target_bound_names(target: &AssignTarget, assigned: &mut HashSet<String>) {
     match target {
         AssignTarget::Name(n) => {
-            assigned.insert(n.clone());
+            assigned.insert(n.to_string());
         }
         AssignTarget::Tuple(targets) => {
             for t in targets {
@@ -170,7 +170,7 @@ fn collect_assign_target_bound_names(target: &AssignTarget, assigned: &mut HashS
 fn collect_pattern_bound_names(pattern: &crate::ast::Pattern, assigned: &mut HashSet<String>) {
     match pattern {
         crate::ast::Pattern::Capture(name) => {
-            assigned.insert(name.clone());
+            assigned.insert(name.to_string());
         }
         crate::ast::Pattern::Or(pats) => {
             for p in pats {
@@ -187,7 +187,7 @@ fn collect_pattern_bound_names(pattern: &crate::ast::Pattern, assigned: &mut Has
                 collect_pattern_bound_names(p, assigned);
             }
             if let Some(name) = rest {
-                assigned.insert(name.clone());
+                assigned.insert(name.to_string());
             }
         }
         crate::ast::Pattern::Class {
@@ -205,7 +205,7 @@ fn collect_pattern_bound_names(pattern: &crate::ast::Pattern, assigned: &mut Has
         | crate::ast::Pattern::Value(_) => {}
         crate::ast::Pattern::As { pattern, name } => {
             collect_pattern_bound_names(pattern, assigned);
-            assigned.insert(name.clone());
+            assigned.insert(name.to_string());
         }
     }
 }
@@ -222,7 +222,7 @@ pub(crate) fn compute_def_bound_mask(
     // unwrap.  The parameter-only subset is sufficient to eliminate the
     // None check for the most frequently read locals in hot inner loops.
     for param in params {
-        if let Some(&idx) = local_index.get(&param.name)
+        if let Some(&idx) = local_index.get(param.name.as_str())
             && idx < 64
         {
             mask |= 1u64 << idx;

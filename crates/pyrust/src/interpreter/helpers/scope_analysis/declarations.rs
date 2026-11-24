@@ -32,7 +32,7 @@ fn collect_annotation_target_names_from_block(body: &[Stmt], names: &mut HashSet
     for stmt in body {
         match stmt {
             Stmt::AnnAssign { name, .. } => {
-                names.insert(name.clone());
+                names.insert(name.to_string());
             }
             // Do not descend into nested function/class scopes.
             Stmt::Def { .. } | Stmt::Class { .. } => {}
@@ -97,7 +97,7 @@ fn collect_annotation_target_names_from_block(body: &[Stmt], names: &mut HashSet
 
 fn collect_declared_names(
     body: &[Stmt],
-    pick: fn(&Stmt) -> Option<&Vec<String>>,
+    pick: fn(&Stmt) -> Option<&Vec<pyrust_core::Symbol>>,
 ) -> HashSet<String> {
     let mut names = HashSet::new();
     collect_declared_names_from_block(body, &mut names, pick);
@@ -107,11 +107,11 @@ fn collect_declared_names(
 fn collect_declared_names_from_block(
     body: &[Stmt],
     names: &mut HashSet<String>,
-    pick: fn(&Stmt) -> Option<&Vec<String>>,
+    pick: fn(&Stmt) -> Option<&Vec<pyrust_core::Symbol>>,
 ) {
     for stmt in body {
         if let Some(declared) = pick(stmt) {
-            names.extend(declared.iter().cloned());
+            names.extend(declared.iter().map(|s| s.to_string()));
             continue;
         }
         match stmt {
@@ -209,13 +209,13 @@ fn check_global_nonlocal_order_block(
                     // CPython checks "used" before "assigned": when both sets
                     // contain the name (e.g. `x = 1; print(x); global x`),
                     // CPython always reports "used prior to global declaration".
-                    if used.contains(name) {
+                    if used.contains(name.as_str()) {
                         return Some(format!(
                             "name '{}' is used prior to global declaration",
                             name
                         ));
                     }
-                    if assigned.contains(name) {
+                    if assigned.contains(name.as_str()) {
                         return Some(format!(
                             "name '{}' is assigned to before global declaration",
                             name
@@ -226,13 +226,13 @@ fn check_global_nonlocal_order_block(
             Stmt::Nonlocal(names) => {
                 for name in names {
                     // Same priority: "used" wins over "assigned" (matches CPython).
-                    if used.contains(name) {
+                    if used.contains(name.as_str()) {
                         return Some(format!(
                             "name '{}' is used prior to nonlocal declaration",
                             name
                         ));
                     }
-                    if assigned.contains(name) {
+                    if assigned.contains(name.as_str()) {
                         return Some(format!(
                             "name '{}' is assigned to before nonlocal declaration",
                             name
@@ -279,13 +279,13 @@ fn check_global_nonlocal_order_block(
                     collect_var_refs_in_expr(expr, used, assigned)
                 });
                 // The def name is bound in the outer scope (not recursed into).
-                assigned.insert(name.clone());
+                assigned.insert(name.to_string());
             }
             stmt @ Stmt::Class { name, .. } => {
                 stmt.visit_evaluated_exprs(&mut |expr| {
                     collect_var_refs_in_expr(expr, used, assigned)
                 });
-                assigned.insert(name.clone());
+                assigned.insert(name.to_string());
             }
             Stmt::For {
                 target,
@@ -373,8 +373,8 @@ fn check_global_nonlocal_order_block(
                     return Some(msg);
                 }
                 for handler in handlers {
-                    if let Some(bound) = &handler.name {
-                        assigned.insert(bound.clone());
+                    if let Some(bound) = handler.name {
+                        assigned.insert(bound.to_string());
                     }
                     if let Some(exc_type) = &handler.kind {
                         collect_var_refs_in_expr(exc_type, used, assigned);
@@ -472,7 +472,7 @@ fn check_global_nonlocal_order_block(
                 stmt.visit_evaluated_exprs(&mut |expr| {
                     collect_var_refs_in_expr(expr, used, assigned)
                 });
-                assigned.insert(name.clone());
+                assigned.insert(name.to_string());
             }
         }
     }

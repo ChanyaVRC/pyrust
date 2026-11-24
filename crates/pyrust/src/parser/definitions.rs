@@ -83,7 +83,7 @@ impl Parser {
                         return Err(PyError::Parse("cannot assign to __debug__".to_string()));
                     }
                     return Ok(vec![Stmt::AnnAssign {
-                        name: name.clone(),
+                        name: *name,
                         annotation,
                         value: Some(rhs),
                     }]);
@@ -102,7 +102,7 @@ impl Parser {
                     return Err(PyError::Parse("cannot assign to __debug__".to_string()));
                 }
                 return Ok(vec![Stmt::AnnAssign {
-                    name: name.clone(),
+                    name: *name,
                     annotation,
                     value: None,
                 }]);
@@ -469,7 +469,7 @@ impl Parser {
 
         let mut bases = Vec::new();
         let mut metaclass: Option<Expr> = None;
-        let mut keywords: Vec<(String, Expr)> = Vec::new();
+        let mut keywords: Vec<(pyrust_core::Symbol, Expr)> = Vec::new();
         if self.is(&Token::LParen) {
             self.bump();
             if !self.is(&Token::RParen) {
@@ -532,7 +532,7 @@ impl Parser {
         Ok(Stmt::Nonlocal(names))
     }
 
-    fn parse_name_list(&mut self, ctx: &str) -> Result<Vec<String>> {
+    fn parse_name_list(&mut self, ctx: &str) -> Result<Vec<pyrust_core::Symbol>> {
         let mut names = Vec::new();
         loop {
             names.push(self.expect_ident(ctx)?);

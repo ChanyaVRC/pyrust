@@ -129,7 +129,7 @@ impl Compiler {
         self.free_temp(params_reg);
 
         // ── Step 6: store the alias under `name` ─────────────────────────────
-        let target = crate::ast::AssignTarget::Name(name.to_string());
+        let target = crate::ast::AssignTarget::Name(Symbol::intern(name));
         if let Some(reg) = self.local_reg(name) {
             if reg != dst {
                 self.emit(Insn::Move(reg, dst));

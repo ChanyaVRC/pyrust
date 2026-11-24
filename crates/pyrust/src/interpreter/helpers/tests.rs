@@ -25,7 +25,7 @@ mod purity_tests {
         else {
             panic!("expected a function definition");
         };
-        (name, params, body)
+        (name.to_string(), params, body)
     }
 
     /// Locals helper: treat the given names as function-local registers so a

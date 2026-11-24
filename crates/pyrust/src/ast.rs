@@ -1,6 +1,8 @@
+pub use pyrust_core::Symbol;
+
 #[derive(Debug, Clone)]
 pub struct FunctionParam {
-    pub name: String,
+    pub name: Symbol,
     pub default: Option<Expr>,
     pub annotation: Option<Expr>,
     pub is_args: bool,            // *args
@@ -12,7 +14,7 @@ pub struct FunctionParam {
 /// A single PEP 695 type parameter, e.g. `T`, `T: int`, or `T: (int, str)`.
 #[derive(Debug, Clone)]
 pub struct TypeParam {
-    pub name: String,
+    pub name: Symbol,
     /// The bound or constraint clause following `:`, if present.
     pub bound: Option<TypeParamBound>,
 }
@@ -33,7 +35,7 @@ pub enum TypeParamBound {
 
 #[derive(Debug, Clone)]
 pub struct CallArg {
-    pub name: Option<String>,
+    pub name: Option<Symbol>,
     pub value: Expr,
     pub splat: bool,        // *expr
     pub double_splat: bool, // **expr
@@ -42,7 +44,7 @@ pub struct CallArg {
 #[derive(Debug, Clone)]
 pub struct ExceptHandler {
     pub kind: Option<Expr>,
-    pub name: Option<String>,
+    pub name: Option<Symbol>,
     pub body: Vec<Stmt>,
     /// `true` for PEP 654 `except*` handlers; `false` for ordinary `except`.
     pub is_star: bool,
@@ -54,13 +56,13 @@ pub struct ExceptHandler {
 /// Assignment target (left-hand side of = or augmented =)
 #[derive(Debug, Clone)]
 pub enum AssignTarget {
-    Name(String),
+    Name(Symbol),
     /// Attribute target `obj.attr`.  The third field is the PEP 657 caret
     /// anchor (issue #2442) for the whole `obj.attr` span — used to paint the
     /// caret when an augmented attribute assignment (`obj.attr += ...`) raises
     /// `AttributeError` on the read or store.  `None` when built without column
     /// info.
-    Attr(Box<Expr>, String, Option<CaretSpan>),
+    Attr(Box<Expr>, Symbol, Option<CaretSpan>),
     Index(Box<Expr>, Box<Expr>),
     /// Slice target: a[lower:upper:step] — only valid for augmented assignment
     /// (plain slice assignment goes through `Stmt::SliceAssign`).
@@ -117,13 +119,13 @@ impl AssignTarget {
 pub enum Stmt {
     Assign(AssignTarget, Expr),
     AnnAssign {
-        name: String,
+        name: Symbol,
         annotation: Expr,
         value: Option<Expr>,
     },
     AttrAssign {
         target: Expr,
-        name: String,
+        name: Symbol,
         expr: Expr,
         /// PEP 657 caret anchor (issue #2442): the whole `obj.attr` span of the
         /// assignment *target*, underlined with `^` (full == prim).  Used to
@@ -152,7 +154,7 @@ pub enum Stmt {
     },
     Expr(Expr),
     Def {
-        name: String,
+        name: Symbol,
         params: Vec<FunctionParam>,
         body: Vec<Stmt>,
         /// Parallel 1-based source line numbers for each statement in `body`
@@ -179,7 +181,7 @@ pub enum Stmt {
         type_params: Vec<TypeParam>,
     },
     Class {
-        name: String,
+        name: Symbol,
         bases: Vec<Expr>,
         /// Optional metaclass specified as `metaclass=<expr>` keyword in the
         /// class header.  If present, the class object is produced by calling
@@ -189,15 +191,15 @@ pub enum Stmt {
         /// PEP 487 keyword arguments in the class header other than `metaclass`.
         /// Forwarded to `__init_subclass__` of the base class.
         /// E.g. `class Foo(Base, key=val)` -> `keywords = [("key", val_expr)]`.
-        keywords: Vec<(String, Expr)>,
+        keywords: Vec<(Symbol, Expr)>,
         body: Vec<Stmt>,
         decorators: Vec<Expr>,
         /// PEP 695 type parameters from `class Foo[T, U: int]:`, carrying each
         /// parameter's name and optional bound/constraint clause.
         type_params: Vec<TypeParam>,
     },
-    Global(Vec<String>),
-    Nonlocal(Vec<String>),
+    Global(Vec<Symbol>),
+    Nonlocal(Vec<Symbol>),
     If {
         branches: Vec<(Expr, Vec<Stmt>)>,
         else_branch: Option<Vec<Stmt>>,
@@ -255,11 +257,11 @@ pub enum Stmt {
         span: Option<CaretSpan>,
     },
     Import {
-        names: Vec<(String, Option<String>)>,
+        names: Vec<(Symbol, Option<Symbol>)>,
     },
     ImportFrom {
-        module: String,
-        names: Vec<(String, Option<String>)>,
+        module: Symbol,
+        names: Vec<(Symbol, Option<Symbol>)>,
     },
     Return(Option<Expr>),
     Break,
@@ -290,7 +292,7 @@ pub enum Stmt {
     /// annotation scope; the lazy `value` evaluator captures that scope and the
     /// resulting alias gets a `__type_params__` attribute.
     TypeAlias {
-        name: String,
+        name: Symbol,
         type_params: Vec<TypeParam>,
         value: Expr,
     },
@@ -615,7 +617,7 @@ pub enum Pattern {
     /// `42`, `"str"`, `True`, `None` — equality test.
     Literal(Expr),
     /// `x` — binds the matched value to a name.
-    Capture(String),
+    Capture(Symbol),
     /// `p1 | p2` — matches if any sub-pattern matches.
     Or(Vec<Pattern>),
     /// `[a, b, *rest]` — destructures a sequence.
@@ -623,7 +625,7 @@ pub enum Pattern {
     Sequence(Vec<(Pattern, bool)>),
     /// `{"key": pattern, **rest}` — destructures a mapping.
     /// `rest` is the optional `**rest` capture name.
-    Mapping(Vec<(Expr, Pattern)>, Option<String>),
+    Mapping(Vec<(Expr, Pattern)>, Option<Symbol>),
     /// `ClassName(pos, ..., attr=pat, ...)` — class pattern.
     ///
     /// `positional` sub-patterns are resolved at runtime via `__match_args__`;
@@ -631,7 +633,7 @@ pub enum Pattern {
     Class {
         cls: Box<Expr>,
         positional: Vec<Pattern>,
-        kwargs: Vec<(String, Pattern)>,
+        kwargs: Vec<(Symbol, Pattern)>,
     },
     /// `a.b.c` — value pattern (dotted attribute lookup, compared with ==).
     /// Per PEP 634: a name followed by at least one `.attr` is a value pattern,
@@ -639,7 +641,7 @@ pub enum Pattern {
     Value(Expr),
     /// `pattern as name` — matches `pattern` and, if it succeeds, binds the
     /// entire subject (not just the matched portion) to `name`.
-    As { pattern: Box<Pattern>, name: String },
+    As { pattern: Box<Pattern>, name: Symbol },
 }
 
 impl Pattern {
@@ -792,7 +794,7 @@ pub enum Expr {
     /// the line the *name itself* is on, not the enclosing statement's first
     /// line — so a name on a continuation line of a multi-line expression
     /// reports its own line in tracebacks, matching CPython 3.12 (issue #2632).
-    Var(String, Option<(u32, u32, u32)>),
+    Var(Symbol, Option<(u32, u32, u32)>),
     List(Vec<Expr>),
     Tuple(Vec<Expr>),
     Dict(Vec<DictItem>),
@@ -882,7 +884,7 @@ pub enum Expr {
     },
     Attr {
         target: Box<Expr>,
-        name: String,
+        name: Symbol,
         /// PEP 657 caret anchor (issue #2442): the whole `obj.attr` span,
         /// underlined with `^` (full == prim), from the target's start column to
         /// the attribute name's end column.  `None` for attribute accesses
@@ -904,7 +906,7 @@ pub enum Expr {
     },
     /// Walrus operator: `target := value`
     Named {
-        target: String,
+        target: Symbol,
         value: Box<Expr>,
     },
     /// `yield` or `yield expr` — only valid inside a generator function

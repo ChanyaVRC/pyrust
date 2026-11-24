@@ -52,6 +52,7 @@ fn non_value_responsibilities_are_not_folded_back_into_object_model() {
         "include!(\"class_epoch.rs\")",
         "include!(\"object_identity.rs\")",
         "include!(\"string_interning.rs\")",
+        "include!(\"symbol.rs\")",
         "include!(\"cycle_guards.rs\")",
         "include!(\"pool.rs\")",
     ] {
