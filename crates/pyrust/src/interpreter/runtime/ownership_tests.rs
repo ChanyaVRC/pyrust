@@ -1099,7 +1099,7 @@ fn instance_builtin_data_is_confined_to_boundary_and_storage_owners() {
         "builtin_modules/bodies/builtins/container_protocols.rs",
         "builtin_modules/bodies/builtins/iteration.rs",
         "interpreter/runtime/generator_protocols/methods.rs",
-        "interpreter/runtime/iteration/reduce_copy.rs",
+        "interpreter/runtime/iteration/reduce_copy/legacy_iterators.rs",
         "interpreter/runtime/ownership_tests.rs",
     ];
 
