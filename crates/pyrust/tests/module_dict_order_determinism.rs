@@ -32,9 +32,10 @@ import math
 import os.path
 import collections.abc
 import __future__
-names = ["abc", "asyncio", "base64", "binascii", "bisect", "builtins", "collections", "contextlib",
-         "copy", "csv", "dataclasses", "decimal", "difflib", "enum", "errno", "fnmatch",
-         "fractions", "functools", "glob", "hashlib", "heapq", "hmac", "inspect", "io", "itertools",
+names = ["abc", "argparse", "asyncio", "base64", "binascii", "bisect", "builtins", "collections",
+         "contextlib", "copy", "csv", "dataclasses", "decimal", "difflib", "enum", "errno",
+         "fnmatch", "fractions", "functools", "glob", "hashlib", "heapq", "hmac", "inspect", "io",
+         "itertools",
          "json", "math", "numbers", "operator", "os", "pathlib", "pprint", "random", "re",
          "secrets", "shlex", "shutil", "statistics", "string", "sys", "tempfile", "textwrap",
          "time", "traceback", "types", "typing", "warnings"]
