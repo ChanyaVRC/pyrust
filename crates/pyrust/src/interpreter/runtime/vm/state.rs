@@ -196,10 +196,9 @@ pub(crate) struct AnextAwaitable {
 }
 
 /// Call-trampoline frame (#2234): what the caller needs restored when a
-/// trampolined Python→Python callee returns.  Module-scoped so the cold error
-/// unwinder ([`Interpreter::vm_unwind_error`]) can name it; the dispatch loop's
-/// `tramp_stack` is `Vec<TrampFrame>`.
-struct TrampFrame {
+/// trampolined Python→Python callee returns.  Owned by `Interpreter::tramp_stack`
+/// across nested VM entries (#3159).
+pub(crate) struct TrampFrame {
     /// Counts this explicit Python frame in the thread-wide recursion depth,
     /// including when a full arena forces a nested native VM entry.
     _depth_guard: CallDepthGuard,
@@ -221,7 +220,6 @@ struct TrampFrame {
     /// returns.  (Equal to the callee's for a self-recursive call; differ for a
     /// general Python→Python call.)
     saved_code_ptr: *const crate::bytecode::FnCode,
-    saved_active_code_rc: Option<Rc<crate::bytecode::FnCode>>,
     saved_num_locals: u32,
     /// `None` when callee shares the caller's environment (`Rc::ptr_eq`),
     /// avoiding an `Rc::clone` + `Rc::drop` on every intra-module call (#2924).
@@ -240,8 +238,8 @@ pub(super) struct GenDriving;
 
 /// Generator-trampoline frame (#2253): the generator's checked-out frame plus
 /// the consumer state restored when the generator yields / returns / raises.
-/// Module-scoped for the same reason as [`TrampFrame`].
-struct GenDriveFrame {
+/// Owned by `Interpreter::gen_drive_stack` across nested VM entries (#3159).
+pub(crate) struct GenDriveFrame {
     /// Counts this generator frame in the same thread-wide recursion depth as
     /// native and call-trampolined Python frames.
     _depth_guard: CallDepthGuard,
@@ -266,7 +264,6 @@ struct GenDriveFrame {
     saved_base: usize,
     saved_cur_line: u32,
     saved_code_ptr: *const crate::bytecode::FnCode,
-    saved_active_code_rc: Option<Rc<crate::bytecode::FnCode>>,
     saved_num_locals: u32,
     saved_env: EnvRef,
     saved_iters: ItersBuf,
@@ -291,15 +288,15 @@ struct UnwindState<'a> {
     pc: &'a mut usize,
     cur_line: &'a mut u32,
     code_ptr: &'a mut *const crate::bytecode::FnCode,
-    active_code_rc: &'a mut Option<Rc<crate::bytecode::FnCode>>,
     num_locals: &'a mut u32,
     iters: &'a mut ItersBuf,
     iter_next_cache: &'a mut IterCacheBuf,
     exc_handlers: &'a mut ExcHandlersBuf,
     tramp_active_base: &'a mut usize,
-    tramp_arena: &'a mut Vec<Value>,
-    tramp_stack: &'a mut Vec<TrampFrame>,
-    gen_drive_stack: &'a mut Vec<GenDriveFrame>,
+    /// High-water floor in `Interpreter::tramp_stack` for this VM entry (#3159).
+    tramp_base: usize,
+    /// High-water floor in `Interpreter::gen_drive_stack` for this VM entry (#3159).
+    gen_base: usize,
     exc_ctx_frame_base: usize,
 }
 
@@ -346,14 +343,16 @@ pub(crate) struct GenSaveState {
 ///
 /// For callers that don't execute generators (`run_bytecode`), `Yielded` is
 /// unreachable and the `Returned` value is extracted directly.
-// Hot-path VM type: this is the return value of the core dispatch loop, matched on
-// every frame return. Boxing the rare `Yielded` variant would add heap indirection
-// on the generator-suspension path; the size delta lives only on the stack and is
-// never duplicated, so a box buys nothing while costing the suspension path.
-#[allow(clippy::large_enum_variant)]
+///
+/// `GenSaveState` is boxed (#3159) so every synchronous `run_bytecode` return
+/// passes `FrameOutcome` in two registers (`size_of::<FrameOutcome>() <= 24`)
+/// instead of a 168-byte stack sret buffer.
 pub(crate) enum FrameOutcome {
     Returned(Value),
-    Yielded { value: Value, saved: GenSaveState },
+    Yielded {
+        value: Value,
+        saved: Box<GenSaveState>,
+    },
 }
 
 /// Outcome of a single event-loop step of a coroutine (issue #2281).

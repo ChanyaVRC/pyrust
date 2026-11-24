@@ -222,6 +222,7 @@ mod weak_value_cache_tests {
             params: Vec::new(),
             param_binds: Rc::new(Vec::new()),
             memo_positional_parameter_count: 0,
+            trampoline_arity: UserFunction::TRAMPOLINE_INELIGIBLE,
             self_bind: None,
             local_names: Rc::new(HashSet::new()),
             local_index: Rc::new(HashMap::new()),

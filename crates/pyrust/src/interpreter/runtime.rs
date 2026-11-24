@@ -2,11 +2,11 @@
 
 mod program_execution {
     use super::{
-        CallDepthGuard, CellSlice, EnvRef, Environment, FrameKind, HashMap,
-        IntMaxStrDigitsExecutionGuard, Interpreter, PyDict, PyError, PyKey, Rc, RegSlice, RegsBuf,
-        Result, Stmt, StrKey, Value, ValueKind, VmFrameView, cached_builtins_module,
-        exception_str_with_dispatch, format_exc_chain_prefix, format_exception_group_traceback,
-        intern_string, is_exception_group_value, module_env, render_instance_repr, smallvec,
+        CallDepthGuard, EnvRef, Environment, HashMap, IntMaxStrDigitsExecutionGuard, Interpreter,
+        PyDict, PyError, PyKey, Rc, RegSlice, RegsBuf, Result, Stmt, StrKey, Value, ValueKind,
+        VmFrameView, cached_builtins_module, exception_str_with_dispatch, format_exc_chain_prefix,
+        format_exception_group_traceback, intern_string, is_exception_group_value, module_env,
+        render_instance_repr, smallvec,
     };
     include!("runtime/program_execution.rs");
 }
@@ -82,14 +82,13 @@ mod calls {
     use super::classes::{PrimitiveLayout, classify_primitive_layout, primitive_layout_for_class};
     use super::{
         CallDepthGuard, CellSlice, CellsBuf, ExcHandlersBuf, ExpandedArgBuf, ExpandedCallArg,
-        FnCode, FrameKind, GeneratorFrame, GeneratorKind, HandledExcBuf, InstanceAttrs,
-        Interpreter, PyClass, PyDict, PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf,
-        Result, UserFunction, Value, ValueKind, VmFrameView, allocate_frame_cells,
-        bind_class_level_method_wrapper, call_depth, call_descriptor_get, call_slot_value_unbound,
-        class_chain_new_slot_wrapped, class_is_subclass_of, invoke_class_method,
-        is_exception_class, is_primitive_class, lookup_class_attr, mapping_entries_for_expansion,
-        max_call_depth, object_class_singleton, slot_is_descriptor, smallvec, type_class_singleton,
-        value_type_name_str,
+        FnCode, GeneratorFrame, GeneratorKind, HandledExcBuf, InstanceAttrs, Interpreter, PyClass,
+        PyDict, PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result, UserFunction,
+        Value, ValueKind, VmFrameView, allocate_frame_cells, bind_class_level_method_wrapper,
+        call_depth, call_descriptor_get, call_slot_value_unbound, class_chain_new_slot_wrapped,
+        class_is_subclass_of, invoke_class_method, is_exception_class, is_primitive_class,
+        lookup_class_attr, mapping_entries_for_expansion, max_call_depth, object_class_singleton,
+        slot_is_descriptor, smallvec, type_class_singleton, value_type_name_str,
     };
     include!("runtime/calls.rs");
 }
@@ -376,10 +375,10 @@ mod execution {
         try_scalar_truthiness_fast, try_tagged_int_unary, value_is_builtin_len,
     };
     use super::{
-        CallDepthGuard, CellSlice, EnvRef, FrameKind, GeneratorCell, Interpreter, IterCacheBuf,
-        IterState, ItersBuf, KwCallMappingMerge, LoopIteratorAdvance, MemoKey, PyError, Rc,
-        RegSlice, Result, Value, ValueKind, VmFrameCache, VmFrameView, bump_global_struct_version,
-        call_depth, callable_error_name, duplicate_keyword_error, extract_stop_iteration_value,
+        CallDepthGuard, CellSlice, EnvRef, GeneratorCell, Interpreter, IterCacheBuf, IterState,
+        ItersBuf, KwCallMappingMerge, LoopIteratorAdvance, MemoKey, PyError, Rc, RegSlice, Result,
+        Value, ValueKind, VmFrameCache, VmFrameView, bump_global_struct_version, call_depth,
+        callable_error_name, duplicate_keyword_error, extract_stop_iteration_value,
         initialize_typevar_attr, intern_string_value, is_stop_iteration_error,
         keyword_mapping_operand_error, lookup_class_attr, make_slice_value,
         make_type_alias_from_syntax, make_typevar_from_syntax, max_call_depth, star_operand_error,
@@ -389,7 +388,8 @@ mod execution {
     include!("runtime/vm/tests.rs");
 }
 pub(crate) use execution::{
-    AnextAwaitable, AsyncGenASend, CoroStep, ExcHandlersBuf, GeneratorFrame, HandledExcBuf, RegsBuf,
+    AnextAwaitable, AsyncGenASend, CoroStep, ExcHandlersBuf, GenDriveFrame, GeneratorFrame,
+    HandledExcBuf, RegsBuf, TrampFrame,
 };
 use execution::{GenDriving, vm_read};
 

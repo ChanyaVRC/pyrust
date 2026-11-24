@@ -107,18 +107,12 @@ impl Interpreter {
                 let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
                 let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
                 let regs_len = regs.len();
-                self.vm_frame_views.push(VmFrameView {
-                    kind: FrameKind::Script,
+                self.vm_frame_views.push(VmFrameView::script_frame(
                     regs_ptr,
                     regs_len,
-                    cells: CellSlice::empty(),
-                    local_index: Rc::clone(&local_index),
-                    nonlocal_names: None,
-                    env: Some(Rc::clone(&self.env)),
-                    is_class_method: false,
-                    function: None,
-                    gen_frame: None,
-                });
+                    Rc::clone(&local_index),
+                    Rc::clone(&self.env),
+                ));
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let namespace_mirror_guard =
                     self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
@@ -187,18 +181,12 @@ impl Interpreter {
         let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
         let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
         let regs_len = regs.len();
-        self.vm_frame_views.push(VmFrameView {
-            kind: FrameKind::Script,
+        self.vm_frame_views.push(VmFrameView::script_frame(
             regs_ptr,
             regs_len,
-            cells: CellSlice::empty(),
-            local_index: Rc::clone(&local_index),
-            nonlocal_names: None,
-            env: Some(Rc::clone(&self.env)),
-            is_class_method: false,
-            function: None,
-            gen_frame: None,
-        });
+            Rc::clone(&local_index),
+            Rc::clone(&self.env),
+        ));
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let namespace_mirror_guard =
             self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);

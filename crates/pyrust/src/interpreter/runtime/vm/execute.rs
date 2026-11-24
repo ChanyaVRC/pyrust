@@ -21,10 +21,13 @@ impl Interpreter {
         use crate::bytecode::Insn;
 
         let mut code_ptr: *const crate::bytecode::FnCode = code;
-        let mut active_code_rc: Option<Rc<crate::bytecode::FnCode>> = None;
         let mut num_locals = code.num_locals;
         let mut iters: ItersBuf = iters_init;
-        let mut iter_next_cache: IterCacheBuf = smallvec::smallvec![None; iters.len()];
+        let mut iter_next_cache: IterCacheBuf = if iters.is_empty() {
+            IterCacheBuf::new()
+        } else {
+            smallvec::smallvec![None; iters.len()]
+        };
         let mut exc_handlers: ExcHandlersBuf = exc_handlers_init;
         let mut pc: usize = start_pc;
         let mut cur_line: u32 = pyrust_core::get_current_vm_line();
@@ -44,10 +47,9 @@ impl Interpreter {
             self.active_exception = gen_active_exception;
         }
 
-        let mut tramp_stack: Vec<TrampFrame> = Vec::new();
-        let mut tramp_arena: Vec<Value> = Vec::new();
+        let tramp_base: usize = self.tramp_stack.len();
+        let gen_base: usize = self.gen_drive_stack.len();
         let mut tramp_active_base: usize = usize::MAX;
-        let mut gen_drive_stack: Vec<GenDriveFrame> = Vec::new();
 
         'vm: loop {
             // Re-derive the active frame's `code` from `code_ptr` (updated on a
@@ -62,15 +64,13 @@ impl Interpreter {
                         pc: &mut pc,
                         cur_line: &mut cur_line,
                         code_ptr: &mut code_ptr,
-                        active_code_rc: &mut active_code_rc,
                         num_locals: &mut num_locals,
                         iters: &mut iters,
                         iter_next_cache: &mut iter_next_cache,
                         exc_handlers: &mut exc_handlers,
                         tramp_active_base: &mut tramp_active_base,
-                        tramp_arena: &mut tramp_arena,
-                        tramp_stack: &mut tramp_stack,
-                        gen_drive_stack: &mut gen_drive_stack,
+                        tramp_base,
+                        gen_base,
                         exc_ctx_frame_base,
                     }
                 };
@@ -121,23 +121,26 @@ impl Interpreter {
             }
             macro_rules! tramp_finish {
                 ($res:expr) => {
-                    match $res? {
-                        TrampEnter::Entered => continue 'vm,
-                        TrampEnter::Fallback(__v) => __v,
-                        TrampEnter::UnwindErr(__err) => tramp_unwind_err!(__err),
-                        TrampEnter::VmErr(__err) => {
+                    match $res {
+                        Ok(TrampEnter::Entered) => continue 'vm,
+                        Ok(TrampEnter::Fallback(__v)) => __v,
+                        Ok(TrampEnter::UnwindErr(__err)) => tramp_unwind_err!(__err),
+                        Ok(TrampEnter::VmErr(__err)) => {
                             vm_try!(Err::<(), _>(__err));
                             unreachable!()
                         }
+                        Err(__err) => tramp_unwind_err!(__err),
                     }
                 };
             }
             macro_rules! vm_yield {
                 ($yielded:expr, $resume_pc:expr, $yield_dst:expr) => {{
                     let __resume_pc = $resume_pc;
-                    if gen_drive_stack
-                        .last()
-                        .is_some_and(|__g| __g.tramp_floor == tramp_stack.len())
+                    if self.gen_drive_stack.len() > gen_base
+                        && self
+                            .gen_drive_stack
+                            .last()
+                            .is_some_and(|__g| __g.tramp_floor == self.tramp_stack.len())
                     {
                         let mut __st = unwind_state!();
                         self.vm_gen_drive_yield($yielded, __resume_pc, $yield_dst, &mut __st);
@@ -162,7 +165,17 @@ impl Interpreter {
             }
             macro_rules! jump_pc {
                 ($offset:expr) => {
-                    vm_jump_pc(pc, $offset, code.insns.len(), cur_line)?
+                    match vm_jump_pc(pc, $offset, code.insns.len(), cur_line) {
+                        Ok(__pc) => __pc,
+                        Err(__err) => {
+                            if self.tramp_stack.len() > tramp_base
+                                || self.gen_drive_stack.len() > gen_base
+                            {
+                                tramp_unwind_err!(__err);
+                            }
+                            return Err(__err);
+                        }
+                    }
                 };
             }
             macro_rules! cond_jump {
@@ -235,7 +248,11 @@ impl Interpreter {
                 if pc == code.insns.len() {
                     tramp_return!(Value::none());
                 }
-                return Err(vm_oob_pc_err(pc, code.insns.len(), cur_line));
+                let err = vm_oob_pc_err(pc, code.insns.len(), cur_line);
+                if self.tramp_stack.len() > tramp_base || self.gen_drive_stack.len() > gen_base {
+                    tramp_unwind_err!(err);
+                }
+                return Err(err);
             };
             if let Some(&ln) = code.lineno_table.get(pc)
                 && ln != 0
@@ -488,16 +505,8 @@ impl Interpreter {
                             cache_probe,
                         } => (function, cache_probe),
                     };
-                    tramp_finish!(self.vm_tramp_try_plain(
-                        code,
-                        *func_reg,
-                        *argc,
-                        &func_val,
-                        None,
-                        &mut unwind_state!(),
-                    ));
                     if let ValueKind::BoundMethod { function, receiver } = func_val.kind()
-                        && matches!(function.kind, pyrust_core::UserFunctionKind::Regular)
+                        && function.trampoline_arity as usize == (*argc as usize) + 1
                     {
                         let f = Rc::clone(function);
                         let recv = Value::py_instance(Rc::clone(receiver));
@@ -543,6 +552,7 @@ impl Interpreter {
                     if let Some(method) = code.names.get(*name_idx as usize)
                         && let Some((f, recv_rc)) =
                             self.resolve_method_cached(&regs, *obj, method, code, pc - 1)
+                        && f.trampoline_arity as usize == (*nargs as usize) + 1
                     {
                         let recv = Value::py_instance(recv_rc);
                         tramp_finish!(self.vm_tramp_try_method(

@@ -48,7 +48,7 @@ impl Interpreter {
         let in_function = self
             .vm_frame_views
             .last()
-            .is_some_and(|view| view.kind == FrameKind::Function);
+            .is_some_and(|view| view.kind() == FrameKind::Function);
         if in_function {
             Err(PyError::name_error(
                 "UnboundLocalError",
@@ -96,7 +96,7 @@ impl Interpreter {
         name_index: u16,
         raise_if_missing: bool,
     ) -> Result<()> {
-        let frame_kind = self.vm_frame_views.last().map(|view| view.kind);
+        let frame_kind = self.vm_frame_views.last().map(|view| view.kind());
         let is_module_scope = frame_kind == Some(FrameKind::Script);
         let name = code.names.get(name_index as usize).ok_or_else(|| {
             PyError::Runtime(format!(

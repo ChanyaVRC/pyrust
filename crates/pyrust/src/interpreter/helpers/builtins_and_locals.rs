@@ -185,7 +185,7 @@ fn merge_frame_view_into_dict(view: &VmFrameView, dict: &mut PyDict) {
     // Stable iteration order: walk the fastlocal slot table sorted by
     // slot index, mirroring the compiler's name-allocation order.
     let mut by_slot: Vec<(usize, &String)> = view
-        .local_index
+        .local_index()
         .iter()
         .map(|(name, &slot)| (slot as usize, name))
         .collect();
@@ -236,9 +236,9 @@ fn active_class_index_for_view(interp: &Interpreter, view: &VmFrameView) -> Opti
     let mut class_index = 0;
     for candidate in &interp.vm_frame_views {
         if std::ptr::eq(candidate, view) {
-            return (candidate.kind == FrameKind::Class).then_some(class_index);
+            return (candidate.kind() == FrameKind::Class).then_some(class_index);
         }
-        if candidate.kind == FrameKind::Class {
+        if candidate.kind() == FrameKind::Class {
             class_index += 1;
         }
     }
@@ -251,8 +251,9 @@ fn merge_class_frame_view_into_dict(
     qualname_was_deleted: bool,
     dict: &mut PyDict,
 ) -> Vec<Option<String>> {
+    let local_index = view.local_index();
     let mut slot_names = vec![None; view.regs_len];
-    for (name, &slot) in view.local_index.iter() {
+    for (name, &slot) in local_index.iter() {
         if let Some(target) = slot_names.get_mut(slot as usize) {
             *target = Some(name.clone());
         }
@@ -279,8 +280,8 @@ fn merge_class_frame_view_into_dict(
     // final-attrs store-order trace. Materialize it immediately after the
     // still-live __module__ seed (or first if __module__ was deleted), then
     // replay the runtime store order for every other key.
-    let module_slot = view.local_index.get("__module__").copied();
-    let qualname_slot = view.local_index.get("__qualname__").copied();
+    let module_slot = local_index.get("__module__").copied();
+    let qualname_slot = local_index.get("__qualname__").copied();
     if qualname_was_deleted {
         for &slot in store_order {
             insert_slot(dict, slot);
@@ -353,7 +354,7 @@ pub(crate) fn class_frame_locals_value(interp: &Interpreter, view: &VmFrameView)
 /// Class frames have a persistent live dict; function frames retain snapshot
 /// semantics. Module callers keep their existing synchronized provider path.
 pub(crate) fn current_locals_value(interp: &mut Interpreter) -> Value {
-    match interp.vm_frame_views.last().map(|view| view.kind) {
+    match interp.vm_frame_views.last().map(VmFrameView::kind) {
         Some(FrameKind::Class) => {
             class_frame_locals_value(interp, interp.vm_frame_views.last().unwrap())
         }
@@ -369,7 +370,7 @@ pub(crate) fn active_live_class_namespace(interp: &Interpreter) -> Option<Value>
     if !interp
         .vm_frame_views
         .last()
-        .is_some_and(|view| view.kind == FrameKind::Class)
+        .is_some_and(|view| view.kind() == FrameKind::Class)
     {
         return None;
     }
@@ -394,10 +395,10 @@ type FrameCellContext = (Rc<crate::bytecode::FnCode>, Option<EnvRef>, EnvRef);
 /// `defining_env` is the closure's captured environment, where its free
 /// variables resolve.
 fn frame_cell_context(view: &VmFrameView) -> Option<FrameCellContext> {
-    if let Some(function) = &view.function {
+    if let Some(function) = view.function() {
         let rc = function.precompiled_code.as_ref()?;
         let code = Rc::clone(rc).downcast::<crate::bytecode::FnCode>().ok()?;
-        Some((code, view.env.clone(), Rc::clone(&function.env)))
+        Some((code, view.env().cloned(), Rc::clone(&function.env)))
     } else {
         // SAFETY: `gen_frame` is non-null only while the generator frame is on
         // the call stack — pushed/popped in lock-step with this view by
@@ -405,7 +406,7 @@ fn frame_cell_context(view: &VmFrameView) -> Option<FrameCellContext> {
         // synchronously on that stack while the frame is suspended inside a
         // builtin call, so the pointee is alive and no `&mut GeneratorFrame`
         // to it is live (the same reasoning `build_deferred_traceback` uses).
-        let gframe = unsafe { view.gen_frame?.as_ref() };
+        let gframe = unsafe { view.gen_frame()?.as_ref() };
         // A generator's cells live in the env it captured at creation, which is
         // also where its free variables resolve from.
         Some((
@@ -420,8 +421,9 @@ fn frame_cell_context(view: &VmFrameView) -> Option<FrameCellContext> {
 /// mapping are owned by compiler state, even while their current value is
 /// unbound. Arbitrary mapping-only keys are deliberately excluded.
 pub(crate) fn compiler_owned_frame_local_keys(view: &VmFrameView) -> Vec<PyKey> {
-    let mut names: Vec<String> = view.local_index.keys().cloned().collect();
-    if let Some(nonlocal_names) = &view.nonlocal_names {
+    let local_index = view.local_index();
+    let mut names: Vec<String> = local_index.keys().cloned().collect();
+    if let Some(nonlocal_names) = view.nonlocal_names() {
         names.extend(nonlocal_names.iter().cloned());
     }
 
@@ -430,8 +432,7 @@ pub(crate) fn compiler_owned_frame_local_keys(view: &VmFrameView) -> Vec<PyKey> 
 
         if defining_env.borrow().parent.is_some() {
             let declared_global = view
-                .function
-                .as_ref()
+                .function()
                 .map(|function| Rc::clone(&function.global_names))
                 .or_else(|| {
                     own_env
@@ -440,7 +441,7 @@ pub(crate) fn compiler_owned_frame_local_keys(view: &VmFrameView) -> Vec<PyKey> 
                 });
             for &candidate in code.free_var_candidates() {
                 let cand_str = candidate.as_str();
-                if view.local_index.contains_key(cand_str)
+                if local_index.contains_key(cand_str)
                     || declared_global
                         .as_ref()
                         .is_some_and(|globals| globals.contains(cand_str))
@@ -481,8 +482,8 @@ fn merge_frame_cells_into_dict(view: &VmFrameView, dict: &mut PyDict) {
     // Fast gate for plain functions with no cell slots and no non-root defining
     // namespace (module-level functions).
     if view.cells.is_empty()
-        && view.gen_frame.is_none()
-        && !matches!(&view.function, Some(f) if f.env.borrow().parent.is_some())
+        && view.gen_frame().is_none()
+        && !matches!(view.function(), Some(f) if f.env.borrow().parent.is_some())
     {
         return;
     }
@@ -533,9 +534,9 @@ fn merge_frame_cells_into_dict_slow(view: &VmFrameView, dict: &mut PyDict) {
     if defining_env.borrow().parent.is_some() {
         let candidates = code.free_var_candidates();
         if !candidates.is_empty() {
+            let local_index = view.local_index();
             let declared_global = view
-                .function
-                .as_ref()
+                .function()
                 .map(|f| Rc::clone(&f.global_names))
                 .or_else(|| own_env.map(|env| Rc::clone(&env.borrow().global_names)));
             let mut current = Some(defining_env);
@@ -561,7 +562,7 @@ fn merge_frame_cells_into_dict_slow(view: &VmFrameView, dict: &mut PyDict) {
                         if value.is_unset() {
                             continue;
                         }
-                        if view.local_index.contains_key(name.as_str())
+                        if local_index.contains_key(name.as_str())
                             || declared_global
                                 .as_ref()
                                 .is_some_and(|g| g.contains(name.as_str()))
@@ -614,7 +615,7 @@ pub(crate) fn snapshot_current_locals(interp: &Interpreter) -> PyDict {
 #[inline]
 pub(crate) fn snapshot_view_locals(interp: &Interpreter, view: &VmFrameView) -> PyDict {
     let mut dict: PyDict = PyDict::default();
-    match view.kind {
+    match view.kind() {
         FrameKind::Script => {
             // Module scope: include the module env (built-in
             // classes + already-spilled bindings) so the user sees the
@@ -625,7 +626,7 @@ pub(crate) fn snapshot_view_locals(interp: &Interpreter, view: &VmFrameView) -> 
             //
             // The view's own root is authoritative: an outer script frame may
             // belong to a different module than the frame that is running now.
-            let me = module_env(view.env.as_ref().unwrap_or(&interp.env));
+            let me = module_env(view.env().unwrap_or(&interp.env));
             let pairs = me.borrow().namespace_materialization_snapshot();
             for (name, value) in pairs {
                 dict.insert(PyKey::str_from(&name), value);

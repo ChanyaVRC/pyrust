@@ -450,25 +450,17 @@ impl Interpreter {
         // accesses go through raw pointers with no noalias assertion in scope.
         let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
         let regs_len = regs.len();
-        self.vm_frame_views.push(VmFrameView {
-            kind: FrameKind::Script,
-            // SAFETY: SmallVec's inline storage / Vec allocation is always
-            // non-null.  The pointer is valid for the lifetime of `regs` on
-            // this stack frame; it is popped before `regs` is dropped.
+        // SAFETY: SmallVec's inline storage / Vec allocation is always
+        // non-null.  The pointer is valid for the lifetime of `regs` on
+        // this stack frame; it is popped before `regs` is dropped.
+        // Retain the root so globals operations inside an imported
+        // function cannot accidentally use the caller's script registers.
+        self.vm_frame_views.push(VmFrameView::script_frame(
             regs_ptr,
             regs_len,
-            cells: CellSlice::empty(),
-            local_index: Rc::clone(&local_index),
-            // Script frames have no enclosing function scope, so there
-            // are no nonlocal bindings to resolve.
-            nonlocal_names: None,
-            // Retain the root so globals operations inside an imported
-            // function cannot accidentally use the caller's script registers.
-            env: Some(Rc::clone(&self.env)),
-            is_class_method: false,
-            function: None,
-            gen_frame: None,
-        });
+            Rc::clone(&local_index),
+            Rc::clone(&self.env),
+        ));
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
         // `regs` (a local RegsBuf that outlives this call).  No &mut [Value]
         // referencing `regs` is held while the dispatch loop runs; RegSlice

@@ -84,6 +84,7 @@ mod vm_tests {
             params: Vec::new(),
             param_binds: Rc::new(Vec::new()),
             memo_positional_parameter_count: 0,
+            trampoline_arity: UserFunction::TRAMPOLINE_INELIGIBLE,
             self_bind: None,
             local_names: Rc::new(HashSet::new()),
             local_index: Rc::new(HashMap::new()),
@@ -888,5 +889,392 @@ assert out > 0
         eprintln!(
             "FNCODE MEM (insns={insns}, names={total_names}): legacy={legacy_total_per_insn:.1} B/insn | cold={cold_total_per_insn:.1} B/insn (cache=0.0 B/insn) | warm={warm_total_per_insn:.1} B/insn (cache={warm_cache_per_insn:.1} B/insn)",
         );
+    }
+
+    #[test]
+    fn vm_frame_view_and_frame_outcome_sizes_stay_compact() {
+        use super::{FrameOutcome, TRAMP_ARENA_CAPACITY, TrampFrame, VmFrameView};
+        use std::mem::size_of;
+
+        assert!(
+            size_of::<VmFrameView>() <= 56,
+            "VmFrameView grew to {} B (guard <= 56 B; keep FrameOwner compact)",
+            size_of::<VmFrameView>()
+        );
+        assert!(
+            size_of::<FrameOutcome>() <= 24,
+            "FrameOutcome grew to {} B (guard <= 24 B; keep GenSaveState boxed)",
+            size_of::<FrameOutcome>()
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(size_of::<VmFrameView>(), 48);
+            assert_eq!(size_of::<FrameOutcome>(), 16);
+        }
+        assert!(
+            size_of::<TrampFrame>() <= 88,
+            "TrampFrame grew to {} B (guard <= 88 B)",
+            size_of::<TrampFrame>()
+        );
+        assert_eq!(TRAMP_ARENA_CAPACITY, 16 * 1024);
+    }
+
+    #[test]
+    fn precomputed_trampoline_arity_matches_eligibility_rules() {
+        use pyrust_core::{UserFunction, ValueKind};
+
+        let mut interp = Interpreter::default();
+        interp
+            .exec_source(
+                r#"
+g = 0
+def eligible0():
+    return 1
+def eligible2(a, b):
+    return a + b
+def eligible_default(a, b=10):
+    return a + b
+def has_args(*args):
+    return args
+def has_kwargs(**kwargs):
+    return kwargs
+def has_kwonly(a, *, b):
+    return a + b
+def uses_global(x):
+    global g
+    g = x
+    return x
+def is_gen(x):
+    yield x
+async def is_coro(x):
+    return x
+def has_loop(xs):
+    s = 0
+    for x in xs:
+        s += x
+    return s
+def has_try(x):
+    try:
+        return 1 // x
+    except ZeroDivisionError:
+        return 0
+def has_own_cell(x):
+    def inner(y):
+        return x + y
+    return inner
+closure_no_own_cells = has_own_cell(5)
+class C:
+    @staticmethod
+    def sm(x):
+        return x
+    @classmethod
+    def cm(cls, x):
+        return x
+sm_fn = C.__dict__['sm']
+cm_fn = C.__dict__['cm']
+"#,
+                None,
+                None,
+            )
+            .expect("definitions must execute");
+
+        let arity_of = |name: &str| -> u16 {
+            let val = interp
+                .lookup_name(name)
+                .expect("lookup succeeds")
+                .unwrap_or_else(|| panic!("missing binding {name}"));
+            let ValueKind::UserFunction(f) = val.kind() else {
+                panic!("{name} must be a UserFunction");
+            };
+            f.trampoline_arity
+        };
+
+        assert_eq!(arity_of("eligible0"), 0);
+        assert_eq!(arity_of("eligible2"), 2);
+        assert_eq!(arity_of("eligible_default"), 2);
+        assert_eq!(arity_of("closure_no_own_cells"), 1);
+        assert_eq!(arity_of("has_args"), UserFunction::TRAMPOLINE_INELIGIBLE);
+        assert_eq!(arity_of("has_kwargs"), UserFunction::TRAMPOLINE_INELIGIBLE);
+        assert_eq!(arity_of("has_kwonly"), UserFunction::TRAMPOLINE_INELIGIBLE);
+        assert_eq!(arity_of("uses_global"), UserFunction::TRAMPOLINE_INELIGIBLE);
+        assert_eq!(arity_of("is_gen"), UserFunction::TRAMPOLINE_INELIGIBLE);
+        assert_eq!(arity_of("is_coro"), UserFunction::TRAMPOLINE_INELIGIBLE);
+        assert_eq!(arity_of("has_loop"), UserFunction::TRAMPOLINE_INELIGIBLE);
+        assert_eq!(arity_of("has_try"), UserFunction::TRAMPOLINE_INELIGIBLE);
+        assert_eq!(
+            arity_of("has_own_cell"),
+            UserFunction::TRAMPOLINE_INELIGIBLE
+        );
+        assert_eq!(arity_of("sm_fn"), UserFunction::TRAMPOLINE_INELIGIBLE);
+        assert_eq!(arity_of("cm_fn"), UserFunction::TRAMPOLINE_INELIGIBLE);
+    }
+
+    #[test]
+    fn shared_tramp_arena_preserves_pointer_stability_across_reentrancy_and_unwind() {
+        use super::TRAMP_ARENA_CAPACITY;
+
+        let mut interp = Interpreter::default();
+        assert_eq!(interp.tramp_arena.capacity(), 0);
+
+        // 1. Re-entrant native <-> Python callbacks (map / sorted / __getattr__)
+        //    with live outer trampolined frames sharing the single tramp_arena.
+        interp
+            .exec_source(
+                r#"
+def leaf(x):
+    return x * 2 + 1
+
+def deep_tramp(n):
+    if n <= 0:
+        return 1
+    return 1 + deep_tramp(n - 1)
+
+class AttrProxy:
+    def __init__(self, bias):
+        self.bias = bias
+    def __getattr__(self, name):
+        return deep_tramp(len(name)) + self.bias
+
+def reentrant_outer(xs, proxy):
+    # Outer frame is trampolined; calls into native map/sorted and __getattr__
+    # which each open nested VM entries that trampoline onto the same arena.
+    mapped = list(map(deep_tramp, xs))
+    ordered = sorted(xs, key=leaf, reverse=True)
+    attr_val = proxy.abcdef
+    return (mapped, ordered, attr_val, deep_tramp(5))
+
+res = reentrant_outer([3, 1, 4, 2], AttrProxy(10))
+assert res == ([4, 2, 5, 3], [4, 3, 2, 1], 17, 6), res
+"#,
+                None,
+                None,
+            )
+            .expect("re-entrant native callbacks must preserve live trampolined frames");
+
+        assert_eq!(interp.tramp_arena.capacity(), TRAMP_ARENA_CAPACITY);
+        assert!(interp.tramp_arena.is_empty());
+        assert!(interp.tramp_stack.is_empty());
+        assert!(interp.gen_drive_stack.is_empty());
+        let initial_arena_ptr = interp.tramp_arena.as_ptr();
+
+        // 2. Exception unwinding across nested trampoline entries (caught and uncaught).
+        interp
+            .exec_source(
+                r#"
+def boom(n):
+    if n <= 0:
+        raise ValueError("boom")
+    return boom(n - 1)
+
+def key_fn(x):
+    if x == 2:
+        return boom(4)
+    return leaf(x)
+
+def outer_catch(xs):
+    try:
+        return sorted(xs, key=key_fn)
+    except ValueError as e:
+        return ("caught", str(e), deep_tramp(6))
+
+caught_res = outer_catch([1, 2, 3])
+assert caught_res == ("caught", "boom", 7), caught_res
+
+def outer_tramp_with_inner_catch(x):
+    return (x, outer_catch([1, 2, 3]), leaf(x))
+
+assert outer_tramp_with_inner_catch(9) == (9, ("caught", "boom", 7), 19)
+"#,
+                None,
+                None,
+            )
+            .expect("caught exception unwinding across nested trampoline entries must succeed");
+
+        assert_eq!(interp.tramp_arena.as_ptr(), initial_arena_ptr);
+        assert_eq!(interp.tramp_arena.capacity(), TRAMP_ARENA_CAPACITY);
+        assert!(interp.tramp_arena.is_empty());
+        assert!(interp.tramp_stack.is_empty());
+        assert!(interp.gen_drive_stack.is_empty());
+
+        // Uncaught exception escaping nested trampoline entries must still unwind cleanly.
+        let uncaught = interp.exec_source(
+            r#"
+def wrapper_uncaught(xs):
+    return sorted(xs, key=key_fn)
+wrapper_uncaught([1, 2, 3])
+"#,
+            None,
+            None,
+        );
+        assert!(uncaught.is_err());
+        assert_eq!(interp.tramp_arena.as_ptr(), initial_arena_ptr);
+        assert!(interp.tramp_arena.is_empty());
+        assert!(interp.tramp_stack.is_empty());
+        assert!(interp.gen_drive_stack.is_empty());
+
+        // 3. Interleaved driven generator calling next() on another generator +
+        //    trampolined calls + exception unwind (guards `gen_base` / `tramp_base`).
+        interp
+            .exec_source(
+                r#"
+def inner_gen(n):
+    i = 0
+    while i < n:
+        yield leaf(i)
+        i += 1
+
+def outer_gen(n):
+    g = inner_gen(n)
+    i = 0
+    while i < n:
+        v = next(g)
+        yield (v, deep_tramp(i))
+        i += 1
+
+collected = []
+for pair in outer_gen(5):
+    collected.append(pair)
+assert collected == [(1, 1), (3, 2), (5, 3), (7, 4), (9, 5)], collected
+
+def raising_inner_gen():
+    yield leaf(1)
+    boom(3)
+
+def outer_gen_err():
+    g = raising_inner_gen()
+    yield next(g)
+    yield next(g)
+
+got = []
+try:
+    for item in outer_gen_err():
+        got.append(item)
+except ValueError as e:
+    got.append(str(e))
+assert got == [3, "boom"], got
+"#,
+                None,
+                None,
+            )
+            .expect("interleaved driven generators and nested next() must respect gen_base");
+
+        assert_eq!(interp.tramp_arena.as_ptr(), initial_arena_ptr);
+        assert!(interp.tramp_arena.is_empty());
+        assert!(interp.tramp_stack.is_empty());
+        assert!(interp.gen_drive_stack.is_empty());
+
+        // 4. Deep recursion that exhausts TRAMP_ARENA_CAPACITY and falls back to
+        //    native frames without reallocating tramp_arena, plus RecursionError.
+        //    Keep ~40 live registers across the recursive call so the arena
+        //    fills well before the debug-build native stack limit.
+        interp
+            .exec_source(
+                r#"
+def wide_rec(n):
+    a0 = n + 1
+    a1 = n + 2
+    a2 = n + 3
+    a3 = n + 4
+    a4 = n + 5
+    a5 = n + 6
+    a6 = n + 7
+    a7 = n + 8
+    a8 = n + 9
+    a9 = n + 10
+    b0 = a0 + a1
+    b1 = a2 + a3
+    b2 = a4 + a5
+    b3 = a6 + a7
+    b4 = a8 + a9
+    c0 = b0 + b1
+    c1 = b2 + b3
+    c2 = c0 + c1 + b4
+    d0 = c2 + a0
+    d1 = d0 + a1
+    d2 = d1 + a2
+    d3 = d2 + a3
+    d4 = d3 + a4
+    d5 = d4 + a5
+    d6 = d5 + a6
+    d7 = d6 + a7
+    d8 = d7 + a8
+    d9 = d8 + a9
+    if n <= 0:
+        return 0
+    sub = wide_rec(n - 1)
+    check = (
+        a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9
+        + b0 + b1 + b2 + b3 + b4 + c0 + c1 + c2
+        + d0 + d1 + d2 + d3 + d4 + d5 + d6 + d7 + d8 + d9
+    )
+    return sub + (1 if check >= 0 else 0)
+"#,
+                None,
+                None,
+            )
+            .expect("wide_rec definition must execute");
+
+        let wide_rec_num_regs = {
+            let val = interp
+                .lookup_name("wide_rec")
+                .expect("lookup succeeds")
+                .expect("wide_rec defined");
+            let pyrust_core::ValueKind::UserFunction(f) = val.kind() else {
+                panic!("wide_rec must be a UserFunction");
+            };
+            assert_eq!(
+                f.trampoline_arity, 1,
+                "wide_rec must be trampoline-eligible"
+            );
+            f.precompiled_code
+                .as_deref()
+                .and_then(|any| any.downcast_ref::<FnCode>())
+                .expect("wide_rec must have precompiled FnCode")
+                .num_regs as usize
+        };
+        let arena_frames = TRAMP_ARENA_CAPACITY / wide_rec_num_regs;
+        let overflow_depth = arena_frames + 5;
+        let limit = overflow_depth + 5;
+        let too_deep = limit + 20;
+        assert!(
+            overflow_depth * wide_rec_num_regs > TRAMP_ARENA_CAPACITY,
+            "test must actually overflow TRAMP_ARENA_CAPACITY"
+        );
+
+        interp
+            .exec_source(
+                &format!(
+                    r#"
+import sys
+old_limit = sys.getrecursionlimit()
+sys.setrecursionlimit({limit})
+try:
+    assert wide_rec({overflow_depth}) == {overflow_depth}
+
+    # Exceed recursion limit across the trampoline + native fallback boundary.
+    hit_rec_err = False
+    try:
+        wide_rec({too_deep})
+    except RecursionError:
+        hit_rec_err = True
+    assert hit_rec_err
+finally:
+    sys.setrecursionlimit(old_limit)
+"#
+                ),
+                None,
+                None,
+            )
+            .expect("deep recursion overflowing tramp_arena must fall back without reallocating");
+
+        assert_eq!(
+            interp.tramp_arena.as_ptr(),
+            initial_arena_ptr,
+            "tramp_arena must never reallocate once reserved"
+        );
+        assert_eq!(interp.tramp_arena.capacity(), TRAMP_ARENA_CAPACITY);
+        assert!(interp.tramp_arena.is_empty());
+        assert!(interp.tramp_stack.is_empty());
+        assert!(interp.gen_drive_stack.is_empty());
     }
 }

@@ -168,6 +168,7 @@ impl Value {
                 params: Vec::new(),
                 param_binds: Rc::new(Vec::new()),
                 memo_positional_parameter_count: 0,
+                trampoline_arity: UserFunction::TRAMPOLINE_INELIGIBLE,
                 self_bind: None,
                 local_names: Rc::new(HashSet::new()),
                 local_index: Rc::new(HashMap::new()),
@@ -211,6 +212,7 @@ impl Value {
             params: template.params.clone(),
             param_binds: Rc::clone(&template.param_binds),
             memo_positional_parameter_count: template.memo_positional_parameter_count,
+            trampoline_arity: UserFunction::TRAMPOLINE_INELIGIBLE,
             self_bind: template.self_bind,
             local_names: Rc::clone(&template.local_names),
             local_index: Rc::clone(&template.local_index),
@@ -293,6 +295,11 @@ impl Value {
             params: f.params.clone(),
             param_binds: Rc::clone(&f.param_binds),
             memo_positional_parameter_count: f.memo_positional_parameter_count,
+            trampoline_arity: if matches!(kind, UserFunctionKind::Regular) {
+                f.trampoline_arity
+            } else {
+                UserFunction::TRAMPOLINE_INELIGIBLE
+            },
             self_bind: f.self_bind,
             local_names: Rc::clone(&f.local_names),
             local_index: Rc::clone(&f.local_index),

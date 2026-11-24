@@ -74,7 +74,7 @@ impl Interpreter {
             && self
                 .vm_frame_views
                 .last()
-                .is_some_and(|view| view.kind == FrameKind::Script);
+                .is_some_and(|view| view.kind() == FrameKind::Script);
         let namespace = GlobalNamespace {
             root,
             globals,

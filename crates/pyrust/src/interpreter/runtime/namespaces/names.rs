@@ -12,11 +12,11 @@ impl Interpreter {
     #[inline]
     pub(crate) fn active_frame_declares_global(&self, name: &str) -> bool {
         if let Some(view) = self.vm_frame_views.last() {
-            if let Some(func) = view.function.as_ref() {
+            if let Some(func) = view.function() {
                 if Rc::ptr_eq(&self.env, &func.env) && func.global_names.contains(name) {
                     return true;
                 }
-            } else if let Some(gen_frame) = view.gen_frame {
+            } else if let Some(gen_frame) = view.gen_frame() {
                 // SAFETY: `VmFrameView::gen_frame` points to a heap-stable
                 // `GeneratorFrame` for as long as the view is on the stack.
                 let gf = unsafe { gen_frame.as_ref() };

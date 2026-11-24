@@ -294,31 +294,21 @@ impl Interpreter {
                 return Ok(Self::build_generator_value(&code, regs, cells, &function));
             }
 
-            let nonlocal_names_opt = if function.nonlocal_names.is_empty() {
-                None
-            } else {
-                Some(Rc::clone(&function.nonlocal_names))
-            };
             // Capture the raw pointer and length BEFORE constructing RegSlice
             // so both the VmFrameView and the dispatch loop share the same raw
             // pointer with no &mut [Value] in scope (issue #547 / PR #646).
             let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
             let regs_len = regs.len();
             let cells_slice = CellSlice::from_slice(&cells);
-            self.vm_frame_views.push(VmFrameView {
-                kind: FrameKind::Function,
-                // SAFETY: SmallVec / Vec allocation is always non-null.
-                // Popped before `regs` / `cells` are dropped.
+            // SAFETY: SmallVec / Vec allocation is always non-null.
+            // Popped before `regs` / `cells` are dropped.
+            self.vm_frame_views.push(VmFrameView::function_frame(
                 regs_ptr,
                 regs_len,
-                cells: cells_slice,
-                local_index: Rc::clone(&function.local_index),
-                nonlocal_names: nonlocal_names_opt,
-                env: None,
-                is_class_method: code.is_class_method,
-                function: Some(Rc::clone(&function)),
-                gen_frame: None,
-            });
+                cells_slice,
+                Rc::clone(&function),
+                code.is_class_method,
+            ));
             // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
             // of `regs` (a local RegsBuf that outlives this call).  No
             // &mut [Value] referencing `regs` is held while the dispatch loop

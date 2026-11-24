@@ -303,6 +303,14 @@ pub struct Interpreter {
     /// so that `locals()` inside a class body returns the partially-built
     /// class attrs dict (issue #487).
     pub(crate) vm_frame_views: Vec<VmFrameView>,
+    /// Reusable register arena for trampolined Python→Python calls (#2234 / #3159).
+    /// Lazily reserved once to a fixed capacity on the first trampolined call and
+    /// never reallocated while live `RegSlice` / `VmFrameView` pointers borrow it.
+    pub(crate) tramp_arena: Vec<Value>,
+    /// Reusable stack of active trampolined call frames across nested VM entries (#3159).
+    pub(crate) tramp_stack: Vec<TrampFrame>,
+    /// Reusable stack of active inline-driven generator frames across nested VM entries (#3159).
+    pub(crate) gen_drive_stack: Vec<GenDriveFrame>,
     /// Lazily allocated frame-object caches parallel to `vm_frame_views` for
     /// non-generator activations that have actually been introspected. The
     /// vector ends at its highest materialized slot; generator activations own
@@ -403,11 +411,51 @@ pub(crate) enum FrameKind {
     Class,
 }
 
-/// Snapshot of a VM frame's register file and name index, used by
-/// `globals()` / `locals()` / `vars()` to surface names that live in
-/// registers rather than `env.values` (issue #389).
+/// Metadata for a script / module / `exec` / `eval` VM frame view (#3159).
+/// Boxed inside [`FrameOwner::Script`] so hot function and generator frame views
+/// stay compact (`size_of::<VmFrameView>() <= 56`).
+pub(crate) struct ScriptFrameMeta {
+    pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+    /// Root environment for this script frame so namespace-sensitive helpers
+    /// distinguish an imported function's globals from the caller's script registers.
+    pub(crate) env: EnvRef,
+}
+
+/// Compact ownership tag for [`VmFrameView`] (#3159).
+///
+/// Replaces redundant `local_index` / `nonlocal_names` / `env` / `is_class_method`
+/// / `function` / `gen_frame` fields so pushing a function or generator view does
+/// zero extra `Rc::clone`s beyond its single owner handle (zero `Rc::clone`s at
+/// all for generators and owned-`Rc` trampolined calls).
+pub(crate) enum FrameOwner {
+    /// Ordinary or trampolined Python function frame (not a direct class method).
+    Function(Rc<UserFunction>),
+    /// Direct class-body method frame (`FnCode::is_class_method == true`).
+    ClassMethod(Rc<UserFunction>),
+    /// Active generator, coroutine, or async-generator frame.
+    ///
+    /// # Soundness
+    ///
+    /// The `GeneratorFrame` is heap-stable for the lifetime of this view.  At
+    /// both push sites it lives behind a stable address — the trampoline's
+    /// `Box<GeneratorFrame>` (held in `GenDriveFrame::gframe`) or a
+    /// `&mut GeneratorFrame` borrowed for the whole duration of
+    /// `resume_generator_with_exc` — and the view is popped before that box /
+    /// borrow can be used again. While the dispatch loop is running, cold-path
+    /// consumers reconstruct shared references only; they never reconstruct a
+    /// raw-derived mutable reference. The frame cache alone uses interior
+    /// mutability, with each `RefCell` borrow confined to one cold helper call.
+    Generator(std::ptr::NonNull<GeneratorFrame>),
+    /// Module / script / `exec` / `eval` frame.
+    Script(Box<ScriptFrameMeta>),
+    /// Class-body evaluation frame.
+    Class(Rc<HashMap<String, crate::bytecode::Reg>>),
+}
+
+/// Snapshot of a VM frame's register file and owner metadata, used by
+/// `globals()` / `locals()` / `vars()` / `sys._getframe()` / tracebacks to
+/// surface names that live in registers rather than `env.values` (issue #389).
 pub(crate) struct VmFrameView {
-    pub(crate) kind: FrameKind,
     /// Non-null raw pointer to the active frame's register file.  Valid only
     /// while the corresponding `run_bytecode` invocation is on the call stack
     /// — `Interpreter::vm_frame_views` is pushed/popped in lock-step with
@@ -424,23 +472,6 @@ pub(crate) struct VmFrameView {
     /// annotation, so dereferencing `regs_ptr` in any helper while the
     /// dispatch loop is blocked inside `call_function_expanded` is not aliasing
     /// UB — both accesses go through raw pointers.
-    ///
-    /// The old invariant ("per-element `NonNull::as_ref()` limits the alias
-    /// scope") was insufficient: even a single-element `&Value` / `&mut Value`
-    /// formed while a `&mut [Value]` to the same allocation is live on the
-    /// call stack violates Rust/LLVM `noalias` rules.  Removing `&mut [Value]`
-    /// from the picture entirely (via `RegSlice`) is the correct fix.
-    ///
-    /// Access patterns:
-    /// * **Reads** (`merge_frame_view_into_dict`, `Insn::LoadGlobal`): happen
-    ///   while the frame is suspended inside `call_function_expanded`.  The
-    ///   interpreter is single-threaded; no concurrent writes are possible.
-    /// * **Writes** (`assign_name`/`StoreGlobal`, `Insn::DeleteGlobal`): only
-    ///   ever target a **suspended** `Script` frame from a nested `Function`
-    ///   or `Class` frame.
-    ///
-    /// `NonNull` (rather than `*mut`) makes the non-null invariant explicit
-    /// and catches null-push bugs at the push site rather than at dereference.
     pub(crate) regs_ptr: std::ptr::NonNull<Value>,
     pub(crate) regs_len: usize,
     /// Borrowed slice of this frame's indexed [`CellSlot`](pyrust_core::CellSlot)s
@@ -448,62 +479,160 @@ pub(crate) struct VmFrameView {
     /// lifetime of this `VmFrameView` (popped before the backing `CellsBuf` /
     /// `UserFunction::closure_cells` / `GeneratorFrame::cells` is dropped).
     pub(crate) cells: CellSlice,
-    pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
-    /// Names declared `nonlocal` in this function frame (absent for
-    /// `Script` frames which have no enclosing function scope).  Used
-    /// by `snapshot_current_locals` (issue #486) to include nonlocal
-    /// bindings in `locals()` — these live in an enclosing env, not
-    /// in the fastlocal register file.
-    pub(crate) nonlocal_names: Option<Rc<std::collections::HashSet<String>>>,
-    /// The active env reference for this frame.  For function frames,
-    /// this is the function's own local env (the one pushed by
-    /// `call_user_function_expanded` before `run_bytecode`).
-    /// `snapshot_current_locals` uses it as the starting point for
-    /// `find_enclosing_local_env_for_name` to resolve nonlocal names.
-    /// Script frames retain their root env so namespace-sensitive helpers can
-    /// distinguish an imported function's globals from the caller's script
-    /// registers.
-    pub(crate) env: Option<EnvRef>,
-    /// True when this function was compiled as a direct method inside a class
-    /// body (`FnCode::is_class_method`).  Used by `resolve_zero_arg_super` to
-    /// identify the frame whose register 0 (`self`/`cls`) should be used.
-    /// Script and Class frames always have this `false`.
-    pub(crate) is_class_method: bool,
-    /// The `UserFunction` this frame is executing, for `Function` frames.
-    /// `None` for `Script` and `Class` frames.  Stored as a strong `Rc`
-    /// (a refcount bump at push time — the function is already alive for the
-    /// duration of its own call) so that frame-introspection objects
-    /// (`sys._getframe`, traceback `tb_frame`; issues #2170/#2171) can recover
-    /// the frame's `co_name` / code object without threading the name through
-    /// the VM dispatch signatures.
-    pub(crate) function: Option<Rc<UserFunction>>,
-    /// For generator frames (which carry no `UserFunction`, so `function` is
-    /// `None`), a raw pointer to the active `GeneratorFrame` from which the
-    /// generator's `(funcname, filename)` is recovered *lazily* on the cold
-    /// traceback path (issue #2471).  Used so a traceback built when an
-    /// exception is *caught inside* the generator body (e.g. via
-    /// `generator.throw()`) attributes the catching frame to the generator
-    /// rather than falling back to the `<module>` frame (issue #2445).  `None`
-    /// for every non-generator frame.
-    ///
-    /// Storing one pointer rather than two eagerly-cloned `Arc<str>`s keeps
-    /// `VmFrameView` narrow and the hot `vm_enter_gen_drive` setup free of the
-    /// two per-resume atomic refcount bumps that PR #2469 introduced: the
-    /// name/filename are read only when a traceback snapshot is actually built
-    /// (always the cold path).
-    ///
-    /// # Soundness
-    ///
-    /// The `GeneratorFrame` is heap-stable for the lifetime of this view.  At
-    /// both push sites it lives behind a stable address — the trampoline's
-    /// `Box<GeneratorFrame>` (held in `GenDriveFrame::gframe`) or a
-    /// `&mut GeneratorFrame` borrowed for the whole duration of
-    /// `resume_generator_with_exc` — and the view is popped before that box /
-    /// borrow can be used again. While the dispatch loop is running, cold-path
-    /// consumers reconstruct shared references only; they never reconstruct a
-    /// raw-derived mutable reference. The frame cache alone uses interior
-    /// mutability, with each `RefCell` borrow confined to one cold helper call.
-    pub(crate) gen_frame: Option<std::ptr::NonNull<GeneratorFrame>>,
+    /// Compact frame owner holding the frame's kind and metadata (#3159).
+    pub(crate) owner: FrameOwner,
+}
+
+impl VmFrameView {
+    #[inline(always)]
+    pub(crate) fn function_frame(
+        regs_ptr: std::ptr::NonNull<Value>,
+        regs_len: usize,
+        cells: CellSlice,
+        function: Rc<UserFunction>,
+        is_class_method: bool,
+    ) -> Self {
+        let owner = if is_class_method {
+            FrameOwner::ClassMethod(function)
+        } else {
+            FrameOwner::Function(function)
+        };
+        Self {
+            regs_ptr,
+            regs_len,
+            cells,
+            owner,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn generator_frame(
+        regs_ptr: std::ptr::NonNull<Value>,
+        regs_len: usize,
+        cells: CellSlice,
+        gen_frame: std::ptr::NonNull<GeneratorFrame>,
+    ) -> Self {
+        Self {
+            regs_ptr,
+            regs_len,
+            cells,
+            owner: FrameOwner::Generator(gen_frame),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn script_frame(
+        regs_ptr: std::ptr::NonNull<Value>,
+        regs_len: usize,
+        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+        env: EnvRef,
+    ) -> Self {
+        Self {
+            regs_ptr,
+            regs_len,
+            cells: CellSlice::empty(),
+            owner: FrameOwner::Script(Box::new(ScriptFrameMeta { local_index, env })),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn class_frame(
+        regs_ptr: std::ptr::NonNull<Value>,
+        regs_len: usize,
+        cells: CellSlice,
+        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+    ) -> Self {
+        Self {
+            regs_ptr,
+            regs_len,
+            cells,
+            owner: FrameOwner::Class(local_index),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn kind(&self) -> FrameKind {
+        match &self.owner {
+            FrameOwner::Function(_) | FrameOwner::ClassMethod(_) | FrameOwner::Generator(_) => {
+                FrameKind::Function
+            }
+            FrameOwner::Script(_) => FrameKind::Script,
+            FrameOwner::Class(_) => FrameKind::Class,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn function(&self) -> Option<&Rc<UserFunction>> {
+        match &self.owner {
+            FrameOwner::Function(f) | FrameOwner::ClassMethod(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn into_function(self) -> Option<Rc<UserFunction>> {
+        match self.owner {
+            FrameOwner::Function(f) | FrameOwner::ClassMethod(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn gen_frame(&self) -> Option<std::ptr::NonNull<GeneratorFrame>> {
+        match self.owner {
+            FrameOwner::Generator(ptr) => Some(ptr),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_class_method(&self) -> bool {
+        match self.owner {
+            FrameOwner::ClassMethod(_) => true,
+            FrameOwner::Generator(ptr) => {
+                // SAFETY: `ptr` points to the heap-stable `GeneratorFrame`
+                // while this view is on `vm_frame_views`.
+                unsafe { ptr.as_ref().code.is_class_method }
+            }
+            _ => false,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn local_index(&self) -> &HashMap<String, crate::bytecode::Reg> {
+        match &self.owner {
+            FrameOwner::Function(f) | FrameOwner::ClassMethod(f) => &f.local_index,
+            FrameOwner::Generator(ptr) => {
+                // SAFETY: `ptr` points to the heap-stable `GeneratorFrame`
+                // while this view is on `vm_frame_views`.
+                &unsafe { ptr.as_ref() }.function.local_index
+            }
+            FrameOwner::Script(meta) => &meta.local_index,
+            FrameOwner::Class(local_index) => local_index,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn nonlocal_names(&self) -> Option<&HashSet<String>> {
+        let names = match &self.owner {
+            FrameOwner::Function(f) | FrameOwner::ClassMethod(f) => &f.nonlocal_names,
+            FrameOwner::Generator(ptr) => {
+                // SAFETY: `ptr` points to the heap-stable `GeneratorFrame`
+                // while this view is on `vm_frame_views`.
+                &unsafe { ptr.as_ref() }.function.nonlocal_names
+            }
+            FrameOwner::Script(_) | FrameOwner::Class(_) => return None,
+        };
+        (!names.is_empty()).then_some(names.as_ref())
+    }
+
+    #[inline]
+    pub(crate) fn env(&self) -> Option<&EnvRef> {
+        match &self.owner {
+            FrameOwner::Script(meta) => Some(&meta.env),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) struct VmFrameCache {
@@ -584,6 +713,9 @@ impl Default for Interpreter {
             class_store_order: Vec::new(),
             class_annotation_scopes: Vec::new(),
             vm_frame_views: Vec::new(),
+            tramp_arena: Vec::new(),
+            tramp_stack: Vec::new(),
+            gen_drive_stack: Vec::new(),
             vm_frame_caches: None,
             eq_in_progress: Vec::new(),
             comparison_pair_stack: Vec::new(),

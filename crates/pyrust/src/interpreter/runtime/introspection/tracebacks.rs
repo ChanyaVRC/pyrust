@@ -178,7 +178,7 @@ impl Interpreter {
         let catch_view_index = self.visible_view_index_for_depth(0);
         let (catch_code, catch_globals) = {
             let last_view = catch_view_index.and_then(|idx| self.vm_frame_views.get(idx));
-            let catch_func = last_view.and_then(|view| view.function.clone());
+            let catch_func = last_view.and_then(|view| view.function().cloned());
             // Issue #2445: a generator body has no `UserFunction`; recover the
             // generator's `(funcname, filename)` so the catching frame is attributed
             // to the generator instead of `<module>`.  Issue #2471: the view stores
@@ -191,7 +191,7 @@ impl Interpreter {
             // synchronously on that same stack while the frame is suspended, so the
             // pointee is alive and no `&mut GeneratorFrame` to it is live.
             let catch_gen_frame = if catch_func.is_none() {
-                last_view.and_then(|view| view.gen_frame.map(|p| unsafe { p.as_ref() }))
+                last_view.and_then(|view| view.gen_frame().map(|p| unsafe { p.as_ref() }))
             } else {
                 None
             };
@@ -199,7 +199,7 @@ impl Interpreter {
                 .map(|gframe| (gframe.fn_name.clone(), gframe.code.filename.clone()));
             let catch_class_info = if catch_func.is_none() && catch_gen_frame.is_none() {
                 last_view
-                    .filter(|view| view.kind == FrameKind::Class)
+                    .filter(|view| view.kind() == FrameKind::Class)
                     .and_then(|view| class_frame_identity(self, view))
             } else {
                 None
@@ -213,7 +213,7 @@ impl Interpreter {
                 .as_ref()
                 .map(|func| &func.env)
                 .or_else(|| catch_gen_frame.map(|gframe| &gframe.function.env))
-                .or_else(|| last_view.and_then(|view| view.env.as_ref()))
+                .or_else(|| last_view.and_then(|view| view.env()))
                 .unwrap_or(&self.env);
             let catch_globals = pyrust_core::FrameGlobals::for_environment(catch_env);
             let catch_code = match (catch_func, catch_gen_info, catch_class_info) {

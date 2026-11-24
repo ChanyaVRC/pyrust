@@ -24,12 +24,20 @@ enum TrampEnter<T> {
     VmErr(PyError),
 }
 
-/// Gate check shared by plain-function and bound-method trampolining (#2234 / #2345).
+/// Fixed register-slot capacity reserved once on `Interpreter::tramp_arena`
+/// (16 Ki Values = 128 KiB). Never grown afterwards so live `RegSlice` and
+/// `VmFrameView::regs_ptr` pointers across nested VM entries stay strictly stable
+/// (#2234 / #3159).
+const TRAMP_ARENA_CAPACITY: usize = 16 * 1024;
+
+/// Gate check shared by plain-function and bound-method trampolining (#2234 / #2345 / #3159).
 ///
-/// Ensures the callee is a plain, loop-free, handler-free, local-env-free
-/// regular function, the caller is outside any `try`, and the pre-reserved
-/// `tramp_arena` has room without reallocating (which would dangle saved
-/// `RegSlice`s).
+/// Uses the precomputed `UserFunction::trampoline_arity` sentinel so callee
+/// eligibility (`Regular`, no `global` declarations, no variadic/keyword-only
+/// parameters, exact arity, and plain loop-free/handler-free/own-cell-free
+/// bytecode) reduces to a single integer comparison, then verifies the caller
+/// is outside any `try` and that the fixed-capacity `tramp_arena` has room
+/// without reallocating (which would dangle live `RegSlice`s).
 #[inline(always)]
 fn vm_tramp_check_gate<'a>(
     f: &'a pyrust_core::UserFunction,
@@ -39,7 +47,7 @@ fn vm_tramp_check_gate<'a>(
     nsupplied: usize,
     tramp_arena: &mut Vec<Value>,
 ) -> Option<(&'a crate::bytecode::FnCode, usize)> {
-    if !matches!(f.kind, pyrust_core::UserFunctionKind::Regular) || !f.global_names.is_empty() {
+    if nsupplied != f.trampoline_arity as usize {
         return None;
     }
     if !exc_handlers.is_empty()
@@ -52,39 +60,40 @@ fn vm_tramp_check_gate<'a>(
     {
         return None;
     }
-    if nsupplied != f.params.len()
-        || f.params
-            .iter()
-            .any(|p| p.is_args || p.is_kwargs || p.is_keyword_only)
-    {
-        return None;
-    }
     // Borrow `FnCode` directly out of `f.precompiled_code` without cloning its
-    // `Rc`: `VmFrameView::function` keeps `f` (and its immutable
+    // `Rc`: `VmFrameView`'s `FrameOwner` keeps `f` (and its immutable
     // `precompiled_code`) alive until `vm_tramp_return` restores `code_ptr` and
-    // pops the view (#2924).
+    // pops the view (#2924 / #3159).
     let callee_code = f
         .precompiled_code
         .as_deref()
         .and_then(|any| any.downcast_ref::<crate::bytecode::FnCode>())?;
-    // A coroutine function (`async def`, #1039) must build a coroutine object
-    // instead of executing inline, even when its body has no `await`.
-    if callee_code.is_generator
-        || callee_code.is_coroutine
-        || callee_code.num_iters != 0
-        || callee_code.has_exc_handlers
-        || callee_code.has_own_cells()
-    {
-        return None;
-    }
+    debug_assert!(matches!(f.kind, pyrust_core::UserFunctionKind::Regular));
+    debug_assert!(f.global_names.is_empty());
+    debug_assert_eq!(f.params.len(), nsupplied);
+    debug_assert!(
+        !f.params
+            .iter()
+            .any(|p| p.is_args || p.is_kwargs || p.is_keyword_only)
+    );
+    debug_assert!(!callee_code.is_generator);
+    debug_assert!(!callee_code.is_coroutine);
+    debug_assert_eq!(callee_code.num_iters, 0);
+    debug_assert!(!callee_code.has_exc_handlers);
+    debug_assert!(!callee_code.has_own_cells());
     let num_regs = callee_code.num_regs as usize;
-    let base = tramp_arena.len();
-    if tramp_arena.is_empty() {
+    if tramp_arena.capacity() == 0 {
         // Reserve once while no slices are live so later `resize`s never
-        // reallocate (which would dangle saved/active `RegSlice`s).
-        tramp_arena.reserve(16 * 1024);
+        // reallocate (which would dangle saved/active `RegSlice`s across both
+        // this entry and any enclosing nested VM entries).
+        debug_assert!(tramp_arena.is_empty());
+        tramp_arena.reserve_exact(TRAMP_ARENA_CAPACITY);
     }
-    if base + num_regs > tramp_arena.capacity() {
+    let base = tramp_arena.len();
+    if base
+        .checked_add(num_regs)
+        .is_none_or(|end| end > tramp_arena.capacity())
+    {
         return None;
     }
     Some((callee_code, base))
@@ -92,7 +101,7 @@ fn vm_tramp_check_gate<'a>(
 
 impl Interpreter {
     /// Finalize a call-trampoline frame switch after parameters have been bound
-    /// into `st.tramp_arena[base .. base + num_regs]`.
+    /// into `self.tramp_arena[base .. base + num_regs]`.
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn vm_tramp_commit_frame(
@@ -111,7 +120,7 @@ impl Interpreter {
         // SAFETY: `base + num_regs <= capacity` was verified by the gate, so
         // no reallocation occurred and the pointer stays valid until this
         // frame's `truncate` on return.
-        let new_ptr = unsafe { st.tramp_arena.as_mut_ptr().add(base) };
+        let new_ptr = unsafe { self.tramp_arena.as_mut_ptr().add(base) };
         // Claim only after every gate and register read succeeded. A same-key
         // recursive miss gets no second owner but still enters the trampoline.
         let memo_key = memo_key
@@ -122,18 +131,12 @@ impl Interpreter {
         } else {
             Some(std::mem::replace(&mut self.env, Rc::clone(&view_fn.env)))
         };
-        let callee_local_index = Rc::clone(&view_fn.local_index);
         // Freevar-only closures (`own_cell_count == 0`) borrow `f.closure_cells`
-        // directly with zero allocation; `VmFrameView::function` keeps `f` alive
-        // until return restores `saved_cells` (#452 / #2348).
+        // directly with zero allocation; `VmFrameView`'s `FrameOwner` keeps `f`
+        // alive until return restores `saved_cells` (#452 / #2348 / #3159).
         let callee_cells = CellSlice::from_slice(&view_fn.closure_cells);
-        let callee_nonlocal_names = if view_fn.nonlocal_names.is_empty() {
-            None
-        } else {
-            Some(Rc::clone(&view_fn.nonlocal_names))
-        };
         let new_regs = unsafe { RegSlice::from_raw(new_ptr, num_regs) };
-        st.tramp_stack.push(TrampFrame {
+        self.tramp_stack.push(TrampFrame {
             _depth_guard: depth_guard,
             saved_regs: std::mem::replace(st.regs, new_regs),
             saved_cells: *st.cells,
@@ -142,25 +145,19 @@ impl Interpreter {
             saved_base: *st.tramp_active_base,
             saved_cur_line: *st.cur_line,
             saved_code_ptr: *st.code_ptr,
-            saved_active_code_rc: st.active_code_rc.take(),
             saved_num_locals: *st.num_locals,
             saved_env,
             memo_key,
         });
         // Publish a frame view so `locals()` / `sys._getframe()` / tracebacks
         // observe this trampolined frame like a natively-called one.
-        self.vm_frame_views.push(VmFrameView {
-            kind: FrameKind::Function,
-            regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(new_ptr) },
-            regs_len: num_regs,
-            cells: callee_cells,
-            local_index: callee_local_index,
-            nonlocal_names: callee_nonlocal_names,
-            env: None,
-            is_class_method: callee_is_class_method,
-            function: Some(view_fn),
-            gen_frame: None,
-        });
+        self.vm_frame_views.push(VmFrameView::function_frame(
+            unsafe { std::ptr::NonNull::new_unchecked(new_ptr) },
+            num_regs,
+            callee_cells,
+            view_fn,
+            callee_is_class_method,
+        ));
         *st.tramp_active_base = base;
         *st.code_ptr = callee_code_ptr;
         *st.num_locals = callee_num_locals;
@@ -169,8 +166,8 @@ impl Interpreter {
     }
 
     /// Direct owned-`Rc<UserFunction>` trampoline entry used by `Insn::Call`
-    /// (#2924): moves `func` into `VmFrameView::function` without cloning a
-    /// second `Rc`, or hands it back on gate rejection.
+    /// (#2924): moves `func` into `VmFrameView` without cloning a second `Rc`,
+    /// or hands it back on gate rejection.
     #[inline(always)]
     fn vm_tramp_try_user_fn(
         &mut self,
@@ -186,7 +183,7 @@ impl Interpreter {
             *st.pc,
             st.exc_handlers,
             argc as usize,
-            st.tramp_arena,
+            &mut self.tramp_arena,
         ) else {
             return Ok(TrampEnter::Fallback(func));
         };
@@ -197,22 +194,22 @@ impl Interpreter {
         let Some(depth_guard) = CallDepthGuard::try_enter(max_call_depth(self)) else {
             return Ok(TrampEnter::UnwindErr(self.recursion_limit_error()?));
         };
-        let nparams = func.params.len();
-        st.tramp_arena.resize(base + num_regs, Value::unset());
+        let nparams = argc as usize;
+        self.tramp_arena.resize(base + num_regs, Value::unset());
         for i in 0..nparams {
             let v = match vm_read(st.regs, func_reg + 1 + i as u32, *st.num_locals) {
                 Ok(v) => v,
                 Err(e) => {
-                    st.tramp_arena.truncate(base);
+                    self.tramp_arena.truncate(base);
                     return Ok(TrampEnter::VmErr(e));
                 }
             };
             if let pyrust_core::ParamBind::Reg(r) = func.param_binds[i] {
-                st.tramp_arena[base + r as usize] = v;
+                self.tramp_arena[base + r as usize] = v;
             }
         }
         if let Some(slot) = func.self_bind {
-            st.tramp_arena[base + slot as usize] = Value::user_function(Rc::clone(&func));
+            self.tramp_arena[base + slot as usize] = Value::user_function(Rc::clone(&func));
         }
         self.vm_tramp_commit_frame(
             func_reg,
@@ -229,7 +226,7 @@ impl Interpreter {
         Ok(TrampEnter::Entered)
     }
 
-    /// Plain-call trampoline entry (`Insn::Call` slow path & `Insn::CallMemo`).
+    /// Plain-call trampoline entry (`Insn::CallMemo`).
     #[inline(always)]
     fn vm_tramp_try_plain(
         &mut self,
@@ -249,7 +246,7 @@ impl Interpreter {
             *st.pc,
             st.exc_handlers,
             argc as usize,
-            st.tramp_arena,
+            &mut self.tramp_arena,
         ) else {
             return Ok(TrampEnter::Fallback(()));
         };
@@ -260,22 +257,22 @@ impl Interpreter {
         let Some(depth_guard) = CallDepthGuard::try_enter(max_call_depth(self)) else {
             return Ok(TrampEnter::UnwindErr(self.recursion_limit_error()?));
         };
-        let nparams = f.params.len();
-        st.tramp_arena.resize(base + num_regs, Value::unset());
+        let nparams = argc as usize;
+        self.tramp_arena.resize(base + num_regs, Value::unset());
         for i in 0..nparams {
             let v = match vm_read(st.regs, func_reg + 1 + i as u32, *st.num_locals) {
                 Ok(v) => v,
                 Err(e) => {
-                    st.tramp_arena.truncate(base);
+                    self.tramp_arena.truncate(base);
                     return Ok(TrampEnter::VmErr(e));
                 }
             };
             if let pyrust_core::ParamBind::Reg(r) = f.param_binds[i] {
-                st.tramp_arena[base + r as usize] = v;
+                self.tramp_arena[base + r as usize] = v;
             }
         }
         if let Some(slot) = f.self_bind {
-            st.tramp_arena[base + slot as usize] = func_val.clone();
+            self.tramp_arena[base + slot as usize] = func_val.clone();
         }
         self.vm_tramp_commit_frame(
             func_reg,
@@ -312,7 +309,7 @@ impl Interpreter {
             *st.pc,
             st.exc_handlers,
             (argc as usize) + 1,
-            st.tramp_arena,
+            &mut self.tramp_arena,
         ) else {
             return Ok(TrampEnter::Fallback(()));
         };
@@ -323,20 +320,20 @@ impl Interpreter {
         let Some(depth_guard) = CallDepthGuard::try_enter(max_call_depth(self)) else {
             return Ok(TrampEnter::UnwindErr(self.recursion_limit_error()?));
         };
-        st.tramp_arena.resize(base + num_regs, Value::unset());
+        self.tramp_arena.resize(base + num_regs, Value::unset());
         if let pyrust_core::ParamBind::Reg(r) = f.param_binds[0] {
-            st.tramp_arena[base + r as usize] = recv;
+            self.tramp_arena[base + r as usize] = recv;
         }
         for i in 0..argc as u32 {
             let v = match vm_read(st.regs, args_base + i, *st.num_locals) {
                 Ok(v) => v,
                 Err(e) => {
-                    st.tramp_arena.truncate(base);
+                    self.tramp_arena.truncate(base);
                     return Ok(TrampEnter::VmErr(e));
                 }
             };
             if let pyrust_core::ParamBind::Reg(r) = f.param_binds[1 + i as usize] {
-                st.tramp_arena[base + r as usize] = v;
+                self.tramp_arena[base + r as usize] = v;
             }
         }
         self.vm_tramp_commit_frame(
@@ -433,29 +430,30 @@ impl Interpreter {
     /// bottom VM frame.
     #[inline(always)]
     fn vm_tramp_return(&mut self, value: Value, st: &mut UnwindState) -> Option<Value> {
-        if st
-            .gen_drive_stack
-            .last()
-            .is_some_and(|g| g.tramp_floor == st.tramp_stack.len())
+        if self.gen_drive_stack.len() > st.gen_base
+            && self
+                .gen_drive_stack
+                .last()
+                .is_some_and(|g| g.tramp_floor == self.tramp_stack.len())
         {
             self.vm_gen_drive_return(value, st);
             return None;
         }
-        if let Some(saved) = st.tramp_stack.pop() {
+        if self.tramp_stack.len() > st.tramp_base {
+            let saved = self.tramp_stack.pop().unwrap();
             let detached_view = self.detach_vm_frame_view();
             let memo_key = saved.memo_key;
-            st.tramp_arena.truncate(*st.tramp_active_base);
+            self.tramp_arena.truncate(*st.tramp_active_base);
             *st.tramp_active_base = saved.saved_base;
             *st.regs = saved.saved_regs;
             *st.cells = saved.saved_cells;
             *st.pc = saved.saved_pc;
             *st.cur_line = saved.saved_cur_line;
             // Restore the caller's code / locals / env BEFORE dropping the
-            // detached frame view (whose `function` `Rc<UserFunction>` keeps the
-            // callee's `FnCode` alive, #2924) and finalizing any escaping frame
-            // cache (#3028).
+            // detached frame view (whose `FrameOwner` keeps the callee's
+            // `FnCode` alive, #2924) and finalizing any escaping frame cache
+            // (#3028).
             *st.code_ptr = saved.saved_code_ptr;
-            *st.active_code_rc = saved.saved_active_code_rc;
             *st.num_locals = saved.saved_num_locals;
             if let Some(saved_env) = saved.saved_env {
                 self.env = saved_env;
@@ -475,7 +473,7 @@ impl Interpreter {
     /// exhausted, restore its consumer, and jump to the `ForIter` exit PC.
     #[inline(always)]
     fn vm_gen_drive_return(&mut self, value: Value, st: &mut UnwindState) {
-        let mut gd = st.gen_drive_stack.pop().unwrap();
+        let mut gd = self.gen_drive_stack.pop().unwrap();
         gd.gframe.done = true;
         gd.gframe.last_return_value = Some(value);
         self.sync_top_generator_frame_cache_if_present();
@@ -485,7 +483,6 @@ impl Interpreter {
         *st.pc = gd.exit_pc;
         *st.cur_line = gd.saved_cur_line;
         *st.code_ptr = gd.saved_code_ptr;
-        *st.active_code_rc = gd.saved_active_code_rc;
         *st.num_locals = gd.saved_num_locals;
         self.env = gd.saved_env;
         *st.iters = gd.saved_iters;
@@ -507,7 +504,7 @@ impl Interpreter {
         yield_dst: crate::bytecode::Reg,
         st: &mut UnwindState,
     ) {
-        let mut gd = st.gen_drive_stack.pop().unwrap();
+        let mut gd = self.gen_drive_stack.pop().unwrap();
         gd.gframe.pc = resume_pc;
         gd.gframe.iters = std::mem::take(st.iters);
         gd.gframe.exc_handlers = std::mem::take(st.exc_handlers);
@@ -523,7 +520,6 @@ impl Interpreter {
         *st.pc = gd.saved_pc;
         *st.cur_line = gd.saved_cur_line;
         *st.code_ptr = gd.saved_code_ptr;
-        *st.active_code_rc = gd.saved_active_code_rc;
         *st.num_locals = gd.saved_num_locals;
         self.env = gd.saved_env;
         *st.iters = gd.saved_iters;
@@ -555,7 +551,7 @@ impl Interpreter {
         let saved_active = self.active_exception.take();
         FrameOutcome::Yielded {
             value: yielded,
-            saved: GenSaveState {
+            saved: Box::new(GenSaveState {
                 iters: std::mem::take(iters),
                 exc_handlers: std::mem::take(exc_handlers),
                 pc: resume_pc,
@@ -564,7 +560,7 @@ impl Interpreter {
                 exc_saved_active_slice: saved_exc_saved_active,
                 yield_dst,
                 suspended_line: cur_line,
-            },
+            }),
         }
     }
 }
