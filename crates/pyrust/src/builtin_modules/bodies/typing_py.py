@@ -469,84 +469,57 @@ class _AnnotatedMarker:
         return _AnnotatedAlias(origin, metadata)
 
 
+class _UnpackGenericAlias:
+    """Runtime form of `Unpack[X]` (PEP 646)."""
+
+    def __init__(self, origin, args):
+        self.__origin__ = origin
+        self.__args__ = args
+        params = []
+        for a in args:
+            if isinstance(a, (TypeVar, ParamSpec, TypeVarTuple)):
+                if a not in params:
+                    params.append(a)
+            else:
+                for p in getattr(a, "__parameters__", ()):
+                    if p not in params:
+                        params.append(p)
+        self.__parameters__ = tuple(params)
+
+    def __repr__(self):
+        return "typing.Unpack[" + _type_repr(self.__args__[0]) + "]"
+
+    def __eq__(self, other):
+        if not isinstance(other, _UnpackGenericAlias):
+            return NotImplemented
+        return (
+            self.__origin__ == other.__origin__
+            and self.__args__ == other.__args__
+        )
+
+    def __hash__(self):
+        return hash((self.__origin__, self.__args__))
+
+
+class _UnpackMarker:
+    """Special form for `Unpack` (PEP 646)."""
+
+    def __repr__(self):
+        return "typing.Unpack"
+
+    def __getitem__(self, item):
+        if isinstance(item, tuple):
+            raise TypeError("Unpack[...] accepts only single type.")
+        return _UnpackGenericAlias(self, (item,))
+
+
 Self = _SpecialMarker("Self")
 Never = _SpecialMarker("Never")
 LiteralString = _SpecialMarker("LiteralString")
 Annotated = _AnnotatedMarker()
 TypeAlias = _SpecialMarker("TypeAlias")
 Concatenate = _SpecialMarker("Concatenate")
-Unpack = _SpecialMarker("Unpack")
+Unpack = _UnpackMarker()
 Required = _SpecialMarker("Required")
 NotRequired = _SpecialMarker("NotRequired")
 TypeGuard = _SpecialMarker("TypeGuard")
-
-
-class ParamSpecArgs:
-    """Proxy for a `ParamSpec`'s ``args`` attribute."""
-
-    def __init__(self, origin):
-        self.__origin__ = origin
-
-    def __repr__(self):
-        return f"{self.__origin__.__name__}.args"
-
-    def __eq__(self, other):
-        if not isinstance(other, ParamSpecArgs):
-            return NotImplemented
-        return self.__origin__ is other.__origin__
-
-
-class ParamSpecKwargs:
-    """Proxy for a `ParamSpec`'s ``kwargs`` attribute."""
-
-    def __init__(self, origin):
-        self.__origin__ = origin
-
-    def __repr__(self):
-        return f"{self.__origin__.__name__}.kwargs"
-
-    def __eq__(self, other):
-        if not isinstance(other, ParamSpecKwargs):
-            return NotImplemented
-        return self.__origin__ is other.__origin__
-
-
-class ParamSpec:
-    """Minimal `ParamSpec` stub: stores its name and exposes `args`/`kwargs`."""
-
-    def __init__(self, name, *, bound=None, covariant=False, contravariant=False):
-        self.__name__ = name
-        self.__bound__ = bound
-        # CPython captures the caller's module on the instance, so
-        # `P = ParamSpec('P')` at top level has `P.__module__ == '__main__'`.
-        # The `ParamSpec` *class* carries `__module__ == 'typing'` (#2801), so
-        # without this instance override the instance would inherit `'typing'`.
-        # Mirror the native `TypeVar` path (typing.rs), which seeds `'__main__'`.
-        self.__module__ = "__main__"
-
-    @property
-    def args(self):
-        return ParamSpecArgs(self)
-
-    @property
-    def kwargs(self):
-        return ParamSpecKwargs(self)
-
-    def __repr__(self):
-        return "~" + self.__name__
-
-
-class TypeVarTuple:
-    """Minimal `TypeVarTuple` stub: stores its name."""
-
-    def __init__(self, name):
-        self.__name__ = name
-        # See `ParamSpec.__init__`: the instance captures the caller's module
-        # (`'__main__'` at top level), not the `TypeVarTuple` class's `'typing'`.
-        self.__module__ = "__main__"
-
-    def __iter__(self):
-        return iter((Unpack[self],))
-
-    def __repr__(self):
-        return self.__name__

@@ -1,6 +1,6 @@
 use crate::ast::{
     AssignTarget, BinaryOp, CallArg, CmpOp, CompClause, DictItem, ExceptHandler, Expr, FStringPart,
-    FunctionParam, MatchArm, Pattern, Stmt, TypeParam, TypeParamBound, UnaryOp,
+    FunctionParam, MatchArm, Pattern, Stmt, TypeParam, TypeParamBound, TypeParamKind, UnaryOp,
 };
 use crate::error::{PyError, Result};
 use crate::token::{FStringPart as LexFStringPart, Token};

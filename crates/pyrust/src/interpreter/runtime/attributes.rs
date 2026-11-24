@@ -8,6 +8,12 @@ fn typing_object_readonly_attr_error(class: &Rc<RefCell<PyClass>>, name: &str) -
         typevar_readonly_attr_error(name)
     } else if is_type_alias_class(class) {
         type_alias_readonly_attr_error(name)
+    } else if is_paramspec_class(class) {
+        paramspec_readonly_attr_error(name)
+    } else if is_typevartuple_class(class) {
+        typevartuple_readonly_attr_error(name)
+    } else if is_paramspec_args_class(class) || is_paramspec_kwargs_class(class) {
+        paramspec_proxy_readonly_attr_error(name)
     } else {
         None
     }

@@ -89,13 +89,23 @@ impl Compiler {
             }
             for (slot_i, (_, annot_expr)) in (0u32..).zip(annotated_params.iter()) {
                 let saved = self.next_temp;
-                let r = if self.future_annotations {
-                    self.compile_literal(Value::string(stringify_annotation(annot_expr)))
+                if self.future_annotations {
+                    let r = self.compile_literal(Value::string(stringify_annotation(annot_expr)));
+                    if r != annots_base + slot_i {
+                        self.emit(Insn::Move(annots_base + slot_i, r));
+                    }
+                } else if let Expr::Starred(inner) = annot_expr {
+                    // PEP 646 starred `*args: *Ts` annotation: unpack a single
+                    // value from the iterable (`(annot,) = inner`), yielding
+                    // `typing.Unpack[Ts]` for a `TypeVarTuple` and matching
+                    // CPython's `ValueError` for iterables of length != 1.
+                    let iter_reg = self.compile_expr(inner);
+                    self.emit(Insn::Unpack(annots_base + slot_i, iter_reg, 1));
                 } else {
-                    self.compile_expr(annot_expr)
-                };
-                if r != annots_base + slot_i {
-                    self.emit(Insn::Move(annots_base + slot_i, r));
+                    let r = self.compile_expr(annot_expr);
+                    if r != annots_base + slot_i {
+                        self.emit(Insn::Move(annots_base + slot_i, r));
+                    }
                 }
                 self.next_temp = saved;
             }

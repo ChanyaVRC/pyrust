@@ -111,7 +111,7 @@ macro_rules! dispatch_insn_operands {
             | LoadClassDeref(d, _)
             | LoadNone(d)
             | LoadExc(d)
-            | MakeTypeVar(d, _) => {
+            | MakeTypeVar(d, _, _) => {
                 $v.write_reg(d);
             }
             LoadNoneRange { start, count } => {

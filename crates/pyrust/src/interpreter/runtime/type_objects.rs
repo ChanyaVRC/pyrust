@@ -69,6 +69,114 @@ thread_local! {
         class.non_subclassable_name = Some("typing.TypeVar");
         Rc::new(RefCell::new(class))
     };
+
+    /// Class singleton for `typing.ParamSpec` (shared by PEP 695 `[**P]` and
+    /// manual `typing.ParamSpec("P")`, canonical across `typing` reloads).
+    static PARAMSPEC_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__init__".to_string(),
+            Value::builtin_function("builtins.ParamSpec.__init__"),
+        );
+        attrs.insert(
+            "__repr__".to_string(),
+            Value::builtin_function("builtins.ParamSpec.__repr__"),
+        );
+        attrs.insert(
+            "__or__".to_string(),
+            Value::builtin_function("builtins.ParamSpec.__or__"),
+        );
+        attrs.insert(
+            "__ror__".to_string(),
+            Value::builtin_function("builtins.ParamSpec.__ror__"),
+        );
+        attrs.insert(
+            "args".to_string(),
+            pyrust_builtins::property::property(
+                Value::builtin_function("builtins.ParamSpec._get_args"),
+                Value::none(),
+                Value::none(),
+            ),
+        );
+        attrs.insert(
+            "kwargs".to_string(),
+            pyrust_builtins::property::property(
+                Value::builtin_function("builtins.ParamSpec._get_kwargs"),
+                Value::none(),
+                Value::none(),
+            ),
+        );
+        attrs.insert("__module__".to_string(), Value::string("typing"));
+        let mut class = PyClass::new("ParamSpec", "ParamSpec", None, attrs);
+        class.non_subclassable_name = Some("typing.ParamSpec");
+        Rc::new(RefCell::new(class))
+    };
+
+    /// Class singleton for `typing.ParamSpecArgs`.
+    static PARAMSPEC_ARGS_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__init__".to_string(),
+            Value::builtin_function("builtins.ParamSpecArgs.__init__"),
+        );
+        attrs.insert(
+            "__repr__".to_string(),
+            Value::builtin_function("builtins.ParamSpecArgs.__repr__"),
+        );
+        attrs.insert(
+            "__eq__".to_string(),
+            Value::builtin_function("builtins.ParamSpecArgs.__eq__"),
+        );
+        attrs.insert("__hash__".to_string(), Value::none());
+        attrs.insert("__module__".to_string(), Value::string("typing"));
+        let mut class = PyClass::new("ParamSpecArgs", "ParamSpecArgs", None, attrs);
+        class.non_subclassable_name = Some("typing.ParamSpecArgs");
+        Rc::new(RefCell::new(class))
+    };
+
+    /// Class singleton for `typing.ParamSpecKwargs`.
+    static PARAMSPEC_KWARGS_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__init__".to_string(),
+            Value::builtin_function("builtins.ParamSpecKwargs.__init__"),
+        );
+        attrs.insert(
+            "__repr__".to_string(),
+            Value::builtin_function("builtins.ParamSpecKwargs.__repr__"),
+        );
+        attrs.insert(
+            "__eq__".to_string(),
+            Value::builtin_function("builtins.ParamSpecKwargs.__eq__"),
+        );
+        attrs.insert("__hash__".to_string(), Value::none());
+        attrs.insert("__module__".to_string(), Value::string("typing"));
+        let mut class = PyClass::new("ParamSpecKwargs", "ParamSpecKwargs", None, attrs);
+        class.non_subclassable_name = Some("typing.ParamSpecKwargs");
+        Rc::new(RefCell::new(class))
+    };
+
+    /// Class singleton for `typing.TypeVarTuple` (shared by PEP 695 `[*Ts]` and
+    /// manual `typing.TypeVarTuple("Ts")`, canonical across `typing` reloads).
+    static TYPEVARTUPLE_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__init__".to_string(),
+            Value::builtin_function("builtins.TypeVarTuple.__init__"),
+        );
+        attrs.insert(
+            "__repr__".to_string(),
+            Value::builtin_function("builtins.TypeVarTuple.__repr__"),
+        );
+        attrs.insert(
+            "__iter__".to_string(),
+            Value::builtin_function("builtins.TypeVarTuple.__iter__"),
+        );
+        attrs.insert("__module__".to_string(), Value::string("typing"));
+        let mut class = PyClass::new("TypeVarTuple", "TypeVarTuple", None, attrs);
+        class.non_subclassable_name = Some("typing.TypeVarTuple");
+        Rc::new(RefCell::new(class))
+    };
 }
 
 /// Construct an (initially unbounded) `TypeVar` `PyInstance` with `__name__`,
@@ -156,6 +264,120 @@ pub(crate) fn typevar_class_singleton() -> Rc<RefCell<PyClass>> {
     TYPEVAR_CLASS.with(Rc::clone)
 }
 
+/// The canonical `typing.ParamSpec` class singleton.
+pub(crate) fn paramspec_class_singleton() -> Rc<RefCell<PyClass>> {
+    PARAMSPEC_CLASS.with(Rc::clone)
+}
+
+/// The canonical `typing.ParamSpecArgs` class singleton.
+pub(crate) fn paramspec_args_class_singleton() -> Rc<RefCell<PyClass>> {
+    PARAMSPEC_ARGS_CLASS.with(Rc::clone)
+}
+
+/// The canonical `typing.ParamSpecKwargs` class singleton.
+pub(crate) fn paramspec_kwargs_class_singleton() -> Rc<RefCell<PyClass>> {
+    PARAMSPEC_KWARGS_CLASS.with(Rc::clone)
+}
+
+/// The canonical `typing.TypeVarTuple` class singleton.
+pub(crate) fn typevartuple_class_singleton() -> Rc<RefCell<PyClass>> {
+    TYPEVARTUPLE_CLASS.with(Rc::clone)
+}
+
+pub(crate) fn is_paramspec_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    PARAMSPEC_CLASS.with(|cls| Rc::ptr_eq(class, cls))
+}
+
+pub(crate) fn is_paramspec_args_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    PARAMSPEC_ARGS_CLASS.with(|cls| Rc::ptr_eq(class, cls))
+}
+
+pub(crate) fn is_paramspec_kwargs_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    PARAMSPEC_KWARGS_CLASS.with(|cls| Rc::ptr_eq(class, cls))
+}
+
+pub(crate) fn is_typevartuple_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    TYPEVARTUPLE_CLASS.with(|cls| Rc::ptr_eq(class, cls))
+}
+
+/// Construct a PEP 695 `ParamSpec` instance (inferred variance, bare repr).
+pub(crate) fn make_paramspec_instance(name: String) -> Value {
+    PARAMSPEC_CLASS.with(|cls| {
+        let mut attrs = InstanceAttrs::new();
+        attrs.insert("__name__", Value::string(name));
+        attrs.insert("__bound__", Value::none());
+        attrs.insert("__covariant__", Value::bool_(false));
+        attrs.insert("__contravariant__", Value::bool_(false));
+        attrs.insert("__infer_variance__", Value::bool_(true));
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(cls),
+            attrs,
+        })))
+    })
+}
+
+/// Construct a `ParamSpecArgs` proxy for `origin`.
+pub(crate) fn make_paramspec_args_instance(origin: Value) -> Value {
+    PARAMSPEC_ARGS_CLASS.with(|cls| {
+        let mut attrs = InstanceAttrs::new();
+        attrs.insert("__origin__", origin);
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(cls),
+            attrs,
+        })))
+    })
+}
+
+/// Construct a `ParamSpecKwargs` proxy for `origin`.
+pub(crate) fn make_paramspec_kwargs_instance(origin: Value) -> Value {
+    PARAMSPEC_KWARGS_CLASS.with(|cls| {
+        let mut attrs = InstanceAttrs::new();
+        attrs.insert("__origin__", origin);
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(cls),
+            attrs,
+        })))
+    })
+}
+
+/// Construct a PEP 695 `TypeVarTuple` instance.
+pub(crate) fn make_typevartuple_instance(name: String) -> Value {
+    TYPEVARTUPLE_CLASS.with(|cls| {
+        let mut attrs = InstanceAttrs::new();
+        attrs.insert("__name__", Value::string(name));
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(cls),
+            attrs,
+        })))
+    })
+}
+
+pub(crate) fn paramspec_readonly_attr_error(name: &str) -> Option<String> {
+    match name {
+        "args" | "kwargs" => Some(format!(
+            "attribute '{name}' of 'typing.ParamSpec' objects is not writable"
+        )),
+        "__name__" | "__bound__" | "__covariant__" | "__contravariant__" | "__infer_variance__" => {
+            Some("readonly attribute".to_string())
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn typevartuple_readonly_attr_error(name: &str) -> Option<String> {
+    match name {
+        "__name__" => Some("readonly attribute".to_string()),
+        _ => None,
+    }
+}
+
+pub(crate) fn paramspec_proxy_readonly_attr_error(name: &str) -> Option<String> {
+    match name {
+        "__origin__" => Some("readonly attribute".to_string()),
+        _ => None,
+    }
+}
+
 /// True if `class` is the PEP 695 `TypeAliasType` singleton.  Used by the
 /// subscript path to give `Pair[int]` a `types.GenericAlias` while a
 /// non-generic alias raises CPython's "Only generic type aliases are
@@ -184,12 +406,17 @@ fn syntax_object_name(value: &Value, opcode: &str) -> Result<String> {
         .ok_or_else(|| PyError::runtime(format!("{opcode}: name must be a string constant")))
 }
 
-/// Construct a TypeVar from the constant operand of `MakeTypeVar`.
-pub(crate) fn make_typevar_from_syntax(name: &Value) -> Result<Value> {
-    Ok(make_typevar_instance(syntax_object_name(
-        name,
-        "MakeTypeVar",
-    )?))
+/// Construct a TypeVar, ParamSpec, or TypeVarTuple from `MakeTypeVar`.
+pub(crate) fn make_type_param_from_syntax(
+    name: &Value,
+    kind: crate::ast::TypeParamKind,
+) -> Result<Value> {
+    let name = syntax_object_name(name, "MakeTypeVar")?;
+    Ok(match kind {
+        crate::ast::TypeParamKind::TypeVar => make_typevar_instance(name),
+        crate::ast::TypeParamKind::ParamSpec => make_paramspec_instance(name),
+        crate::ast::TypeParamKind::TypeVarTuple => make_typevartuple_instance(name),
+    })
 }
 
 /// Construct a TypeAliasType from the operands of `MakeTypeAlias`.

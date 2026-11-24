@@ -622,17 +622,14 @@ pub enum Insn {
     /// Tuple: (dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base,
     /// kwarg_n, meta_reg).
     MakeClassMeta(Reg, u16, Reg, u32, u16, Reg, u32, Reg),
-    /// R[dst] = TypeVar(name=consts[name_idx])
-    /// PEP 695: construct an (initially unbounded) `TypeVar` object for a generic
-    /// type parameter — `__bound__` is `None` and `__constraints__` is `()`.
-    /// Any bound/constraint clause is populated lazily, after every type
-    /// parameter of the enclosing def/class/alias is in scope, via
-    /// `SetTypeVarAttr` on `__bound__` / `__constraints__` (see
-    /// `Compiler::emit_typevar_bound`).
-    /// This matches PEP 695's lazy evaluation of bounds in an annotation scope,
-    /// so a self/forward-referential bound (`def f[T: T]`, `def g[T, U: T]`)
-    /// resolves instead of raising `NameError`.
-    MakeTypeVar(Reg, u16),
+    /// R[dst] = TypeVar / ParamSpec / TypeVarTuple (name=consts[name_idx], kind)
+    /// PEP 695: construct an (initially unbounded) type parameter object for a
+    /// generic def/class/alias (`TypeVar` for `T`, `ParamSpec` for `**P`,
+    /// `TypeVarTuple` for `*Ts`).  For `TypeVar`, `__bound__` is `None` and
+    /// `__constraints__` is `()`; any bound/constraint clause is populated
+    /// lazily, after every type parameter of the enclosing def/class/alias is
+    /// in scope, via `SetTypeVarAttr` (see `Compiler::emit_typevar_bound`).
+    MakeTypeVar(Reg, u16, crate::ast::TypeParamKind),
     /// R[obj].names[name_idx] = R[val], bypassing TypeVar's read-only-attribute
     /// guard.  Emitted only by the compiler to populate a PEP 695 TypeVar's
     /// `__bound__` / `__constraints__` after construction.  CPython sets these

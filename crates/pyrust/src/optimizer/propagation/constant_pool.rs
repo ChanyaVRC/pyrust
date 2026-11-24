@@ -29,7 +29,7 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
             Insn::CmpJumpIfFalseConst(_, _, c, _) => mark(&mut used, *c),
             Insn::CmpJumpIfTrueConst(_, _, c, _) => mark(&mut used, *c),
             Insn::MakeTypeAlias(_, name_idx, _, _) => mark(&mut used, *name_idx),
-            Insn::MakeTypeVar(_, name_idx) => mark(&mut used, *name_idx),
+            Insn::MakeTypeVar(_, name_idx, _) => mark(&mut used, *name_idx),
             Insn::CallKw { kwnames_idx, .. } => mark(&mut used, *kwnames_idx),
             Insn::CallMethodKw { kwnames_idx, .. } => mark(&mut used, *kwnames_idx),
             Insn::CallExArgs { kwnames_idx, .. } => mark(&mut used, *kwnames_idx),
@@ -67,7 +67,7 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
             Insn::MakeTypeAlias(dst, name_idx, value_reg, params_reg) => {
                 Insn::MakeTypeAlias(dst, remap(name_idx), value_reg, params_reg)
             }
-            Insn::MakeTypeVar(dst, name_idx) => Insn::MakeTypeVar(dst, remap(name_idx)),
+            Insn::MakeTypeVar(dst, name_idx, kind) => Insn::MakeTypeVar(dst, remap(name_idx), kind),
             Insn::CallKw {
                 func,
                 total,

@@ -1,10 +1,24 @@
 use super::{AssignTarget, BinaryOp, CaretSpan, Expr, FunctionParam, MatchArm, Symbol};
 
-/// A single PEP 695 type parameter, e.g. `T`, `T: int`, or `T: (int, str)`.
+/// The syntactic kind of a PEP 695 type parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeParamKind {
+    /// `T`, `T: int`, or `T: (int, str)` — creates a `typing.TypeVar`.
+    TypeVar,
+    /// `**P` — creates a `typing.ParamSpec`.
+    ParamSpec,
+    /// `*Ts` — creates a `typing.TypeVarTuple`.
+    TypeVarTuple,
+}
+
+/// A single PEP 695 type parameter, e.g. `T`, `T: int`, `T: (int, str)`, `*Ts`, or `**P`.
 #[derive(Debug, Clone)]
 pub struct TypeParam {
     pub name: Symbol,
+    pub kind: TypeParamKind,
     /// The bound or constraint clause following `:`, if present.
+    /// Only valid for [`TypeParamKind::TypeVar`]; bounds/constraints on
+    /// `ParamSpec` or `TypeVarTuple` are rejected with `SyntaxError` by the parser.
     pub bound: Option<TypeParamBound>,
 }
 

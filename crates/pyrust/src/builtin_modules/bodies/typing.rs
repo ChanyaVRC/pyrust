@@ -250,18 +250,7 @@ pyrust_module! {
             let sub = borrow.attrs.get("_args").cloned().unwrap_or_else(Value::none);
             (origin_repr, sub)
         };
-        // The subscript may be a single arg (`Generic[T]`) or a tuple
-        // (`Generic[T, U]`).  Each element is rendered via `_type_repr` so a
-        // plain class shows its name (`int`, not `<class 'int'>`) and a
-        // `TypeVar` shows its variance prefix (`~T`).
-        let args_repr = match sub.kind() {
-            ValueKind::Tuple(items) => items
-                .iter()
-                .map(|v| aliases::generic_arg_repr(_interp, v))
-                .collect::<Result<Vec<_>>>()?
-                .join(", "),
-            _ => aliases::generic_arg_repr(_interp, &sub)?,
-        };
+        let args_repr = aliases::generic_alias_args_repr(_interp, &sub)?;
         Ok(Value::string(format!("{origin_repr}[{args_repr}]")))
     }
 
@@ -316,15 +305,8 @@ pyrust_module! {
                 "_GenericAlias.__mro_entries__() missing 1 required positional argument: 'bases'"
             ));
         }
-        let origin = instance
-            .borrow()
-            .attrs
-            .get("_origin")
-            .cloned()
-            .ok_or_else(|| {
-                PyError::runtime("typing._GenericAlias has no origin".to_string())
-            })?;
-        Ok(Value::tuple(vec![origin]))
+        let bases_arg = user_args.first().map(|arg| &arg.value);
+        aliases::resolve_generic_alias_mro_entries(&instance, bases_arg)
     }
 
     // ── Generic.__class_getitem__ ─────────────────────────────────────────────

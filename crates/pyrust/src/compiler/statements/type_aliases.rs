@@ -29,13 +29,14 @@ impl Compiler {
             self.shadowed_type_params
                 .extend(type_params.iter().map(|tp| Symbol::intern(&tp.name)));
         }
-        // Phase 1: create every TypeVar (unbounded) and bind its name, so the RHS
-        // and any bound/constraint can reference every parameter by name.
+        // Phase 1: create every type parameter (unbounded TypeVar, ParamSpec, or
+        // TypeVarTuple) and bind its name, so the RHS and any bound/constraint
+        // can reference every parameter by name.
         let mut typevar_regs: Vec<Reg> = Vec::with_capacity(type_params.len());
         for param in type_params {
             let tv_reg = self.alloc_temp();
-            self.emit_make_typevar(tv_reg, &param.name);
-            // Bind the TypeVar to the param name so the RHS expression — and the
+            self.emit_make_type_param(tv_reg, &param.name, param.kind);
+            // Bind the type parameter to its name so the RHS expression — and
             // lazily-evaluated bound/constraint thunks — can load it via
             // LoadGlobal.  StoreGlobal writes into the active (type-param) env's
             // `values`, exactly where a free-variable LoadGlobal looks.
@@ -187,7 +188,7 @@ impl Compiler {
         // enclosing name) are visible.
         for (i, param) in type_params.iter().enumerate() {
             let tv_reg = base + i as Reg;
-            self.emit_make_typevar(tv_reg, &param.name);
+            self.emit_make_type_param(tv_reg, &param.name, param.kind);
             // Bind via StoreGlobal so the name lands in `env.values`, which is
             // exactly where a body's `LoadGlobal` for a free variable looks.
             let name_idx = self.intern_name(&param.name);
@@ -202,13 +203,14 @@ impl Compiler {
         (base, n)
     }
 
-    /// Emit a `MakeTypeVar` into `tv_reg` for the type parameter named `name`.
-    /// The TypeVar is created unbounded (`__bound__ == None`, `__constraints__
-    /// == ()`); any bound/constraint clause is populated later by
-    /// `emit_typevar_bound`, once every type parameter is in scope.
-    fn emit_make_typevar(&mut self, tv_reg: Reg, name: &str) {
+    /// Emit a `MakeTypeVar` into `tv_reg` for the type parameter named `name`
+    /// with syntactic kind `kind` (`TypeVar`, `ParamSpec`, or `TypeVarTuple`).
+    /// For `TypeVar`, the object starts unbounded (`__bound__ == None`,
+    /// `__constraints__ == ()`); any bound/constraint clause is populated later
+    /// by `emit_typevar_bound`, once every type parameter is in scope.
+    fn emit_make_type_param(&mut self, tv_reg: Reg, name: &str, kind: TypeParamKind) {
         let name_const = self.intern_const(crate::value::Value::string(name));
-        self.emit(Insn::MakeTypeVar(tv_reg, name_const));
+        self.emit(Insn::MakeTypeVar(tv_reg, name_const, kind));
     }
 
     /// Attach a PEP 695 lazy bound/constraint *thunk* to an already-created
