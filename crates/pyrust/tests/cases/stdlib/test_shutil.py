@@ -303,7 +303,11 @@ with tempfile.TemporaryDirectory() as root:
         sym_copy = os.path.join(root, "sym_copy.txt")
         shutil.copyfile(sym_link, sym_copy, follow_symlinks=False)
         print("sym-copyfile-islink", os.path.islink(sym_copy))
-        print("sym-copyfile-readlink", os.readlink(sym_copy) == sym_target)
+        print(
+            "sym-copyfile-readlink",
+            os.readlink(sym_copy) == os.readlink(sym_link),
+            os.path.samefile(sym_copy, sym_target),
+        )
 
         sym_deref = os.path.join(root, "sym_deref.txt")
         shutil.copyfile(sym_link, sym_deref, follow_symlinks=True)
