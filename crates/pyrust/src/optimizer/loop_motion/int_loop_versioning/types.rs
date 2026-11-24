@@ -158,7 +158,7 @@ impl IntLoopRegionInsn {
 
 fn classify_int_loop_region_insn(insn: &Insn) -> Option<IntLoopRegionInsn> {
     Some(match *insn {
-        Insn::Move(dst, src) | Insn::CopyReg(dst, src) => IntLoopRegionInsn::Copy { dst, src },
+        Insn::Move(dst, src) => IntLoopRegionInsn::Copy { dst, src },
         Insn::LoadConst(dst, idx) => IntLoopRegionInsn::LoadConst { dst, idx },
         Insn::BinOp(dst, lhs, op, rhs) | Insn::BinOpInPlace(dst, lhs, op, rhs) => {
             IntLoopRegionInsn::Binary { dst, lhs, op, rhs }
@@ -325,7 +325,6 @@ fn int_loop_writes_reg(insn: &Insn, r: Reg) -> bool {
         | Insn::SyncModuleGlobal(..) => false,
         Insn::LoadConst(dst, _)
         | Insn::Move(dst, _)
-        | Insn::CopyReg(dst, _)
         | Insn::BinOp(dst, ..)
         | Insn::BinOpInPlace(dst, ..)
         | Insn::BinOpImm(dst, ..)
@@ -394,7 +393,12 @@ fn replace_jump_offset(insn: Insn, off: i32) -> Insn {
         JumpIfIterNotIntRange(s2, _) => JumpIfIterNotIntRange(s2, off),
         JumpIfIterNotIndexedSeq(s2, _) => JumpIfIterNotIndexedSeq(s2, off),
         JumpIfIterNotIntRangeExact(guard, _) => JumpIfIterNotIntRangeExact(guard, off),
-        GetItemSeqIntOrExit(dst, obj, idx, _) => GetItemSeqIntOrExit(dst, obj, idx, off),
+        GetItemSeqIntOrExit(dst, obj, idx, _) => GetItemSeqIntOrExit(
+            dst,
+            obj,
+            idx,
+            i16::try_from(off).expect("GetItemSeqIntOrExit side-exit offset fits i16"),
+        ),
         JumpIfNotBuiltinLen(r, _) => JumpIfNotBuiltinLen(r, off),
         LenSeqOrExit(dst, seq, _) => LenSeqOrExit(dst, seq, off),
         CmpJumpIfFalse(a, op, b, _) => CmpJumpIfFalse(a, op, b, off),
@@ -403,27 +407,11 @@ fn replace_jump_offset(insn: Insn, off: i32) -> Insn {
         CmpJumpIfTrueConst(a, op, c, _) => CmpJumpIfTrueConst(a, op, c, off),
         CountCmpJumpTrue(v, op, s, imm, _) => CountCmpJumpTrue(v, op, s, imm, off),
         CountCmpJumpFalse(v, op, s, imm, _) => CountCmpJumpFalse(v, op, s, imm, off),
-        CallInlineBinOp {
-            callee,
-            dst,
-            a,
-            op,
-            b,
-            proto,
-            ..
-        } => CallInlineBinOp {
-            callee,
-            dst,
-            a,
-            op,
-            b,
-            proto,
-            skip: off,
-        },
+        CallInlineBinOp(desc, _) => CallInlineBinOp(desc, off),
         ForIter(dst, slot, _) => ForIter(dst, slot, off),
         SetupExcept(_) => SetupExcept(off),
         MatchExcept(r, _) => MatchExcept(r, off),
-        MatchExceptStar(r, src, dst, _) => MatchExceptStar(r, src, dst, off),
+        MatchExceptStar(desc, _) => MatchExceptStar(desc, off),
         other => other,
     }
 }

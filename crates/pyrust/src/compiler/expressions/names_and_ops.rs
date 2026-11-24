@@ -23,14 +23,24 @@ impl Compiler {
             // Call is NOT retargetable: Call(func_reg, argc) uses func_reg as both
             // the function source and the result destination. Retargeting it to a
             // different register would point the call at the wrong function.
-            | Insn::MakeFunction(d, ..)
-            | Insn::MakeClass(d, ..)
             | Insn::BuildList(d, ..)
             | Insn::BuildTuple(d, ..)
             | Insn::BuildDict(d, ..)
             | Insn::ForIter(d, ..)
             | Insn::LoadExc(d)
             | Insn::ImportModule(d, ..) => d,
+            Insn::MakeFunction(desc_idx) => {
+                let InsnDesc::MakeFunction(desc) = &mut self.descs[*desc_idx as usize] else {
+                    unreachable!("MakeFunction desc mismatch");
+                };
+                &mut desc.dst
+            }
+            Insn::MakeClass(desc_idx) => {
+                let InsnDesc::MakeClass(desc) = &mut self.descs[*desc_idx as usize] else {
+                    unreachable!("MakeClass desc mismatch");
+                };
+                &mut desc.dst
+            }
             _ => return false,
         };
         if *dst == from {

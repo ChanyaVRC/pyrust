@@ -376,7 +376,15 @@ impl Compiler {
 
         // Emit MakeFunction + Call: fn_reg = function, fn_reg+1 = iterable arg.
         let fn_reg = self.alloc_temp();
-        self.emit(Insn::MakeFunction(fn_reg, proto_idx, 0, 0, 0, 0));
+        let desc_idx = self.push_desc(InsnDesc::MakeFunction(MakeFunctionDesc {
+            dst: fn_reg,
+            proto_idx,
+            defs_base: 0,
+            defs_n: 0,
+            annots_base: 0,
+            annots_n: 0,
+        }));
+        self.emit(Insn::MakeFunction(desc_idx));
 
         let arg_reg = fn_reg + 1;
         if arg_reg > self.max_reg {

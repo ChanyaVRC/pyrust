@@ -242,7 +242,7 @@ impl Compiler {
             self.set_lineno(lineno);
         }
         self.set_col_span_for_next(span);
-        self.emit(Insn::CallMethodKw {
+        let desc_idx = self.push_desc(InsnDesc::CallMethodKw(CallMethodKwDesc {
             dst: dst_reg,
             obj: obj_reg,
             name_idx,
@@ -250,7 +250,8 @@ impl Compiler {
             total: total as u8,
             nkw: nkw as u8,
             kwnames_idx,
-        });
+        }));
+        self.emit(Insn::CallMethodKw(desc_idx));
         self.set_lineno(saved_lineno);
         self.next_temp = dst_reg + 1;
         dst_reg

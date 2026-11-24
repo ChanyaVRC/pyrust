@@ -26,8 +26,13 @@ pub use function::{
     CaptureSource, CellSlotMeta, CellVar, FnParamSpec, FnProto, compute_param_binds,
     compute_self_bind,
 };
+pub(crate) use instruction::push_desc;
 pub use instruction::{
-    DictKeyKindHint, Insn, IntRangeExactGuard, KwCallName, NO_CLASS_LOCAL, NO_KWARGS, Reg,
+    CallExArgsDesc, CallInlineBinOpDesc, CallMethodExpandedDesc, CallMethodKwDesc, DescIdx,
+    DictKeyKindHint, DictMergeKwCallDesc, Insn, InsnDesc, IntRangeExactGuard, KwCallName,
+    ListExtendCallDesc, MakeClassDesc, MakeFunctionDesc, MatchClassPositionalDesc,
+    MatchExceptStarDesc, NO_ARGS_SPLAT, NO_ASSERT_MSG, NO_CLASS_LOCAL, NO_KWARGS, NO_METACLASS,
+    Reg, SetItemKwCallDesc,
 };
 
 #[cfg(test)]

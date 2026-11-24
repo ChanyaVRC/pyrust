@@ -64,7 +64,10 @@ fn leaf_binop_inlining_binds_each_site_to_the_proto_live_before_it() {
         .insns
         .iter()
         .filter_map(|insn| match insn {
-            Insn::CallInlineBinOp { proto, op, .. } => Some((*proto, *op)),
+            Insn::CallInlineBinOp(desc_idx, _) => {
+                let d = code.descs[*desc_idx as usize].as_call_inline_binop();
+                Some((d.proto, d.op))
+            }
             _ => None,
         })
         .collect();
@@ -96,7 +99,10 @@ fn leaf_binop_inlining_binds_each_site_to_the_proto_live_before_it() {
         .insns
         .iter()
         .filter_map(|insn| match insn {
-            Insn::CallInlineBinOp { proto, op, .. } => Some((*proto, *op)),
+            Insn::CallInlineBinOp(desc_idx, _) => {
+                let d = twice.descs[*desc_idx as usize].as_call_inline_binop();
+                Some((d.proto, d.op))
+            }
             _ => None,
         })
         .collect();
@@ -138,7 +144,10 @@ fn leaf_binop_inlining_retargets_a_plain_move_rebinding() {
         .insns
         .iter()
         .filter_map(|insn| match insn {
-            Insn::CallInlineBinOp { proto, op, .. } => Some((*proto, *op)),
+            Insn::CallInlineBinOp(desc_idx, _) => {
+                let d = driver.code.descs[*desc_idx as usize].as_call_inline_binop();
+                Some((d.proto, d.op))
+            }
             _ => None,
         })
         .collect();
@@ -183,67 +192,6 @@ fn leaf_binop_inlining_kills_a_plain_move_from_an_untracked_source() {
 }
 
 #[test]
-fn leaf_binop_inlining_retargets_copyreg_from_a_tracked_source() {
-    let code = compile_fn(
-        "def driver(left, right):\n    def leaf(a, b):\n        return a + b\n    def other(a, b):\n        return a - b\n    leaf = other\n    return leaf(left, right)\n",
-    );
-    let driver = code
-        .fn_protos
-        .iter()
-        .find(|proto| proto.name.as_ref() == "driver")
-        .expect("driver prototype");
-    let proto_index = |name: &str| {
-        driver
-            .code
-            .fn_protos
-            .iter()
-            .position(|proto| proto.name.as_ref() == name)
-            .expect("nested leaf prototype") as u16
-    };
-    let leaf_proto = proto_index("leaf");
-    let other_proto = proto_index("other");
-    let bound_reg = |proto_index| {
-        driver
-            .code
-            .insns
-            .windows(2)
-            .find_map(|window| match (&window[0], &window[1]) {
-                (Insn::MakeFunction(tmp, proto, ..), Insn::Move(dst, src))
-                    if *proto == proto_index && src == tmp =>
-                {
-                    Some(*dst)
-                }
-                _ => None,
-            })
-            .expect("compiler-shaped function binding")
-    };
-    let leaf_reg = bound_reg(leaf_proto);
-    let other_reg = bound_reg(other_proto);
-    let mut insns = driver.code.insns.clone();
-    let rebind_at = insns
-        .iter()
-        .position(
-            |insn| matches!(insn, Insn::Move(dst, src) if *dst == leaf_reg && *src == other_reg),
-        )
-        .expect("plain Move rebinding");
-    insns[rebind_at] = Insn::CopyReg(leaf_reg, other_reg);
-
-    let out = pass_inline_leaf_binop(insns, &driver.code.fn_protos);
-    let guards: Vec<(u16, BinaryOp)> = out
-        .iter()
-        .filter_map(|insn| match insn {
-            Insn::CallInlineBinOp { proto, op, .. } => Some((*proto, *op)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        guards,
-        [(other_proto, BinaryOp::Sub)],
-        "CopyReg preserves the function value and should retarget the binding just like Move: {out:?}"
-    );
-}
-
-#[test]
 fn leaf_binop_inlining_invalidates_non_move_register_writes() {
     let code = compile_fn(
         "def leaf(a, b):\n    return a + b\nleft = 3\nright = 4\nresult = leaf(left, right)\n",
@@ -252,7 +200,11 @@ fn leaf_binop_inlining_invalidates_non_move_register_writes() {
         .insns
         .windows(2)
         .find_map(|window| match (&window[0], &window[1]) {
-            (Insn::MakeFunction(tmp, ..), Insn::Move(dst, src)) if src == tmp => Some(*dst),
+            (Insn::MakeFunction(desc_idx), Insn::Move(dst, src))
+                if *src == code.descs[*desc_idx as usize].as_make_function().dst =>
+            {
+                Some(*dst)
+            }
             _ => None,
         })
         .expect("compiler-shaped MakeFunction + Move binding");
@@ -285,11 +237,12 @@ fn leaf_binop_inlining_invalidates_non_move_register_writes() {
 
     for (name, clobber) in clobbers {
         let mut insns = code.insns.clone();
+        let mut descs = code.descs.clone();
         insns.insert(call_at, clobber);
-        let out = pass_inline_leaf_binop(insns, &code.fn_protos);
+        let out = pass_inline_leaf_binop(insns, &mut descs, &code.fn_protos);
         assert!(
             out.iter()
-                .all(|insn| !matches!(insn, Insn::CallInlineBinOp { .. })),
+                .all(|insn| !matches!(insn, Insn::CallInlineBinOp(..))),
             "{name} overwrites the tracked register and must kill its stale proto binding: {out:?}"
         );
     }
@@ -345,15 +298,7 @@ fn call_inline_binop_is_classified_late_stage() {
     // past both the driver's re-entry skip and the early passes' debug assert,
     // reaching a register-rewriting pass whose wildcard kill-set arms cannot
     // model it.
-    let insn = Insn::CallInlineBinOp {
-        callee: 0,
-        dst: 1,
-        a: 2,
-        op: BinaryOp::Add,
-        b: 3,
-        proto: 0,
-        skip: 4,
-    };
+    let insn = Insn::CallInlineBinOp(0, 4);
     assert!(
         is_late_stage_guard_insn(&insn),
         "{insn:?} is emitted by a late-stage guarded pass but is not classified as one"

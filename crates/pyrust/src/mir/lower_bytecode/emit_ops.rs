@@ -150,6 +150,8 @@ impl BytecodeEmitter<'_> {
                 let use_regs: SmallVec<[Reg; 4]> = uses.iter().map(|&u| self.reg_of(u)).collect();
                 materialize_side_effect_insn(
                     insn,
+                    &self.func.descs,
+                    &mut self.descs,
                     &use_regs,
                     &effective_defs,
                     self.scratch_base,

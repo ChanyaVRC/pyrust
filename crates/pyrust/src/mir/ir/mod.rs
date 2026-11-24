@@ -24,7 +24,7 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use crate::ast::{BinaryOp, CaretSpan, Symbol, UnaryOp};
-use crate::bytecode::{CellSlotMeta, FnProto, Insn, Reg};
+use crate::bytecode::{CellSlotMeta, FnProto, Insn, InsnDesc, Reg};
 use crate::value::Value;
 
 /// SSA value identifier, defined at most once within a [`MirFn`].
@@ -112,8 +112,7 @@ pub enum Terminator {
     Return(Val),
     /// `raise val` (or bare `raise` when `None`).
     Raise(Option<Val>),
-    /// Specialized raise (`RaiseFrom`, `RaiseAssert`, `RaiseAssertNoMsg`,
-    /// `RaiseExceptStarResidual`).
+    /// Specialized raise (`RaiseFrom`, `RaiseAssert`, `RaiseExceptStarResidual`).
     RaiseSpecial {
         insn: Insn,
         uses: SmallVec<[Val; 2]>,
@@ -412,6 +411,7 @@ pub struct MirFn {
     pub num_iters: u8,
     pub consts: Vec<Value>,
     pub names: Vec<Symbol>,
+    pub descs: Vec<InsnDesc>,
     pub cell_slots: SmallVec<[CellSlotMeta; 4]>,
     pub own_cell_count: u16,
     pub fn_protos: Vec<FnProto>,
@@ -491,6 +491,7 @@ impl MirFn {
             num_iters: 0,
             consts: Vec::new(),
             names: Vec::new(),
+            descs: Vec::new(),
             cell_slots: SmallVec::new(),
             own_cell_count: 0,
             fn_protos: Vec::new(),

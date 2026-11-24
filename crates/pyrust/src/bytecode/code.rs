@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use crate::value::Value;
 
 use super::{
-    AttrCacheEntry, BinOpCacheEntry, CellSlotMeta, FnProto, GlobalCacheEntry, Insn,
+    AttrCacheEntry, BinOpCacheEntry, CellSlotMeta, FnProto, GlobalCacheEntry, Insn, InsnDesc,
     KwCallCacheEntry, SiteCache, SparsePcCache,
 };
 
@@ -216,6 +216,11 @@ impl ColTable {
 #[derive(Debug, Clone)]
 pub struct FnCode {
     pub(crate) insns: Vec<Insn>,
+    /// Out-of-line descriptor side-table for cold wide-operand instructions
+    /// (`MakeClass`, `MakeFunction`, `CallMethodKw`, `CallExArgs`, etc.) so
+    /// [`Insn`] stays 16 bytes with 4-byte alignment (#3161).  Allocates 0 heap
+    /// bytes for functions without descriptor-backed instructions.
+    pub(crate) descs: Vec<InsnDesc>,
     /// Source-file path this code object was compiled from — the code object's
     /// `co_filename`.  Threaded from the compile entry point through every nested
     /// `def`/`class`/`lambda`, so an imported module's functions report their own

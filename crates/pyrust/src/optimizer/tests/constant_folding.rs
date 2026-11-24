@@ -22,7 +22,7 @@ fn binop_const_fusion_skips_binop_that_is_jump_target() {
         Insn::BinOp(1, 0, BinaryOp::Add, 2),
         Insn::Return(1),
     ];
-    let out = pass_binop_const_fusion(insns.clone(), 1);
+    let out = pass_binop_const_fusion(insns.clone(), &[], 1);
     assert_eq!(out, insns, "must not fuse a BinOp that is a jump target");
 }
 
@@ -36,7 +36,7 @@ fn binop_const_fusion_fuses_loadconst_binop() {
         Insn::BinOp(1, 0, BinaryOp::Add, 5),
         Insn::Return(1),
     ];
-    let out = pass_binop_const_fusion(insns, 2);
+    let out = pass_binop_const_fusion(insns, &[], 2);
     assert_eq!(out.len(), 2, "LoadConst should be removed");
     assert!(
         matches!(out[0], Insn::BinOpConst(1, 0, BinaryOp::Add, 0, ..)),
@@ -61,7 +61,7 @@ fn binop_const_fusion_fires_for_reused_scratch_in_loop_body() {
         Insn::BinOpInPlace(0, 0, BinaryOp::Add, 2), // s += r2
         Insn::Jump(-6),                             // loop back-edge
     ];
-    let out = pass_binop_const_fusion(insns, 2);
+    let out = pass_binop_const_fusion(insns, &[], 2);
     assert!(
         matches!(out[0], Insn::BinOpConst(2, 1, BinaryOp::Mul, 0, false)),
         "first pair fused despite the back-edge (scratch overwritten before \
@@ -87,7 +87,7 @@ fn binop_const_fusion_skips_reused_scratch_when_value_is_live() {
         Insn::BinOp(4, 2, BinaryOp::Sub, 3), // reads reg 3 again → still live
         Insn::Jump(-4),
     ];
-    let out = pass_binop_const_fusion(insns, 2);
+    let out = pass_binop_const_fusion(insns, &[], 2);
     assert!(
         matches!(out[0], Insn::LoadConst(3, 0)),
         "no fusion while reg 3 is still live: {:?}",
@@ -118,7 +118,7 @@ fn binop_const_fusion_fires_for_loop_bound_reloaded_each_iteration() {
         Insn::Jump(-10),                              // 9: back-edge to 0
         Insn::Return(0),                              // 10
     ];
-    let out = pass_binop_const_fusion(insns, 2);
+    let out = pass_binop_const_fusion(insns, &[], 2);
 
     assert!(
         !out.iter().any(|insn| matches!(insn, Insn::LoadConst(3, _))),
@@ -153,7 +153,7 @@ fn binop_const_fusion_skips_scratch_that_crosses_a_jump_target() {
         Insn::Jump(-4),                      // 4: back-edge to 1
         Insn::Return(0),                     // 5
     ];
-    let out = pass_binop_const_fusion(insns.clone(), 2);
+    let out = pass_binop_const_fusion(insns.clone(), &[], 2);
     assert_eq!(
         out, insns,
         "a scratch value that crosses a control-flow edge must not fuse"
@@ -184,7 +184,7 @@ fn binop_const_fusion_handles_wide_temp_indices_past_inline_bitset_and_slot_limi
         Insn::Jump(-8),                                     // 8: back-edge to 1
         Insn::Return(0),                                    // 9
     ];
-    let out = pass_binop_const_fusion(insns, num_locals);
+    let out = pass_binop_const_fusion(insns, &[], num_locals);
     assert!(
         !out.iter()
             .any(|insn| matches!(insn, Insn::LoadConst(r, _) if *r == local_scratch)),
@@ -211,7 +211,7 @@ fn binop_const_fusion_skips_when_reg_is_local() {
         Insn::BinOp(2, 0, BinaryOp::Add, 1),
         Insn::Return(2),
     ];
-    let out = pass_binop_const_fusion(insns, 3);
+    let out = pass_binop_const_fusion(insns, &[], 3);
     assert_eq!(out.len(), 3, "no fusion when reg is a local");
     assert!(matches!(out[0], Insn::LoadConst(1, 0)));
 }
@@ -226,7 +226,7 @@ fn binop_const_fusion_skips_when_dst_equals_reg() {
         Insn::BinOp(5, 0, BinaryOp::Add, 5), // dst == rhs == lc_reg
         Insn::Return(5),
     ];
-    let out = pass_binop_const_fusion(insns, 2);
+    let out = pass_binop_const_fusion(insns, &[], 2);
     assert_eq!(
         out.len(),
         2,
@@ -267,7 +267,7 @@ fn binop_const_fusion_commutative_lhs_const() {
         Insn::BinOp(1, 5, BinaryOp::Add, 0),
         Insn::Return(1),
     ];
-    let out = pass_binop_const_fusion(insns, 2);
+    let out = pass_binop_const_fusion(insns, &[], 2);
     assert_eq!(
         out.len(),
         3,
@@ -284,7 +284,7 @@ fn binop_const_fusion_does_not_commute_non_commutative() {
         Insn::BinOp(1, 5, BinaryOp::Sub, 0),
         Insn::Return(1),
     ];
-    let out = pass_binop_const_fusion(insns, 2);
+    let out = pass_binop_const_fusion(insns, &[], 2);
     assert_eq!(
         out.len(),
         3,
@@ -631,14 +631,13 @@ fn named_local_effect_classifier_is_a_conservative_false_whitelist() {
         Insn::LoadNone(0),
         Insn::LoadNoneRange { start: 0, count: 2 },
         Insn::Move(0, 1),
-        Insn::CopyReg(0, 1),
         Insn::CheckLocal(0, 0),
         Insn::BuildList(0, 1, 1),
         Insn::BuildListReserve(0, 1),
         Insn::BuildTuple(0, 1, 1),
         Insn::BuildString(0, 1, 1),
         Insn::BuildSlice(0, 1),
-        Insn::MakeFunction(0, 0, 1, 0, 1, 0),
+        Insn::MakeFunction(0),
     ] {
         assert!(
             !may_invalidate_named_locals(&safe),
@@ -659,7 +658,7 @@ fn named_local_effect_classifier_is_a_conservative_false_whitelist() {
         Insn::ForIter(2, 0, 1),
         Insn::ImportModule(2, 0),
         Insn::ImportStar(1),
-        Insn::MakeClass(2, 0, 3, 0, 0, 3, 0),
+        Insn::MakeClass(0),
         Insn::StoreGlobal(0, 1),
         Insn::StoreCell(0, 1),
         Insn::DeleteName(0),
@@ -834,7 +833,7 @@ fn cmpjump_fuses_binopconst_jumpiffalse() {
         Insn::JumpIfFalse(5, 0),
         Insn::Return(0),
     ];
-    let out = pass_cmpjump_fusion(insns, 2);
+    let out = pass_cmpjump_fusion(insns, &[], 2);
     assert_eq!(out.len(), 2, "BinOpConst should be removed");
     assert!(
         matches!(out[0], Insn::CmpJumpIfFalseConst(0, BinaryOp::Gt, 0, 0)),
@@ -852,7 +851,7 @@ fn cmpjump_fuses_binop_jumpiftrue() {
         Insn::JumpIfTrue(5, 0),
         Insn::Return(0),
     ];
-    let out = pass_cmpjump_fusion(insns, 2);
+    let out = pass_cmpjump_fusion(insns, &[], 2);
     assert_eq!(out.len(), 2, "BinOp should be removed");
     assert!(
         matches!(out[0], Insn::CmpJumpIfTrue(0, BinaryOp::Eq, 1, 0)),
@@ -869,7 +868,7 @@ fn cmpjump_skips_when_reg_is_local() {
         Insn::JumpIfFalse(1, 1),
         Insn::Return(0),
     ];
-    let out = pass_cmpjump_fusion(insns, 3);
+    let out = pass_cmpjump_fusion(insns, &[], 3);
     assert_eq!(out.len(), 3, "no fusion when cond reg is a local");
 }
 
@@ -887,7 +886,7 @@ fn cmpjump_skips_when_jump_targets_the_cond_jump() {
         Insn::JumpIfFalse(3, 0), // index 2: jump target — must NOT be fused
         Insn::Return(0),
     ];
-    let out = pass_cmpjump_fusion(insns, 2);
+    let out = pass_cmpjump_fusion(insns, &[], 2);
     assert_eq!(
         out.len(),
         4,
@@ -940,7 +939,7 @@ fn not_invert_keeps_shared_ternary_merge_test() {
         Insn::ReturnNone,
     ];
 
-    let out = pass_not_invert(insns, 1);
+    let out = pass_not_invert(insns, &[], 1);
     assert!(
         matches!(out[3], Insn::UnaryOp(1, UnaryOp::Not, 2)),
         "the else-arm UnaryOp must survive an incoming edge to the merge test"

@@ -55,6 +55,7 @@ pub fn lower_fncode_to_mir(code: &FnCode) -> MirFn {
         num_iters: code.num_iters,
         consts: code.consts.clone(),
         names: code.names.clone(),
+        descs: code.descs.clone(),
         cell_slots: code.cell_slots.clone(),
         own_cell_count: code.own_cell_count,
         fn_protos: code.fn_protos.clone(),
@@ -92,6 +93,7 @@ pub fn lower_fncode_to_mir(code: &FnCode) -> MirFn {
     let analysis = analyze_and_place_phis(
         &compact_raw,
         insns,
+        &code.descs,
         num_locals,
         num_regs,
         aliased_locals,
@@ -109,7 +111,7 @@ pub fn lower_fncode_to_mir(code: &FnCode) -> MirFn {
     );
     renamer.rename_block(0);
 
-    insert_pinned_edge_bridges(&compact_raw, insns, &analysis.pinned, &mut mir);
+    insert_pinned_edge_bridges(&compact_raw, insns, &code.descs, &analysis.pinned, &mut mir);
     mir.rebuild_preds();
     infer_mir_types(&mut mir);
     mir

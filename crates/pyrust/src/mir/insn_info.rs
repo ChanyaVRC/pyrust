@@ -7,7 +7,52 @@
 //! materialization always agree on operand ordering and window layouts.
 
 use crate::ast::CaretSpan;
-use crate::bytecode::{Insn, KwCallName, NO_KWARGS, Reg};
+use crate::bytecode::{
+    CallExArgsDesc, CallMethodExpandedDesc, CallMethodKwDesc, DescIdx, DictMergeKwCallDesc, Insn,
+    InsnDesc, KwCallName, ListExtendCallDesc, MakeClassDesc, MakeFunctionDesc,
+    MatchClassPositionalDesc, MatchExceptStarDesc, NO_ARGS_SPLAT, NO_ASSERT_MSG, NO_KWARGS,
+    NO_METACLASS, Reg, SetItemKwCallDesc, push_desc,
+};
+
+/// Return the descriptor pool index carried by `insn`, if any.
+#[inline]
+pub(crate) fn insn_desc_idx(insn: &Insn) -> Option<DescIdx> {
+    match insn {
+        Insn::JumpIfIterNotIntRangeExact(idx, _)
+        | Insn::CallInlineBinOp(idx, _)
+        | Insn::CallMethodExpanded(idx)
+        | Insn::CallExArgs(idx)
+        | Insn::CallMethodKw(idx)
+        | Insn::MatchClassPositional(idx)
+        | Insn::MakeFunction(idx)
+        | Insn::MatchExceptStar(idx, _)
+        | Insn::MakeClass(idx)
+        | Insn::ListExtendCall(idx)
+        | Insn::DictMergeKwCall(idx)
+        | Insn::SetItemKwCall(idx) => Some(*idx),
+        _ => None,
+    }
+}
+
+/// Update the descriptor pool index carried by `insn`, if any.
+#[inline]
+pub(crate) fn set_insn_desc_idx(insn: &mut Insn, new_idx: DescIdx) {
+    match insn {
+        Insn::JumpIfIterNotIntRangeExact(idx, _)
+        | Insn::CallInlineBinOp(idx, _)
+        | Insn::CallMethodExpanded(idx)
+        | Insn::CallExArgs(idx)
+        | Insn::CallMethodKw(idx)
+        | Insn::MatchClassPositional(idx)
+        | Insn::MakeFunction(idx)
+        | Insn::MatchExceptStar(idx, _)
+        | Insn::MakeClass(idx)
+        | Insn::ListExtendCall(idx)
+        | Insn::DictMergeKwCall(idx)
+        | Insn::SetItemKwCall(idx) => *idx = new_idx,
+        _ => {}
+    }
+}
 
 /// Conservative false-whitelist matching `optimizer/effects.rs::may_invalidate_named_locals`.
 #[inline]
@@ -22,7 +67,6 @@ pub(crate) fn insn_may_invalidate_named_locals(insn: &Insn) -> bool {
             | LoadNone(..)
             | LoadNoneRange { .. }
             | Move(..)
-            | CopyReg(..)
             | CheckLocal(..)
             | BuildList(..)
             | BuildListReserve(..)
@@ -47,7 +91,7 @@ pub(crate) fn jump_offset(insn: &Insn) -> Option<i32> {
         | Insn::ForIter(_, _, k)
         | Insn::SetupExcept(k)
         | Insn::MatchExcept(_, k)
-        | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
+        | Insn::MatchExceptStar(_, k) => Some(*k),
         _ => None,
     }
 }
@@ -66,7 +110,7 @@ pub(crate) fn jump_offset_mut(insn: &mut Insn) -> Option<&mut i32> {
         | Insn::ForIter(_, _, k)
         | Insn::SetupExcept(k)
         | Insn::MatchExcept(_, k)
-        | Insn::MatchExceptStar(_, _, _, k) => Some(k),
+        | Insn::MatchExceptStar(_, k) => Some(k),
         _ => None,
     }
 }
@@ -84,7 +128,6 @@ pub(crate) fn ends_raw_block(insn: &Insn) -> bool {
                 | Insn::RaiseFrom(..)
                 | Insn::RaiseReRaise
                 | Insn::RaiseAssert(_)
-                | Insn::RaiseAssertNoMsg
         )
 }
 
@@ -99,7 +142,7 @@ pub(crate) fn ends_raw_block(insn: &Insn) -> bool {
 /// `LoadClassName`'s `local` slot) access canonical `R[r]` directly (which
 /// write-through `StoreLocal` keeps current) and are intentionally omitted.
 macro_rules! dispatch_insn_operands {
-    ($insn:expr, $v:expr) => {{
+    ($insn:expr, $desc:expr, $v:expr) => {{
         use Insn::*;
         match $insn {
             // Zero-reg / canonical-slot / terminator-def-only / late-stage guards.
@@ -130,7 +173,6 @@ macro_rules! dispatch_insn_operands {
             | PopExcContext
             | ReturnNone
             | RaiseReRaise
-            | RaiseAssertNoMsg
             | ForIter(..)
             | DeleteModuleGlobal(..)
             | CheckLocal(..)
@@ -147,7 +189,13 @@ macro_rules! dispatch_insn_operands {
             | LenSeqOrExit(..)
             | CountCmpJumpTrue(..)
             | CountCmpJumpFalse(..)
-            | CallInlineBinOp { .. } => {}
+            | CallInlineBinOp(..) => {}
+
+            RaiseAssert(s) => {
+                if *s != NO_ASSERT_MSG {
+                    $v.read_reg(s);
+                }
+            }
 
             // Single scalar read, no write.
             StoreGlobal(_, s)
@@ -157,7 +205,6 @@ macro_rules! dispatch_insn_operands {
             | PrintExpr(s)
             | RaiseValue(s)
             | RaiseExceptStarResidual(s)
-            | RaiseAssert(s)
             | JumpIfFalse(s, _)
             | JumpIfTrue(s, _)
             | GetIter(_, s)
@@ -171,7 +218,6 @@ macro_rules! dispatch_insn_operands {
 
             // Single scalar read, single scalar write.
             Move(d, s)
-            | CopyReg(d, s)
             | UnaryOp(d, _, s)
             | FormatValue(d, s)
             | MatchSeqExcluded(d, s)
@@ -190,8 +236,19 @@ macro_rules! dispatch_insn_operands {
             }
 
             // Two scalar reads, no write (MatchExceptStar writes are edge-defined).
-            MatchExceptStar(a, b, _, _)
-            | CmpJumpIfFalse(a, _, b, _)
+            MatchExceptStar(_, _) => {
+                let Some(InsnDesc::MatchExceptStar(MatchExceptStarDesc {
+                    type_reg: a,
+                    src_group: b,
+                    ..
+                })) = $desc
+                else {
+                    unreachable!("MatchExceptStar missing descriptor");
+                };
+                $v.read_reg(a);
+                $v.read_reg(b);
+            }
+            CmpJumpIfFalse(a, _, b, _)
             | CmpJumpIfTrue(a, _, b, _)
             | RaiseFrom(a, b)
             | SetAdd(a, b)
@@ -229,13 +286,17 @@ macro_rules! dispatch_insn_operands {
             }
 
             // Three scalar reads, single scalar write.
-            CallMethodExpanded {
-                dst: d,
-                obj: a,
-                pos_list: b,
-                kw_dict: c,
-                ..
-            } => {
+            CallMethodExpanded(_) => {
+                let Some(InsnDesc::CallMethodExpanded(CallMethodExpandedDesc {
+                    dst: d,
+                    obj: a,
+                    pos_list: b,
+                    kw_dict: c,
+                    ..
+                })) = $desc
+                else {
+                    unreachable!("CallMethodExpanded missing descriptor");
+                };
                 $v.read_reg(a);
                 $v.read_reg(b);
                 $v.read_reg(c);
@@ -243,20 +304,46 @@ macro_rules! dispatch_insn_operands {
             }
 
             // KwCallName helpers.
-            ListExtendCall { list: a, src: b, name }
-            | DictMergeKwCall { dict: a, src: b, name } => {
+            ListExtendCall(_) => {
+                let Some(InsnDesc::ListExtendCall(ListExtendCallDesc {
+                    list: a,
+                    src: b,
+                    name,
+                })) = $desc
+                else {
+                    unreachable!("ListExtendCall missing descriptor");
+                };
                 $v.read_reg(a);
                 $v.read_reg(b);
                 match name {
                     KwCallName::Callee(r) | KwCallName::Method { obj: r, .. } => $v.read_reg(r),
                 }
             }
-            SetItemKwCall {
-                dict: a,
-                key: b,
-                val: c,
-                name,
-            } => {
+            DictMergeKwCall(_) => {
+                let Some(InsnDesc::DictMergeKwCall(DictMergeKwCallDesc {
+                    dict: a,
+                    src: b,
+                    name,
+                })) = $desc
+                else {
+                    unreachable!("DictMergeKwCall missing descriptor");
+                };
+                $v.read_reg(a);
+                $v.read_reg(b);
+                match name {
+                    KwCallName::Callee(r) | KwCallName::Method { obj: r, .. } => $v.read_reg(r),
+                }
+            }
+            SetItemKwCall(_) => {
+                let Some(InsnDesc::SetItemKwCall(SetItemKwCallDesc {
+                    dict: a,
+                    key: b,
+                    val: c,
+                    name,
+                })) = $desc
+                else {
+                    unreachable!("SetItemKwCall missing descriptor");
+                };
                 $v.read_reg(a);
                 $v.read_reg(b);
                 $v.read_reg(c);
@@ -272,20 +359,22 @@ macro_rules! dispatch_insn_operands {
             CallKw { func, total, .. } => {
                 $v.call_window(func, *total as u32 + 1);
             }
-            CallEx { func, npos, kwargs } => {
-                $v.call_window(func, *npos as u32 + 1);
-                $v.read_reg(kwargs);
-            }
-            CallExArgs {
-                func,
-                npos,
-                nkw,
-                args_splat,
-                kwargs,
-                ..
-            } => {
+            CallExArgs(_) => {
+                let Some(InsnDesc::CallExArgs(CallExArgsDesc {
+                    func,
+                    npos,
+                    nkw,
+                    args_splat,
+                    kwargs,
+                    ..
+                })) = $desc
+                else {
+                    unreachable!("CallExArgs missing descriptor");
+                };
                 $v.call_window(func, 1 + *npos as u32 + *nkw as u32);
-                $v.read_reg(args_splat);
+                if *args_splat != NO_ARGS_SPLAT {
+                    $v.read_reg(args_splat);
+                }
                 if *kwargs != NO_KWARGS {
                     $v.read_reg(kwargs);
                 }
@@ -324,13 +413,17 @@ macro_rules! dispatch_insn_operands {
                 $v.read_window(args_base, *nargs as u32);
                 $v.write_reg(d);
             }
-            CallMethodKw {
-                dst: d,
-                obj,
-                args_base,
-                total,
-                ..
-            } => {
+            CallMethodKw(_) => {
+                let Some(InsnDesc::CallMethodKw(CallMethodKwDesc {
+                    dst: d,
+                    obj,
+                    args_base,
+                    total,
+                    ..
+                })) = $desc
+                else {
+                    unreachable!("CallMethodKw missing descriptor");
+                };
                 $v.read_reg(obj);
                 $v.read_window(args_base, *total as u32);
                 $v.write_reg(d);
@@ -339,18 +432,38 @@ macro_rules! dispatch_insn_operands {
                 $v.read_window(base, *count as u32);
                 $v.write_reg(d);
             }
-            MakeFunction(d, _, defs_base, defs_n, annots_base, annots_n) => {
+            MakeFunction(_) => {
+                let Some(InsnDesc::MakeFunction(MakeFunctionDesc {
+                    dst: d,
+                    defs_base,
+                    defs_n,
+                    annots_base,
+                    annots_n,
+                    ..
+                })) = $desc
+                else {
+                    unreachable!("MakeFunction missing descriptor");
+                };
                 $v.read_window(defs_base, *defs_n);
                 $v.read_window(annots_base, *annots_n);
                 $v.write_reg(d);
             }
-            MakeClass(d, _, bases_base, bases_n, _, kwarg_base, kwarg_n) => {
-                $v.read_window(bases_base, *bases_n);
-                $v.read_window(kwarg_base, *kwarg_n);
-                $v.write_reg(d);
-            }
-            MakeClassMeta(d, _, bases_base, bases_n, _, kwarg_base, kwarg_n, meta_reg) => {
-                $v.read_reg(meta_reg);
+            MakeClass(_) => {
+                let Some(InsnDesc::MakeClass(MakeClassDesc {
+                    dst: d,
+                    bases_base,
+                    bases_n,
+                    kwarg_base,
+                    kwarg_n,
+                    meta_reg,
+                    ..
+                })) = $desc
+                else {
+                    unreachable!("MakeClass missing descriptor");
+                };
+                if *meta_reg != NO_METACLASS {
+                    $v.read_reg(meta_reg);
+                }
                 $v.read_window(bases_base, *bases_n);
                 $v.read_window(kwarg_base, *kwarg_n);
                 $v.write_reg(d);
@@ -370,12 +483,16 @@ macro_rules! dispatch_insn_operands {
                 $v.read_reg(src);
                 $v.write_window(dst_base, *before as u32 + 1 + *after);
             }
-            MatchClassPositional {
-                dst_base,
-                subj,
-                cls,
-                n,
-            } => {
+            MatchClassPositional(_) => {
+                let Some(InsnDesc::MatchClassPositional(MatchClassPositionalDesc {
+                    dst_base,
+                    subj,
+                    cls,
+                    n,
+                })) = $desc
+                else {
+                    unreachable!("MatchClassPositional missing descriptor");
+                };
                 $v.read_reg(subj);
                 $v.read_reg(cls);
                 $v.write_window(dst_base, *n);
@@ -439,15 +556,17 @@ impl<F: FnMut(Reg)> WriteVisitor<F> {
 }
 
 /// Visit every register read by `insn` (for SSA liveness, def-analysis, and lifting).
-pub(crate) fn visit_ssa_reads(insn: &Insn, f: impl FnMut(Reg)) {
+pub(crate) fn visit_ssa_reads(insn: &Insn, descs: &[InsnDesc], f: impl FnMut(Reg)) {
     let mut visitor = ReadVisitor(f);
-    dispatch_insn_operands!(insn, visitor);
+    let desc = insn_desc_idx(insn).map(|idx| &descs[idx as usize]);
+    dispatch_insn_operands!(insn, desc, visitor);
 }
 
 /// Visit every register written by a non-terminator `insn`.
-pub(crate) fn visit_ssa_writes(insn: &Insn, f: impl FnMut(Reg)) {
+pub(crate) fn visit_ssa_writes(insn: &Insn, descs: &[InsnDesc], f: impl FnMut(Reg)) {
     let mut visitor = WriteVisitor(f);
-    dispatch_insn_operands!(insn, visitor);
+    let desc = insn_desc_idx(insn).map(|idx| &descs[idx as usize]);
+    dispatch_insn_operands!(insn, desc, visitor);
 }
 
 struct MaterializeVisitor<'a> {
@@ -527,6 +646,8 @@ impl MaterializeVisitor<'_> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_side_effect_insn(
     insn: &Insn,
+    src_descs: &[InsnDesc],
+    dst_descs: &mut Vec<InsnDesc>,
     uses: &[Reg],
     defs: &[Reg],
     scratch_base: Reg,
@@ -560,6 +681,7 @@ pub(crate) fn materialize_side_effect_insn(
     }
 
     let mut cloned = insn.clone();
+    let mut cloned_desc = insn_desc_idx(insn).map(|idx| src_descs[idx as usize].clone());
     let mut visitor = MaterializeVisitor {
         uses,
         defs,
@@ -575,8 +697,12 @@ pub(crate) fn materialize_side_effect_insn(
         post_call_move: None,
         post_write_window: None,
     };
-    dispatch_insn_operands!(&mut cloned, visitor);
+    dispatch_insn_operands!(&mut cloned, cloned_desc.as_mut(), visitor);
     debug_assert_eq!(visitor.use_cursor, uses.len());
+    if let Some(new_desc) = cloned_desc {
+        let new_idx = push_desc(dst_descs, new_desc);
+        set_insn_desc_idx(&mut cloned, new_idx);
+    }
     visitor.emit(cloned);
 
     if let Some((dst, base)) = visitor.post_call_move

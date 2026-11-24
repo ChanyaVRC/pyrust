@@ -12,7 +12,7 @@
 /// The liveness guard is necessary for patterns like chained comparisons where the
 /// same intermediate value is used as both an operand of the first comparison and
 /// the left-hand side of the next comparison.
-fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+fn pass_binop_const_fusion(insns: Vec<Insn>, descs: &[InsnDesc], num_locals: u32) -> Vec<Insn> {
     let n = insns.len();
     let mut transformed = insns;
     let mut keep_buf = InlineBoolBuf::new(n, true);
@@ -36,7 +36,7 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     let mut is_jump_target_buf = InlineBoolBuf::new(n, false);
     let is_jump_target = &mut is_jump_target_buf.as_mut_slice()[..n];
     for (idx, insn) in transformed.iter().enumerate() {
-        for_each_read(insn, |r| {
+        for_each_read(insn, descs, |r| {
             if r >= num_locals {
                 let slot = (r - num_locals) as usize;
                 if slot < 64 {
@@ -96,7 +96,7 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 // read OR branch in a short straight-line window — which makes fusion
                 // sound regardless of the forward `last_read` estimate or a later
                 // back-edge (no reachable path can observe the dead value).
-                let dead_after = scratch_dead_after(&transformed, i + 2, lc_reg);
+                let dead_after = scratch_dead_after(&transformed, descs, i + 2, lc_reg);
                 if (dead_after || !back_edge_after[i + 2])
                     && (dst == lc_reg || !read_after || dead_after)
                 {
@@ -125,7 +125,8 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     // immediately before it, so no read that carries a value across an
     // instruction boundary — the only kind either scan reasons about — is lost.
     if !rejected.is_empty() {
-        let dead_def_buf = load_const_dead_after_use(&transformed, num_locals, is_jump_target);
+        let dead_def_buf =
+            load_const_dead_after_use(&transformed, descs, num_locals, is_jump_target);
         let dead_def = dead_def_buf.as_slice();
         for i in rejected {
             if !dead_def[i] {

@@ -272,12 +272,14 @@ impl Compiler {
             for _ in 1..positional.len() {
                 self.alloc_temp();
             }
-            self.emit(Insn::MatchClassPositional {
-                dst_base,
-                subj,
-                cls: cls_reg,
-                n,
-            });
+            let desc_idx =
+                self.push_desc(InsnDesc::MatchClassPositional(MatchClassPositionalDesc {
+                    dst_base,
+                    subj,
+                    cls: cls_reg,
+                    n,
+                }));
+            self.emit(Insn::MatchClassPositional(desc_idx));
             self.free_temp(cls_reg);
             for (i, pat) in positional.iter().enumerate() {
                 let attr_r = dst_base + i as u32;

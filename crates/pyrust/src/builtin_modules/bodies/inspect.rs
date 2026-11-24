@@ -162,6 +162,15 @@ pyrust_module! {
         let mut attr_seen: HashSet<&str> = HashSet::new();
         let mut attr_names: Vec<Value> = Vec::new();
 
+        let mut push_attr = |idx: u16| {
+            if let Some(sym) = fncode.names.get(idx as usize) {
+                let s = sym.as_str();
+                if attr_seen.insert(s) {
+                    attr_names.push(Value::string(s));
+                }
+            }
+        };
+
         for insn in &fncode.insns {
             match insn {
                 Insn::LoadGlobal(_, idx) => {
@@ -174,15 +183,16 @@ pyrust_module! {
                 }
                 Insn::GetAttr(_, _, idx)
                 | Insn::GetAttrForWith(_, _, idx, _)
-                | Insn::CallMethod { name_idx: idx, .. }
-                | Insn::CallMethodKw { name_idx: idx, .. }
-                | Insn::CallMethodExpanded { name_idx: idx, .. } => {
-                    if let Some(sym) = fncode.names.get(*idx as usize) {
-                        let s = sym.as_str();
-                        if attr_seen.insert(s) {
-                            attr_names.push(Value::string(s));
-                        }
-                    }
+                | Insn::CallMethod { name_idx: idx, .. } => push_attr(*idx),
+                Insn::CallMethodKw(desc_idx) => {
+                    push_attr(fncode.descs[*desc_idx as usize].as_call_method_kw().name_idx);
+                }
+                Insn::CallMethodExpanded(desc_idx) => {
+                    push_attr(
+                        fncode.descs[*desc_idx as usize]
+                            .as_call_method_expanded()
+                            .name_idx,
+                    );
                 }
                 _ => {}
             }

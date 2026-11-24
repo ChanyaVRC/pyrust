@@ -34,7 +34,7 @@ fn kwcall_name_subst(
 }
 
 /// Returns `true` if `insn` reads the value of register `r`.
-fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
+fn insn_reads_reg(insn: &Insn, descs: &[InsnDesc], r: u32) -> bool {
     use Insn::*;
     match insn {
         // No register sources.
@@ -61,18 +61,17 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | PopExcContext
         | ReturnNone
         | RaiseReRaise
-        | RaiseAssertNoMsg
         | ForIter(..)
         | DeleteModuleGlobal(..) => false,
 
         LoadClassName(_, local, _) => *local != crate::bytecode::NO_CLASS_LOCAL && r == *local,
+        RaiseAssert(s) => *s != NO_ASSERT_MSG && *s == r,
 
         // One source register.
         StoreGlobal(_, s)
         | StoreCell(_, s)
         | ImportStar(s)
         | Move(_, s)
-        | CopyReg(_, s)
         | UnaryOp(_, _, s)
         | FormatValue(_, s)
         | MatchSeqExcluded(_, s)
@@ -81,7 +80,6 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | PrintExpr(s)
         | RaiseValue(s)
         | RaiseExceptStarResidual(s)
-        | RaiseAssert(s)
         | JumpIfFalse(s, _)
         | JumpIfTrue(s, _)
         | GetIter(_, s)
@@ -106,7 +104,10 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | RecordClassDel(s)
         | PushExcContext(s)
         | SyncModuleGlobal(s, _) => *s == r,
-        MatchExceptStar(type_r, src, _, _) => *type_r == r || *src == r,
+        MatchExceptStar(desc_idx, _) => {
+            let desc = descs[*desc_idx as usize].as_match_except_star();
+            desc.type_reg == r || desc.src_group == r
+        }
 
         // Two source registers.
         BinOp(_, a, _, b)
@@ -125,7 +126,10 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | FormatValueSpec(_, a, b)
         | DeleteItem(a, b) => *a == r || *b == r,
 
-        ListExtendCall { list, src, name } => *list == r || *src == r || kwcall_name_reads(name, r),
+        ListExtendCall(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_list_extend_call();
+            desc.list == r || desc.src == r || kwcall_name_reads(&desc.name, r)
+        }
 
         SetAttr(obj, _, val) | SetTypeVarAttr(obj, _, val) => *obj == r || *val == r,
 
@@ -134,35 +138,25 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // Call-context kwarg merges read their dict + source + the registers
         // backing the callee-name source.
-        DictMergeKwCall { dict, src, name } => {
-            *dict == r || *src == r || kwcall_name_reads(name, r)
+        DictMergeKwCall(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_dict_merge_kw_call();
+            desc.dict == r || desc.src == r || kwcall_name_reads(&desc.name, r)
         }
-        SetItemKwCall {
-            dict,
-            key,
-            val,
-            name,
-        } => *dict == r || *key == r || *val == r || kwcall_name_reads(name, r),
+        SetItemKwCall(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_set_item_kw_call();
+            desc.dict == r || desc.key == r || desc.val == r || kwcall_name_reads(&desc.name, r)
+        }
 
         // Range-based: func + args live in consecutive registers.
         Call(base, argc) | CallMemo(base, argc) => r >= *base && r <= *base + *argc as u32,
         // CallKw reads the callee and `total` consecutive arg registers — the
         // same footprint as `Call(func, total)`.
         CallKw { func, total, .. } => r >= *func && r <= *func + *total as u32,
-        // CallEx reads the callee + `npos` positional registers (contiguous) and
-        // the separate `kwargs` (`**d`) register.
-        CallEx { func, npos, kwargs } => (r >= *func && r <= *func + *npos as u32) || r == *kwargs,
-        CallExArgs {
-            func,
-            npos,
-            nkw,
-            args_splat,
-            kwargs,
-            ..
-        } => {
-            (r >= *func && r <= *func + *npos as u32 + *nkw as u32)
-                || r == *args_splat
-                || (*kwargs != crate::bytecode::NO_KWARGS && r == *kwargs)
+        CallExArgs(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_call_ex_args();
+            (r >= desc.func && r <= desc.func + desc.npos as u32 + desc.nkw as u32)
+                || (desc.args_splat != NO_ARGS_SPLAT && r == desc.args_splat)
+                || (desc.kwargs != NO_KWARGS && r == desc.kwargs)
         }
         BuildList(_, base, n) | BuildTuple(_, base, n) => r >= *base && r < *base + *n,
         BuildString(_, base, n) => r >= *base && r < *base + *n as u32,
@@ -181,31 +175,27 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
             nargs,
             ..
         } => *obj == r || (r >= *args_base && r < *args_base + *nargs as u32),
-        CallMethodKw {
-            obj,
-            args_base,
-            total,
-            ..
-        } => *obj == r || (r >= *args_base && r < *args_base + *total as u32),
-        CallMethodExpanded {
-            obj,
-            pos_list,
-            kw_dict,
-            ..
-        } => *obj == r || *pos_list == r || *kw_dict == r,
+        CallMethodKw(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_call_method_kw();
+            desc.obj == r || (r >= desc.args_base && r < desc.args_base + desc.total as u32)
+        }
+        CallMethodExpanded(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_call_method_expanded();
+            desc.obj == r || desc.pos_list == r || desc.kw_dict == r
+        }
 
-        MakeFunction(_, _, defs_base, defs_n, annots_base, annots_n) => {
-            (r >= *defs_base && r < *defs_base + *defs_n)
-                || (*annots_n > 0 && r >= *annots_base && r < *annots_base + *annots_n)
+        MakeFunction(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_make_function();
+            (r >= desc.defs_base && r < desc.defs_base + desc.defs_n)
+                || (desc.annots_n > 0
+                    && r >= desc.annots_base
+                    && r < desc.annots_base + desc.annots_n)
         }
-        MakeClass(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n) => {
-            (r >= *bases_base && r < *bases_base + *bases_n)
-                || (*kwarg_n > 0 && r >= *kwarg_base && r < *kwarg_base + *kwarg_n)
-        }
-        MakeClassMeta(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n, meta_reg) => {
-            *meta_reg == r
-                || (r >= *bases_base && r < *bases_base + *bases_n)
-                || (*kwarg_n > 0 && r >= *kwarg_base && r < *kwarg_base + *kwarg_n)
+        MakeClass(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_make_class();
+            (desc.meta_reg != NO_METACLASS && desc.meta_reg == r)
+                || (r >= desc.bases_base && r < desc.bases_base + desc.bases_n)
+                || (desc.kwarg_n > 0 && r >= desc.kwarg_base && r < desc.kwarg_base + desc.kwarg_n)
         }
         MakeTypeAlias(_, _, value_reg, params_reg) => *value_reg == r || *params_reg == r,
         MakeTypeVar(_, _, _) => false,
@@ -227,16 +217,22 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         Concat { base, count, .. } => r >= *base && r < *base + *count as u32,
 
         // MatchClassPositional reads subj and cls.
-        MatchClassPositional { subj, cls, .. } => r == *subj || r == *cls,
+        MatchClassPositional(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_match_class_positional();
+            r == desc.subj || r == desc.cls
+        }
 
         // Guard reads its callee and both argument registers.
-        CallInlineBinOp { callee, a, b, .. } => r == *callee || r == *a || r == *b,
+        CallInlineBinOp(desc_idx, _) => {
+            let desc = descs[*desc_idx as usize].as_call_inline_binop();
+            r == desc.callee || r == desc.a || r == desc.b
+        }
     }
 }
 
 /// Visit every register read by `insn` without allocating.  O(1) per
 /// instruction (amortised O(ranges) for range-based instructions).
-fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
+fn for_each_read(insn: &Insn, descs: &[InsnDesc], mut f: impl FnMut(u32)) {
     use Insn::*;
     match insn {
         LoadConst(..)
@@ -261,7 +257,6 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
         | PopExcContext
         | ReturnNone
         | RaiseReRaise
-        | RaiseAssertNoMsg
         | ForIter(..)
         | DeleteModuleGlobal(..) => {}
 
@@ -270,12 +265,16 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
                 f(*local);
             }
         }
+        RaiseAssert(s) => {
+            if *s != NO_ASSERT_MSG {
+                f(*s);
+            }
+        }
 
         StoreGlobal(_, s)
         | StoreCell(_, s)
         | ImportStar(s)
         | Move(_, s)
-        | CopyReg(_, s)
         | UnaryOp(_, _, s)
         | FormatValue(_, s)
         | MatchSeqExcluded(_, s)
@@ -284,7 +283,6 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
         | PrintExpr(s)
         | RaiseValue(s)
         | RaiseExceptStarResidual(s)
-        | RaiseAssert(s)
         | JumpIfFalse(s, _)
         | JumpIfTrue(s, _)
         | GetIter(_, s)
@@ -309,9 +307,10 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
         | RecordClassDel(s)
         | PushExcContext(s)
         | SyncModuleGlobal(s, _) => f(*s),
-        MatchExceptStar(type_r, src, _, _) => {
-            f(*type_r);
-            f(*src);
+        MatchExceptStar(desc_idx, _) => {
+            let desc = descs[*desc_idx as usize].as_match_except_star();
+            f(desc.type_reg);
+            f(desc.src_group);
         }
 
         BinOp(_, a, _, b)
@@ -333,10 +332,11 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
             f(*b);
         }
 
-        ListExtendCall { list, src, name } => {
-            f(*list);
-            f(*src);
-            kwcall_name_for_each(name, &mut f);
+        ListExtendCall(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_list_extend_call();
+            f(desc.list);
+            f(desc.src);
+            kwcall_name_for_each(&desc.name, &mut f);
         }
 
         SetAttr(obj, _, val) | SetTypeVarAttr(obj, _, val) => {
@@ -349,21 +349,18 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
             f(*c);
         }
 
-        DictMergeKwCall { dict, src, name } => {
-            f(*dict);
-            f(*src);
-            kwcall_name_for_each(name, &mut f);
+        DictMergeKwCall(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_dict_merge_kw_call();
+            f(desc.dict);
+            f(desc.src);
+            kwcall_name_for_each(&desc.name, &mut f);
         }
-        SetItemKwCall {
-            dict,
-            key,
-            val,
-            name,
-        } => {
-            f(*dict);
-            f(*key);
-            f(*val);
-            kwcall_name_for_each(name, &mut f);
+        SetItemKwCall(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_set_item_kw_call();
+            f(desc.dict);
+            f(desc.key);
+            f(desc.val);
+            kwcall_name_for_each(&desc.name, &mut f);
         }
 
         Call(base, argc) | CallMemo(base, argc) => {
@@ -376,26 +373,16 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
                 f(r);
             }
         }
-        CallEx { func, npos, kwargs } => {
-            for r in *func..=(*func + *npos as u32) {
+        CallExArgs(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_call_ex_args();
+            for r in desc.func..=(desc.func + desc.npos as u32 + desc.nkw as u32) {
                 f(r);
             }
-            f(*kwargs);
-        }
-        CallExArgs {
-            func,
-            npos,
-            nkw,
-            args_splat,
-            kwargs,
-            ..
-        } => {
-            for r in *func..=(*func + *npos as u32 + *nkw as u32) {
-                f(r);
+            if desc.args_splat != NO_ARGS_SPLAT {
+                f(desc.args_splat);
             }
-            f(*args_splat);
-            if *kwargs != crate::bytecode::NO_KWARGS {
-                f(*kwargs);
+            if desc.kwargs != NO_KWARGS {
+                f(desc.kwargs);
             }
         }
         BuildList(_, base, n) | BuildTuple(_, base, n) => {
@@ -435,51 +422,39 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
                 f(r);
             }
         }
-        CallMethodKw {
-            obj,
-            args_base,
-            total,
-            ..
-        } => {
-            f(*obj);
-            for r in *args_base..*args_base + *total as u32 {
+        CallMethodKw(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_call_method_kw();
+            f(desc.obj);
+            for r in desc.args_base..desc.args_base + desc.total as u32 {
                 f(r);
             }
         }
-        CallMethodExpanded {
-            obj,
-            pos_list,
-            kw_dict,
-            ..
-        } => {
-            f(*obj);
-            f(*pos_list);
-            f(*kw_dict);
+        CallMethodExpanded(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_call_method_expanded();
+            f(desc.obj);
+            f(desc.pos_list);
+            f(desc.kw_dict);
         }
-        MakeFunction(_, _, defs_base, defs_n, annots_base, annots_n) => {
-            for r in *defs_base..*defs_base + *defs_n {
+        MakeFunction(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_make_function();
+            for r in desc.defs_base..desc.defs_base + desc.defs_n {
                 f(r);
             }
-            if *annots_n > 0 {
-                for r in *annots_base..*annots_base + *annots_n {
+            if desc.annots_n > 0 {
+                for r in desc.annots_base..desc.annots_base + desc.annots_n {
                     f(r);
                 }
             }
         }
-        MakeClass(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n) => {
-            for r in *bases_base..*bases_base + *bases_n {
+        MakeClass(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_make_class();
+            if desc.meta_reg != NO_METACLASS {
+                f(desc.meta_reg);
+            }
+            for r in desc.bases_base..desc.bases_base + desc.bases_n {
                 f(r);
             }
-            for r in *kwarg_base..*kwarg_base + *kwarg_n {
-                f(r);
-            }
-        }
-        MakeClassMeta(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n, meta_reg) => {
-            f(*meta_reg);
-            for r in *bases_base..*bases_base + *bases_n {
-                f(r);
-            }
-            for r in *kwarg_base..*kwarg_base + *kwarg_n {
+            for r in desc.kwarg_base..desc.kwarg_base + desc.kwarg_n {
                 f(r);
             }
         }
@@ -503,15 +478,17 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
             }
         }
         // MatchClassPositional reads subj and cls.
-        MatchClassPositional { subj, cls, .. } => {
-            f(*subj);
-            f(*cls);
+        MatchClassPositional(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_match_class_positional();
+            f(desc.subj);
+            f(desc.cls);
         }
 
-        CallInlineBinOp { callee, a, b, .. } => {
-            f(*callee);
-            f(*a);
-            f(*b);
+        CallInlineBinOp(desc_idx, _) => {
+            let desc = descs[*desc_idx as usize].as_call_inline_binop();
+            f(desc.callee);
+            f(desc.a);
+            f(desc.b);
         }
     }
 }
@@ -519,8 +496,8 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
 /// Collect every register read by `insn` into `reads`.  O(1) per instruction
 /// (amortised O(ranges) for range-based instructions).  Use this instead of
 /// calling `insn_reads_reg` in a loop to avoid the O(n × k) inner loop.
-fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
-    for_each_read(insn, |r| {
+fn collect_reads(insn: &Insn, descs: &[InsnDesc], reads: &mut HashSet<u32>) {
+    for_each_read(insn, descs, |r| {
         reads.insert(r);
     });
 }

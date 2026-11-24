@@ -1,7 +1,7 @@
 //! Basic-block terminator bytecode emission with fallthrough and trampoline
 //! lowering.
 
-use crate::bytecode::Insn;
+use crate::bytecode::{Insn, InsnDesc, MatchExceptStarDesc, NO_ASSERT_MSG, push_desc};
 use crate::value::Value;
 
 use crate::mir::ir::{BlockId, MirBlock, Terminator, Val};
@@ -112,11 +112,16 @@ impl BytecodeEmitter<'_> {
                     Insn::RaiseFrom(_, _) => {
                         Insn::RaiseFrom(self.reg_of(uses[0]), self.reg_of(uses[1]))
                     }
-                    Insn::RaiseAssert(_) => Insn::RaiseAssert(self.reg_of(uses[0])),
+                    Insn::RaiseAssert(r) => {
+                        if *r == NO_ASSERT_MSG {
+                            Insn::RaiseAssert(NO_ASSERT_MSG)
+                        } else {
+                            Insn::RaiseAssert(self.reg_of(uses[0]))
+                        }
+                    }
                     Insn::RaiseExceptStarResidual(_) => {
                         Insn::RaiseExceptStarResidual(self.reg_of(uses[0]))
                     }
-                    Insn::RaiseAssertNoMsg => Insn::RaiseAssertNoMsg,
                     other => other.clone(),
                 };
                 self.emit(lowered, tln, tsp);
@@ -208,16 +213,17 @@ impl BytecodeEmitter<'_> {
                 let sg_scratch = self.scratch_base;
                 self.max_reg_used = self.max_reg_used.max(sg_scratch);
                 self.emit(Insn::Move(sg_scratch, self.reg_of(*src_group)), tln, tsp);
-                let pc = self.emit(
-                    Insn::MatchExceptStar(
-                        self.reg_of(*type_val),
-                        sg_scratch,
-                        self.reg_of(*matched_def),
-                        0,
-                    ),
-                    tln,
-                    tsp,
+                let type_reg = self.reg_of(*type_val);
+                let matched_dst = self.reg_of(*matched_def);
+                let desc_idx = push_desc(
+                    &mut self.descs,
+                    InsnDesc::MatchExceptStar(MatchExceptStarDesc {
+                        type_reg,
+                        src_group: sg_scratch,
+                        matched_dst,
+                    }),
                 );
+                let pc = self.emit(Insn::MatchExceptStar(desc_idx, 0), tln, tsp);
                 self.patches.push(JumpPatch {
                     insn_pc: pc,
                     target: nomatch_target,

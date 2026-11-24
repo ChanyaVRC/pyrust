@@ -44,7 +44,7 @@ fn pass_loadnone_merge(insns: Vec<Insn>) -> Vec<Insn> {
             | Insn::ForIter(_, _, k)
             | Insn::SetupExcept(k)
             | Insn::MatchExcept(_, k)
-            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
+            | Insn::MatchExceptStar(_, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {

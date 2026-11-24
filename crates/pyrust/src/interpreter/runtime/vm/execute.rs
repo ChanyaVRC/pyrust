@@ -279,7 +279,7 @@ impl Interpreter {
                     cells.as_slice()[*cell_idx as usize].set(val);
                 }
                 Insn::LoadNone(dst) => regs[*dst as usize] = Value::none(),
-                Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
+                Insn::Move(dst, src) => {
                     regs[*dst as usize] = vm_try!(vm_read(&regs, *src, num_locals));
                 }
 
@@ -382,7 +382,7 @@ impl Interpreter {
                 | Insn::JumpIfIterNotIntRangeExact(..)
                 | Insn::JumpIfIterNotIndexedSeq(..)
                 | Insn::JumpIfNotBuiltinLen(..) => {
-                    if let Some(offset) = Self::eval_entry_guard_jump(insn, &regs, &iters) {
+                    if let Some(offset) = Self::eval_entry_guard_jump(insn, code, &regs, &iters) {
                         pc = jump_pc!(offset);
                     }
                 }
@@ -398,21 +398,21 @@ impl Interpreter {
                         &regs[*idx as usize],
                     ) {
                         Some(element) => regs[*dst as usize] = element,
-                        None => pc = jump_pc!(*offset),
+                        None => pc = jump_pc!(i32::from(*offset)),
                     }
                 }
-                Insn::CallInlineBinOp {
-                    callee,
-                    dst,
-                    a,
-                    op,
-                    b,
-                    proto,
-                    skip,
-                } => {
-                    if self
-                        .exec_call_inline_binop(&mut regs, code, *callee, *dst, *a, *op, *b, *proto)
-                    {
+                Insn::CallInlineBinOp(desc_idx, skip) => {
+                    let desc = code.descs[*desc_idx as usize].as_call_inline_binop();
+                    if self.exec_call_inline_binop(
+                        &mut regs,
+                        code,
+                        desc.callee,
+                        desc.dst,
+                        desc.a,
+                        desc.op,
+                        desc.b,
+                        desc.proto,
+                    ) {
                         pc = jump_pc!(*skip);
                     }
                 }

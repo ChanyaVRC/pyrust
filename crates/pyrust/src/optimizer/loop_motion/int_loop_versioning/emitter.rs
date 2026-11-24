@@ -39,6 +39,7 @@ struct IntLoopMainLayout {
 
 fn emit_int_loop_guards_and_main(
     insns: &[Insn],
+    descs: &mut Vec<InsnDesc>,
     candidates: &[IntLoopCandidate],
 ) -> IntLoopMainLayout {
     let n = insns.len();
@@ -93,10 +94,11 @@ fn emit_int_loop_guards_and_main(
                                     .closed_form
                                     .as_ref()
                                     .expect("a ClosedForm variant carries its plan");
-                                Insn::JumpIfIterNotIntRangeExact(
-                                    Box::new(closed_form.guard.clone()),
-                                    fail_off,
-                                )
+                                let desc_idx = push_desc(
+                                    descs,
+                                    InsnDesc::IntRangeExactGuard(closed_form.guard.clone()),
+                                );
+                                Insn::JumpIfIterNotIntRangeExact(desc_idx, fail_off)
                             }
                             IntLoopFastVariant::Plain => {
                                 unreachable!("a for header always guards its iterator kind")
@@ -433,6 +435,7 @@ fn emit_int_loop_fast_copies(
 
 fn pass_int_loop_version(
     insns: Vec<Insn>,
+    descs: &mut Vec<InsnDesc>,
     consts: &mut Vec<Value>,
     names: &[pyrust_core::Symbol],
     num_locals: u32,
@@ -446,9 +449,10 @@ fn pass_int_loop_version(
         };
     }
 
-    let reaching_const_reads = compute_reaching_const_reads(&insns, num_locals);
+    let reaching_const_reads = compute_reaching_const_reads(&insns, descs, num_locals);
     let mut candidates = find_int_loop_candidates(
         &insns,
+        descs,
         consts,
         names,
         num_locals,
@@ -463,6 +467,6 @@ fn pass_int_loop_version(
     }
 
     materialize_closed_form_consts(&mut candidates, consts);
-    let layout = emit_int_loop_guards_and_main(&insns, &candidates);
+    let layout = emit_int_loop_guards_and_main(&insns, descs, &candidates);
     emit_int_loop_fast_copies(&insns, &candidates, layout)
 }

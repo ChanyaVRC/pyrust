@@ -60,7 +60,7 @@ fn pre_eliminates_partial_redundancy_in_diamond_with_else() {
     ];
 
     let mut num_regs = 6;
-    let out = pass_pre(insns, &consts, 5, &mut num_regs);
+    let out = pass_pre(insns, &[], &consts, 5, &mut num_regs);
 
     // The join block's `BinOp(4, 1, Mul, 2)` must be replaced by `Move(4, temp)`.
     assert!(
@@ -99,7 +99,7 @@ fn pre_eliminates_partial_redundancy_in_diamond_without_else() {
     ];
 
     let mut num_regs = 5;
-    let out = pass_pre(insns, &consts, 5, &mut num_regs);
+    let out = pass_pre(insns, &[], &consts, 5, &mut num_regs);
 
     // Total `Mul` count drops from 2 down to 1!
     assert_eq!(
@@ -144,7 +144,7 @@ fn pre_hoists_loop_invariant_pure_expression_out_of_do_while_loop() {
     ];
 
     let mut num_regs = 5;
-    let out = pass_pre(insns, &consts, 5, &mut num_regs);
+    let out = pass_pre(insns, &[], &consts, 5, &mut num_regs);
 
     assert_eq!(
         count_binops(&out, BinaryOp::Mul),
@@ -195,7 +195,7 @@ fn pre_does_not_hoist_when_operand_is_killed_on_one_branch() {
     ];
 
     let mut num_regs = 5;
-    let out = pass_pre(insns.clone(), &consts, 5, &mut num_regs);
+    let out = pass_pre(insns.clone(), &[], &consts, 5, &mut num_regs);
 
     // Note: in `else`, `a = 99` kills `a` BEFORE exit, so `ant_in[else] = 0`,
     // `ant_out[else] = 1` (after `a = 99`!).  PRE MAY insert `t = a * b` AFTER
@@ -245,7 +245,7 @@ fn pre_does_not_hoist_when_not_anticipated_on_early_return_branch() {
     ];
 
     let mut num_regs = 5;
-    let out = pass_pre(insns.clone(), &consts, 5, &mut num_regs);
+    let out = pass_pre(insns.clone(), &[], &consts, 5, &mut num_regs);
 
     assert_eq!(
         out, insns,
@@ -285,7 +285,7 @@ fn pre_never_hoists_across_try_except_boundary() {
     ];
 
     let mut num_regs = 5;
-    let out = pass_pre(insns.clone(), &consts, 5, &mut num_regs);
+    let out = pass_pre(insns.clone(), &[], &consts, 5, &mut num_regs);
 
     assert_eq!(
         out, insns,
@@ -320,7 +320,7 @@ fn pre_never_hoists_division_by_unknown_or_zero_divisor() {
     ];
 
     let mut num_regs = 5;
-    let out = pass_pre(insns.clone(), &consts, 5, &mut num_regs);
+    let out = pass_pre(insns.clone(), &[], &consts, 5, &mut num_regs);
 
     assert_eq!(
         out, insns,
@@ -343,7 +343,7 @@ fn pre_never_deduplicates_untyped_user_operands() {
     ];
 
     let mut num_regs = 5;
-    let out = pass_pre(insns.clone(), &consts, 5, &mut num_regs);
+    let out = pass_pre(insns.clone(), &[], &consts, 5, &mut num_regs);
 
     assert_eq!(
         out, insns,

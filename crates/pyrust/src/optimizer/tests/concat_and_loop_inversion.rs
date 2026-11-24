@@ -25,7 +25,7 @@ fn concat_merge_fuses_three_binop_chain() {
         Insn::Return(4),
     ];
     let mut num_regs = 5u32;
-    let out = pass_concat_merge(insns, 0, &mut num_regs, &str_consts());
+    let out = pass_concat_merge(insns, &[], 0, &mut num_regs, &str_consts());
 
     // 3 LoadConst + 3 Moves + 1 Concat + 1 Return = 8 instructions.
     assert_eq!(out.len(), 8, "3 LoadConst + 3 Moves + Concat + Return");
@@ -62,7 +62,7 @@ fn concat_merge_does_not_bypass_frame_register_limit() {
     ];
     let mut num_regs = MAX_FRAME_REGS - 2;
 
-    let out = pass_concat_merge(insns.clone(), 0, &mut num_regs, &str_consts());
+    let out = pass_concat_merge(insns.clone(), &[], 0, &mut num_regs, &str_consts());
 
     assert_eq!(out, insns);
     assert_eq!(num_regs, MAX_FRAME_REGS - 2);
@@ -80,7 +80,7 @@ fn concat_merge_skips_non_string_chain() {
     ];
     let mut num_regs = 5u32;
     // Empty const pool → no register is provably a string.
-    let out = pass_concat_merge(insns, 0, &mut num_regs, &[]);
+    let out = pass_concat_merge(insns, &[], 0, &mut num_regs, &[]);
     assert_eq!(out.len(), 3, "int chain left as plain BinOps");
     assert!(matches!(out[0], Insn::BinOp(..)));
     assert!(matches!(out[1], Insn::BinOp(..)));
@@ -102,7 +102,7 @@ fn concat_merge_requires_two_binops_minimum() {
         Insn::Return(2),
     ];
     let mut num_regs = 3u32;
-    let out = pass_concat_merge(insns, 0, &mut num_regs, &str_consts());
+    let out = pass_concat_merge(insns, &[], 0, &mut num_regs, &str_consts());
     assert_eq!(out.len(), 4, "no merge for 2-operand chain");
     assert!(
         !out.iter().any(|i| matches!(i, Insn::Concat { .. })),
@@ -124,7 +124,7 @@ fn concat_merge_skips_when_intermediate_multi_use() {
         Insn::Return(2),                     // also reads t1=2 → use_count=2
     ];
     let mut num_regs = 5u32;
-    let out = pass_concat_merge(insns, 0, &mut num_regs, &str_consts());
+    let out = pass_concat_merge(insns, &[], 0, &mut num_regs, &str_consts());
     // Must NOT merge because t1 has use_count=2.
     assert_eq!(out.len(), 6, "no merge when intermediate is multi-use");
     assert!(
@@ -156,7 +156,7 @@ fn concat_merge_does_not_cross_bb_boundary() {
         Insn::Jump(-3),                      // i=6: target = 6+1+(-3) = 4
     ];
     let mut num_regs = 5u32;
-    let out = pass_concat_merge(insns, 0, &mut num_regs, &str_consts());
+    let out = pass_concat_merge(insns, &[], 0, &mut num_regs, &str_consts());
     assert_eq!(out.len(), 7, "no merge across BB boundary");
     assert!(
         !out.iter().any(|i| matches!(i, Insn::Concat { .. })),
@@ -196,7 +196,7 @@ fn concat_merge_skips_named_string_operand() {
         Insn::Return(5),
     ];
     let mut num_regs = 6;
-    let out = pass_concat_merge(insns.clone(), 2, &mut num_regs, &str_consts());
+    let out = pass_concat_merge(insns.clone(), &[], 2, &mut num_regs, &str_consts());
 
     assert_eq!(out, insns);
     assert_eq!(num_regs, 6);
@@ -216,7 +216,7 @@ fn concat_merge_requires_every_leaf_to_be_exact_string() {
         Insn::Return(5),
     ];
     let mut num_regs = 6;
-    let out = pass_concat_merge(insns.clone(), 2, &mut num_regs, &str_consts());
+    let out = pass_concat_merge(insns.clone(), &[], 2, &mut num_regs, &str_consts());
 
     assert_eq!(out, insns);
     assert_eq!(num_regs, 6);

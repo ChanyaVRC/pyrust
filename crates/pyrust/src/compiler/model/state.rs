@@ -110,6 +110,7 @@ struct Compiler {
     /// Empty outside class-body compilers.
     class_direct_env_names: HashSet<String>,
     insns: Vec<Insn>,
+    descs: Vec<InsnDesc>,
     /// Per-instruction 1-based source line numbers, parallel to `insns`.
     /// Filled by `emit()` from `current_lineno`.  0 = unknown.
     lineno_table: Vec<u32>,

@@ -328,6 +328,7 @@ fn pre_extract_expr(insn: &Insn, types: &PreTypeMap, consts: &[Value]) -> Option
 /// user Python code and therefore do not invalidate named locals.
 fn pre_step_types(
     insn: &Insn,
+    descs: &[InsnDesc],
     types: &mut PreTypeMap,
     consts: &[Value],
     num_locals: u32,
@@ -351,7 +352,7 @@ fn pre_step_types(
             }
             (true, false)
         }
-        Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
+        Insn::Move(dst, src) => {
             match types.get(src).copied() {
                 Some(t) => {
                     types.insert(*dst, t);
@@ -444,7 +445,7 @@ fn pre_step_types(
             (false, true)
         }
         insn => {
-            for_each_write(insn, |w| {
+            for_each_write(insn, descs, |w| {
                 types.remove(&w);
             });
             let pure = !may_invalidate_named_locals(insn);

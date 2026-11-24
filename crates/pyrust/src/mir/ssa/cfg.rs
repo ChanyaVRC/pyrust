@@ -256,7 +256,7 @@ fn collect_block_succs(
             succs.push(edge(fallthrough, RawEdgeKind::Normal));
             succs.push(edge(target_of(*off), RawEdgeKind::SetupExceptHandler));
         }
-        Insn::MatchExceptStar(_, _, _, off) => {
+        Insn::MatchExceptStar(_, off) => {
             succs.push(edge(fallthrough, RawEdgeKind::ExceptStarMatched));
             succs.push(edge(target_of(*off), RawEdgeKind::Normal));
         }
@@ -266,8 +266,7 @@ fn collect_block_succs(
         | Insn::RaiseExceptStarResidual(_)
         | Insn::RaiseFrom(..)
         | Insn::RaiseReRaise
-        | Insn::RaiseAssert(_)
-        | Insn::RaiseAssertNoMsg => {}
+        | Insn::RaiseAssert(_) => {}
         _ => unreachable!("non-terminator in term_pc"),
     }
     succs

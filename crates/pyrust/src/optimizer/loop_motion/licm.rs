@@ -58,7 +58,7 @@ fn collect_complete_loop_intervals(insns: &[Insn]) -> Vec<(usize, usize)> {
     intervals
 }
 
-fn pass_licm(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+fn pass_licm(insns: Vec<Insn>, descs: &[InsnDesc], num_locals: u32) -> Vec<Insn> {
     let n = insns.len();
     if n == 0 {
         return insns;
@@ -115,7 +115,7 @@ fn pass_licm(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             let mut write_count: HashMap<u32, usize> = HashMap::new();
             for insn in &insns[body_start..=latch] {
                 let mut tmp: HashSet<u32> = HashSet::new();
-                collect_writes(insn, &mut tmp);
+                collect_writes(insn, descs, &mut tmp);
                 for r in tmp {
                     *write_count.entry(r).or_insert(0) += 1;
                 }

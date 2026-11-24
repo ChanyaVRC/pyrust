@@ -26,14 +26,15 @@ impl Compiler {
         };
 
         let dst = self.alloc_temp();
-        self.emit(Insn::MakeFunction(
+        let desc_idx = self.push_desc(InsnDesc::MakeFunction(MakeFunctionDesc {
             dst,
             proto_idx,
             defs_base,
             defs_n,
             annots_base,
             annots_n,
-        ));
+        }));
+        self.emit(Insn::MakeFunction(desc_idx));
 
         // Defaults/annotations are dead after MakeFunction. Compact the result
         // into the first register they reserved so callers do not carry holes

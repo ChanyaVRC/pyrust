@@ -4,15 +4,30 @@ use crate::ast::{BinaryOp, UnaryOp};
 
 pub type Reg = u32;
 
+/// Index into [`crate::bytecode::FnCode::descs`] for cold wide-operand
+/// instructions whose payload lives out-of-line so [`Insn`] stays 16 bytes.
+pub type DescIdx = u32;
+
 /// Sentinel `Reg` used by [`Insn::LoadClassName`] when a class-body LOAD_NAME
 /// has no compiler-allocated fastlocal slot. No real register can have this
 /// value.
 pub const NO_CLASS_LOCAL: Reg = Reg::MAX;
 
-/// Sentinel `Reg` marking an absent operand — currently the missing `**kw`
-/// mapping of an [`Insn::CallExArgs`] with no double-splat.  No real register is
-/// ever allocated at `u32::MAX`, so it can never collide with a live operand.
+/// Sentinel `Reg` marking an absent `**kw` mapping in [`CallExArgsDesc`].
+/// No real register is ever allocated at `u32::MAX`, so it can never collide
+/// with a live operand.
 pub const NO_KWARGS: Reg = Reg::MAX;
+
+/// Sentinel `Reg` marking an absent `*args` splat in [`CallExArgsDesc`]
+/// (double-splat `f(<pos…>, **d)` calls).
+pub const NO_ARGS_SPLAT: Reg = Reg::MAX;
+
+/// Sentinel `Reg` marking an absent assertion message in [`Insn::RaiseAssert`]
+/// (`assert cond` with no message expression).
+pub const NO_ASSERT_MSG: Reg = Reg::MAX;
+
+/// Sentinel `Reg` marking an absent explicit `metaclass=` in [`MakeClassDesc`].
+pub const NO_METACLASS: Reg = Reg::MAX;
 
 /// Compile-time knowledge about the exact key-table kind for `BuildDict`.
 /// Dynamic expressions remain `Unknown` and receive CPython's runtime key
@@ -25,7 +40,8 @@ pub enum DictKeyKindHint {
 }
 
 /// The exact machine-int range cursor state [`Insn::JumpIfIterNotIntRangeExact`]
-/// admits.  Boxed so the rare closed-form guard does not widen every `Insn`.
+/// admits. Stored in [`crate::bytecode::FnCode::descs`] so the rare closed-form
+/// guard does not widen or over-align `Insn`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IntRangeExactGuard {
     /// Iterator slot the guard inspects.
@@ -48,6 +64,247 @@ pub enum KwCallName {
     /// name is `names[name_idx]`.  The error uses `<module>.<class>.<method>`
     /// derived from the receiver's class.
     Method { obj: Reg, name_idx: u16 },
+}
+
+/// Out-of-line descriptor for [`Insn::CallInlineBinOp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallInlineBinOpDesc {
+    pub callee: Reg,
+    pub dst: Reg,
+    pub a: Reg,
+    pub op: BinaryOp,
+    pub b: Reg,
+    pub proto: u16,
+}
+
+/// Out-of-line descriptor for [`Insn::CallMethodExpanded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallMethodExpandedDesc {
+    pub dst: Reg,
+    pub obj: Reg,
+    pub name_idx: u16,
+    pub pos_list: Reg,
+    pub kw_dict: Reg,
+}
+
+/// Out-of-line descriptor for [`Insn::CallExArgs`].
+///
+/// Covers both double-splat calls (`args_splat == NO_ARGS_SPLAT`, `nkw == 0`)
+/// and positional-splat calls (`f(<pos…>, *args, kw=v…[, **kw])`, with
+/// `kwargs == NO_KWARGS` when no `**kw` is present).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallExArgsDesc {
+    pub func: Reg,
+    pub npos: u8,
+    pub nkw: u8,
+    pub kwnames_idx: u16,
+    pub args_splat: Reg,
+    pub kwargs: Reg,
+}
+
+/// Out-of-line descriptor for [`Insn::CallMethodKw`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallMethodKwDesc {
+    pub dst: Reg,
+    pub obj: Reg,
+    pub name_idx: u16,
+    pub args_base: Reg,
+    pub total: u8,
+    pub nkw: u8,
+    pub kwnames_idx: u16,
+}
+
+/// Out-of-line descriptor for [`Insn::MatchClassPositional`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MatchClassPositionalDesc {
+    pub dst_base: Reg,
+    pub subj: Reg,
+    pub cls: Reg,
+    pub n: u32,
+}
+
+/// Out-of-line descriptor for [`Insn::MakeFunction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MakeFunctionDesc {
+    pub dst: Reg,
+    pub proto_idx: u16,
+    pub defs_base: Reg,
+    pub defs_n: u32,
+    pub annots_base: Reg,
+    pub annots_n: u32,
+}
+
+/// Out-of-line descriptor for [`Insn::MatchExceptStar`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MatchExceptStarDesc {
+    pub type_reg: Reg,
+    pub src_group: Reg,
+    pub matched_dst: Reg,
+}
+
+/// Out-of-line descriptor for [`Insn::MakeClass`].
+///
+/// `meta_reg == NO_METACLASS` selects default `type` class creation; any other
+/// register selects metaclass-driven creation (`__prepare__` + metaclass call).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MakeClassDesc {
+    pub dst: Reg,
+    pub proto_idx: u16,
+    pub bases_base: Reg,
+    pub bases_n: u32,
+    pub name_idx: u16,
+    pub kwarg_base: Reg,
+    pub kwarg_n: u32,
+    pub meta_reg: Reg,
+}
+
+/// Out-of-line descriptor for [`Insn::ListExtendCall`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ListExtendCallDesc {
+    pub list: Reg,
+    pub src: Reg,
+    pub name: KwCallName,
+}
+
+/// Out-of-line descriptor for [`Insn::DictMergeKwCall`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DictMergeKwCallDesc {
+    pub dict: Reg,
+    pub src: Reg,
+    pub name: KwCallName,
+}
+
+/// Out-of-line descriptor for [`Insn::SetItemKwCall`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SetItemKwCallDesc {
+    pub dict: Reg,
+    pub key: Reg,
+    pub val: Reg,
+    pub name: KwCallName,
+}
+
+/// Side-table entry stored in [`crate::bytecode::FnCode::descs`] for cold
+/// wide-operand instructions so [`Insn`] stays compact (`16 B`, `align = 4`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum InsnDesc {
+    IntRangeExactGuard(IntRangeExactGuard),
+    CallInlineBinOp(CallInlineBinOpDesc),
+    CallMethodExpanded(CallMethodExpandedDesc),
+    CallExArgs(CallExArgsDesc),
+    CallMethodKw(CallMethodKwDesc),
+    MatchClassPositional(MatchClassPositionalDesc),
+    MakeFunction(MakeFunctionDesc),
+    MatchExceptStar(MatchExceptStarDesc),
+    MakeClass(MakeClassDesc),
+    ListExtendCall(ListExtendCallDesc),
+    DictMergeKwCall(DictMergeKwCallDesc),
+    SetItemKwCall(SetItemKwCallDesc),
+}
+
+impl InsnDesc {
+    #[inline(always)]
+    pub(crate) fn as_int_range_exact_guard(&self) -> &IntRangeExactGuard {
+        match self {
+            Self::IntRangeExactGuard(d) => d,
+            _ => unreachable!("descriptor mismatch: expected IntRangeExactGuard"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_call_inline_binop(&self) -> &CallInlineBinOpDesc {
+        match self {
+            Self::CallInlineBinOp(d) => d,
+            _ => unreachable!("descriptor mismatch: expected CallInlineBinOp"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_call_method_expanded(&self) -> &CallMethodExpandedDesc {
+        match self {
+            Self::CallMethodExpanded(d) => d,
+            _ => unreachable!("descriptor mismatch: expected CallMethodExpanded"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_call_ex_args(&self) -> &CallExArgsDesc {
+        match self {
+            Self::CallExArgs(d) => d,
+            _ => unreachable!("descriptor mismatch: expected CallExArgs"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_call_method_kw(&self) -> &CallMethodKwDesc {
+        match self {
+            Self::CallMethodKw(d) => d,
+            _ => unreachable!("descriptor mismatch: expected CallMethodKw"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_match_class_positional(&self) -> &MatchClassPositionalDesc {
+        match self {
+            Self::MatchClassPositional(d) => d,
+            _ => unreachable!("descriptor mismatch: expected MatchClassPositional"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_make_function(&self) -> &MakeFunctionDesc {
+        match self {
+            Self::MakeFunction(d) => d,
+            _ => unreachable!("descriptor mismatch: expected MakeFunction"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_match_except_star(&self) -> &MatchExceptStarDesc {
+        match self {
+            Self::MatchExceptStar(d) => d,
+            _ => unreachable!("descriptor mismatch: expected MatchExceptStar"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_make_class(&self) -> &MakeClassDesc {
+        match self {
+            Self::MakeClass(d) => d,
+            _ => unreachable!("descriptor mismatch: expected MakeClass"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_list_extend_call(&self) -> &ListExtendCallDesc {
+        match self {
+            Self::ListExtendCall(d) => d,
+            _ => unreachable!("descriptor mismatch: expected ListExtendCall"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_dict_merge_kw_call(&self) -> &DictMergeKwCallDesc {
+        match self {
+            Self::DictMergeKwCall(d) => d,
+            _ => unreachable!("descriptor mismatch: expected DictMergeKwCall"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_set_item_kw_call(&self) -> &SetItemKwCallDesc {
+        match self {
+            Self::SetItemKwCall(d) => d,
+            _ => unreachable!("descriptor mismatch: expected SetItemKwCall"),
+        }
+    }
+}
+
+/// Append `desc` to a function's descriptor pool and return its [`DescIdx`].
+#[inline]
+pub(crate) fn push_desc(descs: &mut Vec<InsnDesc>, desc: InsnDesc) -> DescIdx {
+    let idx = DescIdx::try_from(descs.len()).expect("FnCode descriptor pool exceeded u32::MAX");
+    descs.push(desc);
+    idx
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -93,11 +350,6 @@ pub enum Insn {
     LoadNoneRange { start: Reg, count: u8 },
     /// R[dst] = R[src]
     Move(Reg, Reg),
-    /// R[dst] = R[src]  — emitted by the CSE pass; semantically identical to Move
-    /// but distinguished so that copy-propagation does not chase through it and
-    /// confuse subsequent passes that expect Move for named-variable copies.
-    #[allow(dead_code)]
-    CopyReg(Reg, Reg),
     /// R[dst] = R[lhs] op R[rhs]
     BinOp(Reg, Reg, BinaryOp, Reg),
     /// R[dst] = R[lhs] op= R[rhs]  (tries __i<op>__ before __<op>__)
@@ -176,7 +428,11 @@ pub enum Insn {
     /// negative, out-of-range, non-int, `dict`, user-`__getitem__`, and unset
     /// operands all raise (or run user code) on the original path with their
     /// own source line and PEP 657 caret span.
-    GetItemSeqIntOrExit(Reg, Reg, Reg, i32),
+    ///
+    /// The side-exit offset is `i16` so this hot specialized opcode remains
+    /// inline within the 16-byte `Insn` budget (`INT_LOOP_MAX_REGION = 48`
+    /// keeps the stub distance well within `i16::MAX`).
+    GetItemSeqIntOrExit(Reg, Reg, Reg, i16),
     /// R[dst] = R[obj][R[base] : R[base+1] : R[base+2]]  (rvalue slice read).
     /// CPython's BINARY_SLICE analogue: reads the three contiguous bound
     /// registers (start, stop, step; `None` = absent) and slices `obj` directly,
@@ -267,19 +523,11 @@ pub enum Insn {
     /// this entry guard with a `JumpIfNotInt` side exit on the loop variable.
     JumpIfIterNotIndexedSeq(u8, i32),
     /// Jump unless the iterator slot holds the canonical machine-int `range`
-    /// cursor in *exactly* the state the boxed guard describes — same `stop`,
-    /// same `step`, and a cursor still parked at `start`.
+    /// cursor in *exactly* the state the descriptor guard describes — same
+    /// `stop`, same `step`, and a cursor still parked at `start`.
     ///
-    /// The strongest of the three int-loop versioning entry guards, and the
-    /// only one that pins the iterated values themselves rather than just the
-    /// cursor kind.  That is what a closed-form loop copy needs: knowing the
-    /// slot holds *some* int range says nothing about its trip count, so a
-    /// copy that folds the whole loop into constants must confirm the exact
-    /// bounds it folded.  Because the check reads the live cursor, nothing
-    /// about how the range was produced matters — a rebound `range` returning
-    /// a differently-bounded range, an aliased iterable, or a partially
-    /// consumed cursor all simply fail the guard and run the original loop.
-    JumpIfIterNotIntRangeExact(Box<IntRangeExactGuard>, i32),
+    /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::IntRangeExactGuard`).
+    JumpIfIterNotIntRangeExact(DescIdx, i32),
     /// Jump when R[reg] is not the canonical built-in `len`.
     ///
     /// The entry guard for a `while i < len(xs):` loop copy that reads the
@@ -310,25 +558,10 @@ pub enum Insn {
     /// optimizer, always immediately before the original call sequence it
     /// specializes, which stays in place as the deopt path).
     ///
-    /// When R[callee] is the exact `Regular` user function compiled from
-    /// `fn_protos[proto]` — compared by code-object identity, so any runtime
-    /// rebinding of the source-level name deopts — and both argument
-    /// registers hold machine integers, the VM stores `R[a] op R[b]` into
-    /// R[dst] (the call-base register) and jumps by `skip` over the call
-    /// sequence.  That computation is the entire observable effect of calling
-    /// the eligible two-parameter `return a op b` leaf on ints: no user code,
-    /// raise, or namespace read is elided, and overflow promotes to BigInt
-    /// exactly like the called body would.  On any guard failure execution
-    /// falls through into the unmodified call sequence.
-    CallInlineBinOp {
-        callee: Reg,
-        dst: Reg,
-        a: Reg,
-        op: BinaryOp,
-        b: Reg,
-        proto: u16,
-        skip: i32,
-    },
+    /// Operands live in `FnCode::descs[idx]` (`InsnDesc::CallInlineBinOp`);
+    /// the skip offset stays inline so control-flow patching needs no table
+    /// lookup.
+    CallInlineBinOp(DescIdx, i32),
     /// R[func_reg] = call(R[func_reg], R[func_reg+1..func_reg+1+argc]); result in R[func_reg]
     Call(Reg, u8),
     /// Marks a call to a statically memo-pure callee. The VM may reuse a cached
@@ -346,113 +579,32 @@ pub enum Insn {
         nargs: u8,
     },
     /// Like CallMethod but args are pre-built as a positional list and a kwargs dict.
-    /// R[dst] = R[obj].names[name_idx](*R[pos_list], **R[kw_dict])
-    CallMethodExpanded {
-        dst: Reg,
-        obj: Reg,
-        name_idx: u16,
-        pos_list: Reg,
-        kw_dict: Reg,
-    },
+    /// R[dst] = R[obj].names[name_idx](*R[pos_list], **R[kw_dict]).
+    /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::CallMethodExpanded`).
+    CallMethodExpanded(DescIdx),
     /// Keyword-argument call with no `*args` / `**kwargs` splats (issue #2382).
     /// Mirrors CPython's `KW_NAMES` + `CALL`: arguments are laid out
     /// contiguously in registers — `total` values in `R[func+1 .. func+1+total]`
     /// — and the *last* `nkw` of them are keyword arguments whose names are the
     /// strings in the constant-pool tuple `consts[kwnames_idx]` (in order).  The
     /// first `total - nkw` are positional.  Result is written back to `R[func]`.
-    ///
-    /// This replaces the old `BuildList`+`BuildDict`+`SetItem`+hidden-helper
-    /// lowering for plain keyword calls, which allocated a dict and a list and
-    /// round-tripped through a Python-visible builtin on every invocation.
     CallKw {
         func: Reg,
         total: u8,
         nkw: u8,
         kwnames_idx: u16,
     },
-    /// Double-splat keyword-expansion call `f(<pos…>, **d)` (issue #2393).
-    /// `npos` plain positional arguments occupy `R[func+1 .. func+1+npos]`, and
-    /// `R[kwargs]` holds the single `**d` source mapping.  Result is written back
-    /// to `R[func]`.
+    /// Splat-expansion call `f(<pos…>, [*args][, kw=v…][, **kw])`.
+    /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::CallExArgs`).
     ///
-    /// This replaces the old `BuildList`+`BuildDict`+`DictUpdate`+hidden-helper
-    /// lowering for the common `f(**d)` / `f(a, **d)` shapes, which copied the
-    /// whole dict, round-tripped through a Python-visible builtin, and then
-    /// linearly name-scanned the parameter list on every call.  A per-call-site
-    /// cache ([`KwCallCacheEntry::ExSimple`]) records the dict key-set →
-    /// parameter-slot mapping for a monomorphic plain-`UserFunction` callee whose
-    /// `**d` keys are stable across calls, so the keyword values bind straight
-    /// into their slots (reusing the #2382 `kwcall_resolve_simple` /
-    /// `call_user_function_kw_cached` machinery) with no dict copy and no name
-    /// scan.  Only emitted for a single trailing `**d` with no `*args` splat and
-    /// no literal keywords, non-method callee; every other variadic shape keeps
-    /// the generic path.
-    CallEx { func: Reg, npos: u8, kwargs: Reg },
-    /// Positional-splat expansion call `f(<pos…>, *args[, **kw])` (the
-    /// decorator/wrapper shape).  `npos` plain leading positionals occupy
-    /// `R[func+1 .. func+1+npos]` contiguously; `R[args_splat]` holds the single
-    /// `*args` iterable; `R[kwargs]` holds the single `**kw` mapping, or the
-    /// sentinel [`NO_KWARGS`] when the call has no `**kw`.  Result is written back
-    /// to `R[func]`.
-    ///
-    /// This replaces the old `BuildList`+`ListExtend`+`BuildDict`+`DictMergeKwCall`
-    /// +hidden-global lookup+`Move`×3+`Call` lowering for the common
-    /// single-`*args`(+optional single-`**kw`) shape, which allocated a list and a
-    /// dict, copied every splatted element and every kwarg into them, and
-    /// round-tripped through a Python-visible builtin on every call. The runtime
-    /// handler ([`Interpreter::exec_call_ex_args`]) reads the splat iterable and
-    /// the `**kw` mapping directly. A per-call-site cache
-    /// ([`KwCallCacheEntry::ExArgs`]) records the callee prototype + total
-    /// positional count + `**kw` key-set → parameter-slot mapping for a
-    /// monomorphic plain-`UserFunction` callee, so on a hit the values bind
-    /// straight into their slots with no intermediate list/dict and no name scan.
-    /// Emitted for a single `*args` (as the last positional group), followed by
-    /// zero or more literal `kw=v` keyword arguments and an optional single
-    /// trailing `**kw`, non-method callee. Generic source-order-sensitive shapes
-    /// also use this opcode after the compiler has materialized their positional
-    /// list and keyword dict; for that transport form `npos == nkw == 0`.
-    ///
-    /// The `nkw` literal keyword VALUES occupy `R[func+1+npos ..
-    /// func+1+npos+nkw]` (contiguously, right after the leading positionals);
-    /// their NAMES are the strings in the constant-pool tuple
-    /// `consts[kwnames_idx]` (in the same order).  The fixed-arity slot fast bind
-    /// only engages when `nkw == 0`; with literal keywords the call takes the
-    /// variadic fast path or the slow path (both fold the literals into the
-    /// keyword arguments), so no additional slot-cache shape is needed.
-    CallExArgs {
-        func: Reg,
-        npos: u8,
-        nkw: u8,
-        kwnames_idx: u16,
-        args_splat: Reg,
-        kwargs: Reg,
-    },
+    /// Consolidates double-splat calls (`args_splat == NO_ARGS_SPLAT`,
+    /// `nkw == 0`) and positional-splat calls (`args_splat != NO_ARGS_SPLAT`,
+    /// optional `kwargs != NO_KWARGS`) under one opcode.
+    CallExArgs(DescIdx),
     /// Keyword-argument method call `R[obj].name(<pos…>, k=v…)` with no
-    /// `*args` / `**kwargs` splats (issue #2392).  The receiver lives in
-    /// `R[obj]`; the `total` argument values occupy `R[args_base ..
-    /// args_base+total]` contiguously, the trailing `nkw` of them being keyword
-    /// arguments whose names are the constant-pool tuple `consts[kwnames_idx]`
-    /// (in order).  The first `total - nkw` are positional.  Result is written
-    /// to `R[dst]` (which may equal `R[obj]` for non-fast-local receivers, as
-    /// with `CallMethod`).
-    ///
-    /// Combines the `CallMethod` inline-cache method resolution (#2345) with the
-    /// `CallKw` keyword fast-bind (#2382): on a monomorphic cache hit for a
-    /// plain Python method the receiver binds to parameter 0 and the keyword
-    /// values bind straight into their slots with no dict/list build and no name
-    /// scan.  Replaces the old `BuildList`+`BuildDict`+`CallMethodExpanded`
-    /// lowering for literal-keyword method calls.  Falls back to the general
-    /// method-expansion path (which owns CPython-parity diagnostics) on any
-    /// cache miss, a builtin/backing method, or a non-simple binding shape.
-    CallMethodKw {
-        dst: Reg,
-        obj: Reg,
-        name_idx: u16,
-        args_base: Reg,
-        total: u8,
-        nkw: u8,
-        kwnames_idx: u16,
-    },
+    /// `*args` / `**kwargs` splats (issue #2392).
+    /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::CallMethodKw`).
+    CallMethodKw(DescIdx),
     /// return R[src]
     Return(Reg),
     /// return None
@@ -522,10 +674,8 @@ pub enum Insn {
     ForIter(Reg, u8, i32),
     /// error if R[reg] is uninitialised: "cannot access local variable '<name>' ..."
     CheckLocal(Reg, u16),
-    /// raise AssertionError(R[msg])  (condition already tested by JumpIfTrue)
+    /// raise AssertionError(R[msg]), or AssertionError() when `msg == NO_ASSERT_MSG`.
     RaiseAssert(Reg),
-    /// raise AssertionError() with no args (`assert False` with no message)
-    RaiseAssertNoMsg,
     /// raise R[exc]  (coerces class to instance)
     RaiseValue(Reg),
     /// raise R[exc] from R[cause]  (sets __cause__ on the coerced instance)
@@ -540,24 +690,11 @@ pub enum Insn {
     /// with `__suppress_context__ is True`, matching CPython).
     RaiseExceptStarResidual(Reg),
     /// Match positional sub-patterns of a class pattern.
-    ///
-    /// Loads `R[cls].__match_args__`, validates that it is a tuple or list of
-    /// length >= `n`, then for each `i in 0..n` gets the attribute name from
-    /// `__match_args__[i]` and stores `getattr(R[subj], name)` into
-    /// `R[dst_base + i]`.  Raises `TypeError` if `__match_args__` is absent,
-    /// is not a tuple or list, or has fewer than `n` elements.
-    MatchClassPositional {
-        dst_base: Reg,
-        subj: Reg,
-        cls: Reg,
-        n: u32,
-    },
-    /// R[dst] = new UserFunction(fn_protos[proto_idx], defaults R[defs_base..+defs_n],
-    ///          annotations R[annots_base..+annots_n], env=current).
-    /// `annots_n == 0` means no annotations; `annots_base` is ignored in that case.
-    /// The annotation names (parallel to the register values) are stored in
-    /// `FnProto::annotation_keys`.
-    MakeFunction(Reg, u16, Reg, u32, Reg, u32),
+    /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::MatchClassPositional`).
+    MatchClassPositional(DescIdx),
+    /// R[dst] = new UserFunction(fn_protos[proto_idx], defaults, annotations, env=current).
+    /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::MakeFunction`).
+    MakeFunction(DescIdx),
     /// R[dst] = load_module(names[name_idx])
     ImportModule(Reg, u16),
 
@@ -586,18 +723,9 @@ pub enum Insn {
     /// if active_exception is NOT an instance of R[type_reg]: pc += offset.
     MatchExcept(Reg, i32),
     /// PEP 654 `except*` filter.
-    ///
-    /// Reads R[src_group] (must be a BaseExceptionGroup instance).  Filters
-    /// its `.exceptions` for instances of R[type_reg].  If no exceptions
-    /// match, jump to pc + offset.  Otherwise:
-    ///   - R[matched_dst] = new sub-group containing only matching exceptions
-    ///   - R[src_group]   = new sub-group containing only non-matching exceptions
-    ///     (or None if all exceptions were matched)
-    ///
-    /// Multiple handlers are compiled sequentially; after each matched handler
-    /// runs, the compiler emits code that moves the remaining sub-group back
-    /// into R[src_group] so the next MatchExceptStar sees only leftovers.
-    MatchExceptStar(Reg, Reg, Reg, i32),
+    /// Register operands live in `FnCode::descs[idx]` (`InsnDesc::MatchExceptStar`);
+    /// the no-match jump offset stays inline.
+    MatchExceptStar(DescIdx, i32),
     /// Clear active_exception (end of except handler).
     EndExcept,
     /// Push R[src] onto handled_exc_stack and set active_exception = R[src].
@@ -608,20 +736,9 @@ pub enum Insn {
     /// Pop the top of handled_exc_stack and restore active_exception to the
     /// new top.  Emitted after an inlined finally block to undo PushExcContext.
     PopExcContext,
-    /// R[dst] = create class(fn_protos[proto_idx], bases R[bases_base..+bases_n], name=names[name_idx])
-    /// PEP 487: kwarg_n keyword arg values are in R[kwarg_base..kwarg_base+kwarg_n];
-    /// names come from fn_protos[proto_idx].class_kwarg_names.
-    MakeClass(Reg, u16, Reg, u32, u16, Reg, u32),
-    /// R[dst] = metaclass-driven class creation, where the metaclass value is in
-    /// R[meta_reg].  Same layout as `MakeClass` plus a trailing `meta_reg`.
-    /// Unlike `MakeClass`, this calls `metaclass.__prepare__(name, bases, **kw)`
-    /// to obtain the body namespace, runs the class body into it, then calls
-    /// `metaclass(name, bases_tuple, namespace, **kw)` — so all class-creation
-    /// hooks (`__set_name__`, `__init_subclass__`) run once inside the metaclass
-    /// (`type.__new__`) rather than in `MakeClass` (issues #2128/#2130).
-    /// Tuple: (dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base,
-    /// kwarg_n, meta_reg).
-    MakeClassMeta(Reg, u16, Reg, u32, u16, Reg, u32, Reg),
+    /// R[dst] = create class (plain or metaclass-driven when `meta_reg != NO_METACLASS`).
+    /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::MakeClass`).
+    MakeClass(DescIdx),
     /// R[dst] = TypeVar / ParamSpec / TypeVarTuple (name=consts[name_idx], kind)
     /// PEP 695: construct an (initially unbounded) type parameter object for a
     /// generic def/class/alias (`TypeVar` for `T`, `ParamSpec` for `**P`,
@@ -653,34 +770,17 @@ pub enum Insn {
     ListAppend(Reg, Reg),
     /// R[list].extend(iter(R[src]))  — in-place extend
     ListExtend(Reg, Reg),
-    /// Call-context list extension for one `*` operand. The callee name is
-    /// resolved from `name` only if `R[src]` is not iterable.
-    ListExtendCall {
-        list: Reg,
-        src: Reg,
-        name: KwCallName,
-    },
+    /// Call-context list extension for one `*` operand.
+    /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::ListExtendCall`).
+    ListExtendCall(DescIdx),
     /// R[dict].update(R[src])  — in-place dict merge
     DictUpdate(Reg, Reg),
     /// R[dict].merge(R[src]) for a `**d` keyword splat in a *call* context.
-    /// Like `DictUpdate` but raises `TypeError: <callee>() got multiple values
-    /// for keyword argument '<k>'` on a duplicate key (CPython `DICT_MERGE`),
-    /// instead of silently overwriting (`dict.update` / `{**a, **b}` literals do
-    /// overwrite).  The callee name for the error is resolved from `name`.
-    DictMergeKwCall {
-        dict: Reg,
-        src: Reg,
-        name: KwCallName,
-    },
-    /// R[dict][R[key]] = R[val] for a named (`kw=v`) argument in a *call*
-    /// context, raising the same duplicate-key `TypeError` as `DictMergeKwCall`
-    /// when `R[key]` is already present (collision with a prior `**d` splat).
-    SetItemKwCall {
-        dict: Reg,
-        key: Reg,
-        val: Reg,
-        name: KwCallName,
-    },
+    /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::DictMergeKwCall`).
+    DictMergeKwCall(DescIdx),
+    /// R[dict][R[key]] = R[val] for a named (`kw=v`) argument in a *call* context.
+    /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::SetItemKwCall`).
+    SetItemKwCall(DescIdx),
     /// Suspend the generator and yield R[src] to the caller.
     /// The result of the yield expression (sent value) is placed in R[dst].
     Yield { src: Reg, dst: Reg },
@@ -742,4 +842,28 @@ pub enum Insn {
     /// register (in addition to DeleteLocal which clears the register).
     /// Does NOT raise NameError — the caller must detect unset register state.
     DeleteModuleGlobal(u16),
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{Insn, InsnDesc};
+
+    #[test]
+    fn insn_layout_stays_16_bytes_align_4() {
+        assert_eq!(
+            std::mem::size_of::<Insn>(),
+            16,
+            "Insn must stay 16 bytes (issue #3161)"
+        );
+        assert_eq!(
+            std::mem::align_of::<Insn>(),
+            4,
+            "Insn must stay 4-byte aligned (issue #3161)"
+        );
+        assert!(
+            std::mem::size_of::<InsnDesc>() <= 40,
+            "InsnDesc should stay compact (was {} B)",
+            std::mem::size_of::<InsnDesc>()
+        );
+    }
 }

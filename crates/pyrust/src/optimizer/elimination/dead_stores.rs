@@ -18,7 +18,7 @@
 ///   guard.
 /// - A back-edge guard (`slice_has_back_edge`) prevents removing a store that
 ///   is the initial value consumed by a later loop iteration.
-fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+fn pass_dead_store_elim(insns: Vec<Insn>, descs: &[InsnDesc], num_locals: u32) -> Vec<Insn> {
     debug_assert_no_late_stage_insns(&insns, "pass_dead_store_elim");
     let n = insns.len();
     let mut keep = vec![true; n];
@@ -36,14 +36,14 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         let mut reads_buf: HashSet<u32> = HashSet::new();
         for insn in &insns {
             reads_buf.clear();
-            collect_reads(insn, &mut reads_buf);
+            collect_reads(insn, descs, &mut reads_buf);
             for &r in &reads_buf {
                 max_reg = max_reg.max(r);
                 if r >= num_locals {
                     read_anywhere.insert(r);
                 }
             }
-            if let Some(w) = writable_dst(insn) {
+            if let Some(w) = writable_dst(insn, descs) {
                 max_reg = max_reg.max(w);
             }
             match insn {
@@ -89,9 +89,7 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         // At index `i`, `next_read`/`next_kill`/`cf_*` describe positions `> i`,
         // i.e. exactly the slice `&insns[i + 1..]` that the original scan walked.
         let dst = match &insns[i] {
-            Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::Move(r, _) | Insn::CopyReg(r, _)
-                if *r >= num_locals =>
-            {
+            Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::Move(r, _) if *r >= num_locals => {
                 Some(*r)
             }
             _ => None,
@@ -128,11 +126,11 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         // Reads first so a same-instruction read+kill records the read position
         // (matching the original scan's read-before-write priority).
         reads_buf.clear();
-        collect_reads(&insns[i], &mut reads_buf);
+        collect_reads(&insns[i], descs, &mut reads_buf);
         for &r in &reads_buf {
             next_read[r as usize] = i;
         }
-        if let Some(w) = writable_dst(&insns[i]) {
+        if let Some(w) = writable_dst(&insns[i], descs) {
             next_kill[w as usize] = i;
         }
         match &insns[i] {

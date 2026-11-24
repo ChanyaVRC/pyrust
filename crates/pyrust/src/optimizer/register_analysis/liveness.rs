@@ -16,14 +16,13 @@ fn insn_is_back_edge(insn: &Insn) -> bool {
         | Insn::JumpIfIterNotIntRange(_, k)
         | Insn::JumpIfIterNotIndexedSeq(_, k)
         | Insn::JumpIfIterNotIntRangeExact(_, k)
-        | Insn::GetItemSeqIntOrExit(_, _, _, k)
         | Insn::JumpIfNotBuiltinLen(_, k)
         | Insn::LenSeqOrExit(_, _, k)
         | Insn::CountCmpJumpTrue(_, _, _, _, k)
         | Insn::CountCmpJumpFalse(_, _, _, _, k)
-        | Insn::CallInlineBinOp { skip: k, .. }
+        | Insn::CallInlineBinOp(_, k)
         if *k < 0
-    )
+    ) || matches!(insn, Insn::GetItemSeqIntOrExit(_, _, _, k) if *k < 0)
 }
 
 #[cfg(test)]
@@ -32,8 +31,8 @@ fn slice_has_back_edge(insns: &[Insn]) -> bool {
 }
 
 /// Used as a forward liveness guard before removing a `LoadConst` that produced `r`.
-fn reg_is_read_in(insns: &[Insn], r: u32) -> bool {
-    insns.iter().any(|insn| insn_reads_reg(insn, r))
+fn reg_is_read_in(insns: &[Insn], descs: &[InsnDesc], r: u32) -> bool {
+    insns.iter().any(|insn| insn_reads_reg(insn, descs, r))
 }
 
 /// Returns `true` when the value held in register `r` is provably dead starting
@@ -47,7 +46,7 @@ fn reg_is_read_in(insns: &[Insn], r: u32) -> bool {
 /// only reason within a straight-line run.  Scans a tiny fixed window — a
 /// scratch temp is always overwritten within a couple of instructions, and an
 /// unbounded scan would reintroduce the O(n²) blowup this pass avoids (#2002).
-fn scratch_dead_after(insns: &[Insn], start: usize, r: u32) -> bool {
+fn scratch_dead_after(insns: &[Insn], descs: &[InsnDesc], start: usize, r: u32) -> bool {
     const WINDOW: usize = 6;
     let end = (start + WINDOW).min(insns.len());
     for insn in &insns[start..end] {
@@ -70,11 +69,11 @@ fn scratch_dead_after(insns: &[Insn], start: usize, r: u32) -> bool {
         ) {
             return false;
         }
-        if insn_reads_reg(insn, r) {
+        if insn_reads_reg(insn, descs, r) {
             return false; // read before any overwrite → value is live
         }
         let mut overwrote = false;
-        for_each_write(insn, |w| {
+        for_each_write(insn, descs, |w| {
             if w == r {
                 overwrote = true;
             }
@@ -241,6 +240,7 @@ impl TempSlotBuf {
 /// through `globals()` / `locals()` frame views without a bytecode read.
 fn load_const_dead_after_use(
     insns: &[Insn],
+    descs: &[InsnDesc],
     num_locals: u32,
     is_jump_target: &[bool],
 ) -> InlineBoolBuf {
@@ -262,7 +262,7 @@ fn load_const_dead_after_use(
         if is_jump_target[idx] {
             defined.clear();
         }
-        for_each_read(insn, |r| {
+        for_each_read(insn, descs, |r| {
             if r >= num_locals {
                 has_temp = true;
                 max_temp = max_temp.max(r);
@@ -274,7 +274,7 @@ fn load_const_dead_after_use(
         });
         // Reads are folded in before writes so an instruction that both reads
         // and writes `r` is judged against the *previous* definition.
-        for_each_write(insn, |w| {
+        for_each_write(insn, descs, |w| {
             if w >= num_locals {
                 has_temp = true;
                 max_temp = max_temp.max(w);
@@ -316,12 +316,12 @@ fn load_const_dead_after_use(
         if is_jump_target[idx] {
             next_target = idx;
         }
-        for_each_read(&insns[idx], |r| {
+        for_each_read(&insns[idx], descs, |r| {
             if r >= num_locals {
                 next_read[(r - num_locals) as usize] = idx;
             }
         });
-        for_each_write(&insns[idx], |w| {
+        for_each_write(&insns[idx], descs, |w| {
             if w >= num_locals {
                 next_write[(w - num_locals) as usize] = idx;
             }
@@ -334,9 +334,9 @@ fn load_const_dead_after_use(
 /// instruction that writes `r`? Retained for the dead-store-elimination
 /// reference equivalence test.
 #[cfg(test)]
-fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
+fn reg_is_read_before_next_write(insns: &[Insn], descs: &[InsnDesc], r: u32) -> bool {
     for insn in insns {
-        if insn_reads_reg(insn, r) {
+        if insn_reads_reg(insn, descs, r) {
             return true;
         }
         if is_terminator(insn) {
@@ -345,7 +345,7 @@ fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
         if is_control_flow(insn) {
             return true;
         }
-        if writable_dst(insn) == Some(r) {
+        if writable_dst(insn, descs) == Some(r) {
             return false;
         }
         if matches!(
@@ -357,7 +357,6 @@ fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
                 | Insn::LoadCell(dst, _)
                 | Insn::LoadClassDeref(dst, _)
                 | Insn::Move(dst, _)
-                | Insn::CopyReg(dst, _)
                 if *dst == r
         ) {
             return false;

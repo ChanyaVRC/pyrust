@@ -393,10 +393,10 @@ impl Compiler {
 
         let name_idx = self.intern_name(name);
 
-        // With an explicit `metaclass=`, route the whole creation through
-        // `MakeClassMeta`: it calls `metaclass.__prepare__`, runs the body into
-        // that namespace, and calls `metaclass(name, bases, ns, **kw)` so the
-        // class-creation hooks fire once inside the metaclass (issues
+        // With an explicit `metaclass=`, route through `MakeClass` with
+        // `meta_reg != NO_METACLASS`: it calls `metaclass.__prepare__`, runs the
+        // body into that namespace, and calls `metaclass(name, bases, ns, **kw)`
+        // so class-creation hooks fire once inside the metaclass (issues
         // #2128/#2130).  The metaclass value must live in a register kept alive
         // across the instruction; allocate it after the bases/kwargs region.
         if let Some(meta_expr) = metaclass {
@@ -406,9 +406,17 @@ impl Compiler {
             self.next_temp = saved;
             self.shadowed_type_params.truncate(shadowed_before);
             let dst = self.alloc_temp();
-            self.emit(Insn::MakeClassMeta(
-                dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n, meta_reg,
-            ));
+            let desc_idx = self.push_desc(InsnDesc::MakeClass(MakeClassDesc {
+                dst,
+                proto_idx,
+                bases_base,
+                bases_n,
+                name_idx,
+                kwarg_base,
+                kwarg_n,
+                meta_reg,
+            }));
+            self.emit(Insn::MakeClass(desc_idx));
             // bases/kwargs/meta_reg are dead after the instruction; keep only
             // `dst` (the class object) live for decorators / type-params / store.
             self.next_temp = dst + 1;
@@ -417,9 +425,17 @@ impl Compiler {
         self.shadowed_type_params.truncate(shadowed_before);
 
         let dst = self.alloc_temp();
-        self.emit(Insn::MakeClass(
-            dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n,
-        ));
+        let desc_idx = self.push_desc(InsnDesc::MakeClass(MakeClassDesc {
+            dst,
+            proto_idx,
+            bases_base,
+            bases_n,
+            name_idx,
+            kwarg_base,
+            kwarg_n,
+            meta_reg: NO_METACLASS,
+        }));
+        self.emit(Insn::MakeClass(desc_idx));
         if bases_n > 0 {
             // The base registers are dead after MakeClass, but `dst` (the freshly
             // built class object) must stay live for the decorator / type-params

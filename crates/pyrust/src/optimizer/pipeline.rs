@@ -3,7 +3,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::BinaryOp;
-use crate::bytecode::{FnCode, FnProto, Insn, IntRangeExactGuard, MAX_FRAME_REGS, Reg};
+use crate::bytecode::{
+    CallInlineBinOpDesc, DescIdx, DictMergeKwCallDesc, FnCode, FnProto, Insn, InsnDesc,
+    IntRangeExactGuard, ListExtendCallDesc, MAX_FRAME_REGS, MatchExceptStarDesc, NO_ARGS_SPLAT,
+    NO_ASSERT_MSG, NO_KWARGS, NO_METACLASS, Reg, SetItemKwCallDesc, push_desc,
+};
 use crate::value::{Value, ValueKind, i64_range_native_cursor_safe, range_len};
 
 /// Optimize a compiled `FnCode` and all nested function prototypes.

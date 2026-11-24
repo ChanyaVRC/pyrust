@@ -97,6 +97,7 @@ impl Compiler {
             .collect();
         Ok(FnCode {
             insns,
+            descs: self.descs,
             filename: self.filename,
             qualname: self.qualname,
             lineno_table: crate::bytecode::LinenoTable::from_dense(&self.lineno_table),

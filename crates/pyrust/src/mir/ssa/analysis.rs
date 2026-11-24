@@ -1,7 +1,7 @@
 //! Dataflow analyses (`definitely_bound`, backward register liveness,
 //! pinned-register discovery) and Cytron-style block-parameter phi placement.
 
-use crate::bytecode::{Insn, Reg};
+use crate::bytecode::{Insn, InsnDesc, Reg};
 
 use crate::mir::insn_info::{insn_may_invalidate_named_locals, visit_ssa_reads, visit_ssa_writes};
 use crate::mir::ir::{BlockId, MirBlock, MirFn, Terminator, Val};
@@ -25,6 +25,7 @@ pub(super) struct SsaAnalysis {
 pub(super) fn analyze_and_place_phis(
     compact_raw: &[RawBlock],
     insns: &[Insn],
+    descs: &[InsnDesc],
     num_locals: Reg,
     num_regs: usize,
     aliased_locals: bool,
@@ -43,13 +44,20 @@ pub(super) fn analyze_and_place_phis(
     let def_in = compute_definitely_bound(
         compact_raw,
         insns,
+        descs,
         num_locals,
         num_regs,
         aliased_locals,
         &mut pinned,
     );
-    let (def_blocks, live_in) =
-        compute_liveness_and_defs(compact_raw, insns, num_locals, num_regs, aliased_locals);
+    let (def_blocks, live_in) = compute_liveness_and_defs(
+        compact_raw,
+        insns,
+        descs,
+        num_locals,
+        num_regs,
+        aliased_locals,
+    );
 
     // Build skeleton MirBlocks so DominatorTree can compute dominance frontiers.
     for (bi, rb) in compact_raw.iter().enumerate() {
@@ -130,6 +138,7 @@ pub(super) fn analyze_and_place_phis(
 fn compute_definitely_bound(
     compact_raw: &[RawBlock],
     insns: &[Insn],
+    descs: &[InsnDesc],
     num_locals: Reg,
     num_regs: usize,
     aliased_locals: bool,
@@ -159,7 +168,7 @@ fn compute_definitely_bound(
                 bits.remove(*r);
                 continue;
             }
-            visit_ssa_writes(insn, |w| bits.insert(w));
+            visit_ssa_writes(insn, descs, |w| bits.insert(w));
             if aliased_locals && insn_may_invalidate_named_locals(insn) {
                 bits.clear_below(num_locals);
             }
@@ -188,11 +197,12 @@ fn compute_definitely_bound(
                                 edge_bits.insert(*dst);
                             }
                             (
-                                Insn::MatchExceptStar(_, src_group, matched_dst, _),
+                                Insn::MatchExceptStar(desc_idx, _),
                                 RawEdgeKind::ExceptStarMatched,
                             ) => {
-                                edge_bits.insert(*matched_dst);
-                                edge_bits.insert(*src_group);
+                                let desc = descs[*desc_idx as usize].as_match_except_star();
+                                edge_bits.insert(desc.matched_dst);
+                                edge_bits.insert(desc.src_group);
                             }
                             _ => {}
                         }
@@ -225,7 +235,7 @@ fn compute_definitely_bound(
         let rb = &compact_raw[bi];
         let mut cur = def_in[bi].clone();
         for insn in &insns[rb.start_pc..rb.body_end] {
-            visit_ssa_reads(insn, |r| {
+            visit_ssa_reads(insn, descs, |r| {
                 if r >= num_locals && !cur.contains(r) {
                     pinned.insert(r);
                 }
@@ -233,14 +243,14 @@ fn compute_definitely_bound(
             if let Insn::DeleteLocal(r, _, _) = insn {
                 cur.remove(*r);
             } else {
-                visit_ssa_writes(insn, |w| cur.insert(w));
+                visit_ssa_writes(insn, descs, |w| cur.insert(w));
                 if aliased_locals && insn_may_invalidate_named_locals(insn) {
                     cur.clear_below(num_locals);
                 }
             }
         }
         if let Some(tpc) = rb.term_pc {
-            visit_ssa_reads(&insns[tpc], |r| {
+            visit_ssa_reads(&insns[tpc], descs, |r| {
                 if r >= num_locals && !cur.contains(r) {
                     pinned.insert(r);
                 }
@@ -255,6 +265,7 @@ fn compute_definitely_bound(
 fn compute_liveness_and_defs(
     compact_raw: &[RawBlock],
     insns: &[Insn],
+    descs: &[InsnDesc],
     num_locals: Reg,
     num_regs: usize,
     aliased_locals: bool,
@@ -284,7 +295,7 @@ fn compute_liveness_and_defs(
             }
         }
         for insn in &insns[rb.start_pc..rb.body_end] {
-            visit_ssa_reads(insn, |r| {
+            visit_ssa_reads(insn, descs, |r| {
                 if !killed.contains(r) {
                     used.insert(r);
                 }
@@ -292,7 +303,7 @@ fn compute_liveness_and_defs(
             if let Insn::DeleteLocal(r, _, _) = insn {
                 killed.insert(*r);
             } else {
-                visit_ssa_writes(insn, |w| {
+                visit_ssa_writes(insn, descs, |w| {
                     killed.insert(w);
                     if (w as usize) < num_regs && def_blocks[w as usize].last() != Some(&bi) {
                         def_blocks[w as usize].push(bi);
@@ -307,7 +318,7 @@ fn compute_liveness_and_defs(
         }
         if let Some(tpc) = rb.term_pc {
             let insn = &insns[tpc];
-            visit_ssa_reads(insn, |r| {
+            visit_ssa_reads(insn, descs, |r| {
                 if !killed.contains(r) {
                     used.insert(r);
                 }
@@ -316,10 +327,11 @@ fn compute_liveness_and_defs(
                 Insn::ForIter(dst, _, _) => {
                     record_edge_def(&mut def_blocks, *dst, bi, rb.succs[0].target);
                 }
-                Insn::MatchExceptStar(_, src_group, matched_dst, _) => {
+                Insn::MatchExceptStar(desc_idx, _) => {
+                    let desc = descs[*desc_idx as usize].as_match_except_star();
                     let matched_bb = rb.succs[0].target;
-                    record_edge_def(&mut def_blocks, *matched_dst, bi, matched_bb);
-                    record_edge_def(&mut def_blocks, *src_group, bi, matched_bb);
+                    record_edge_def(&mut def_blocks, desc.matched_dst, bi, matched_bb);
+                    record_edge_def(&mut def_blocks, desc.src_group, bi, matched_bb);
                 }
                 _ => {}
             }
