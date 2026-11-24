@@ -216,26 +216,25 @@ mod expressions {
     };
     use super::fast_path::try_tagged_int_unary;
     use super::{
-        BinaryOp, ExpandedCallArg, Interpreter, IterFallback, PyBigInt, PyBigIntSign, PyDict,
-        PyError, PyKey, PyPow, PySet, PyToPrimitive, PyZero, Rc, RegSlice, ResolvedIterSlot,
-        Result, UnaryOp, Value, ValueKind, builtin_data_backing, class_is_subclass_of,
-        coerce_bytes_subclass_arg, coerce_numeric, coerce_operand_backing, coerce_str_subclass_arg,
-        compare_values_with_op, effective_builtin_receiver, float_divmod, int_pow_promoting,
-        invoke_class_method, is_async_generator_value, is_builtin_class_getitem_sentinel,
-        is_coroutine_value, is_not_implemented, is_stop_iteration_error, is_type_alias_class,
-        key_contains_object, lookup_class_attr, make_builtin_generic_alias, make_getitem_iterator,
-        make_slice_value, metaclass_dunder, metaclass_dunder_for_call, normalize_index,
-        normalize_index_write, py_mod_i64, range_len, resolve_iter_fallback,
-        resolve_metaclass_iter_slot, resolve_value_iter_slot, slot_is_dispatchable,
-        type_class_singleton, validate_iterator_result, value_type_name_str, values_are_identical,
-        vm_read,
+        BinaryOp, ExpandedCallArg, Interpreter, IterFallback, PyBigInt, PyDict, PyError, PyKey,
+        PySet, PyToPrimitive, Rc, RegSlice, ResolvedIterSlot, Result, UnaryOp, Value, ValueKind,
+        builtin_data_backing, class_is_subclass_of, coerce_bytes_subclass_arg,
+        coerce_operand_backing, coerce_str_subclass_arg, compare_values_with_op,
+        effective_builtin_receiver, invoke_class_method, is_async_generator_value,
+        is_builtin_class_getitem_sentinel, is_coroutine_value, is_not_implemented,
+        is_stop_iteration_error, is_type_alias_class, key_contains_object, lookup_class_attr,
+        make_builtin_generic_alias, make_getitem_iterator, make_slice_value, metaclass_dunder,
+        metaclass_dunder_for_call, normalize_index, normalize_index_write, range_len,
+        resolve_iter_fallback, resolve_metaclass_iter_slot, resolve_value_iter_slot,
+        slot_is_dispatchable, type_class_singleton, validate_iterator_result, value_type_name_str,
+        values_are_identical, vm_read,
     };
     include!("runtime/expr.rs");
 }
 use expressions::bigint_to_float_or_overflow;
 pub(crate) use expressions::{
-    bigint_divmod_floor, dispatch_numeric_binop, eval_builtin_unary, value_from_bigint,
-    value_to_bigint,
+    bigint_divmod_floor, binary_op_to_numeric_cmp, dispatch_numeric_binop, eval_builtin_unary,
+    value_from_bigint, value_to_bigint,
 };
 
 mod attributes {

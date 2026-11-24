@@ -11,23 +11,11 @@ impl Interpreter {
     }
 
     fn div(&self, left: Value, right: Value) -> Result<Value> {
-        // Issue #1204/#2544: coerce scalar primitive subclass backings for the
-        // numeric path, but keep the originals for the subclass-named TypeError.
-        let cl = coerce_numeric(&left);
-        let cr = coerce_numeric(&right);
-        if let Some((a, b)) = both_as_complex(&cl, &cr)? {
-            // (ar+ai*j) / (br+bi*j) = ((ar*br + ai*bi) + (ai*br - ar*bi)j) / (br^2 + bi^2)
-            let denom = b.0 * b.0 + b.1 * b.1;
-            if denom == 0.0 {
-                return Err(pyrust_core::zerodiv_err!("complex division by zero"));
-            }
-            return Ok(Value::complex(
-                (a.0 * b.0 + a.1 * b.1) / denom,
-                (a.1 * b.0 - a.0 * b.1) / denom,
-            ));
-        }
-        // Canonical numeric true division via the NumericOps slot table
-        // (#458).  Non-numeric operands return None → TypeError.
+        // Issue #1204/#2544: coerce scalar numeric subclass backings for the
+        // numeric path, keeping the originals for subclass-named TypeError.
+        let cl = unwrap_numeric_subclass(&left);
+        let cr = unwrap_numeric_subclass(&right);
+        // Canonical 5-type numeric true division via pyrust_core::NumericOps (#458).
         if let Some(result) = dispatch_numeric_binop(BinaryOp::Div, &cl, &cr) {
             return result;
         }
@@ -35,27 +23,24 @@ impl Interpreter {
     }
 
     fn floor_div(&self, left: Value, right: Value) -> Result<Value> {
-        // Issue #1204/#2544: coerce scalar primitive subclass backings for the
-        // numeric path, but keep the originals for the subclass-named TypeError.
-        let cl = coerce_numeric(&left);
-        let cr = coerce_numeric(&right);
-        // Canonical numeric floor division via the NumericOps slot table
-        // (#458): one site handles int/int (with BigInt promotion on
-        // i64::MIN overflow, #485), BigInt cross-type arms, and float
-        // floor division, plus the ZeroDivisionError wording.
-        if let Some(result) = dispatch_numeric_binop(BinaryOp::FloorDiv, &cl, &cr) {
+        let cl = unwrap_numeric_subclass(&left);
+        let cr = unwrap_numeric_subclass(&right);
+        // Canonical 5-type numeric floor division via pyrust_core::NumericOps (#458).
+        if let Some(result) =
+            dispatch_numeric_binop_with_originals(BinaryOp::FloorDiv, &left, &right, &cl, &cr)
+        {
             return result;
         }
         Err(unsupported_operand("//", &left, &right))
     }
 
     fn modulo(&self, left: Value, right: Value) -> Result<Value> {
-        // Issue #1204/#2544: coerce scalar primitive subclass backings for the
-        // numeric path, but keep the originals for the subclass-named TypeError.
-        let cl = coerce_numeric(&left);
-        let cr = coerce_numeric(&right);
-        // Canonical numeric modulo via the NumericOps slot table (#458).
-        if let Some(result) = dispatch_numeric_binop(BinaryOp::Mod, &cl, &cr) {
+        let cl = unwrap_numeric_subclass(&left);
+        let cr = unwrap_numeric_subclass(&right);
+        // Canonical 5-type numeric modulo via pyrust_core::NumericOps (#458).
+        if let Some(result) =
+            dispatch_numeric_binop_with_originals(BinaryOp::Mod, &left, &right, &cl, &cr)
+        {
             return result;
         }
         Err(unsupported_operand("%", &left, &right))
@@ -69,20 +54,37 @@ impl Interpreter {
         op_name: &str,
         cmp: impl Fn(std::cmp::Ordering) -> bool,
     ) -> Result<Value> {
-        // Issue #1204: extract scalar primitive backing for subclasses of
-        // int/float/str/bytes so that `MyInt(5) < 10` etc. works.
-        // Issue #1939: also extract container backing (list/tuple/dict/set
-        // subclasses) so `L([1]) < L([2])` compares the backing lists.  A user
-        // comparison override was already dispatched at the `BinaryOp::Lt..Ge`
-        // sites via `try_dunder_binary` before reaching `compare`, so an empty
-        // override list is safe here.
-        let left = coerce_operand_backing(&left);
-        let right = coerce_operand_backing(&right);
-        if matches!(left.kind(), ValueKind::Float(f) if f.is_nan())
-            || matches!(right.kind(), ValueKind::Float(f) if f.is_nan())
+        // Canonical 5-type numeric comparison via pyrust_core::NumericOps (#458):
+        // handles exact Int/BigInt vs Float precision, NaN -> False (only for
+        // numeric pairs; `nan < 'a'` raises TypeError), and Complex ordering
+        // TypeError while preserving original subclass type names.
+        let nl = unwrap_numeric_subclass(&left);
+        let nr = unwrap_numeric_subclass(&right);
+        if let Some(cmp_op) = binary_op_to_numeric_cmp(op)
+            && let Some(res) = pyrust_core::dispatch_numeric_compare(cmp_op, &nl, &nr)
         {
-            return Ok(Value::bool_(false));
+            return res.map(Value::bool_).map_err(|err| {
+                if matches!(&err, PyError::Named(cls, _) if cls.as_ref() == "TypeError")
+                    && (matches!(left.kind(), ValueKind::PyInstance(_))
+                        || matches!(right.kind(), ValueKind::PyInstance(_)))
+                {
+                    pyrust_core::type_err!(
+                        "'{op_name}' not supported between instances of '{}' and '{}'",
+                        crate::interpreter::error_type_name_str(&left),
+                        crate::interpreter::error_type_name_str(&right),
+                    )
+                } else {
+                    err
+                }
+            });
         }
+        // Issue #1204/#1939: extract container/str/bytes subclass backings so
+        // `L([1]) < L([2])` compares the backing lists. Keep originals if
+        // comparing incompatible types so subclass names stay intact.
+        let orig_left = left;
+        let orig_right = right;
+        let left = coerce_operand_backing(&orig_left);
+        let right = coerce_operand_backing(&orig_right);
         if let Some(sequence_result) = self.richcmp_sequence_binary(&left, &right, op) {
             return sequence_result;
         }
@@ -93,7 +95,21 @@ impl Interpreter {
                     return Err(error);
                 }
                 self.richcmp_sequence_binary(&left, &right, op)
-                    .unwrap_or(Err(error))
+                    .unwrap_or_else(|| {
+                        if matches!(orig_left.kind(), ValueKind::PyInstance(_))
+                            || matches!(orig_right.kind(), ValueKind::PyInstance(_))
+                            || orig_left.is_bool()
+                            || orig_right.is_bool()
+                        {
+                            Err(pyrust_core::type_err!(
+                                "'{op_name}' not supported between instances of '{}' and '{}'",
+                                crate::interpreter::error_type_name_str(&orig_left),
+                                crate::interpreter::error_type_name_str(&orig_right),
+                            ))
+                        } else {
+                            Err(error)
+                        }
+                    })
             }
         }
     }

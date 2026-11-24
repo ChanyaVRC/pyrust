@@ -1,52 +1,23 @@
 /// Canonical unary `-`/`+`/`~`/`not` evaluation for built-in operands.
 ///
 /// Runtime dispatch, built-in numeric dunders, and optimizer constant folding
-/// share this definition so promotion and error semantics cannot drift.
+/// share this definition through `pyrust_core::dispatch_numeric_unary` so
+/// promotion and error semantics cannot drift (issue #458).
 pub(crate) fn eval_builtin_unary(op: UnaryOp, value: Value) -> Result<Value> {
-    match op {
-        UnaryOp::Neg => match value.kind() {
-            ValueKind::Int(integer) => Ok(match integer.checked_neg() {
-                Some(result) => Value::int(result),
-                None => Value::bigint(-PyBigInt::from(integer)),
-            }),
-            ValueKind::Float(float) => Ok(Value::float(-float)),
-            ValueKind::Complex(real, imag) => Ok(Value::complex(-real, -imag)),
-            ValueKind::BigInt(integer) => Ok(Value::bigint(-integer)),
-            ValueKind::Bool(boolean) => Ok(Value::int(if boolean { -1 } else { 0 })),
-            _ => Err(pyrust_core::type_err!(
-                "bad operand type for unary -: '{}'",
-                value_type_name_str(&value)
-            )),
-        },
-        UnaryOp::Not => Ok(Value::bool_(!value.truthy_raw())),
-        UnaryOp::BitNot => match value.kind() {
-            ValueKind::Int(integer) => Ok(Value::int(!integer)),
-            ValueKind::Bool(boolean) => Ok(Value::int(if boolean { -2 } else { -1 })),
-            ValueKind::BigInt(integer) => Ok(Value::bigint(!integer)),
-            _ => Err(pyrust_core::type_err!(
-                "bad operand type for unary ~: '{}'",
-                value_type_name_str(&value)
-            )),
-        },
-        UnaryOp::Pos => {
-            // `float.__pos__` / `int.__pos__` return *self* in CPython, so
-            // `+x is x` holds.  Floats must take this path rather than being
-            // re-boxed below: re-boxing a NaN would mint a fresh object
-            // identity and break `+n is n` (#2911).
-            if matches!(value.kind(), ValueKind::BigInt(_) | ValueKind::Float(_)) {
-                return Ok(value);
-            }
-            match value.kind() {
-                ValueKind::Int(integer) => Ok(Value::int(integer)),
-                ValueKind::Complex(real, imag) => Ok(Value::complex(real, imag)),
-                ValueKind::Bool(boolean) => Ok(Value::int(if boolean { 1 } else { 0 })),
-                _ => Err(pyrust_core::type_err!(
-                    "bad operand type for unary +: '{}'",
-                    value_type_name_str(&value)
-                )),
-            }
-        }
+    let num_op = match op {
+        UnaryOp::Neg => pyrust_core::NumericUnaryOp::Neg,
+        UnaryOp::Pos => pyrust_core::NumericUnaryOp::Pos,
+        UnaryOp::BitNot => pyrust_core::NumericUnaryOp::Invert,
+        UnaryOp::Not => return Ok(Value::bool_(!value.truthy_raw())),
+    };
+    if let Some(result) = pyrust_core::dispatch_numeric_unary(num_op, &value) {
+        return result;
     }
+    Err(pyrust_core::type_err!(
+        "bad operand type for {}: '{}'",
+        num_op.symbol(),
+        value_type_name_str(&value)
+    ))
 }
 
 /// Reuse the fast-path definition when expression evaluation is invoked
@@ -79,7 +50,24 @@ impl Interpreter {
             return result;
         }
 
-        let operand = builtin_data_backing(&value).unwrap_or(value);
-        eval_builtin_unary(op, operand)
+        let is_instance = matches!(value.kind(), ValueKind::PyInstance(_));
+        let operand = builtin_data_backing(&value).unwrap_or_else(|| value.clone());
+        eval_builtin_unary(op, operand).map_err(|err| {
+            if is_instance && matches!(&err, PyError::Named(cls, _) if cls.as_ref() == "TypeError")
+            {
+                let sym = match op {
+                    UnaryOp::Neg => "unary -",
+                    UnaryOp::Pos => "unary +",
+                    UnaryOp::BitNot => "unary ~",
+                    UnaryOp::Not => unreachable!("handled above"),
+                };
+                pyrust_core::type_err!(
+                    "bad operand type for {sym}: '{}'",
+                    value_type_name_str(&value)
+                )
+            } else {
+                err
+            }
+        })
     }
 }

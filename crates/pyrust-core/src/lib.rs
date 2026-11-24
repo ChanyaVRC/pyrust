@@ -17,6 +17,8 @@ mod environment;
 mod error_macros;
 #[path = "core/errors.rs"]
 mod errors;
+#[path = "core/numeric_ops.rs"]
+mod numeric_ops;
 #[path = "core/object_identity.rs"]
 mod object_identity;
 #[path = "core/object_model.rs"]
@@ -43,6 +45,13 @@ pub use environment::{
     namespace_name_interest_mask,
 };
 pub use errors::{PyError, Result};
+pub use numeric_ops::{
+    NumericBinOp, NumericCmpOp, NumericOps, NumericSlot, NumericUnaryOp, bigint_divmod_floor,
+    bigint_float_cmp, bigint_float_eq, bigint_to_float_or_overflow, dispatch_numeric_binop,
+    dispatch_numeric_bool, dispatch_numeric_compare, dispatch_numeric_unary, float_divmod,
+    int_float_cmp, int_float_eq, int_pow_promoting, numeric_eq, numeric_partial_cmp, py_mod_i64,
+    value_from_bigint, value_to_bigint,
+};
 pub use object_model::{
     BigRangeData, BuiltinCallablePresentation, BuiltinCallablePresentationProvider,
     BuiltinRegistry, BuiltinState, BuiltinTypeClassTag, BuiltinTypeOps, CachedConstructionPlan,

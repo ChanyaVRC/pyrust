@@ -303,25 +303,12 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__pow__", "__rpow__") {
                     return r;
                 }
-                // Issue #1204: extract scalar primitive backing so that
-                // `MyInt(42) ** 2` works identically to `42 ** 2`.  Keep the
-                // original `left`/`right` for the TypeError arm so CPython's
-                // subclass-named message (`'C' and 'str'`, #2544) is preserved.
-                let cl = coerce_numeric(&left);
-                let cr = coerce_numeric(&right);
-                // When either operand is complex, use complex
-                // exponentiation: z^w = exp(w * ln(z)).  `both_as_complex`
-                // returns Ok(Some) only when at least one operand is
-                // already a Complex value; pure int/float/bigint pairs
-                // route through the canonical NumericOps slot below.
-                if let Some(((zr, zi), (wr, wi))) = both_as_complex(&cl, &cr)? {
-                    return complex_pow(zr, zi, wr, wi);
-                }
-                // Canonical numeric `**` via the NumericOps slot table
-                // (#458): int**int (BigInt promotion on overflow, #421/#484),
-                // the BigInt-exponent OverflowError arms, and the float
-                // power path (negative-real → complex, 0.0 ** negative
-                // ZeroDivisionError).
+                // Issue #1204/#2544: extract scalar numeric subclass backing while
+                // keeping originals for subclass-named TypeError diagnostics.
+                let cl = unwrap_numeric_subclass(&left);
+                let cr = unwrap_numeric_subclass(&right);
+                // Canonical 5-type numeric `**` via pyrust_core::NumericOps (#458):
+                // covers Int, Bool, Float, BigInt, and Complex in one site.
                 if let Some(result) = dispatch_numeric_binop(BinaryOp::Pow, &cl, &cr) {
                     return result;
                 }
@@ -334,29 +321,17 @@ impl Interpreter {
                 if let Some(r) = set_binary_op(self, &left, &right, SetOp::And, "&") {
                     return r;
                 }
-                // CPython keeps the `bool` type for `bool & bool` (only `&`,
-                // `|`, `^`; arithmetic like `True + True` yields `int`).  Catch
-                // this before `coerce_numeric` collapses Bool → Int below.  A
-                // single int operand makes the result `int`, so mixed
-                // bool/int falls through to the int path.
-                if let (ValueKind::Bool(a), ValueKind::Bool(b)) = (left.kind(), right.kind()) {
-                    return Ok(Value::bool_(a & b));
-                }
-                // Issue #1204: extract backing for scalar primitive subclasses.
-                let lt = crate::interpreter::error_type_name_str(&left);
-                let rt = crate::interpreter::error_type_name_str(&right);
-                let left = coerce_numeric(&left);
-                let right = coerce_numeric(&right);
-                // Canonical numeric `&` via the NumericOps slot table (#458):
-                // int×int, BigInt cross-type arms (#485), and Bool coercion
-                // all in one site.  Float / non-numeric operands return None
-                // → operand-type TypeError below.
-                if let Some(result) = dispatch_numeric_binop(BinaryOp::BitAnd, &left, &right) {
+                let cl = unwrap_numeric_subclass(&left);
+                let cr = unwrap_numeric_subclass(&right);
+                // Canonical 5-type numeric `&` via pyrust_core::NumericOps (#458):
+                // preserves `bool & bool -> bool`, handles Int/BigInt, and raises
+                // TypeError for Float/Complex pairs.
+                if let Some(result) =
+                    dispatch_numeric_binop_with_originals(BinaryOp::BitAnd, &left, &right, &cl, &cr)
+                {
                     return result;
                 }
-                Err(pyrust_core::type_err!(
-                    "unsupported operand type(s) for &: '{lt}' and '{rt}'"
-                ))
+                Err(unsupported_operand("&", &left, &right))
             }
             BinaryOp::BitOr => {
                 // Issue #2936 / #3019: CPython's `mappingproxy_or` merges the
@@ -421,23 +396,18 @@ impl Interpreter {
                         "unsupported operand type(s) for |: '{lt}' and '{rt}'"
                     ));
                 }
-                // CPython keeps the `bool` type for `bool | bool`.  Catch this
-                // before `coerce_numeric` collapses Bool → Int below; mixed
-                // bool/int falls through to the int path.
-                if let (ValueKind::Bool(a), ValueKind::Bool(b)) = (left.kind(), right.kind()) {
-                    return Ok(Value::bool_(a | b));
+                let cl = unwrap_numeric_subclass(&left);
+                let cr = unwrap_numeric_subclass(&right);
+                // Canonical 5-type numeric `|` via pyrust_core::NumericOps (#458).
+                if let Some(result) =
+                    dispatch_numeric_binop_with_originals(BinaryOp::BitOr, &left, &right, &cl, &cr)
+                {
+                    return result;
                 }
-                // Issue #1204: extract backing for scalar primitive subclasses.
                 // A mappingproxy's `|` / `__ror__` is `dict.__or__`, so a failing
                 // merge names it `dict` on either side (CPython 3.12).
                 let lt = bitor_operand_type_name(&left);
                 let rt = bitor_operand_type_name(&right);
-                let left = coerce_numeric(&left);
-                let right = coerce_numeric(&right);
-                // Canonical numeric `|` via the NumericOps slot table (#458).
-                if let Some(result) = dispatch_numeric_binop(BinaryOp::BitOr, &left, &right) {
-                    return result;
-                }
                 Err(pyrust_core::type_err!(
                     "unsupported operand type(s) for |: '{lt}' and '{rt}'"
                 ))
@@ -449,66 +419,45 @@ impl Interpreter {
                 if let Some(r) = set_binary_op(self, &left, &right, SetOp::Xor, "^") {
                     return r;
                 }
-                // CPython keeps the `bool` type for `bool ^ bool`.  Catch this
-                // before `coerce_numeric` collapses Bool → Int below; mixed
-                // bool/int falls through to the int path.
-                if let (ValueKind::Bool(a), ValueKind::Bool(b)) = (left.kind(), right.kind()) {
-                    return Ok(Value::bool_(a ^ b));
-                }
-                // Issue #1204: extract backing for scalar primitive subclasses.
-                let lt = crate::interpreter::error_type_name_str(&left);
-                let rt = crate::interpreter::error_type_name_str(&right);
-                let left = coerce_numeric(&left);
-                let right = coerce_numeric(&right);
-                // Canonical numeric `^` via the NumericOps slot table (#458).
-                if let Some(result) = dispatch_numeric_binop(BinaryOp::BitXor, &left, &right) {
+                let cl = unwrap_numeric_subclass(&left);
+                let cr = unwrap_numeric_subclass(&right);
+                // Canonical 5-type numeric `^` via pyrust_core::NumericOps (#458).
+                if let Some(result) =
+                    dispatch_numeric_binop_with_originals(BinaryOp::BitXor, &left, &right, &cl, &cr)
+                {
                     return result;
                 }
-                Err(pyrust_core::type_err!(
-                    "unsupported operand type(s) for ^: '{lt}' and '{rt}'"
-                ))
+                Err(unsupported_operand("^", &left, &right))
             }
             BinaryOp::LShift => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__lshift__", "__rlshift__")
                 {
                     return r;
                 }
-                // Issue #1204: extract backing for scalar primitive subclasses.
-                let lt = crate::interpreter::error_type_name_str(&left);
-                let rt = crate::interpreter::error_type_name_str(&right);
-                let left = coerce_numeric(&left);
-                let right = coerce_numeric(&right);
-                // Canonical numeric `<<` via the NumericOps slot table (#458):
-                // BigInt-exact shift, Int→BigInt promotion, the
-                // OverflowError / "0 << huge" saturation, and the
-                // ValueError("negative shift count").  A Float / non-int
-                // operand returns None → operand-type TypeError below.
-                if let Some(result) = dispatch_numeric_binop(BinaryOp::LShift, &left, &right) {
+                let cl = unwrap_numeric_subclass(&left);
+                let cr = unwrap_numeric_subclass(&right);
+                // Canonical 5-type numeric `<<` via pyrust_core::NumericOps (#458).
+                if let Some(result) =
+                    dispatch_numeric_binop_with_originals(BinaryOp::LShift, &left, &right, &cl, &cr)
+                {
                     return result;
                 }
-                Err(pyrust_core::type_err!(
-                    "unsupported operand type(s) for <<: '{lt}' and '{rt}'"
-                ))
+                Err(unsupported_operand("<<", &left, &right))
             }
             BinaryOp::RShift => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__rshift__", "__rrshift__")
                 {
                     return r;
                 }
-                // Issue #1204: extract backing for scalar primitive subclasses.
-                let lt = crate::interpreter::error_type_name_str(&left);
-                let rt = crate::interpreter::error_type_name_str(&right);
-                let left = coerce_numeric(&left);
-                let right = coerce_numeric(&right);
-                // Canonical numeric `>>` via the NumericOps slot table (#458):
-                // BigInt-exact shift, sign-collapse on huge counts, and the
-                // ValueError("negative shift count").
-                if let Some(result) = dispatch_numeric_binop(BinaryOp::RShift, &left, &right) {
+                let cl = unwrap_numeric_subclass(&left);
+                let cr = unwrap_numeric_subclass(&right);
+                // Canonical 5-type numeric `>>` via pyrust_core::NumericOps (#458).
+                if let Some(result) =
+                    dispatch_numeric_binop_with_originals(BinaryOp::RShift, &left, &right, &cl, &cr)
+                {
                     return result;
                 }
-                Err(pyrust_core::type_err!(
-                    "unsupported operand type(s) for >>: '{lt}' and '{rt}'"
-                ))
+                Err(unsupported_operand(">>", &left, &right))
             }
             BinaryOp::In => self.eval_in(right, left),
             BinaryOp::NotIn => Ok(Value::bool_(!self.eval_in(right, left)?.truthy_raw())),

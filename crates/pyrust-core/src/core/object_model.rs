@@ -25,6 +25,7 @@ use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 use crate::cycle_guards::{EqGuard, ReprGuard};
 use crate::environment::{EnvRef, Environment, NameSet};
 use crate::errors::{PyError, Result};
+use crate::numeric_ops::bigint_float_eq;
 use crate::object_identity::{ObjectIdentity, next_obj_id};
 use crate::pool::{
     alloc_or_handle, pool_b_alloc, pool_b_dealloc, pool_opaque_alloc, pool_opaque_dealloc,

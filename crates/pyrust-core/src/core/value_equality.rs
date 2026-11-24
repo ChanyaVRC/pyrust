@@ -1,59 +1,16 @@
-// ── PartialEq helpers ─────────────────────────────────────────────────────────
-
-/// Exact equality between an `i64` integer and an `f64` float.
-///
-/// CPython's int-float comparison converts the float to its exact integer
-/// representation and compares, rather than converting the int to float (which
-/// loses precision beyond 2^53).  Concretely: `2**53 + 1 == float(2**53 + 1)`
-/// is `False` in CPython because `float(2**53 + 1)` rounds to `2**53`.
-///
-/// The algorithm:
-/// 1. If `f` is not finite, return `false`.
-/// 2. If `f` has a fractional part, return `false` (no integer can equal it).
-/// 3. If `f` is outside the `i64` value range, return `false`.
-/// 4. Otherwise convert `f` to `i64` exactly (safe: `f` is finite,
-///    integer-valued, and in range) and compare.
-///
-/// Step 4 is the key insight: `f as i64` gives the *float's* exact integer
-/// value, not a lossy round-trip through `i as f64`.
-fn int_float_eq(i: i64, f: f64) -> bool {
-    if !f.is_finite() || f != f.trunc() {
-        return false;
-    }
-    // 9223372036854775808.0 is 2^63, the smallest f64 strictly greater than
-    // i64::MAX.  Any finite integer-valued float in [i64::MIN, 2^63) is
-    // safely representable as i64.
-    const I64_MAX_PLUS_ONE: f64 = 9_223_372_036_854_775_808.0_f64;
-    if f < (i64::MIN as f64) || f >= I64_MAX_PLUS_ONE {
-        return false;
-    }
-    (f as i64) == i
-}
-
-/// Exact equality between a `BigInt` and an `f64` float.
-///
-/// Mirrors `int_float_eq` for arbitrarily large integers.  Only finite,
-/// integer-valued floats can equal a `BigInt`; anything else (NaN, infinity,
-/// or a fractional value like 1.2) returns `false` immediately.
-///
-/// We must guard with `f.is_finite() && f == f.trunc()` before calling
-/// `BigInt::from_f64`, because `from_f64` **truncates** fractional floats
-/// (e.g. 1.2 → BigInt(1)) rather than returning `None`, which would make
-/// `bigint_float_eq(&BigInt::from(1), 1.2)` incorrectly return `true`.
-fn bigint_float_eq(big: &BigInt, f: f64) -> bool {
-    if !f.is_finite() || f != f.trunc() {
-        return false;
-    }
-    match BigInt::from_f64(f) {
-        Some(f_as_bigint) => f_as_bigint == *big,
-        None => false,
-    }
-}
-
 // ── PartialEq ─────────────────────────────────────────────────────────────────
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
+        // Fast path for the overwhelmingly common tagged Int/Int pair, then
+        // route all five numeric kinds (Int, Bool, Float, BigInt, Complex)
+        // through the canonical NumericOps equality slot (issue #458).
+        if let (ValueKind::Int(a), ValueKind::Int(b)) = (self.kind(), other.kind()) {
+            return a == b;
+        }
+        if let Some(equal) = crate::numeric_ops::numeric_eq(self, other) {
+            return equal;
+        }
         // Cycle detection (#364): for collection kinds, check whether we're
         // already comparing this exact pair further up the call stack.  If we
         // are we've hit a cycle; we treat cyclic equality as true (the
@@ -78,26 +35,7 @@ impl PartialEq for Value {
             _ => None,
         };
         match (self.kind(), other.kind()) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
-            // Python: 1 == 1.0 is True, but 2**53+1 == float(2**53+1) is False.
-            // Convert the float to its exact integer value (not the int to float)
-            // to avoid precision loss for values beyond the 53-bit mantissa.
-            (ValueKind::Int(a), ValueKind::Float(b)) => int_float_eq(a, b),
-            (ValueKind::Float(a), ValueKind::Int(b)) => int_float_eq(b, a),
-            (ValueKind::Float(a), ValueKind::Float(b)) => a == b,
-            (ValueKind::BigInt(a), ValueKind::BigInt(b)) => a == b,
-            (ValueKind::BigInt(a), ValueKind::Int(b)) => *a == BigInt::from(b),
-            (ValueKind::Int(a), ValueKind::BigInt(b)) => BigInt::from(a) == *b,
-            (ValueKind::BigInt(a), ValueKind::Float(b)) => bigint_float_eq(a, b),
-            (ValueKind::Float(a), ValueKind::BigInt(b)) => bigint_float_eq(b, a),
             (ValueKind::Str(a), ValueKind::Str(b)) => a == b,
-            (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
-            // Python: True == 1 is True
-            (ValueKind::Bool(a), ValueKind::Int(b)) => (a as i64) == b,
-            (ValueKind::Int(a), ValueKind::Bool(b)) => a == (b as i64),
-            // Python: True == 1.0 is True
-            (ValueKind::Bool(a), ValueKind::Float(b)) => (a as u8 as f64) == b,
-            (ValueKind::Float(a), ValueKind::Bool(b)) => a == (b as u8 as f64),
             (ValueKind::None, ValueKind::None) => true,
             (ValueKind::Ellipsis, ValueKind::Ellipsis) => true,
             // `Ref<T>` doesn't impl `==` directly — deref to compare the
@@ -108,17 +46,6 @@ impl PartialEq for Value {
             (ValueKind::Dict(a), ValueKind::Dict(b)) => *a == *b,
             (ValueKind::Set(a), ValueKind::Set(b)) => *a == *b,
             (ValueKind::Bytes(a), ValueKind::Bytes(b)) => a.as_ref() == b.as_ref(),
-            // Plain component equality — NO NaN bit-equality fallback here, to
-            // match the `ValueKind::Float` arm above: bare `==` on two distinct
-            // NaN-bearing complex values is `False` in CPython
-            // (`complex(nan,0) == complex(nan,0)` is `False`).  The identity
-            // short-circuit that makes `z in [z]` / `{z:1}[z]` work lives in
-            // `is_identical_nan` and the `PyKey::Complex` arm, not in `==` (#2535).
-            (ValueKind::Complex(ar, ai), ValueKind::Complex(br, bi)) => ar == br && ai == bi,
-            (ValueKind::Int(n), ValueKind::Complex(br, bi)) => (n as f64) == br && bi == 0.0,
-            (ValueKind::Complex(ar, ai), ValueKind::Int(n)) => ar == (n as f64) && ai == 0.0,
-            (ValueKind::Float(f), ValueKind::Complex(br, bi)) => f == br && bi == 0.0,
-            (ValueKind::Complex(ar, ai), ValueKind::Float(f)) => ar == f && ai == 0.0,
             (
                 ValueKind::Range {
                     start: as_,
