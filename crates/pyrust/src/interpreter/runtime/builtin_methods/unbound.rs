@@ -601,6 +601,7 @@ impl Interpreter {
                             | "set"
                             | "complex"
                             | "frozenset"
+                            | "mappingproxy"
                     )
                 }) =>
             {
@@ -738,6 +739,12 @@ impl Interpreter {
                     {
                         true
                     }
+                    ("mappingproxy", ValueKind::BuiltinObject { ops, .. })
+                        if ops.canonical_class_tag()
+                            == Some(pyrust_core::CanonicalClassTag::MappingProxy) =>
+                    {
+                        true
+                    }
                     _ => false,
                 };
                 if !kind_ok {
@@ -786,6 +793,20 @@ impl Interpreter {
                 // with bound methods and both CallMethod opcodes.  The generic
                 // callable router validates the descriptor receiver above, then
                 // hands off without owning any list/dict/tuple/str/set names.
+                if type_name == "dict"
+                    && matches!(self_arg.value.kind(), ValueKind::PyInstance(_))
+                    && let Some(spec) = pyrust_builtins::dict::method_spec(method)
+                    && spec.view_method().is_some()
+                {
+                    spec.validate_keywords(!kw.is_empty())?;
+                    spec.validate_positional_arity(pos.len())?;
+                    return Self::dict_view_for_owner(
+                        &self_val,
+                        spec.method().name(),
+                        receiver_ordered,
+                        self_arg.value.clone(),
+                    );
+                }
                 if let Some(kind) = BuiltinContainerKind::from_type_name(type_name)
                     .filter(|kind| kind.supports_direct_method(method))
                 {
@@ -888,6 +909,9 @@ impl Interpreter {
                             }
                             _ => unreachable!("kind_ok guard above"),
                         }
+                    }
+                    "mappingproxy" => {
+                        self.call_builtin_object_bound_method(&self_val, method, &mut pos, &kw)
                     }
                     _ => unreachable!("guard matched type_name above"),
                 }

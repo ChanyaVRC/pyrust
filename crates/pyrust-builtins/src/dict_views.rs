@@ -10,7 +10,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use pyrust_core::{
-    BuiltinState, BuiltinTypeOps, PyDict, PyKey, Result, Value, ValueKind, builtin_ops_is, key_repr,
+    BuiltinState, BuiltinTypeOps, PyClass, PyDict, PyKey, Result, Value, ValueKind, builtin_ops_is,
+    key_repr,
 };
 
 pub type DictRc = Rc<RefCell<PyDict>>;
@@ -72,6 +73,19 @@ impl DictViewKind {
     }
 }
 
+/// What `.mapping` returns for a dictionary view (issue #2679, #3019).
+#[derive(Clone)]
+pub enum DictViewMapping {
+    /// Plain dict view — `.mapping` wraps `DictView::items` directly.
+    Dict,
+    /// View obtained from a class `__dict__` proxy — `.mapping` stays a live
+    /// class-backed `mappingproxy` rather than a dead snapshot dict.
+    Class(Rc<RefCell<PyClass>>),
+    /// View obtained from a dict-subclass instance (e.g. `OrderedDict`) —
+    /// `.mapping` preserves the authoritative owner object.
+    Owner(Value),
+}
+
 pub struct DictView {
     pub items: DictRc,
     /// `true` when the view was produced from a `collections.OrderedDict`
@@ -79,6 +93,7 @@ pub struct DictView {
     /// class/presentation and the OrderedDict-specific mutation error. Plain
     /// dict and other dict-subclass views leave it `false`.
     pub ordered: bool,
+    pub mapping: DictViewMapping,
 }
 
 // ── keys ─────────────────────────────────────────────────────────────────────
@@ -150,7 +165,31 @@ pub fn dict_keys(rc: DictRc) -> Value {
 
 /// Like [`dict_keys`] but records whether the source is an OrderedDict.
 pub fn dict_keys_tagged(rc: DictRc, ordered: bool) -> Value {
-    let state: Box<dyn Any> = Box::new(DictView { items: rc, ordered });
+    let state: Box<dyn Any> = Box::new(DictView {
+        items: rc,
+        ordered,
+        mapping: DictViewMapping::Dict,
+    });
+    Value::builtin_object(DICT_KEYS_OPS, state)
+}
+
+/// Like [`dict_keys`] but retains the live class namespace for `.mapping` (#3019).
+pub fn dict_keys_for_class(rc: DictRc, class: Rc<RefCell<PyClass>>) -> Value {
+    let state: Box<dyn Any> = Box::new(DictView {
+        items: rc,
+        ordered: false,
+        mapping: DictViewMapping::Class(class),
+    });
+    Value::builtin_object(DICT_KEYS_OPS, state)
+}
+
+/// Like [`dict_keys_tagged`] but retains the dict-subclass owner for `.mapping` (#3019).
+pub fn dict_keys_for_owner(rc: DictRc, ordered: bool, owner: Value) -> Value {
+    let state: Box<dyn Any> = Box::new(DictView {
+        items: rc,
+        ordered,
+        mapping: DictViewMapping::Owner(owner),
+    });
     Value::builtin_object(DICT_KEYS_OPS, state)
 }
 
@@ -241,7 +280,31 @@ pub fn dict_values(rc: DictRc) -> Value {
 
 /// OrderedDict-aware counterpart of [`dict_values`] (issue #2436).
 pub fn dict_values_tagged(rc: DictRc, ordered: bool) -> Value {
-    let state: Box<dyn Any> = Box::new(DictView { items: rc, ordered });
+    let state: Box<dyn Any> = Box::new(DictView {
+        items: rc,
+        ordered,
+        mapping: DictViewMapping::Dict,
+    });
+    Value::builtin_object(DICT_VALUES_OPS, state)
+}
+
+/// Like [`dict_values`] but retains the live class namespace for `.mapping` (#3019).
+pub fn dict_values_for_class(rc: DictRc, class: Rc<RefCell<PyClass>>) -> Value {
+    let state: Box<dyn Any> = Box::new(DictView {
+        items: rc,
+        ordered: false,
+        mapping: DictViewMapping::Class(class),
+    });
+    Value::builtin_object(DICT_VALUES_OPS, state)
+}
+
+/// Like [`dict_values_tagged`] but retains the dict-subclass owner for `.mapping` (#3019).
+pub fn dict_values_for_owner(rc: DictRc, ordered: bool, owner: Value) -> Value {
+    let state: Box<dyn Any> = Box::new(DictView {
+        items: rc,
+        ordered,
+        mapping: DictViewMapping::Owner(owner),
+    });
     Value::builtin_object(DICT_VALUES_OPS, state)
 }
 
@@ -321,7 +384,31 @@ pub fn dict_items(rc: DictRc) -> Value {
 
 /// OrderedDict-aware counterpart of [`dict_items`] (issue #2436).
 pub fn dict_items_tagged(rc: DictRc, ordered: bool) -> Value {
-    let state: Box<dyn Any> = Box::new(DictView { items: rc, ordered });
+    let state: Box<dyn Any> = Box::new(DictView {
+        items: rc,
+        ordered,
+        mapping: DictViewMapping::Dict,
+    });
+    Value::builtin_object(DICT_ITEMS_OPS, state)
+}
+
+/// Like [`dict_items`] but retains the live class namespace for `.mapping` (#3019).
+pub fn dict_items_for_class(rc: DictRc, class: Rc<RefCell<PyClass>>) -> Value {
+    let state: Box<dyn Any> = Box::new(DictView {
+        items: rc,
+        ordered: false,
+        mapping: DictViewMapping::Class(class),
+    });
+    Value::builtin_object(DICT_ITEMS_OPS, state)
+}
+
+/// Like [`dict_items_tagged`] but retains the dict-subclass owner for `.mapping` (#3019).
+pub fn dict_items_for_owner(rc: DictRc, ordered: bool, owner: Value) -> Value {
+    let state: Box<dyn Any> = Box::new(DictView {
+        items: rc,
+        ordered,
+        mapping: DictViewMapping::Owner(owner),
+    });
     Value::builtin_object(DICT_ITEMS_OPS, state)
 }
 
@@ -494,12 +581,18 @@ fn dict_view_type_name(
 }
 
 /// Serve the `mapping` data attribute shared by all three view types: a live
-/// `mappingproxy` wrapping the parent dict (issue #2679).  Returns `None` for
-/// any other attribute so the interpreter falls through to method lookup.
+/// `mappingproxy` wrapping the parent mapping (issue #2679, #3019).  Returns
+/// `None` for any other attribute so the interpreter falls through to method
+/// lookup.
 fn view_mapping_attr(state: &BuiltinState, name: &str) -> Option<Value> {
     if name != "mapping" {
         return None;
     }
-    let rc = borrow_view(state)?;
-    Some(crate::mapping_proxy::mapping_proxy_dict(rc))
+    let borrow = state.borrow();
+    let view = borrow.downcast_ref::<DictView>()?;
+    Some(match &view.mapping {
+        DictViewMapping::Dict => crate::mapping_proxy::mapping_proxy_dict(Rc::clone(&view.items)),
+        DictViewMapping::Class(cls) => crate::mapping_proxy::mapping_proxy(Rc::clone(cls)),
+        DictViewMapping::Owner(owner) => crate::mapping_proxy::mapping_proxy_object(owner.clone()),
+    })
 }

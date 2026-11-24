@@ -490,6 +490,19 @@ impl Interpreter {
             });
         }
 
+        // Issue #3019: delegate mappingproxy equality inside container/search
+        // comparisons (`[p] == [od]`, `p in [od]`, `[od].index(p)`,
+        // `[od].count(p)`) to the proxied mapping, matching `eval_binary`.
+        if a.is_builtin_object() || b.is_builtin_object() {
+            let a_proxy = pyrust_builtins::mapping_proxy::proxied_value(a);
+            let b_proxy = pyrust_builtins::mapping_proxy::proxied_value(b);
+            if a_proxy.is_some() || b_proxy.is_some() {
+                let lhs = a_proxy.as_ref().unwrap_or(a);
+                let rhs = b_proxy.as_ref().unwrap_or(b);
+                return self.values_user_eq(lhs, rhs);
+            }
+        }
+
         // Primitive / identity fast path. Core dictionary equality has a
         // bool-only cycle guard, so only exact scalar dictionaries may use it;
         // recursive or callback-capable values must reach the guarded path.

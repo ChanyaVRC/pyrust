@@ -256,7 +256,7 @@ pub(super) fn is_named_protocol_wrapper(method: &str, type_name: &str) -> bool {
         (method, type_name),
         ("__getitem__", "list" | "dict")
             | ("__contains__", "dict" | "set" | "frozenset")
-            | ("__reversed__", "list" | "dict")
+            | ("__reversed__", "list" | "dict" | "mappingproxy")
             // Issue #2297/#2481: `int`/`float`.`__round__`/`__trunc__`/`__floor__`/
             // `__ceil__` are `method_descriptor`s (named keyword-rejection
             // wording).  `int.__index__` stays an anonymous slot wrapper.
@@ -648,6 +648,25 @@ pub(super) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
         // to the inherited `<slot wrapper '__str__' of 'object' objects>`).
         // range is hashable and defines equality but NOT ordering (`<`/`<=`/…
         // inherit object's identity slots), so the ordering dunders are omitted.
+        "mappingproxy" => &[
+            ("__getitem__", PA),
+            ("__len__", PA),
+            ("__contains__", PA),
+            ("__iter__", PA),
+            ("__reversed__", PA),
+            ("__or__", PA),
+            ("__ror__", PA),
+            ("__ior__", PA),
+            ("__eq__", PA),
+            ("__ne__", PA),
+            ("__lt__", PA),
+            ("__le__", PA),
+            ("__gt__", PA),
+            ("__ge__", PA),
+            ("__hash__", PA),
+            ("__repr__", PA),
+            ("__str__", PA),
+        ],
         "range" => &[
             ("__iter__", PA),
             ("__reversed__", PA),

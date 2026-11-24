@@ -349,6 +349,11 @@ pyrust_module! {
                 return _interp.call_function_expanded(reducer, &[]);
             }
         }
+        if pyrust_builtins::mapping_proxy::is_mapping_proxy(&self_val) {
+            return Err(pyrust_core::type_err!(
+                "cannot pickle 'mappingproxy' object"
+            ));
+        }
         Ok(Value::tuple(vec![
             value_class(&self_val),
             Value::tuple(Vec::new()),
@@ -366,6 +371,11 @@ pyrust_module! {
             return Err(pyrust_core::type_err!(
                 "cannot pickle '{}' object",
                 kind.class_name()
+            ));
+        }
+        if pyrust_builtins::mapping_proxy::is_mapping_proxy(&self_val) {
+            return Err(pyrust_core::type_err!(
+                "cannot pickle 'mappingproxy' object"
             ));
         }
         Ok(Value::tuple(vec![

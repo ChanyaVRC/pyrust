@@ -97,14 +97,14 @@ pub(crate) fn render_instance_str(
             {
                 render_value_repr(interp, value)
             }
-            // Issue #2936: CPython's `mappingproxy_str` is `str(proxied)`, so
-            // `print(mappingproxy(od))` shows `OrderedDict({...})`.  Only
-            // proxies built over a separate object carry an owner; a proxy over
-            // a plain dict or a class `__dict__` keeps its current rendering.
+            // Issue #2936 / #3019: CPython's `mappingproxy_str` is
+            // `PyObject_Str(pp->mapping)`, so `str(MappingProxyType({'a': 1}))`
+            // is `"{'a': 1}"` and `str(MappingProxyType(od))` is
+            // `"OrderedDict({...})"`.
             ValueKind::BuiltinObject { .. }
-                if let Some(owner) = pyrust_builtins::mapping_proxy::owner_of(value) =>
+                if let Some(proxied) = pyrust_builtins::mapping_proxy::unwrap_one(value) =>
             {
-                render_instance_str(interp, &owner)
+                render_instance_str(interp, &proxied)
             }
             ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
                 render_value_repr(interp, value)

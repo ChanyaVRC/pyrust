@@ -35,6 +35,44 @@ impl Interpreter {
             let callable = self.get_attr(&owner, method)?;
             return self.call_function_expanded(callable, &forwarded);
         }
+        // Issue #3019: route exact mappingproxy `.get()` through interpreter
+        // key conversion so unhashable keys raise `TypeError: unhashable type`
+        // and custom `__hash__`/`__eq__` keys work identically to `dict.get()`.
+        if pyrust_builtins::mapping_proxy::is_exact_proxy_ops(ops) && method == "get" {
+            pyrust_builtins::mapping_proxy::validate_method_call(
+                method,
+                pos.len(),
+                !kw.is_empty(),
+            )?;
+            let key_val = pos[0].clone();
+            let default = pos.get(1).cloned().unwrap_or_else(Value::none);
+            if let Some(dict_rc) = pyrust_builtins::mapping_proxy::as_dict_rc(receiver) {
+                let dict_val = Value::dict_shared(dict_rc);
+                let found = if let Some(s) = key_val.as_str() {
+                    self.dict_str_lookup(&dict_val, s)?
+                } else {
+                    let key = self.value_to_pykey(&key_val)?;
+                    self.dict_lookup(&dict_val, &key)?
+                };
+                return Ok(found.map_or(default, |(_, v)| v));
+            }
+            if let Some(class_rc) = pyrust_builtins::mapping_proxy::as_class_rc(receiver) {
+                if let Some(s) = key_val.as_str() {
+                    let found = class_rc.borrow().attrs.get(s).cloned();
+                    return Ok(found.map_or(default, |v| {
+                        pyrust_builtins::mapping_proxy::expose_class_attr(&v)
+                    }));
+                }
+                let key = self.value_to_pykey(&key_val)?;
+                if let PyKey::Str(s) = key
+                    && let Some(name) = s.as_str()
+                    && let Some(v) = class_rc.borrow().attrs.get(name).cloned()
+                {
+                    return Ok(pyrust_builtins::mapping_proxy::expose_class_attr(&v));
+                }
+                return Ok(default);
+            }
+        }
         // Validate before bytearray join/extend can consume an iterable. The
         // concrete type modules own the method-name policy; this adapter only
         // selects them by stable runtime identity.

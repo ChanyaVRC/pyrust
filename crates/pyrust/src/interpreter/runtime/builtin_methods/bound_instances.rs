@@ -239,7 +239,12 @@ impl Interpreter {
                         // so its size-mutation guard reports
                         // "OrderedDict mutated during iteration".
                         let ordered = is_ordered_dict_class_or_subclass(&class);
-                        return Self::dict_view_for_backing(&backing, resolved.name(), ordered);
+                        return Self::dict_view_for_owner(
+                            &backing,
+                            resolved.name(),
+                            ordered,
+                            receiver.clone(),
+                        );
                     }
                     // issue #2465: record an OrderedDict
                     // `clear()` (with its pre-clear size) keyed
