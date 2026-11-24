@@ -118,35 +118,30 @@ pub(super) fn advance_loop_fast_state(
                 LoopFastOutcome::Exhausted
             }
         }
-        IterState::MaterializedGuarded {
-            items,
-            pos,
-            container,
-            recorded_len,
-            msg,
-            exhaust_first,
-            ordered_watch,
-        } => {
-            if *exhaust_first && *pos >= items.len() {
+        IterState::MaterializedGuarded(guarded) => {
+            if guarded.exhaust_first && guarded.pos >= guarded.items.len() {
                 return LoopFastOutcome::Exhausted;
             }
             fast_try!(ensure_loop_collection_unchanged(
-                container,
-                *recorded_len,
-                msg,
-                ordered_watch.as_ref(),
+                &guarded.container,
+                guarded.recorded_len,
+                guarded.msg,
+                guarded.ordered_watch.as_ref(),
             ));
-            let current = *pos;
-            if current < items.len() {
+            let current = guarded.pos;
+            if current < guarded.items.len() {
                 // SAFETY: the branch checked the index against the same vector.
-                let value = unsafe { items.get_unchecked(current).clone() };
-                *pos = current + 1;
+                let value = unsafe { guarded.items.get_unchecked(current).clone() };
+                guarded.pos = current + 1;
                 advanced_item!(value)
             } else {
                 LoopFastOutcome::Exhausted
             }
         }
-        IterState::LiveKeysGuarded { cursor, container } => {
+        IterState::LiveKeysGuarded(guarded) => {
+            let state = guarded.state_mut();
+            let cursor = &mut state.cursor;
+            let container = &state.container;
             if let Some(value) = crate::interpreter::iteration::next_frozen_key(cursor) {
                 return advanced_item!(value);
             }
@@ -176,34 +171,26 @@ pub(super) fn advance_loop_fast_state(
                 None => LoopFastOutcome::Exhausted,
             }
         }
-        IterState::DictViewGuarded {
-            keys,
-            kind,
-            pos,
-            container,
-            recorded_len,
-            msg,
-            exhaust_first,
-            ordered_watch,
-        } => {
-            if *exhaust_first && *pos >= keys.len() {
+        IterState::DictViewGuarded(guarded) => {
+            if guarded.exhaust_first && guarded.pos >= guarded.keys.len() {
                 return LoopFastOutcome::Exhausted;
             }
             fast_try!(ensure_loop_collection_unchanged(
-                container,
-                *recorded_len,
-                msg,
-                ordered_watch.as_ref(),
+                &guarded.container,
+                guarded.recorded_len,
+                guarded.msg,
+                guarded.ordered_watch.as_ref(),
             ));
-            let current = *pos;
-            if current < keys.len() {
+            let current = guarded.pos;
+            if current < guarded.keys.len() {
                 // SAFETY: the branch checked the index against the same vector.
-                let key = unsafe { keys.get_unchecked(current) };
-                let item = match fast_try!(live_dict_view_item(container, key, *kind)) {
-                    LiveDictViewItem::Item(value) => advanced_item!(value),
-                    LiveDictViewItem::Pair(key, value) => advanced_pair!(key, value),
-                };
-                *pos = current + 1;
+                let key = unsafe { guarded.keys.get_unchecked(current) };
+                let item =
+                    match fast_try!(live_dict_view_item(&guarded.container, key, guarded.kind)) {
+                        LiveDictViewItem::Item(value) => advanced_item!(value),
+                        LiveDictViewItem::Pair(key, value) => advanced_pair!(key, value),
+                    };
+                guarded.pos = current + 1;
                 item
             } else {
                 LoopFastOutcome::Exhausted

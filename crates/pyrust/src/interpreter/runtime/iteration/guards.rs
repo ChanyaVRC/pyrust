@@ -182,6 +182,36 @@ thread_local! {
         const { SnapshotBufferPool::new() };
     static FROZEN_KEY_BUFFERS: SnapshotBufferPool<Value> =
         const { SnapshotBufferPool::new() };
+    static LIVE_KEYS_GUARDED_BOXES: RefCell<[Option<Box<LiveKeysGuardedState>>; SNAPSHOT_BUFFER_SLOTS]> =
+        const { RefCell::new([const { None }; SNAPSHOT_BUFFER_SLOTS]) };
+}
+
+pub(crate) fn take_live_keys_guarded_box(
+    container: Value,
+    cursor: LiveKeyCursor,
+) -> Box<LiveKeysGuardedState> {
+    let recycled = LIVE_KEYS_GUARDED_BOXES.with(|pool| {
+        let mut slots = pool.borrow_mut();
+        slots.iter_mut().find_map(Option::take)
+    });
+    if let Some(mut boxed) = recycled {
+        boxed.container = container;
+        boxed.cursor = cursor;
+        boxed
+    } else {
+        Box::new(LiveKeysGuardedState { cursor, container })
+    }
+}
+
+pub(crate) fn release_live_keys_guarded_box(mut boxed: Box<LiveKeysGuardedState>) {
+    boxed.cursor.release();
+    boxed.container = Value::none();
+    LIVE_KEYS_GUARDED_BOXES.with(|pool| {
+        let mut slots = pool.borrow_mut();
+        if let Some(empty) = slots.iter_mut().find(|slot| slot.is_none()) {
+            *empty = Some(boxed);
+        }
+    });
 }
 
 fn take_key_snapshot_buffer() -> Vec<PyKey> {

@@ -1,7 +1,18 @@
+/// Compact outcome of advancing a `UserDefined` loop iterator (`16 B`, fits in
+/// registers without stack `sret`, mirroring `LoopFastOutcome`, #2906).
 pub(crate) enum LoopIteratorAdvance {
-    Item(Result<Value>),
+    Item(Value),
+    Error(Box<PyError>),
     DriveGenerator(Rc<GeneratorCell>),
     NotIterator,
+}
+
+#[inline]
+fn loop_advance_result(result: Result<Value>) -> LoopIteratorAdvance {
+    match result {
+        Ok(value) => LoopIteratorAdvance::Item(value),
+        Err(error) => LoopIteratorAdvance::Error(Box::new(error)),
+    }
 }
 
 impl Interpreter {
@@ -10,23 +21,39 @@ impl Interpreter {
     /// The VM owns the loop slot and generator-frame switch. This method owns
     /// representation classification, native adapter selection, and cached
     /// `__next__` protocol dispatch.
+    ///
+    /// Inlined so `for x in gen():` classifies a drivable generator without a
+    /// function call or `sret` round trip; non-trampolined paths stay out of
+    /// line (#2906).
+    #[inline]
     pub(crate) fn advance_loop_iterator(
         &mut self,
         iterator: &Value,
-        cached_next: &mut Option<IterNextCacheEntry>,
+        cached_next: &mut Option<Box<IterNextCacheEntry>>,
     ) -> LoopIteratorAdvance {
         match iterator.kind() {
             ValueKind::Generator(state) => {
                 if let Some(decision) = classify_generator_loop_state(state) {
                     return decision;
                 }
-                LoopIteratorAdvance::Item(self.advance_generator_backed_iterator(state))
+                loop_advance_result(self.advance_generator_backed_iterator(state))
             }
+            _ => self.advance_loop_iterator_slow(iterator, cached_next),
+        }
+    }
+
+    #[inline(never)]
+    fn advance_loop_iterator_slow(
+        &mut self,
+        iterator: &Value,
+        cached_next: &mut Option<Box<IterNextCacheEntry>>,
+    ) -> LoopIteratorAdvance {
+        match iterator.kind() {
             ValueKind::PyInstance(instance) => {
                 let instance = Rc::clone(instance);
                 let class = Rc::clone(&instance.borrow().class);
                 let class_version = class.borrow().mutation_version.get();
-                let method = match cached_next.as_ref() {
+                let method = match cached_next.as_deref() {
                     Some(entry)
                         if entry
                             .class
@@ -43,18 +70,20 @@ impl Interpreter {
                     _ => {
                         let method = lookup_class_attr(&class, "__next__");
                         *cached_next = pyrust_core::class_cache_stamp(class_version).map(
-                            |(class_version, epoch)| IterNextCacheEntry {
-                                class: Rc::downgrade(&class),
-                                class_version,
-                                epoch,
-                                method: method.clone(),
+                            |(class_version, epoch)| {
+                                Box::new(IterNextCacheEntry {
+                                    class: Rc::downgrade(&class),
+                                    class_version,
+                                    epoch,
+                                    method: method.clone(),
+                                })
                             },
                         );
                         method
                     }
                 };
                 match method {
-                    Some(method) => LoopIteratorAdvance::Item(invoke_class_method(
+                    Some(method) => loop_advance_result(invoke_class_method(
                         self,
                         method,
                         Value::py_instance(instance),
@@ -64,12 +93,13 @@ impl Interpreter {
                 }
             }
             ValueKind::BuiltinObject { ops, state } if ops.is_iterator() => {
-                LoopIteratorAdvance::Item(ops.iter_next(state).and_then(require_iterator_item))
+                loop_advance_result(ops.iter_next(state).and_then(require_iterator_item))
             }
             _ => LoopIteratorAdvance::NotIterator,
         }
     }
 
+    #[inline(never)]
     pub(crate) fn advance_generator_backed_iterator(
         &mut self,
         state: &Rc<GeneratorCell>,
@@ -134,6 +164,7 @@ impl Interpreter {
     }
 }
 
+#[inline]
 fn classify_generator_loop_state(state: &Rc<GeneratorCell>) -> Option<LoopIteratorAdvance> {
     match state.try_borrow() {
         Ok(borrowed) => {
@@ -168,7 +199,7 @@ fn stop_iteration() -> PyError {
 }
 
 fn generator_already_executing() -> LoopIteratorAdvance {
-    LoopIteratorAdvance::Item(Err(pyrust_core::py_err!(
+    LoopIteratorAdvance::Error(Box::new(pyrust_core::py_err!(
         "ValueError",
         "generator already executing".to_string()
     )))

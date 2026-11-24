@@ -1931,16 +1931,16 @@ impl Interpreter {
                                         LoopIteratorAdvance::DriveGenerator(state) => {
                                             gen_to_drive = Some(state);
                                         }
-                                        LoopIteratorAdvance::Item(Ok(value)) => {
+                                        LoopIteratorAdvance::Item(value) => {
                                             regs[*dst as usize] = value;
                                         }
-                                        LoopIteratorAdvance::Item(Err(ref error))
-                                            if is_stop_iteration_error(error) =>
+                                        LoopIteratorAdvance::Error(error)
+                                            if is_stop_iteration_error(&error) =>
                                         {
                                             pc = jump_pc!(*offset);
                                         }
-                                        LoopIteratorAdvance::Item(Err(error)) => {
-                                            vm_try!(Err(error));
+                                        LoopIteratorAdvance::Error(error) => {
+                                            vm_try!(Err(*error));
                                         }
                                         LoopIteratorAdvance::NotIterator => {
                                             vm_try!(Err(pyrust_core::type_err!(

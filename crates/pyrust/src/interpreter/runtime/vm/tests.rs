@@ -667,4 +667,48 @@ mod vm_tests {
             result
         );
     }
+
+    #[test]
+    fn generator_drive_hot_struct_sizes_stay_compact() {
+        use super::{
+            GenDriveFrame, GeneratorFrame, IterCacheBuf, IterState, ItersBuf, LoopIteratorAdvance,
+        };
+        use std::mem::size_of;
+
+        assert!(
+            size_of::<IterState>() <= 40,
+            "IterState grew to {} B (guard <= 40 B; keep guarded iterator state boxed)",
+            size_of::<IterState>()
+        );
+        assert!(
+            size_of::<Option<IterState>>() <= 40,
+            "Option<IterState> grew to {} B (guard <= 40 B)",
+            size_of::<Option<IterState>>()
+        );
+        assert!(
+            size_of::<ItersBuf>() <= 56,
+            "ItersBuf grew to {} B (guard <= 56 B; copied 4x per generator drive cycle)",
+            size_of::<ItersBuf>()
+        );
+        assert!(
+            size_of::<IterCacheBuf>() <= 56,
+            "IterCacheBuf grew to {} B (guard <= 56 B; keep IterNextCacheEntry boxed)",
+            size_of::<IterCacheBuf>()
+        );
+        assert!(
+            size_of::<LoopIteratorAdvance>() <= 24,
+            "LoopIteratorAdvance grew to {} B (guard <= 24 B; keep PyError boxed)",
+            size_of::<LoopIteratorAdvance>()
+        );
+        assert!(
+            size_of::<GeneratorFrame>() <= 304,
+            "GeneratorFrame grew to {} B (guard <= 304 B)",
+            size_of::<GeneratorFrame>()
+        );
+        assert!(
+            size_of::<GenDriveFrame>() <= 256,
+            "GenDriveFrame grew to {} B (guard <= 256 B)",
+            size_of::<GenDriveFrame>()
+        );
+    }
 }
