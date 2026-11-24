@@ -538,6 +538,91 @@ mod tests {
     }
 
     #[test]
+    fn binding_order_journal_tracks_del_rebind_and_global_only_writes() {
+        // Issue #2919: deleting and re-binding a declared fast-local moves it
+        // to the end, live re-binding keeps its position, and an out-of-slot
+        // global write lands at its runtime binding point.
+        let root = Environment::new(None);
+        {
+            let mut root = root.borrow_mut();
+            root.values.insert("__name__", Value::string("__main__"));
+        }
+        let local_index = Rc::new(HashMap::from([
+            ("a".to_string(), 0_u32),
+            ("b".to_string(), 1_u32),
+            ("c".to_string(), 2_u32),
+            ("e".to_string(), 3_u32),
+        ]));
+        let mut regs = vec![Value::int(1), Value::int(2), Value::int(3), Value::unset()];
+        let regs_ptr = NonNull::new(regs.as_mut_ptr()).expect("Vec storage is non-null");
+        let _guard = unsafe {
+            root.borrow()
+                .register_namespace_fastlocals(regs_ptr, regs.len(), &local_index)
+        };
+        assert!(!root.borrow().namespace_has_binding_order());
+
+        // `del a` activates the journal and removes `a`.
+        root.borrow().record_namespace_binding_order_delete("a");
+        assert!(root.borrow().namespace_has_binding_order());
+        regs[0] = Value::unset();
+
+        // Re-binding `a` appends it after `c`; re-binding live `b` does not move `b`.
+        regs[0] = Value::int(10);
+        root.borrow().record_namespace_binding_order_insert("a");
+        regs[1] = Value::int(20);
+        root.borrow().record_namespace_binding_order_insert("b");
+
+        // Out-of-slot `global g_only = 42` lands before `e = 5`.
+        root.borrow()
+            .record_namespace_binding_order_insert("g_only");
+        root.borrow_mut().values.insert("g_only", Value::int(42));
+        regs[3] = Value::int(5);
+        root.borrow().record_namespace_binding_order_insert("e");
+
+        let names: Vec<String> = root
+            .borrow()
+            .namespace_materialization_snapshot()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, vec!["__name__", "b", "c", "a", "g_only", "e"]);
+    }
+
+    #[test]
+    fn binding_order_journal_initializes_for_global_only_write() {
+        let root = Environment::new(None);
+        root.borrow_mut()
+            .values
+            .insert("__name__", Value::string("__main__"));
+        let local_index = Rc::new(HashMap::from([
+            ("d".to_string(), 0_u32),
+            ("e".to_string(), 1_u32),
+        ]));
+        let mut regs = vec![Value::int(4), Value::unset()];
+        let regs_ptr = NonNull::new(regs.as_mut_ptr()).expect("Vec storage is non-null");
+        let _guard = unsafe {
+            root.borrow()
+                .register_namespace_fastlocals(regs_ptr, regs.len(), &local_index)
+        };
+        assert!(!root.borrow().namespace_has_binding_order());
+
+        // Binding `g_only` while `d` is live and `e` is still unset must place
+        // `g_only` between `d` and `e`.
+        root.borrow().record_namespace_out_of_order_insert("g_only");
+        root.borrow_mut().values.insert("g_only", Value::int(42));
+        regs[1] = Value::int(5);
+        root.borrow().record_namespace_binding_order_insert("e");
+
+        let names: Vec<String> = root
+            .borrow()
+            .namespace_materialization_snapshot()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, vec!["__name__", "d", "g_only", "e"]);
+    }
+
+    #[test]
     fn root_namespace_generations_saturate() {
         let root = Environment::new(None);
         {

@@ -41,6 +41,39 @@ impl Interpreter {
         local_index: &HashMap<String, crate::bytecode::Reg>,
         regs: &mut RegsBuf,
     ) {
+        if local_index.is_empty() {
+            return;
+        }
+        let root = module_env(&self.env);
+        if root.borrow().namespace_has_binding_order() {
+            let order = root.borrow().namespace_binding_order_snapshot();
+            let mut written = std::collections::HashSet::with_capacity(local_index.len());
+            for name in &order {
+                if let Some(&idx) = local_index.get(name.as_str()) {
+                    let idx = idx as usize;
+                    if !regs[idx].is_unset() {
+                        let val = std::mem::replace(&mut regs[idx], Value::unset());
+                        self.assign_name(name, val);
+                        written.insert(name.as_str());
+                    }
+                }
+            }
+            let mut remaining: Vec<(crate::bytecode::Reg, &String)> = local_index
+                .iter()
+                .filter(|(name, _)| !written.contains(name.as_str()))
+                .map(|(name, &slot)| (slot, name))
+                .collect();
+            remaining.sort_unstable();
+            for (idx, name) in remaining {
+                let idx = idx as usize;
+                if !regs[idx].is_unset() {
+                    let val = std::mem::replace(&mut regs[idx], Value::unset());
+                    self.assign_name(name, val);
+                }
+            }
+            root.borrow_mut().reorder_values_to_binding_order();
+            return;
+        }
         let mut by_slot: Vec<(crate::bytecode::Reg, &String)> = local_index
             .iter()
             .map(|(name, &slot)| (slot, name))

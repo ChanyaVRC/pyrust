@@ -234,13 +234,15 @@ impl Interpreter {
     }
 
     /// Seed the module-level global namespace with the standard dunder keys
-    /// that CPython 3.12 always pre-populates for `__main__` (issue #675).
+    /// that CPython 3.12 populates before executing a module body (issues
+    /// #675, #2903, #2919).
     ///
     /// Inserts only keys that are not already present, so a REPL second-pass
-    /// or a future import path that has already seeded the namespace does not
-    /// clobber any existing value.  User assignments made during script
-    /// execution override the pre-seeded values naturally via `assign_name`,
-    /// which keeps both `env.values` and the root globals backing in sync.
+    /// or the filesystem-import path that pre-seeded `__name__`/`__doc__`/
+    /// `__package__` does not clobber any existing value.  User assignments
+    /// made during script execution override the pre-seeded values naturally
+    /// via `assign_name`, which keeps both `env.values` and the root globals
+    /// backing in sync.
     fn seed_module_dunders(&mut self, is_imported_module: bool, has_module_annotations: bool) {
         // `__builtins__` is the builtins module object in `__main__`.
         // Clone from the thread-local cache (O(1)) instead of rebuilding the
@@ -267,7 +269,7 @@ impl Interpreter {
             }};
         }
         // Seeding order is Python-visible (`list(globals())` / `list(vars(mod))`,
-        // issues #2903, #2971):
+        // issues #2903, #2919, #2971):
         // - Top-level `__main__` script: `__name__`, `__doc__`, `__package__`,
         //   `__loader__`, `__spec__`, `__annotations__`, `__builtins__`,
         //   [`__file__`], `__cached__`.
@@ -281,7 +283,6 @@ impl Interpreter {
         seed_env!("__loader__", Value::none());
         seed_env!("__spec__", Value::none());
         let script_file = self.script_filename.as_deref().map(Value::string);
-        let has_script_file = script_file.is_some();
         let mut dunders: Vec<&'static str> = Vec::with_capacity(9);
         dunders.extend_from_slice(&[
             "__name__",
@@ -315,7 +316,6 @@ impl Interpreter {
             seed_env!("__cached__", Value::none());
             dunders.push("__cached__");
         }
-        let _ = has_script_file;
         // Mirror env values into the root-owned globals backing (issue #706)
         // in the same order.
         // Only insert keys not already present in the dict (REPL re-run safety).

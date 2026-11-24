@@ -130,6 +130,11 @@ impl Interpreter {
             };
         }
 
+        if is_module_scope && !regs[register as usize].is_unset() {
+            self.env
+                .borrow()
+                .record_namespace_binding_order_delete(name);
+        }
         let deleted = std::mem::replace(&mut regs[register as usize], Value::unset());
         if (!is_module_scope || !self.globals_exposed_for_environment(&self.env))
             && !deleted.is_unset()
@@ -178,11 +183,11 @@ impl Interpreter {
 
     /// Out-of-line slow path for [`Self::sync_module_global_binding`].
     ///
-    /// Keeping dict/env/mirror synchronization out of the `#[inline]` VM
+    /// Keeping dict/env/mirror/order synchronization out of the `#[inline]` VM
     /// dispatch arm prevents hot-loop code-size and register-pressure
     /// regressions while using `EnvValues::update_if_present` so a
     /// `env_binding_interest` Bloom false positive never inserts an absent key
-    /// or perturbs namespace ordering (issue #2925).
+    /// or perturbs namespace ordering (issues #2919, #2925).
     #[cold]
     #[inline(never)]
     fn sync_module_global_binding_slow(
@@ -200,6 +205,11 @@ impl Interpreter {
         if value.is_unset() {
             return Ok(());
         }
+        if sync_flags & Environment::MODULE_WRITE_TRACK_BINDING_ORDER != 0 {
+            self.env
+                .borrow()
+                .record_namespace_binding_order_insert(name);
+        }
         let write_target = if sync_flags & Environment::MODULE_WRITE_SYNC_GLOBALS != 0 {
             self.env.borrow().namespace_module_write_target()
         } else {
@@ -209,13 +219,11 @@ impl Interpreter {
         let synchronize_env = sync_flags & Environment::MODULE_WRITE_SYNC_ENV != 0;
         if synchronize_env {
             let env_value = if write_target.is_none() && !synchronize_siblings {
-                return {
-                    module_env(&self.env)
-                        .borrow_mut()
-                        .values
-                        .update_if_present(name, value);
-                    Ok(())
-                };
+                module_env(&self.env)
+                    .borrow_mut()
+                    .values
+                    .update_if_present(name, value);
+                return Ok(());
             } else {
                 value.clone()
             };
@@ -251,7 +259,14 @@ impl Interpreter {
                 code.names.len()
             ))
         })?;
-        let from_env = module_env(&self.env).borrow_mut().values.remove(name);
+        let root = module_env(&self.env);
+        {
+            let root_ref = root.borrow();
+            if root_ref.values.get(name).is_some() || root_ref.namespace_has_binding_order() {
+                root_ref.record_namespace_binding_order_delete(name);
+            }
+        }
+        let from_env = root.borrow_mut().values.remove(name);
         let locals = self
             .explicit_locals_for_environment(&self.env)
             .unwrap_or_else(|| self.active_globals_dict());
@@ -428,23 +443,33 @@ impl Interpreter {
         }
         if is_global {
             let me = module_env(&self.env);
-            let from_env = me.borrow_mut().values.remove(name.as_str());
-            let in_env = from_env.is_some();
+            let (in_env, from_mirror) = {
+                let me_ref = me.borrow();
+                (
+                    me_ref.values.get(name.as_str()).is_some(),
+                    me_ref.namespace_fastlocal_value(name.as_str()),
+                )
+            };
             let globals = self
                 .explicit_globals_for_environment(&self.env)
                 .unwrap_or_else(|| self.active_globals_dict());
-            let from_dict = globals
-                .dict_shift_remove(&PyKey::str_from(name.as_str()))
-                .ok()
-                .flatten();
-            let in_dict = from_dict.is_some();
-            if !in_env && !in_dict {
+            let in_dict = globals
+                .dict_with(|dict| dict.contains_key(&StrKey(name.as_str())))
+                .unwrap_or(false);
+            if !in_env && !in_dict && from_mirror.is_none() {
                 return Err(PyError::name_error(
                     "NameError",
                     format!("name '{}' is not defined", name),
                     Some(name.to_string()),
                 ));
             }
+            me.borrow()
+                .record_namespace_binding_order_delete(name.as_str());
+            let from_env = me.borrow_mut().values.remove(name.as_str());
+            let from_dict = globals
+                .dict_shift_remove(&PyKey::str_from(name.as_str()))
+                .ok()
+                .flatten();
             bump_global_struct_version(self);
             if !me.borrow().namespace_cache_disabled() {
                 me.borrow().synchronize_namespace_fastlocal_binding(
@@ -453,31 +478,52 @@ impl Interpreter {
                     None,
                 );
             }
-            let del_candidate = from_env.or(from_dict);
+            let del_candidate = from_env.or(from_dict).or(from_mirror);
             if let Some(val) = del_candidate {
                 call_del_if_last_binding(self, val, regs, code.num_locals as usize);
             }
         } else {
-            let from_env = self.env.borrow_mut().values.remove(name.as_str());
-            let in_env = from_env.is_some();
-            let is_module_scope = self.env.borrow().parent.is_none();
-            let from_dict = if is_module_scope {
+            let (is_module_scope, in_env, from_mirror) = {
+                let env_ref = self.env.borrow();
+                let is_module_scope = env_ref.parent.is_none();
+                (
+                    is_module_scope,
+                    env_ref.values.get(name.as_str()).is_some(),
+                    if is_module_scope {
+                        env_ref.namespace_fastlocal_value(name.as_str())
+                    } else {
+                        None
+                    },
+                )
+            };
+            let globals = is_module_scope.then(|| {
                 self.explicit_globals_for_environment(&self.env)
                     .unwrap_or_else(|| self.active_globals_dict())
-                    .dict_shift_remove(&PyKey::str_from(name.as_str()))
-                    .ok()
-                    .flatten()
-            } else {
-                None
-            };
-            let in_dict = from_dict.is_some();
-            if !in_env && !in_dict {
+            });
+            let in_dict = globals.as_ref().is_some_and(|globals| {
+                globals
+                    .dict_with(|dict| dict.contains_key(&StrKey(name.as_str())))
+                    .unwrap_or(false)
+            });
+            if !in_env && !in_dict && from_mirror.is_none() {
                 return Err(PyError::name_error(
                     "NameError",
                     format!("name '{}' is not defined", name),
                     Some(name.to_string()),
                 ));
             }
+            if is_module_scope {
+                self.env
+                    .borrow()
+                    .record_namespace_binding_order_delete(name.as_str());
+            }
+            let from_env = self.env.borrow_mut().values.remove(name.as_str());
+            let from_dict = globals.and_then(|globals| {
+                globals
+                    .dict_shift_remove(&PyKey::str_from(name.as_str()))
+                    .ok()
+                    .flatten()
+            });
             if is_module_scope {
                 bump_global_struct_version(self);
                 if !self.env.borrow().namespace_cache_disabled() {
@@ -488,7 +534,7 @@ impl Interpreter {
                     );
                 }
             }
-            let del_candidate = from_env.or(from_dict);
+            let del_candidate = from_env.or(from_dict).or(from_mirror);
             if let Some(val) = del_candidate {
                 call_del_if_last_binding(self, val, regs, code.num_locals as usize);
             }
