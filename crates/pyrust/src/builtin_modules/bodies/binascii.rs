@@ -923,3 +923,20 @@ pyrust_module! {
         Ok(Value::bytes(decode_qp(&data, header)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a2b_base64_strict_rejects_excess_padding_after_full_quad() {
+        for sample in [b"YWJj=".as_slice(), b"YWJj==", b"YWJj=a", b"YWJj==a"] {
+            let err = decode_base64(sample, true, &Value::none()).unwrap_err();
+            assert!(
+                err.to_string().contains("Excess padding not allowed"),
+                "unexpected error for {:?}: {err}",
+                sample
+            );
+        }
+    }
+}

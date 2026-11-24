@@ -162,8 +162,6 @@ a2b_cases = [
     b"Y==Q==",
     b"YR==",
     b"YWJj",
-    b"YWJj=",
-    b"YWJj==",
     b"YWJ=",
     b"YWJ==",
     b"YWJ",
@@ -180,8 +178,6 @@ a2b_cases = [
     b"YQ= = ",
     b"YQ= =",
     b"YQ== =",
-    b"YWJj=a",
-    b"YWJj==a",
     b"Y=W=J=j=",
     b"YWJjY=",
     b"YWJjYQ=",
@@ -194,6 +190,11 @@ a2b_cases = [
 for c in a2b_cases:
     for sm in (False, True):
         print("a2b_base64", repr(c), sm, "->", expect_exc(binascii.a2b_base64, c, strict_mode=sm))
+
+# Trailing '=' after a complete 4-char quad: CPython 3.12.4 (GH-118761) tightened
+# strict_mode=True here compared to 3.12.3; test non-strict parity across all 3.12.x.
+for c in (b"YWJj=", b"YWJj==", b"YWJj=a", b"YWJj==a"):
+    print("a2b_base64 non-strict", repr(c), "->", expect_exc(binascii.a2b_base64, c, strict_mode=False))
 
 
 # 6. crc32 and crc_hqx
