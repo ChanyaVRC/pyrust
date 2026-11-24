@@ -50,7 +50,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(PPRINT_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("pprint: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("pprint: exec namespace not a dict".into()))?;
     for name in PPRINT_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             module

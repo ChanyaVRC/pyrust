@@ -136,11 +136,11 @@ impl BuiltinTypeOps for DictKeysOps {
 
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
         let rc = borrow_view(state).ok_or_else(|| {
-            pyrust_core::PyError::Runtime("internal: bad dict_keys state".to_string())
+            pyrust_core::PyError::runtime("internal: bad dict_keys state".to_string())
         })?;
         match item.to_key() {
             Some(k) => Ok(rc.borrow().contains_key(&k)),
-            None => Err(pyrust_core::PyError::Runtime("unhashable type".to_string())),
+            None => Err(pyrust_core::PyError::runtime("unhashable type".to_string())),
         }
     }
 
@@ -257,7 +257,7 @@ impl BuiltinTypeOps for DictValuesOps {
 
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
         let rc = borrow_view(state).ok_or_else(|| {
-            pyrust_core::PyError::Runtime("internal: bad dict_values state".to_string())
+            pyrust_core::PyError::runtime("internal: bad dict_values state".to_string())
         })?;
         Ok(rc.borrow().values().any(|v| v == item))
     }
@@ -351,13 +351,13 @@ impl BuiltinTypeOps for DictItemsOps {
 
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
         let rc = borrow_view(state).ok_or_else(|| {
-            pyrust_core::PyError::Runtime("internal: bad dict_items state".to_string())
+            pyrust_core::PyError::runtime("internal: bad dict_items state".to_string())
         })?;
         match item.kind() {
             pyrust_core::ValueKind::Tuple(kv) if kv.len() == 2 => {
                 let key = kv[0]
                     .to_key()
-                    .ok_or_else(|| pyrust_core::PyError::Runtime("unhashable type".to_string()))?;
+                    .ok_or_else(|| pyrust_core::PyError::runtime("unhashable type".to_string()))?;
                 let map = rc.borrow();
                 Ok(map.get(&key).is_some_and(|v| v == &kv[1]))
             }

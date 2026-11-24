@@ -219,7 +219,7 @@ impl Interpreter {
                     // the update.
                     let lhs = left
                         .set_with(|s| s.clone())
-                        .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                        .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
                     let mut out: PySet = PySet::default();
                     match op {
                         BinaryOp::BitOr => {
@@ -253,7 +253,7 @@ impl Interpreter {
                         _ => unreachable!(),
                     }
                     left.set_with_mut(|s| *s = out)
-                        .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                        .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
                     return Ok(Some(left.clone()));
                 }
                 _ => {}
@@ -698,7 +698,7 @@ impl Interpreter {
     fn set_iand_eq_aware(&mut self, backing: &Value, rhs_items: &PySet) -> Result<()> {
         let lhs = backing
             .set_with(|s| s.clone())
-            .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
         let mut out: PySet = PySet::default();
         let (scan, probe) = intersection_scan_order(&lhs, rhs_items);
         for k in scan.iter() {
@@ -708,7 +708,7 @@ impl Interpreter {
         }
         backing
             .set_with_mut(|s| *s = out)
-            .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))
+            .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))
     }
 }
 

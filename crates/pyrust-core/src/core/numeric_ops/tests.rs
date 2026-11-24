@@ -1,4 +1,4 @@
-use crate::errors::PyError;
+use crate::errors::PyErrorKind;
 use crate::numeric_ops::{
     NumericBinOp, NumericCmpOp, NumericOps, NumericSlot, NumericUnaryOp,
     bigint_to_float_or_overflow, dispatch_numeric_binop, dispatch_numeric_bool,
@@ -8,7 +8,10 @@ use crate::object_model::{PyBigInt, Value, ValueKind};
 
 fn assert_named_err<T: std::fmt::Debug>(res: crate::errors::Result<T>, expected_type: &str) {
     match res {
-        Err(PyError::Named(cls, _)) => assert_eq!(cls.as_ref(), expected_type),
+        Err(ref err) => match err.kind() {
+            PyErrorKind::Named(cls, _) => assert_eq!(cls.as_ref(), expected_type),
+            _ => panic!("expected {expected_type}, got {res:?}"),
+        },
         other => panic!("expected {expected_type}, got {other:?}"),
     }
 }

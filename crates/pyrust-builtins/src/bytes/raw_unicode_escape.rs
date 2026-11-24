@@ -77,13 +77,13 @@ fn raw_unicode_escape_error(
     cps: &mut Vec<u32>,
 ) -> Result<Value> {
     match errors {
-        "strict" => Err(PyError::UnicodeDecodeError {
+        "strict" => Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
             encoding: "rawunicodeescape".to_string(),
             object: bytes.to_vec(),
             start,
             end,
             reason: reason.to_string(),
-        }),
+        })),
         "ignore" => {
             let rest = decode_raw_unicode_escape(&bytes[end..], errors)?;
             if let ValueKind::Str(s) = rest.kind() {

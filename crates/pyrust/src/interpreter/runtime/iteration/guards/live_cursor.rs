@@ -9,7 +9,7 @@ fn emit_live_key_item(
     if cursor.remaining == Some(0) {
         cursor.keys_changed = true;
         cursor.release();
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "dictionary keys changed during iteration".to_string(),
         ));
     }
@@ -24,20 +24,20 @@ fn emit_live_key_item(
         *remaining -= 1;
     }
     let item = match cursor.kind {
-        0 | 3 => Ok(LiveDictViewItem::Item(key_to_value(key))),
+        0 | 3 => LiveDictViewItem::Item(key_to_value(key)),
         1 => {
             let value = live_dict_value(container, &key).ok_or_else(|| {
-                PyError::Runtime("dictionary keys changed during iteration".to_string())
+                PyError::runtime("dictionary keys changed during iteration".to_string())
             })?;
-            Ok(LiveDictViewItem::Item(value))
+            LiveDictViewItem::Item(value)
         }
         _ => {
             let value = live_dict_value(container, &key).ok_or_else(|| {
-                PyError::Runtime("dictionary keys changed during iteration".to_string())
+                PyError::runtime("dictionary keys changed during iteration".to_string())
             })?;
-            Ok(LiveDictViewItem::Pair(key_to_value(key), value))
+            LiveDictViewItem::Pair(key_to_value(key), value)
         }
-    }?;
+    };
     if cursor.remaining == Some(0)
         && !cursor.watching_terminal_key
         && let (Some(state), Some(last_key)) = (&cursor.mutation_state, &cursor.last_key)
@@ -113,13 +113,13 @@ fn advance_snapshot_key_cursor(
         0 | 3 => LiveDictViewItem::Item(key_ref_to_value(key)),
         1 => {
             let value = live_dict_value(container, key).ok_or_else(|| {
-                PyError::Runtime("dictionary keys changed during iteration".to_string())
+                PyError::runtime("dictionary keys changed during iteration".to_string())
             })?;
             LiveDictViewItem::Item(value)
         }
         _ => {
             let value = live_dict_value(container, key).ok_or_else(|| {
-                PyError::Runtime("dictionary keys changed during iteration".to_string())
+                PyError::runtime("dictionary keys changed during iteration".to_string())
             })?;
             LiveDictViewItem::Pair(key_ref_to_value(key), value)
         }
@@ -162,7 +162,7 @@ pub(crate) fn advance_live_key_cursor(
     cursor: &mut LiveKeyCursor,
 ) -> Result<Option<LiveDictViewItem>> {
     if cursor.size_changed {
-        return Err(PyError::Runtime(cursor.size_change_message.to_string()));
+        return Err(PyError::runtime(cursor.size_change_message.to_string()));
     }
     if cursor.exhausted || cursor.keys_changed {
         return Ok(None);
@@ -216,7 +216,7 @@ pub(crate) fn advance_live_key_cursor(
         // size change rather than falling back to plain exhaustion.
         cursor.size_changed = true;
         cursor.release();
-        return Err(PyError::Runtime(message.to_string()));
+        return Err(PyError::runtime(message.to_string()));
     }
 
     if cursor.frozen_keys.is_some() {
@@ -264,7 +264,7 @@ pub(crate) fn advance_live_key_cursor(
     if cursor.remaining == Some(0) && cursor.structurally_changed {
         cursor.keys_changed = true;
         cursor.release();
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "dictionary keys changed during iteration".to_string(),
         ));
     }

@@ -583,7 +583,7 @@ impl Interpreter {
             unreachable!("built-in __new__ adapter requires BuiltinFunction");
         };
         let dispatch = crate::builtin_registry::lookup(name).ok_or_else(|| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "internal: __new__ builtin '{name}' not in registry"
             ))
         })?;

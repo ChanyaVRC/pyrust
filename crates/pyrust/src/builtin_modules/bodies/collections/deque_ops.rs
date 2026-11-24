@@ -4,7 +4,7 @@
 /// Concatenate two deques into a new deque preserving `left`'s class and `maxlen`.
 pub(crate) fn deque_concat_values(left: &Value, right: &Value) -> Result<Value> {
     let ValueKind::PyInstance(inst) = left.kind() else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "internal: expected deque instance".to_string(),
         ));
     };
@@ -30,7 +30,7 @@ pub(crate) fn deque_concat_values(left: &Value, right: &Value) -> Result<Value> 
 /// Repeat a deque `n` times into a new deque preserving `target`'s class and `maxlen`.
 pub(crate) fn deque_mul_by_i64(target: &Value, n: i64) -> Result<Value> {
     let ValueKind::PyInstance(inst) = target.kind() else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "internal: expected deque instance".to_string(),
         ));
     };
@@ -44,7 +44,7 @@ pub(crate) fn deque_mul_by_i64(target: &Value, n: i64) -> Result<Value> {
 /// Repeat a deque `n` times *in place*.
 pub(crate) fn deque_imul_by_i64(target: &Value, n: i64) -> Result<()> {
     let ValueKind::PyInstance(inst) = target.kind() else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "internal: expected deque instance".to_string(),
         ));
     };

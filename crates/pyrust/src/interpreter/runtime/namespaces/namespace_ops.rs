@@ -99,7 +99,7 @@ impl Interpreter {
         let frame_kind = self.vm_frame_views.last().map(|view| view.kind);
         let is_module_scope = frame_kind == Some(FrameKind::Script);
         let name = code.names.get(name_index as usize).ok_or_else(|| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "bytecode error: name index {name_index} out of range (pool size {})",
                 code.names.len()
             ))
@@ -216,7 +216,7 @@ impl Interpreter {
     #[cold]
     #[inline(never)]
     fn invalid_name_index_error(name_index: u16, pool_len: usize) -> Result<()> {
-        Err(PyError::Runtime(format!(
+        Err(PyError::runtime(format!(
             "bytecode error: name index {name_index} out of range (pool size {pool_len})"
         )))
     }
@@ -294,7 +294,7 @@ impl Interpreter {
         name_index: u16,
     ) -> Result<()> {
         let name = code.names.get(name_index as usize).ok_or_else(|| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "bytecode error: name index {name_index} out of range (pool size {})",
                 code.names.len()
             ))
@@ -453,7 +453,7 @@ impl Interpreter {
         name_idx: u16,
     ) -> Result<()> {
         let name = code.names.get(name_idx as usize).ok_or_else(|| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "bytecode error: name index {} out of range (pool size {})",
                 name_idx,
                 code.names.len()

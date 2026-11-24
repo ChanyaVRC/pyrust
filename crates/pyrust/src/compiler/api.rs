@@ -37,7 +37,7 @@ pub fn compile_script_with_linenos(
     // Validate global/nonlocal ordering at module scope.  CPython 3.12 raises
     // SyntaxError for `x = 1; global x` at module level too.
     if let Some(msg) = crate::interpreter::check_global_nonlocal_order(stmts) {
-        return Err(PyError::Named("SyntaxError".into(), msg));
+        return Err(PyError::named("SyntaxError", msg));
     }
     // Script-level code cannot have nonlocal, and nothing captures script
     // locals via nonlocal from a nested scope at this level.

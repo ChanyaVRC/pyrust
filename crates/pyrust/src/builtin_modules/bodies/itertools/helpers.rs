@@ -15,7 +15,7 @@ pub(super) fn expect_self(
 ) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|argument| argument.value.kind()) {
         Some(ValueKind::PyInstance(instance)) => Ok(Rc::clone(instance)),
-        _ => Err(PyError::Runtime(format!(
+        _ => Err(PyError::runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
     }
@@ -88,7 +88,7 @@ pub(super) fn is_stop_iteration(error: &PyError) -> bool {
 
 /// Internal-error shorthand for inaccessible or corrupted private state.
 pub(super) fn internal(fn_name: &str) -> PyError {
-    PyError::Runtime(format!("internal: {fn_name}() instance state corrupted"))
+    PyError::runtime(format!("internal: {fn_name}() instance state corrupted"))
 }
 
 /// Shared `__init__` for two-argument `(callable, iterable)` itertools classes

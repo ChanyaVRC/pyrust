@@ -16,7 +16,7 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
             }
             match chars.get(pos) {
                 None => {
-                    return Err(PyError::Lex(
+                    return Err(PyError::lex(
                         "unterminated triple-quoted string".to_string(),
                     ));
                 }
@@ -26,7 +26,7 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                     // ending the string, but the backslash itself is included in the output.
                     // A backslash at end of input is a syntax error.
                     let next = chars.get(pos + 1).copied().ok_or_else(|| {
-                        PyError::Lex(
+                        PyError::lex(
                             "EOL while scanning string literal (trailing backslash in raw string)"
                                 .to_string(),
                         )
@@ -40,7 +40,7 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                     let escaped = chars
                         .get(pos)
                         .copied()
-                        .ok_or_else(|| PyError::Lex("unterminated escape".to_string()))?;
+                        .ok_or_else(|| PyError::lex("unterminated escape".to_string()))?;
                     // \<newline> inside a triple-quoted string: skip both
                     // (line continuation within the string literal, same as CPython).
                     // Also handle CRLF (\r\n): \<CR><LF> drops all three characters.
@@ -90,7 +90,7 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                 // ending the string, but the backslash itself is included in the output.
                 // A backslash at end of input is a syntax error.
                 let next = chars.get(pos + 1).copied().ok_or_else(|| {
-                    PyError::Lex(
+                    PyError::lex(
                         "EOL while scanning string literal (trailing backslash in raw string)"
                             .to_string(),
                     )
@@ -104,7 +104,7 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
             let escaped = chars
                 .get(pos)
                 .copied()
-                .ok_or_else(|| PyError::Lex("EOL while scanning string literal".to_string()))?;
+                .ok_or_else(|| PyError::lex("EOL while scanning string literal".to_string()))?;
             // \<newline>: line continuation — consume backslash and newline, add nothing.
             // Also handle CRLF: \<CR><LF> drops all three characters.
             if escaped == '\n' {
@@ -125,5 +125,5 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
         pos += 1;
     }
 
-    Err(PyError::Lex("unterminated string literal".to_string()))
+    Err(PyError::lex("unterminated string literal".to_string()))
 }

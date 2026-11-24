@@ -589,7 +589,7 @@ pyrust_module! {
         let hook = match _interp.get_attr(&sys_mod, "breakpointhook") {
             Ok(v) => v,
             Err(ref e) if e.class_name_is("AttributeError") => {
-                return Err(PyError::Runtime("lost sys.breakpointhook".to_string()));
+                return Err(PyError::runtime("lost sys.breakpointhook".to_string()));
             }
             Err(e) => return Err(e),
         };

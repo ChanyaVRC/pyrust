@@ -374,7 +374,7 @@ impl Interpreter {
             // retain their existing one-pass fast path.
             if matches!(
                 &primitive_result,
-                Err(PyError::Named(class, _)) if class.as_ref() == "TypeError"
+                Err(err) if matches!(err.kind(), pyrust_core::PyErrorKind::Named(class, _) if class.as_ref() == "TypeError")
             ) && let Some(sequence_result) = self.richcmp_sequence_order(a, b, false)
             {
                 return sequence_result;
@@ -452,7 +452,7 @@ impl Interpreter {
             }
             if matches!(
                 &primitive_result,
-                Err(PyError::Named(class, _)) if class.as_ref() == "TypeError"
+                Err(err) if matches!(err.kind(), pyrust_core::PyErrorKind::Named(class, _) if class.as_ref() == "TypeError")
             ) && let Some(sequence_result) = self.richcmp_sequence_order(a, b, true)
             {
                 return sequence_result;

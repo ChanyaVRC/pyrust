@@ -1,1 +1,1 @@
-pub use pyrust_core::{PyError, Result};
+pub use pyrust_core::{PyError, PyErrorKind, Result};

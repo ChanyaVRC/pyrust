@@ -62,7 +62,7 @@ impl Interpreter {
     ) -> Result<Value> {
         let rc = backing
             .get_dict_rc()
-            .ok_or_else(|| PyError::Runtime("internal: expected dict backing".to_string()))?
+            .ok_or_else(|| PyError::runtime("internal: expected dict backing".to_string()))?
             .clone();
         Ok(match method {
             "keys" => pyrust_builtins::dict_views::dict_keys_tagged(rc, ordered),
@@ -81,7 +81,7 @@ impl Interpreter {
     ) -> Result<Value> {
         let rc = backing
             .get_dict_rc()
-            .ok_or_else(|| PyError::Runtime("internal: expected dict backing".to_string()))?
+            .ok_or_else(|| PyError::runtime("internal: expected dict backing".to_string()))?
             .clone();
         Ok(match method {
             "keys" => pyrust_builtins::dict_views::dict_keys_for_owner(rc, ordered, owner),

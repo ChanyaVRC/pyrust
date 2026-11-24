@@ -12,8 +12,13 @@ use crate::object_model::{
 // Error types
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Heap-allocated payload of [`PyError`].
+///
+/// Kept behind `Box<PyErrorKind>` inside [`PyError`] so `PyError` is a single
+/// pointer (`8 B`) and `Result<Value, PyError>` stays `16 B` across all
+/// fallible VM and runtime call boundaries.
 #[derive(Debug, Clone)]
-pub enum PyError {
+pub enum PyErrorKind {
     Lex(String),
     Parse(String),
     Runtime(String),
@@ -37,7 +42,7 @@ pub enum PyError {
     ///
     /// Construct via [`PyError::class`].  Call sites in `pyrust-core` and
     /// `pyrust-builtins` that cannot reference a `PyClass` Rc should
-    /// continue to use [`PyError::named`] / `PyError::Named`.
+    /// continue to use [`PyError::named`] / `PyErrorKind::Named`.
     Class(Rc<RefCell<PyClass>>, String), // (class, message)
     /// A `KeyError` that carries the **raw key `Value`** as `args[0]`.
     ///
@@ -52,7 +57,7 @@ pub enum PyError {
     /// CPython 3.12: `ImportError.__init__` accepts `*args, name=None,
     /// path=None` keyword arguments and stores them as instance attributes.
     /// Raise sites that know the module name should use this variant instead
-    /// of `PyError::Named("ImportError", …)` so that `e.name` works in
+    /// of `PyErrorKind::Named("ImportError", …)` so that `e.name` works in
     /// `except ImportError as e:` blocks.
     ///
     /// `class_name` is `"ImportError"` or `"ModuleNotFoundError"`.
@@ -142,25 +147,88 @@ pub enum PyError {
     Raised(Value),
 }
 
+/// Compact boxed error type (`8 B`) used across the workspace `Result<T>`.
+///
+/// The payload lives on the heap in [`PyErrorKind`] so the error branch stays
+/// cold and `Result<Value, PyError>` fits in `16 B` (two machine registers).
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct PyError(Box<PyErrorKind>);
+
+impl From<PyErrorKind> for PyError {
+    #[inline]
+    fn from(kind: PyErrorKind) -> Self {
+        Self::new(kind)
+    }
+}
+
 impl PyError {
+    /// Box a [`PyErrorKind`] into a compact [`PyError`].
+    #[cold]
+    #[inline]
+    pub fn new(kind: PyErrorKind) -> Self {
+        Self(Box::new(kind))
+    }
+
+    /// Borrow the underlying [`PyErrorKind`].
+    #[inline]
+    pub fn kind(&self) -> &PyErrorKind {
+        &self.0
+    }
+
+    /// Mutably borrow the underlying [`PyErrorKind`].
+    #[inline]
+    pub fn kind_mut(&mut self) -> &mut PyErrorKind {
+        &mut self.0
+    }
+
+    /// Unbox and return the underlying [`PyErrorKind`].
+    #[inline]
+    pub fn into_kind(self) -> PyErrorKind {
+        *self.0
+    }
+
+    /// Constructor for a lexer error.
+    #[cold]
+    #[inline]
+    pub fn lex(msg: String) -> Self {
+        Self::new(PyErrorKind::Lex(msg))
+    }
+
+    /// Constructor for a parser error.
+    #[cold]
+    #[inline]
+    pub fn parse(msg: String) -> Self {
+        Self::new(PyErrorKind::Parse(msg))
+    }
+
+    /// Constructor for a generic runtime error.
+    #[cold]
+    #[inline]
+    pub fn runtime(msg: String) -> Self {
+        Self::new(PyErrorKind::Runtime(msg))
+    }
+
     /// Convenience constructor for a named Python exception with a static
     /// class-name literal.  Avoids the per-call `"TypeError".to_string()`
     /// allocation that every error site would otherwise perform.
     ///
     /// Prefer [`PyError::class`] when the class `Rc` is already in scope
     /// (avoids an env-hierarchy name lookup in the VM handler).
+    #[cold]
     #[inline]
     pub fn named(cls: &'static str, msg: impl Into<String>) -> Self {
-        PyError::Named(Cow::Borrowed(cls), msg.into())
+        Self::new(PyErrorKind::Named(Cow::Borrowed(cls), msg.into()))
     }
 
     /// Constructor for a named Python exception with a **known class object**.
     ///
     /// The VM can materialise this directly (no env name lookup).  Use this
     /// from interpreter-internal raise sites that already hold the class `Rc`.
+    #[cold]
     #[inline]
     pub fn class(cls: Rc<RefCell<PyClass>>, msg: impl Into<String>) -> Self {
-        PyError::Class(cls, msg.into())
+        Self::new(PyErrorKind::Class(cls, msg.into()))
     }
 
     /// Constructor for a `KeyError` that stores the raw key `Value`.
@@ -169,9 +237,10 @@ impl PyError {
     /// instance, so `e.args[0]` returns the key itself (not a repr string).
     /// Use this at every dict/set key-not-found raise site instead of
     /// `PyError::named("KeyError", key.repr_raw())`.
+    #[cold]
     #[inline]
     pub fn key_error(key: Value) -> Self {
-        PyError::KeyError(key)
+        Self::new(PyErrorKind::KeyError(key))
     }
 
     /// Constructor for an `ImportError` or `ModuleNotFoundError` that carries
@@ -179,17 +248,18 @@ impl PyError {
     ///
     /// `class_name` must be `"ImportError"` or `"ModuleNotFoundError"`.
     /// The VM materialises the exception and sets `.name` and `.path` on it.
+    #[cold]
     #[inline]
     pub fn import_error(
         class_name: &'static str,
         message: impl Into<String>,
         module_name: Option<String>,
     ) -> Self {
-        PyError::ImportError {
+        Self::new(PyErrorKind::ImportError {
             class_name,
             message: message.into(),
             module_name,
-        }
+        })
     }
 
     /// Constructor for a `NameError` or `UnboundLocalError` that carries the
@@ -198,17 +268,18 @@ impl PyError {
     /// `class_name` must be `"NameError"` or `"UnboundLocalError"`.
     /// `name` is the identifier that was not found; pass `None` for
     /// `UnboundLocalError` (CPython 3.12: `UnboundLocalError.name` is `None`).
+    #[cold]
     #[inline]
     pub fn name_error(
         class_name: &'static str,
         message: impl Into<String>,
         name: Option<String>,
     ) -> Self {
-        PyError::NameError {
+        Self::new(PyErrorKind::NameError {
             class_name,
             message: message.into(),
             name,
-        }
+        })
     }
 
     /// Constructor for an `AttributeError` that carries the attribute name and
@@ -217,17 +288,25 @@ impl PyError {
     ///
     /// `name` is the attribute that was not found; pass `None` when not
     /// available.  `obj` is the receiver; pass `None` when not available.
+    #[cold]
     #[inline]
     pub fn attribute_error(
         message: impl Into<String>,
         name: Option<String>,
         obj: Option<Value>,
     ) -> Self {
-        PyError::AttributeError {
+        Self::new(PyErrorKind::AttributeError {
             message: message.into(),
             name,
             obj,
-        }
+        })
+    }
+
+    /// Constructor for an already-materialised Python exception value.
+    #[cold]
+    #[inline]
+    pub fn raised(value: Value) -> Self {
+        Self::new(PyErrorKind::Raised(value))
     }
 
     /// Map a `std::io::ErrorKind` to the most-derived Python OSError subclass
@@ -254,6 +333,7 @@ impl PyError {
     /// stripped of any file-path decoration, matching CPython's behaviour
     /// where `e.strerror` is `"No such file or directory"` rather than the
     /// decorated form.
+    #[cold]
     pub fn from_io_error(e: &std::io::Error, filename: Option<&str>) -> Self {
         Self::from_io_error2(e, filename, None)
     }
@@ -261,6 +341,7 @@ impl PyError {
     /// Like [`from_io_error`] but also sets `filename2` for two-path operations
     /// (e.g. `os.rename(src, dst)` where `filename2` is the destination).
     /// CPython 3.12 sets `filename2` on the exception for rename/link/symlink.
+    #[cold]
     pub fn from_io_error2(
         e: &std::io::Error,
         filename: Option<&str>,
@@ -283,13 +364,13 @@ impl PyError {
         } else {
             e.to_string()
         };
-        PyError::OsError {
+        Self::new(PyErrorKind::OsError {
             class_name,
             errno: raw as i64,
             strerror,
             filename: filename.map(|s| s.to_owned()),
             filename2: filename2.map(|s| s.to_owned()),
-        }
+        })
     }
 
     /// Returns `true` when `self` is a `Named`, `Class`, `KeyError`, or `Raised` error
@@ -299,22 +380,22 @@ impl PyError {
     /// `StopIteration` and `GeneratorExit` without materialising the error
     /// into a full `PyInstance`.  Works for the string-named (`Named`),
     /// class-identity (`Class`), and already-raised-instance (`Raised`)
-    /// variants so that `PyError::Raised(StopIteration(...))` produced by
-    /// `resume_generator` is treated the same as `PyError::Named`.
+    /// variants so that `PyErrorKind::Raised(StopIteration(...))` produced by
+    /// `resume_generator` is treated the same as `PyErrorKind::Named`.
     #[inline]
     pub fn class_name_is(&self, name: &str) -> bool {
-        match self {
-            PyError::Named(cls, _) => cls.as_ref() == name,
-            PyError::Class(cls, _) => class_chain_contains_builtin_exception(cls, name),
-            PyError::KeyError(_) => name == "KeyError",
-            PyError::ImportError { class_name, .. } => {
+        match self.kind() {
+            PyErrorKind::Named(cls, _) => cls.as_ref() == name,
+            PyErrorKind::Class(cls, _) => class_chain_contains_builtin_exception(cls, name),
+            PyErrorKind::KeyError(_) => name == "KeyError",
+            PyErrorKind::ImportError { class_name, .. } => {
                 // ModuleNotFoundError is a subclass of ImportError; treat it
                 // as both so that `class_name_is("ImportError")` returns true
                 // for a ModuleNotFoundError variant too.
                 *class_name == name
                     || (name == "ImportError" && *class_name == "ModuleNotFoundError")
             }
-            PyError::OsError { class_name, .. } => {
+            PyErrorKind::OsError { class_name, .. } => {
                 // All OSError subclasses also match "OSError" for the fast-path check.
                 *class_name == name
                     || (name == "OSError"
@@ -332,25 +413,25 @@ impl PyError {
                                 | "TimeoutError"
                         ))
             }
-            PyError::UnicodeDecodeError { .. } => {
+            PyErrorKind::UnicodeDecodeError { .. } => {
                 name == "UnicodeDecodeError"
                     || name == "UnicodeError"
                     || name == "ValueError"
                     || name == "Exception"
                     || name == "BaseException"
             }
-            PyError::UnicodeEncodeError { .. } => {
+            PyErrorKind::UnicodeEncodeError { .. } => {
                 name == "UnicodeEncodeError"
                     || name == "UnicodeError"
                     || name == "ValueError"
                     || name == "Exception"
                     || name == "BaseException"
             }
-            PyError::AttributeError { .. } => {
+            PyErrorKind::AttributeError { .. } => {
                 // AttributeError is a subclass of Exception → BaseException.
                 matches!(name, "AttributeError" | "Exception" | "BaseException")
             }
-            PyError::Raised(exc) => match exc.kind() {
+            PyErrorKind::Raised(exc) => match exc.kind() {
                 ValueKind::PyInstance(inst) => {
                     class_chain_contains_builtin_exception(&inst.borrow().class, name)
                 }
@@ -362,23 +443,23 @@ impl PyError {
     }
 }
 
-impl fmt::Display for PyError {
+impl fmt::Display for PyErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PyError::Lex(s) => write!(f, "Lex error: {s}"),
-            PyError::Parse(s) => write!(f, "Parse error: {s}"),
-            PyError::Runtime(s) => write!(f, "Runtime error: {s}"),
-            PyError::Named(cls, s) => write!(f, "{cls}: {s}"),
-            PyError::Class(cls, s) => write!(f, "{}: {s}", cls.borrow().name),
-            PyError::KeyError(key) => write!(f, "KeyError: {}", key.repr_raw()),
-            PyError::ImportError {
+            PyErrorKind::Lex(s) => write!(f, "Lex error: {s}"),
+            PyErrorKind::Parse(s) => write!(f, "Parse error: {s}"),
+            PyErrorKind::Runtime(s) => write!(f, "Runtime error: {s}"),
+            PyErrorKind::Named(cls, s) => write!(f, "{cls}: {s}"),
+            PyErrorKind::Class(cls, s) => write!(f, "{}: {s}", cls.borrow().name),
+            PyErrorKind::KeyError(key) => write!(f, "KeyError: {}", key.repr_raw()),
+            PyErrorKind::ImportError {
                 class_name,
                 message,
                 ..
             } => {
                 write!(f, "{class_name}: {message}")
             }
-            PyError::OsError {
+            PyErrorKind::OsError {
                 class_name,
                 errno,
                 strerror,
@@ -391,7 +472,7 @@ impl fmt::Display for PyError {
                     write!(f, "{class_name}: [Errno {errno}] {strerror}")
                 }
             }
-            PyError::UnicodeDecodeError {
+            PyErrorKind::UnicodeDecodeError {
                 encoding,
                 object,
                 start,
@@ -401,7 +482,7 @@ impl fmt::Display for PyError {
                 let msg = format_unicode_decode_str(encoding, object, *start, *end, reason);
                 write!(f, "UnicodeDecodeError: {msg}")
             }
-            PyError::UnicodeEncodeError {
+            PyErrorKind::UnicodeEncodeError {
                 encoding,
                 object,
                 start,
@@ -411,19 +492,57 @@ impl fmt::Display for PyError {
                 let msg = format_unicode_encode_str(encoding, object, *start, *end, reason);
                 write!(f, "UnicodeEncodeError: {msg}")
             }
-            PyError::NameError {
+            PyErrorKind::NameError {
                 class_name,
                 message,
                 ..
             } => {
                 write!(f, "{class_name}: {message}")
             }
-            PyError::AttributeError { message, .. } => {
+            PyErrorKind::AttributeError { message, .. } => {
                 write!(f, "AttributeError: {message}")
             }
-            PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr_raw()),
+            PyErrorKind::Raised(value) => write!(f, "Uncaught exception: {}", value.repr_raw()),
         }
     }
 }
 
+impl fmt::Display for PyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.kind(), f)
+    }
+}
+
 pub type Result<T> = std::result::Result<T, PyError>;
+
+#[cfg(test)]
+mod tests {
+    use std::mem::size_of;
+
+    use super::{PyError, Result};
+    use crate::object_model::Value;
+
+    #[test]
+    fn pyerror_and_result_sizes_stay_compact() {
+        assert_eq!(
+            size_of::<PyError>(),
+            8,
+            "PyError must stay a single boxed pointer (8 B)"
+        );
+        assert_eq!(
+            size_of::<Result<Value>>(),
+            16,
+            "Result<Value, PyError> must stay 16 B (two registers)"
+        );
+        assert_eq!(
+            size_of::<Result<()>>(),
+            8,
+            "Result<(), PyError> must use Box non-null niche (8 B)"
+        );
+        assert_eq!(
+            size_of::<Option<PyError>>(),
+            8,
+            "Option<PyError> must use Box non-null niche (8 B)"
+        );
+    }
+}

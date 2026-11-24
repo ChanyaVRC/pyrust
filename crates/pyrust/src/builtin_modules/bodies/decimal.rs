@@ -132,7 +132,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(DECIMAL_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("decimal: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("decimal: exec namespace not a dict".into()))?;
     for name in DECIMAL_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             if DECIMAL_PY_CLASS_NAMES.contains(name)

@@ -114,7 +114,7 @@ pub(crate) fn make_reversed_range_iterator(range: &Value) -> Result<Value> {
                 step: -step,
             })))
         }
-        _ => Err(PyError::Runtime(
+        _ => Err(PyError::runtime(
             "make_reversed_range_iterator called for non-range".to_string(),
         )),
     }
@@ -134,7 +134,7 @@ pub(crate) fn make_reversed_sequence_iterator(sequence: &Value) -> Result<Value>
             (ops.len(state).unwrap_or(0), true)
         }
         _ => {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "make_reversed_sequence_iterator called for non-sequence".to_string(),
             ));
         }
@@ -422,7 +422,7 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                             is_inherited_builtin_iter_sentinel(&class, &method)
                         })
                     {
-                        return Err(PyError::Runtime(format!(
+                        return Err(PyError::runtime(format!(
                             "'{}' object is missing internal builtin backing for '__iter__'",
                             class.borrow().name
                         )));
@@ -521,7 +521,7 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
             } else if let Some(kind) = pyrust_builtins::dict_views::view_kind(v) {
                 if pyrust_builtins::ordered_mapping::view_policy(v).is_some() {
                     let dict = pyrust_builtins::dict_views::as_dict_rc(v).ok_or_else(|| {
-                        PyError::Runtime("dict view lost its backing dict".to_string())
+                        PyError::runtime("dict view lost its backing dict".to_string())
                     })?;
                     let keys = dict.borrow().keys().cloned().collect();
                     NativeIterFrame::dict_view(dict, keys, kind, iter_type_name)

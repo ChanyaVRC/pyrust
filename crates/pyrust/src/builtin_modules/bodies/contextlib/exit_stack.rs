@@ -218,7 +218,7 @@ pub(super) fn stack_callback_call(
         .attrs
         .get("_func")
         .cloned()
-        .ok_or_else(|| PyError::Runtime(format!("internal: {fn_name}() _func missing")))?;
+        .ok_or_else(|| PyError::runtime(format!("internal: {fn_name}() _func missing")))?;
     let encoded_val = inst
         .borrow()
         .attrs

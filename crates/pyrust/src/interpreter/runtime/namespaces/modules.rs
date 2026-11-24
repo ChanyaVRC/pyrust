@@ -104,17 +104,17 @@ impl Interpreter {
         // therefore not turn that successful internal hit into an error.
         let module_value = self.load_module(module_name)?;
         let ValueKind::PyModule(module) = module_value.kind() else {
-            return Err(PyError::Runtime(format!(
+            return Err(PyError::runtime(format!(
                 "{module_name}: active module is not a module"
             )));
         };
         let (module_state, class) = {
             let module = module.borrow();
             let class = module.get_attr_value(attribute_name).ok_or_else(|| {
-                PyError::Runtime(format!("{module_name}: missing {attribute_name}"))
+                PyError::runtime(format!("{module_name}: missing {attribute_name}"))
             })?;
             let ValueKind::PyClass(class) = class.kind() else {
-                return Err(PyError::Runtime(format!(
+                return Err(PyError::runtime(format!(
                     "{module_name}: {attribute_name} is not a class"
                 )));
             };
@@ -472,17 +472,18 @@ impl Interpreter {
     /// itself (not a missing transitive dependency) and `expected_name` is not
     /// explicitly halted via `sys.modules[expected_name] = None`.
     pub(crate) fn is_missing_module_error(&mut self, err: &PyError, expected_name: &str) -> bool {
-        let matches_name = match err {
-            PyError::ImportError {
+        let matches_name = match err.kind() {
+            pyrust_core::PyErrorKind::ImportError {
                 class_name: "ModuleNotFoundError",
                 module_name: Some(m),
                 ..
             } => m == expected_name,
-            PyError::Raised(exc) if err.class_name_is("ModuleNotFoundError") => self
-                .get_attr(exc, "name")
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s == expected_name))
-                .unwrap_or(false),
+            pyrust_core::PyErrorKind::Raised(exc) if err.class_name_is("ModuleNotFoundError") => {
+                self.get_attr(exc, "name")
+                    .ok()
+                    .and_then(|v| v.as_str().map(|s| s == expected_name))
+                    .unwrap_or(false)
+            }
             _ => false,
         };
         if !matches_name {
@@ -640,7 +641,7 @@ impl Interpreter {
         if let Some(target) = find_filesystem_module(&search_dirs, leaf_name) {
             let full_path = target.file_path;
             let src = std::fs::read_to_string(&full_path).map_err(|e| {
-                PyError::Runtime(format!("failed to read '{}': {e}", full_path.display()))
+                PyError::runtime(format!("failed to read '{}': {e}", full_path.display()))
             })?;
             // The module's own path: tags its code objects' `co_filename` and
             // the traceback `File "..."` line for frames raised inside it,

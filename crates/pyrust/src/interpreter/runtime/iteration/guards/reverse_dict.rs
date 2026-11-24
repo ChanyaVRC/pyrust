@@ -139,6 +139,6 @@ fn reverse_dict_entry(
         return Ok(Some((key, None)));
     }
     let value = live_dict_value(&cursor.container, &key)
-        .ok_or_else(|| PyError::Runtime("dictionary keys changed during iteration".to_string()))?;
+        .ok_or_else(|| PyError::runtime("dictionary keys changed during iteration".to_string()))?;
     Ok(Some((key, Some(value))))
 }

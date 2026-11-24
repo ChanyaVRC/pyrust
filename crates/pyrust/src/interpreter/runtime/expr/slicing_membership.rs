@@ -730,9 +730,8 @@ impl Interpreter {
                             Err(ref e) if is_stop_iteration_error(e) => {
                                 return Ok(Value::bool_(false));
                             }
-                            // Any remaining Raised error is not the canonical
+                            // Any remaining error is not the canonical
                             // StopIteration class or a real subclass.
-                            Err(PyError::Raised(exc)) => return Err(PyError::Raised(exc)),
                             Err(e) => return Err(e),
                         }
                     }
@@ -764,7 +763,6 @@ impl Interpreter {
                         }
                         // Only the canonical class and real subclasses terminate;
                         // any other exception propagates.
-                        Err(PyError::Raised(exc)) => return Err(PyError::Raised(exc)),
                         Err(e) => return Err(e),
                     }
                 }

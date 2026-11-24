@@ -15,15 +15,15 @@ mod tests {
 
     // Helper — extract the `Named` exception class out of a PyError.
     fn err_class(e: &PyError) -> &str {
-        match e {
-            PyError::Named(cls, _) => cls.as_ref(),
+        match e.kind() {
+            crate::error::PyErrorKind::Named(cls, _) => cls.as_ref(),
             _ => "<not-named>",
         }
     }
 
     fn err_msg(e: &PyError) -> &str {
-        match e {
-            PyError::Named(_, msg) => msg.as_str(),
+        match e.kind() {
+            crate::error::PyErrorKind::Named(_, msg) => msg.as_str(),
             _ => "",
         }
     }

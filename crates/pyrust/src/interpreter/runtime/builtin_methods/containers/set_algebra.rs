@@ -99,7 +99,7 @@ impl Interpreter {
     fn replace_set_items(&self, receiver: &Value, replacement: PySet) -> Result<()> {
         receiver
             .set_with_mut(|items| *items = replacement)
-            .ok_or_else(|| PyError::Runtime("internal: expected mutable set".to_string()))
+            .ok_or_else(|| PyError::runtime("internal: expected mutable set".to_string()))
     }
 
     /// One CPython `set_intersection` step. Exact set operands are scanned in
@@ -178,7 +178,7 @@ impl Interpreter {
                 .set_with_mut(|items| {
                     items.shift_remove_index(index);
                 })
-                .ok_or_else(|| PyError::Runtime("internal: expected mutable set".to_string()))?;
+                .ok_or_else(|| PyError::runtime("internal: expected mutable set".to_string()))?;
         }
         Ok(())
     }
@@ -186,7 +186,7 @@ impl Interpreter {
     fn finish_set_difference_eq(&self, receiver: &Value) -> Result<()> {
         receiver
             .set_with_mut(PySet::finish_cpython_difference_update)
-            .ok_or_else(|| PyError::Runtime("internal: expected mutable set".to_string()))
+            .ok_or_else(|| PyError::runtime("internal: expected mutable set".to_string()))
     }
 
     fn set_difference_update_arg_eq(&mut self, receiver: &Value, arg: &Value) -> Result<()> {
@@ -252,7 +252,7 @@ impl Interpreter {
             }
             "symmetric_difference_update" => {
                 let arg = args.first().ok_or_else(|| {
-                    PyError::Runtime(
+                    PyError::runtime(
                         "set.symmetric_difference_update() requires 1 argument".to_string(),
                     )
                 })?;
@@ -281,7 +281,7 @@ impl Interpreter {
                                 items.shift_remove_index(index);
                             })
                             .ok_or_else(|| {
-                                PyError::Runtime("internal: expected mutable set".to_string())
+                                PyError::runtime("internal: expected mutable set".to_string())
                             })?;
                     } else {
                         receiver.set_add(key)?;
@@ -434,7 +434,7 @@ impl Interpreter {
             }
             "symmetric_difference" => {
                 let arg = args.first().ok_or_else(|| {
-                    PyError::Runtime("set.symmetric_difference() requires 1 argument".to_string())
+                    PyError::runtime("set.symmetric_difference() requires 1 argument".to_string())
                 })?;
                 let recv_items = self.set_receiver_items(&receiver, method)?;
                 // CPython starts from the incoming set and toggles receiver
@@ -451,7 +451,7 @@ impl Interpreter {
                                 items.shift_remove_index(index);
                             })
                             .ok_or_else(|| {
-                                PyError::Runtime("internal: expected set".to_string())
+                                PyError::runtime("internal: expected set".to_string())
                             })?;
                     } else {
                         result.set_add(key)?;
@@ -461,7 +461,7 @@ impl Interpreter {
             }
             "issubset" | "issuperset" => {
                 let arg = args.first().ok_or_else(|| {
-                    PyError::Runtime(format!("set.{method}() requires 1 argument"))
+                    PyError::runtime(format!("set.{method}() requires 1 argument"))
                 })?;
                 let recv_items = self.set_receiver_items(&receiver, method)?;
                 let lhs = Value::set(recv_items);
@@ -482,7 +482,7 @@ impl Interpreter {
                 // element against the materialised operand via `set_lookup_in`,
                 // which dispatches user `__hash__`-then-`__eq__`.
                 let arg = args.first().ok_or_else(|| {
-                    PyError::Runtime("set.isdisjoint() requires 1 argument".to_string())
+                    PyError::runtime("set.isdisjoint() requires 1 argument".to_string())
                 })?;
                 let recv_items = self.set_receiver_items(&receiver, method)?;
                 let other = self.materialize_set_operand(arg)?;

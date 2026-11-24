@@ -364,7 +364,7 @@ impl Interpreter {
         }
 
         // All user functions must have precompiled bytecode
-        Err(PyError::Runtime(format!(
+        Err(PyError::runtime(format!(
             "no bytecode for '{}'",
             function.name
         )))

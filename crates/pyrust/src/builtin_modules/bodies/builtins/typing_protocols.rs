@@ -8,7 +8,7 @@ pyrust_module! {
         let instance = match args.first().map(|arg| arg.value.kind()) {
             Some(ValueKind::PyInstance(instance)) => instance.clone(),
             _ => {
-                return Err(PyError::Runtime(
+                return Err(PyError::runtime(
                     "internal: TypeAliasType.__init__ self must be a PyInstance".to_string(),
                 ));
             }

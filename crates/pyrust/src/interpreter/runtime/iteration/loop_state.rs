@@ -537,7 +537,7 @@ pub(crate) fn live_dict_view_item(
     kind: pyrust_builtins::dict_views::DictViewKind,
 ) -> Result<LiveDictViewItem> {
     let dict = pyrust_builtins::dict_views::as_dict_rc(container)
-        .ok_or_else(|| PyError::Runtime("dict view lost its backing dict".to_string()))?;
+        .ok_or_else(|| PyError::runtime("dict view lost its backing dict".to_string()))?;
     let map = dict.borrow();
     match kind {
         pyrust_builtins::dict_views::DictViewKind::Keys => {
@@ -548,14 +548,14 @@ pub(crate) fn live_dict_view_item(
             .cloned()
             .map(LiveDictViewItem::Item)
             .ok_or_else(|| {
-                PyError::Runtime("dictionary keys changed during iteration".to_string())
+                PyError::runtime("dictionary keys changed during iteration".to_string())
             }),
         pyrust_builtins::dict_views::DictViewKind::Items => map
             .get(key)
             .cloned()
             .map(|value| LiveDictViewItem::Pair(key_to_value(key.clone()), value))
             .ok_or_else(|| {
-                PyError::Runtime("dictionary keys changed during iteration".to_string())
+                PyError::runtime("dictionary keys changed during iteration".to_string())
             }),
     }
 }

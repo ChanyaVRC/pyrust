@@ -2,7 +2,7 @@
 /// registers without stack `sret`, mirroring `LoopFastOutcome`, #2906).
 pub(crate) enum LoopIteratorAdvance {
     Item(Value),
-    Error(Box<PyError>),
+    Error(PyError),
     DriveGenerator(Rc<GeneratorCell>),
     NotIterator,
 }
@@ -11,7 +11,7 @@ pub(crate) enum LoopIteratorAdvance {
 fn loop_advance_result(result: Result<Value>) -> LoopIteratorAdvance {
     match result {
         Ok(value) => LoopIteratorAdvance::Item(value),
-        Err(error) => LoopIteratorAdvance::Error(Box::new(error)),
+        Err(error) => LoopIteratorAdvance::Error(error),
     }
 }
 
@@ -166,7 +166,7 @@ impl Interpreter {
         if let Some(native) = borrowed.downcast_mut::<NativeIterFrame>() {
             return native.advance().and_then(require_iterator_item);
         }
-        Err(PyError::Runtime("invalid generator state".to_string()))
+        Err(PyError::runtime("invalid generator state".to_string()))
     }
 }
 
@@ -205,8 +205,8 @@ fn stop_iteration() -> PyError {
 }
 
 fn generator_already_executing() -> LoopIteratorAdvance {
-    LoopIteratorAdvance::Error(Box::new(pyrust_core::py_err!(
+    LoopIteratorAdvance::Error(pyrust_core::py_err!(
         "ValueError",
         "generator already executing".to_string()
-    )))
+    ))
 }

@@ -75,7 +75,7 @@ impl Parser {
 
         if !self.is(&Token::Comma) {
             if first_starred {
-                return Err(PyError::Parse(
+                return Err(PyError::parse(
                     "starred assignment target must be in a list or tuple".to_string(),
                 ));
             }
@@ -100,7 +100,7 @@ impl Parser {
             if is_starred {
                 star_count += 1;
                 if star_count > 1 {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "multiple starred expressions in assignment".to_string(),
                     ));
                 }
@@ -269,7 +269,7 @@ impl Parser {
             match try_is_star {
                 None => try_is_star = Some(is_star),
                 Some(first) if first != is_star => {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "cannot have both 'except' and 'except*' on the same 'try'".to_string(),
                     ));
                 }
@@ -277,7 +277,7 @@ impl Parser {
             }
             let kind = if self.is(&Token::Colon) {
                 if is_star {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "except* requires an exception type".to_string(),
                     ));
                 }
@@ -285,7 +285,7 @@ impl Parser {
                 None
             } else {
                 if saw_bare_except {
-                    return Err(PyError::Parse("bare except must be last".to_string()));
+                    return Err(PyError::parse("bare except must be last".to_string()));
                 }
                 Some(self.parse_expr()?)
             };
@@ -324,7 +324,7 @@ impl Parser {
             finally_linenos = lns;
         }
         if handlers.is_empty() && finally_branch.is_none() {
-            return Err(PyError::Parse(
+            return Err(PyError::parse(
                 "try statement must have at least one except or finally clause".to_string(),
             ));
         }

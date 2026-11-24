@@ -50,7 +50,7 @@ const INTERPRETER_STACK_SIZE: usize = 128 * 1024 * 1024;
 
 fn run_file(path: &str, script_args: &[String]) -> Result<()> {
     let src = std::fs::read_to_string(path)
-        .map_err(|e| PyError::Runtime(format!("failed to read '{path}': {e}")))?;
+        .map_err(|e| PyError::runtime(format!("failed to read '{path}': {e}")))?;
     let (program, linenos) = Interpreter::parse_source_to_stmts_with_linenos(&src)?;
     let path_owned = path.to_string();
     let script_args = script_args.to_vec();
@@ -70,8 +70,8 @@ fn run_file(path: &str, script_args: &[String]) -> Result<()> {
             interp
                 .exec_program_with_linenos(&program, &linenos, &src_owned, false)
                 .err()
-                .map(|e| match e {
-                    PyError::Runtime(msg) => msg,
+                .map(|e| match e.into_kind() {
+                    crate::error::PyErrorKind::Runtime(msg) => msg,
                     other => other.to_string(),
                 })
         })
@@ -80,7 +80,7 @@ fn run_file(path: &str, script_args: &[String]) -> Result<()> {
         .expect("interpreter thread panicked");
 
     if let Some(msg) = err_str {
-        return Err(PyError::Runtime(msg));
+        return Err(PyError::runtime(msg));
     }
     Ok(())
 }
@@ -93,11 +93,11 @@ fn last_line_is_indented(buf: &str) -> bool {
 }
 
 fn is_incomplete(err: &PyError) -> bool {
-    match err {
+    match err.kind() {
         // "found Eof" — input cut off mid-expression
         // "expected Indent, found" — block header (e.g. "for x:") with no body yet;
         //   the trailing \n produces an extra Newline token instead of Eof
-        PyError::Parse(msg) | PyError::Lex(msg) => {
+        crate::error::PyErrorKind::Parse(msg) | crate::error::PyErrorKind::Lex(msg) => {
             msg.contains("found Eof") || msg.contains("expected Indent, found")
         }
         _ => false,
@@ -111,7 +111,7 @@ fn normalize_repl_error(error: PyError) -> PyError {
 fn run_repl() -> Result<()> {
     println!("PyRust 0.2 (Python-like subset). Type 'exit' or 'quit' to leave.");
 
-    let mut rl = DefaultEditor::new().map_err(|e| PyError::Runtime(e.to_string()))?;
+    let mut rl = DefaultEditor::new().map_err(|e| PyError::runtime(e.to_string()))?;
 
     std::thread::Builder::new()
         .stack_size(INTERPRETER_STACK_SIZE)
@@ -195,7 +195,7 @@ fn run_repl() -> Result<()> {
 
 fn emit_mir_file(path: &str) -> Result<()> {
     let src = std::fs::read_to_string(path)
-        .map_err(|e| PyError::Runtime(format!("failed to read '{path}': {e}")))?;
+        .map_err(|e| PyError::runtime(format!("failed to read '{path}': {e}")))?;
     let rendered = mir::compile_source_to_mir_with_filename(&src, path)?;
     print!("{rendered}");
     Ok(())
@@ -207,7 +207,7 @@ fn main() {
         if let Some(path) = args.get(3) {
             emit_mir_file(path)
         } else {
-            Err(PyError::Runtime(
+            Err(PyError::runtime(
                 "usage: pyrust --emit mir <file.py>".to_string(),
             ))
         }
@@ -215,7 +215,7 @@ fn main() {
         if let Some(path) = args.get(2) {
             emit_mir_file(path)
         } else {
-            Err(PyError::Runtime(
+            Err(PyError::runtime(
                 "usage: pyrust --emit=mir <file.py>".to_string(),
             ))
         }
@@ -229,8 +229,8 @@ fn main() {
         // PyError::Runtime already carries a fully-formatted message (e.g.
         // "SyntaxError: …" from the interpreter); print it raw so that we
         // don't prepend an extra "Runtime error: " prefix via Display.
-        match e {
-            PyError::Runtime(msg) => eprintln!("{msg}"),
+        match e.kind() {
+            crate::error::PyErrorKind::Runtime(msg) => eprintln!("{msg}"),
             other => eprintln!("{other}"),
         }
         std::process::exit(1);
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn eof_parse_error_is_incomplete() {
-        assert!(is_incomplete(&PyError::Parse(
+        assert!(is_incomplete(&PyError::parse(
             "expected X, found Eof".into()
         )));
     }
@@ -296,19 +296,19 @@ mod tests {
     fn expected_indent_parse_error_is_incomplete() {
         // produced when a block header line ends with '\n' and the lexer emits
         // an extra Newline token instead of Eof
-        assert!(is_incomplete(&PyError::Parse(
+        assert!(is_incomplete(&PyError::parse(
             "expected Indent, found Some(Newline)".into()
         )));
     }
 
     #[test]
     fn eof_lex_error_is_incomplete() {
-        assert!(is_incomplete(&PyError::Lex("found Eof".into())));
+        assert!(is_incomplete(&PyError::lex("found Eof".into())));
     }
 
     #[test]
     fn unrelated_parse_error_is_not_incomplete() {
-        assert!(!is_incomplete(&PyError::Parse(
+        assert!(!is_incomplete(&PyError::parse(
             "unexpected token in expression: Some(Plus)".into()
         )));
     }
@@ -322,18 +322,18 @@ mod tests {
 
     #[test]
     fn runtime_error_is_not_incomplete() {
-        assert!(!is_incomplete(&PyError::Runtime("name error".into())));
+        assert!(!is_incomplete(&PyError::runtime("name error".into())));
     }
 
     #[test]
     fn repl_parse_error_is_normalized_for_display() {
-        let error = normalize_repl_error(PyError::Parse("invalid syntax".into()));
+        let error = normalize_repl_error(PyError::parse("invalid syntax".into()));
         assert_eq!(error.to_string(), "SyntaxError: invalid syntax");
     }
 
     #[test]
     fn repl_runtime_error_is_not_reclassified_for_display() {
-        let error = normalize_repl_error(PyError::Runtime("execution failed".into()));
+        let error = normalize_repl_error(PyError::runtime("execution failed".into()));
         assert_eq!(error.to_string(), "Runtime error: execution failed");
     }
 

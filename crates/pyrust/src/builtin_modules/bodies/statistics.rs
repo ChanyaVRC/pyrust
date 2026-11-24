@@ -60,7 +60,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(STATISTICS_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("statistics: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("statistics: exec namespace not a dict".into()))?;
     for name in STATISTICS_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             // Classes render their repr/qualname via `__module__`; the exec

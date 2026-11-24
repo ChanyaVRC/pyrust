@@ -17,7 +17,7 @@ impl Interpreter {
             .names
             .get(name_idx as usize)
             .ok_or_else(|| {
-                PyError::Runtime(format!(
+                PyError::runtime(format!(
                     "bytecode error: name index {name_idx} out of range"
                 ))
             })?
@@ -133,7 +133,7 @@ impl Interpreter {
             .names
             .get(name_idx as usize)
             .ok_or_else(|| {
-                PyError::Runtime(format!(
+                PyError::runtime(format!(
                     "bytecode error: name index {name_idx} out of range"
                 ))
             })?
@@ -142,7 +142,7 @@ impl Interpreter {
         let pos_items: Vec<Value> = match v.kind() {
             ValueKind::List(items) => items.to_vec(),
             _ => {
-                return Err(PyError::Runtime(
+                return Err(PyError::runtime(
                     "CallMethodExpanded: pos_list must be a list".to_string(),
                 ));
             }
@@ -151,7 +151,7 @@ impl Interpreter {
         let kw_map = match v.kind() {
             ValueKind::Dict(d) => d.clone(),
             _ => {
-                return Err(PyError::Runtime(
+                return Err(PyError::runtime(
                     "CallMethodExpanded: kw_dict must be a dict".to_string(),
                 ));
             }

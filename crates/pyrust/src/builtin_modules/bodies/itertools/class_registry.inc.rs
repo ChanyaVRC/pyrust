@@ -450,7 +450,7 @@ fn make_grouper_instance(
         let class = grouper_class_for_groupby(groupby_class)
             .or_else(registered_grouper_class)
             .ok_or_else(|| {
-                PyError::Runtime("internal: itertools class _grouper missing".to_string())
+                PyError::runtime("internal: itertools class _grouper missing".to_string())
             })?;
         drop(module_value);
         class

@@ -145,7 +145,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(COLLECTIONS_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("collections: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("collections: exec namespace not a dict".into()))?;
     for name in COLLECTIONS_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             module
@@ -273,7 +273,7 @@ fn native_deque_iterator_new(
 
 fn ordered_dict_move_to_end(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() != 3 || args.iter().any(|arg| arg.name.is_some()) {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "internal: OrderedDict.move_to_end bridge expected 3 positional arguments".to_string(),
         ));
     }
@@ -283,7 +283,7 @@ fn ordered_dict_move_to_end(interp: &mut Interpreter, args: &[ExpandedCallArg]) 
     let backing = coerce_subclass_backing(&args[0].value, &[])
         .filter(Value::is_dict)
         .ok_or_else(|| {
-            PyError::Runtime(
+            PyError::runtime(
                 "internal: OrderedDict.move_to_end receiver has no dict backing".to_string(),
             )
         })?;
@@ -291,7 +291,7 @@ fn ordered_dict_move_to_end(interp: &mut Interpreter, args: &[ExpandedCallArg]) 
         return Err(PyError::key_error(key_value));
     };
     let len = backing.dict_len().ok_or_else(|| {
-        PyError::Runtime("internal: OrderedDict.move_to_end backing is not a dict".to_string())
+        PyError::runtime("internal: OrderedDict.move_to_end backing is not a dict".to_string())
     })?;
     let to = if last { len - 1 } else { 0 };
     backing.dict_move_index(from, to)?;

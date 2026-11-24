@@ -109,7 +109,7 @@ pub(super) fn set_subtract_in_place(
 
     let (lhs_is_empty, lhs_has_object) = receiver
         .set_with(|lhs| (lhs.is_empty(), set_has_object_key(lhs)))
-        .ok_or_else(|| pyrust_core::PyError::Runtime("internal: expected set".to_string()))?;
+        .ok_or_else(|| pyrust_core::PyError::runtime("internal: expected set".to_string()))?;
     if lhs_is_empty {
         return Ok(());
     }
@@ -117,13 +117,13 @@ pub(super) fn set_subtract_in_place(
     if !lhs_has_object && !set_has_object_key(rhs) {
         receiver
             .set_with_mut(|lhs| lhs.retain(|key| !rhs.contains(key)))
-            .ok_or_else(|| pyrust_core::PyError::Runtime("internal: expected set".to_string()))?;
+            .ok_or_else(|| pyrust_core::PyError::runtime("internal: expected set".to_string()))?;
         return Ok(());
     }
 
     let lhs_snapshot = receiver
         .set_with(|lhs| lhs.clone())
-        .ok_or_else(|| pyrust_core::PyError::Runtime("internal: expected set".to_string()))?;
+        .ok_or_else(|| pyrust_core::PyError::runtime("internal: expected set".to_string()))?;
     let mut remove_mask = vec![false; lhs_snapshot.len()];
     let apply_removals = |receiver: &Value, remove_mask: &[bool]| -> Result<()> {
         let removals: PySet = lhs_snapshot
@@ -137,7 +137,7 @@ pub(super) fn set_subtract_in_place(
         }
         receiver
             .set_with_mut(|lhs| lhs.retain(|key| !removals.contains(key)))
-            .ok_or_else(|| pyrust_core::PyError::Runtime("internal: expected set".to_string()))?;
+            .ok_or_else(|| pyrust_core::PyError::runtime("internal: expected set".to_string()))?;
         Ok(())
     };
 

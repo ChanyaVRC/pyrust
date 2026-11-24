@@ -90,7 +90,7 @@ impl Interpreter {
                 .filter(|backing| !matches!(backing.kind(), ValueKind::PyInstance(_)))
             else {
                 let class_name = class.borrow().name.clone();
-                return Err(PyError::Runtime(format!(
+                return Err(PyError::runtime(format!(
                     "'{class_name}' object is missing internal builtin backing for '{method}'"
                 )));
             };
@@ -415,7 +415,7 @@ impl Interpreter {
                     };
                     ops.call_method(state, method, args_vec, &kw_str)
                 }
-                BkKind::Other => Err(PyError::Runtime(format!(
+                BkKind::Other => Err(PyError::runtime(format!(
                     "internal: unexpected builtin_data kind for method '{method}'"
                 ))),
             };

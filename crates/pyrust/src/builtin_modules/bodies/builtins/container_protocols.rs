@@ -24,7 +24,7 @@ pyrust_module! {
         }
         if instance_builtin_data(&inst_rc).is_some() {
             let list_dispatch = crate::builtin_registry::lookup("list").ok_or_else(|| {
-                PyError::Runtime("internal: list constructor not in registry".to_string())
+                PyError::runtime("internal: list constructor not in registry".to_string())
             })?;
             // Pass the iterable arg if present, or empty args to get an empty list.
             let new_backing = list_dispatch(_interp, args.get(1).map_or(&[], std::slice::from_ref))?;
@@ -296,7 +296,7 @@ pyrust_module! {
         }
         if instance_builtin_data(&inst_rc).is_some() {
             let set_dispatch = crate::builtin_registry::lookup("set").ok_or_else(|| {
-                PyError::Runtime("internal: set constructor not in registry".to_string())
+                PyError::runtime("internal: set constructor not in registry".to_string())
             })?;
             // Pass the iterable arg if present, or empty args to get an empty set.
             let new_backing = set_dispatch(_interp, args.get(1).map_or(&[], std::slice::from_ref))?;

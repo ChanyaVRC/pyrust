@@ -21,7 +21,7 @@ impl Interpreter {
     pub(crate) fn current_std_stream(&mut self, name: &str) -> Result<Value> {
         let module_val = self.load_module("sys")?;
         let ValueKind::PyModule(module) = module_val.kind() else {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "internal: sys is not a module".to_string(),
             ));
         };
@@ -33,7 +33,7 @@ impl Interpreter {
     pub(crate) fn set_std_stream(&mut self, name: &str, value: Value) -> Result<()> {
         let module_val = self.load_module("sys")?;
         let ValueKind::PyModule(module) = module_val.kind() else {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "internal: sys is not a module".to_string(),
             ));
         };

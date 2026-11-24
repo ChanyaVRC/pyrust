@@ -346,7 +346,7 @@ pub fn install_iter_values(f: IterValuesFn) {
 pub fn iter_values_via_registry(value: &Value) -> Result<Vec<Value>> {
     match ITER_VALUES_FN.get() {
         Some(f) => f(value),
-        None => Err(PyError::Runtime(
+        None => Err(PyError::runtime(
             "iter_values callback not installed".to_string(),
         )),
     }
@@ -374,7 +374,7 @@ pub fn install_compare_values(f: CompareValuesFn) {
 pub fn compare_values_via_registry(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     match COMPARE_VALUES_FN.get() {
         Some(f) => f(a, b),
-        None => Err(PyError::Runtime(
+        None => Err(PyError::runtime(
             "compare_values callback not installed".to_string(),
         )),
     }

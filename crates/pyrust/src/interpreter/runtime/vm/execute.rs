@@ -594,7 +594,7 @@ impl Interpreter {
                             match advance_loop_fast_state(state, code, &mut regs, &mut pc, *dst) {
                                 LoopFastOutcome::Advanced => {}
                                 LoopFastOutcome::Exhausted => pc = jump_pc!(*offset),
-                                LoopFastOutcome::Error(error) => vm_try!(Err(*error)),
+                                LoopFastOutcome::Error(error) => vm_try!(Err(error)),
                                 LoopFastOutcome::UserDefined => {
                                     let cached = &mut iter_next_cache[*slot as usize];
                                     match vm_try!(self.exec_for_iter_user(state, cached)) {

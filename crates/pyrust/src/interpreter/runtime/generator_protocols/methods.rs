@@ -51,7 +51,7 @@ impl Interpreter {
                 return self.make_async_gen_asend(
                     &receiver,
                     None,
-                    Some(PyError::Raised(exc_val)),
+                    Some(PyError::raised(exc_val)),
                     false,
                 );
             }
@@ -135,7 +135,7 @@ impl Interpreter {
                     &mut no_memo_insert,
                     None,
                 )?
-                .ok_or_else(|| PyError::Runtime("provider __copy__ unavailable".to_string()))
+                .ok_or_else(|| PyError::runtime("provider __copy__ unavailable".to_string()))
             }
             // Issue #2920: the built-in iterators' remaining-element count.
             // The iteration domain owns the per-cursor arithmetic; this arm
@@ -551,7 +551,7 @@ impl Interpreter {
         }
         let frame = borrow
             .downcast_mut::<GeneratorFrame>()
-            .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("invalid generator state".to_string()))?;
         self.close_generator_frame(frame)
     }
 
@@ -683,7 +683,7 @@ impl Interpreter {
             // current suspension point. The step driver handles either a
             // caught exception or propagation and completes the wrapper.
             if let Some(asend) = borrow.downcast_mut::<AsyncGenASend>() {
-                asend.throw_exc = Some(PyError::Raised(exc_val));
+                asend.throw_exc = Some(PyError::raised(exc_val));
                 drop(borrow);
                 return self.step_async_gen_asend(&state_rc, Value::none(), false);
             }
@@ -715,7 +715,7 @@ impl Interpreter {
         }
         let frame = borrow
             .downcast_mut::<GeneratorFrame>()
-            .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("invalid generator state".to_string()))?;
         if frame.done {
             if frame.is_coroutine && !frame.is_async_generator() {
                 return Err(pyrust_core::runtime_err!(
@@ -724,10 +724,10 @@ impl Interpreter {
             }
             // throw() on an exhausted generator re-raises the exception
             // immediately (CPython behaviour).
-            return Err(PyError::Raised(exc_val));
+            return Err(PyError::raised(exc_val));
         }
 
-        let inject = PyError::Raised(exc_val);
+        let inject = PyError::raised(exc_val);
         match self.resume_generator_with_exc(frame, Some(inject), Value::none()) {
             // Generator caught the injected exception and yielded.
             Ok(v) => Ok(v),
@@ -801,7 +801,7 @@ impl Interpreter {
         }
         let frame = borrow
             .downcast_mut::<GeneratorFrame>()
-            .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("invalid generator state".to_string()))?;
 
         if frame.done {
             if frame.is_coroutine && !frame.is_async_generator() {
@@ -811,7 +811,7 @@ impl Interpreter {
             }
             // Exhausted generator: StopIteration() with no args → .value is None.
             let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
-                PyError::Raised(instantiate_exception(cls, vec![]))
+                PyError::raised(instantiate_exception(cls, vec![]))
             } else {
                 pyrust_core::py_err!("StopIteration", String::new())
             };

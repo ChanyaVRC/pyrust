@@ -51,7 +51,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(BISECT_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("bisect: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("bisect: exec namespace not a dict".into()))?;
     for name in BISECT_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             module

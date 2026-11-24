@@ -183,7 +183,7 @@ impl BuiltinTypeOps for InstanceDictOps {
 
     fn get_item(&self, state: &BuiltinState, key: &Value) -> Result<Value> {
         let s = borrow_state(state)
-            .ok_or_else(|| PyError::Runtime("internal: bad instance_dict state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad instance_dict state".to_string()))?;
         // Non-string keys are never present in the instance attrs map (which
         // stores only string keys).  CPython raises KeyError (not TypeError)
         // when a non-string key is absent from a dict — match that behaviour.
@@ -202,7 +202,7 @@ impl BuiltinTypeOps for InstanceDictOps {
 
     fn set_item(&self, state: &BuiltinState, key: &Value, value: Value) -> Result<()> {
         let s = borrow_state(state)
-            .ok_or_else(|| PyError::Runtime("internal: bad instance_dict state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad instance_dict state".to_string()))?;
         let key_str = key_as_str(key)?.to_string();
         s.instance.borrow_mut().attrs.insert_inline(key_str, value);
         Ok(())
@@ -210,7 +210,7 @@ impl BuiltinTypeOps for InstanceDictOps {
 
     fn delete_item(&self, state: &BuiltinState, key: &Value) -> Result<()> {
         let s = borrow_state(state)
-            .ok_or_else(|| PyError::Runtime("internal: bad instance_dict state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad instance_dict state".to_string()))?;
         // Non-string keys are never present; CPython raises KeyError (not
         // TypeError) for missing keys regardless of key type.
         let key_str = match key.kind() {
@@ -228,7 +228,7 @@ impl BuiltinTypeOps for InstanceDictOps {
 
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
         let s = borrow_state(state)
-            .ok_or_else(|| PyError::Runtime("internal: bad instance_dict state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad instance_dict state".to_string()))?;
         let key_str = match item.kind() {
             ValueKind::Str(k) => k.to_string(),
             _ => return Ok(false),
@@ -275,7 +275,7 @@ impl BuiltinTypeOps for InstanceDictOps {
         kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
         let s = borrow_state(state)
-            .ok_or_else(|| PyError::Runtime("internal: bad instance_dict state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad instance_dict state".to_string()))?;
         match method {
             // Dunder methods delegate to the same write-through paths as the
             // operator forms so `o.__dict__.__setitem__('x', 1)` /

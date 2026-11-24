@@ -62,7 +62,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(TIME_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("time: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("time: exec namespace not a dict".into()))?;
     for name in TIME_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             if let ValueKind::PyClass(class) = val.kind() {
@@ -86,7 +86,7 @@ fn collections_namedtuple(interp: &mut Interpreter) -> Result<Value> {
     {
         return Ok(v);
     }
-    Err(PyError::Runtime(
+    Err(PyError::runtime(
         "time: collections.namedtuple not available".into(),
     ))
 }
@@ -534,7 +534,7 @@ fn struct_time_class(interp: &mut Interpreter) -> Result<Value> {
     {
         return Ok(v);
     }
-    Err(PyError::Runtime("time: struct_time not loaded".into()))
+    Err(PyError::runtime("time: struct_time not loaded".into()))
 }
 
 /// Convert a `struct_time` (or any other `tuple` / `tuple` subclass) into a

@@ -20,7 +20,7 @@ pub(crate) fn try_dict_insert_primitive_fast(
                 deferred = Some((key, value));
             }
         })
-        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
     Ok(deferred)
 }
 
@@ -124,7 +124,7 @@ impl Interpreter {
         } else {
             receiver
                 .dict_prepare_python_insert(&key)
-                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
             (key, value)
         };
         let activate_hash_index = receiver
@@ -142,7 +142,7 @@ impl Interpreter {
         if activate_hash_index {
             receiver
                 .dict_ensure_python_hash_index()
-                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
         }
         let existing = self.dict_lookup(receiver, &key)?;
         receiver
@@ -157,7 +157,7 @@ impl Interpreter {
                     dict.insert(key, value);
                 }
             })
-            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
         Ok(())
     }
 
@@ -271,7 +271,7 @@ impl Interpreter {
         if let Some(probe) = pyrust_core::ValueKeyRef::try_new(&key) {
             let may_have_dynamic = receiver
                 .dict_with(|dict| dict.may_have_dynamic_key())
-                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
             if !may_have_dynamic {
                 let needs_alloc_or_rc = matches!(
                     key.kind(),

@@ -13,14 +13,16 @@ pub(crate) fn is_sequence_iter_terminator(_interp: &Interpreter, err: &PyError) 
         return true;
     }
 
-    match err {
-        // PyError::Named is the VM-internal raise shape that pre-dates
+    match err.kind() {
+        // PyErrorKind::Named is the VM-internal raise shape that pre-dates
         // the PyInstance-backed exception path.  Match the canonical
         // built-in name directly — VM-internal raises never come from a user
         // subclass.
-        PyError::Named(cls, _) => cls == "IndexError",
-        PyError::Class(cls, _) => class_is_builtin_exception_subclass(cls, "IndexError"),
-        PyError::Raised(exc) => match exc.kind() {
+        pyrust_core::PyErrorKind::Named(cls, _) => cls == "IndexError",
+        pyrust_core::PyErrorKind::Class(cls, _) => {
+            class_is_builtin_exception_subclass(cls, "IndexError")
+        }
+        pyrust_core::PyErrorKind::Raised(exc) => match exc.kind() {
             ValueKind::PyInstance(inst) => {
                 class_is_builtin_exception_subclass(&inst.borrow().class, "IndexError")
             }

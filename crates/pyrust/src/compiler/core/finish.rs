@@ -7,7 +7,7 @@ impl Compiler {
             if self.is_syntax_error {
                 return Err(PyError::named("SyntaxError", msg));
             } else {
-                return Err(PyError::Runtime(msg));
+                return Err(PyError::runtime(msg));
             }
         }
         let num_regs = if self.max_reg >= self.base_temp || self.base_temp == 0 {
@@ -18,7 +18,7 @@ impl Compiler {
         // Guard against pathological register counts that would OOM at runtime.
         // Each register slot is one Option<Value>, so 1M slots ~= 8 MB per call frame.
         if num_regs > MAX_FRAME_REGS {
-            return Err(PyError::Runtime(format!(
+            return Err(PyError::runtime(format!(
                 "function uses too many registers ({num_regs}); max is {MAX_FRAME_REGS}"
             )));
         }

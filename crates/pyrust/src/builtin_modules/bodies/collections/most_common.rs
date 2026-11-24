@@ -161,7 +161,7 @@ fn heap_push(interp: &mut Interpreter, heap: &mut Vec<Entry>, entry: Entry) -> R
 fn heap_pop(interp: &mut Interpreter, heap: &mut Vec<Entry>) -> Result<Entry> {
     let last = heap
         .pop()
-        .ok_or_else(|| PyError::Runtime("internal: empty Counter heap".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: empty Counter heap".to_string()))?;
     if heap.is_empty() {
         return Ok(last);
     }

@@ -11,7 +11,7 @@ fn validate_underscores(raw: &[char], kind: &str) -> Result<()> {
     for &c in raw {
         if c == '_' {
             if prev_was_under {
-                return Err(PyError::Lex(format!("invalid {kind} literal")));
+                return Err(PyError::lex(format!("invalid {kind} literal")));
             }
             prev_was_under = true;
         } else {
@@ -19,7 +19,7 @@ fn validate_underscores(raw: &[char], kind: &str) -> Result<()> {
         }
     }
     if prev_was_under {
-        return Err(PyError::Lex(format!("invalid {kind} literal")));
+        return Err(PyError::lex(format!("invalid {kind} literal")));
     }
     Ok(())
 }
@@ -41,7 +41,7 @@ fn validate_decimal_underscores(raw: &[char]) -> Result<()> {
             let prev_digit = i > 0 && raw[i - 1].is_ascii_digit();
             let next_digit = raw.get(i + 1).is_some_and(|n| n.is_ascii_digit());
             if !prev_digit || !next_digit {
-                return Err(PyError::Lex("invalid decimal literal".to_string()));
+                return Err(PyError::lex("invalid decimal literal".to_string()));
             }
         }
     }
@@ -56,7 +56,7 @@ fn validate_decimal_underscores(raw: &[char]) -> Result<()> {
 /// `SyntaxError`.  Underscore placement is assumed already validated.
 fn check_leading_zero(raw: &[char]) -> Result<()> {
     if raw.first() == Some(&'0') && raw.iter().any(|&c| c.is_ascii_digit() && c != '0') {
-        return Err(PyError::Lex(
+        return Err(PyError::lex(
             "leading zeros in decimal integer literals are not permitted; \
              use an 0o prefix for octal integers"
                 .to_string(),
@@ -88,7 +88,7 @@ fn lex_leading_dot_float(chars: &[char], start: usize) -> Result<(Token, usize)>
     let text: String = raw.iter().filter(|&&c| c != '_').collect();
     let val = text
         .parse::<f64>()
-        .map_err(|_| PyError::Lex(format!("invalid float '{text}'")))?;
+        .map_err(|_| PyError::lex(format!("invalid float '{text}'")))?;
     // Imaginary suffix: .5j
     if matches!(chars.get(pos), Some(&'j') | Some(&'J')) {
         return Ok((Token::Imag(val), pos + 1));
@@ -110,7 +110,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         }
         let raw_hex = &chars[hex_start..pos];
         if raw_hex.is_empty() || raw_hex.iter().all(|&c| c == '_') {
-            return Err(PyError::Lex("invalid hexadecimal literal".to_string()));
+            return Err(PyError::lex("invalid hexadecimal literal".to_string()));
         }
         validate_underscores(raw_hex, "hexadecimal")?;
         let text: String = raw_hex.iter().filter(|&&c| c != '_').collect();
@@ -119,7 +119,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
             Err(_) => {
                 // Overflow: parse as BigInt and store decimal representation.
                 let big = BigInt::parse_bytes(text.as_bytes(), 16)
-                    .ok_or_else(|| PyError::Lex("invalid hexadecimal literal".to_string()))?;
+                    .ok_or_else(|| PyError::lex("invalid hexadecimal literal".to_string()))?;
                 Ok((Token::BigInt(big.to_string()), pos))
             }
         };
@@ -133,7 +133,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         }
         let raw_oct = &chars[oct_start..pos];
         if raw_oct.is_empty() || raw_oct.iter().all(|&c| c == '_') {
-            return Err(PyError::Lex("invalid octal literal".to_string()));
+            return Err(PyError::lex("invalid octal literal".to_string()));
         }
         validate_underscores(raw_oct, "octal")?;
         let text: String = raw_oct.iter().filter(|&&c| c != '_').collect();
@@ -141,7 +141,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
             Ok(val) => Ok((Token::Int(val), pos)),
             Err(_) => {
                 let big = BigInt::parse_bytes(text.as_bytes(), 8)
-                    .ok_or_else(|| PyError::Lex("invalid octal literal".to_string()))?;
+                    .ok_or_else(|| PyError::lex("invalid octal literal".to_string()))?;
                 Ok((Token::BigInt(big.to_string()), pos))
             }
         };
@@ -155,7 +155,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         }
         let raw_bin = &chars[bin_start..pos];
         if raw_bin.is_empty() || raw_bin.iter().all(|&c| c == '_') {
-            return Err(PyError::Lex("invalid binary literal".to_string()));
+            return Err(PyError::lex("invalid binary literal".to_string()));
         }
         validate_underscores(raw_bin, "binary")?;
         let text: String = raw_bin.iter().filter(|&&c| c != '_').collect();
@@ -163,7 +163,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
             Ok(val) => Ok((Token::Int(val), pos)),
             Err(_) => {
                 let big = BigInt::parse_bytes(text.as_bytes(), 2)
-                    .ok_or_else(|| PyError::Lex("invalid binary literal".to_string()))?;
+                    .ok_or_else(|| PyError::lex("invalid binary literal".to_string()))?;
                 Ok((Token::BigInt(big.to_string()), pos))
             }
         };
@@ -208,7 +208,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         let text: String = raw.iter().filter(|&&c| c != '_').collect();
         let val = text
             .parse::<f64>()
-            .map_err(|_| PyError::Lex(format!("invalid float '{text}'")))?;
+            .map_err(|_| PyError::lex(format!("invalid float '{text}'")))?;
         // Imaginary suffix: 3.14j
         if matches!(chars.get(pos), Some(&'j') | Some(&'J')) {
             return Ok((Token::Imag(val), pos + 1));
@@ -232,7 +232,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
                 let text: String = raw.iter().filter(|&&c| c != '_').collect();
                 let val = text
                     .parse::<f64>()
-                    .map_err(|_| PyError::Lex(format!("invalid float '{text}'")))?;
+                    .map_err(|_| PyError::lex(format!("invalid float '{text}'")))?;
                 if matches!(chars.get(pos), Some(&'j') | Some(&'J')) {
                     return Ok((Token::Imag(val), pos + 1));
                 }
@@ -247,7 +247,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
             let text: String = raw_imag.iter().filter(|&&c| c != '_').collect();
             let val = text
                 .parse::<f64>()
-                .map_err(|_| PyError::Lex(format!("invalid imaginary literal '{text}j'")))?;
+                .map_err(|_| PyError::lex(format!("invalid imaginary literal '{text}j'")))?;
             return Ok((Token::Imag(val), pos + 1));
         }
         let raw_dec = &chars[start..int_end];
@@ -262,11 +262,11 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
                 // policy before exec/eval source parsing; power-of-two literal
                 // forms returned above remain exempt.
                 pyrust_core::check_int_parse_digits(&text, 10).map_err(|error| {
-                    let message = match error {
-                        PyError::Named(_, message) => message,
+                    let message = match error.into_kind() {
+                        crate::error::PyErrorKind::Named(_, message) => message,
                         other => other.to_string(),
                     };
-                    PyError::Lex(format!(
+                    PyError::lex(format!(
                         "{message} - Consider hexadecimal for huge integer literals \
                          to avoid decimal conversion limits."
                     ))
@@ -274,7 +274,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
                 // Overflow: try parsing as an arbitrary-precision integer.
                 let big = text
                     .parse::<BigInt>()
-                    .map_err(|_| PyError::Lex(format!("invalid integer '{text}'")))?;
+                    .map_err(|_| PyError::lex(format!("invalid integer '{text}'")))?;
                 Ok((Token::BigInt(big.to_string()), pos))
             }
         }

@@ -57,7 +57,7 @@ impl Interpreter {
                 ValueKind::PyModule(module) => module.borrow().get_attr_value(helper_name),
                 _ => None,
             })
-            .ok_or_else(|| PyError::Runtime(format!("typing.{helper_name} unavailable")))?;
+            .ok_or_else(|| PyError::runtime(format!("typing.{helper_name} unavailable")))?;
 
         self.call_function_expanded(helper, args).map(Some)
     }
@@ -156,6 +156,6 @@ impl Interpreter {
                 ValueKind::PyModule(module) => module.borrow().get_attr_value(name),
                 _ => None,
             })
-            .ok_or_else(|| PyError::Runtime(format!("typing.{name} unavailable")))
+            .ok_or_else(|| PyError::runtime(format!("typing.{name} unavailable")))
     }
 }

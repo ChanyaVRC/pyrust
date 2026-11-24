@@ -154,7 +154,7 @@ impl Interpreter {
                     }
                     let frame = borrow
                         .downcast_mut::<GeneratorFrame>()
-                        .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+                        .ok_or_else(|| PyError::runtime("invalid generator state".to_string()))?;
                     if frame.done {
                         break;
                     }
@@ -240,7 +240,7 @@ impl Interpreter {
                 collect_steps!(step_bigrange_iter);
             }
 
-            Err(PyError::Runtime("invalid generator state".to_string()))
+            Err(PyError::runtime("invalid generator state".to_string()))
         } else if let ValueKind::PyInstance(instance) = val.kind() {
             // CPython fallback order is `__iter__` first, then the legacy
             // sequence-iter protocol via `__getitem__`. Having only `__next__`

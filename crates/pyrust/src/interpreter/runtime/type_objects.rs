@@ -181,7 +181,7 @@ fn syntax_object_name(value: &Value, opcode: &str) -> Result<String> {
     value
         .as_str()
         .map(str::to_owned)
-        .ok_or_else(|| PyError::Runtime(format!("{opcode}: name must be a string constant")))
+        .ok_or_else(|| PyError::runtime(format!("{opcode}: name must be a string constant")))
 }
 
 /// Construct a TypeVar from the constant operand of `MakeTypeVar`.

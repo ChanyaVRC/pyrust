@@ -4,7 +4,7 @@
 #[inline(always)]
 fn vm_pool_get<'a, T>(pool: &'a [T], idx: u16, tag: &str) -> Result<&'a T> {
     pool.get(idx as usize).ok_or_else(|| {
-        PyError::Runtime(format!(
+        PyError::runtime(format!(
             "bytecode error: {} index {} out of range (pool size {})",
             tag,
             idx,
@@ -619,7 +619,7 @@ impl Interpreter {
         let displayhook = match self.get_attr(&sys_mod, "displayhook") {
             Ok(v) => v,
             Err(ref e) if e.class_name_is("AttributeError") => {
-                return Err(PyError::Runtime("lost sys.displayhook".to_string()));
+                return Err(PyError::runtime("lost sys.displayhook".to_string()));
             }
             Err(e) => return Err(e),
         };

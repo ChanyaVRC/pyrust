@@ -39,7 +39,7 @@ fn write_to_sys_stream(
     let stream = interp.get_attr(&sys_mod, stream_name)?;
     if stream.is_none() {
         if require_stream {
-            return Err(PyError::Runtime(format!("lost sys.{stream_name}")));
+            return Err(PyError::runtime(format!("lost sys.{stream_name}")));
         }
         return Ok(());
     }

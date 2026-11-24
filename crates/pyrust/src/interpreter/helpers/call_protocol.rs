@@ -473,7 +473,7 @@ pub(crate) fn invoke_class_method(
                         .filter(|backing| !matches!(backing.kind(), ValueKind::PyInstance(_)))
                     else {
                         let class_name = inst.borrow().class.borrow().name.clone();
-                        return Err(PyError::Runtime(format!(
+                        return Err(PyError::runtime(format!(
                             "'{class_name}' object is missing internal builtin backing for '{method}'"
                         )));
                     };
@@ -555,7 +555,7 @@ pub(crate) fn invoke_class_method(
                     {
                         return interp.call_function_expanded(bound, args);
                     }
-                    return Err(PyError::Runtime(format!(
+                    return Err(PyError::runtime(format!(
                         "internal: builtin method '{name}' not in registry"
                     )));
                 }

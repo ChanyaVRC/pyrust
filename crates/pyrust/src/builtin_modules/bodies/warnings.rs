@@ -299,7 +299,7 @@ fn context_warning_message_class(
 
     let context_class = Rc::clone(&inst.borrow().class);
     let warning_message = warning_message_class_for_catch(&context_class).ok_or_else(|| {
-        PyError::Runtime(format!(
+        PyError::runtime(format!(
             "internal: {fn_name}() cannot resolve its warnings module generation",
         ))
     })?;
@@ -336,7 +336,7 @@ fn make_warning_message(
 fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
         Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
-        _ => Err(PyError::Runtime(format!(
+        _ => Err(PyError::runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
     }
@@ -344,7 +344,7 @@ fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyI
 
 fn built_in_warning_class(name: &str) -> Result<Rc<RefCell<PyClass>>> {
     lookup_exc_class(name)
-        .ok_or_else(|| PyError::Runtime(format!("built-in exception '{name}' is not defined")))
+        .ok_or_else(|| PyError::runtime(format!("built-in exception '{name}' is not defined")))
 }
 
 fn positional_or_keyword(
@@ -519,7 +519,7 @@ pyrust_module! {
                 // The warning was already constructed above.  Raising that
                 // exact object preserves user-class identity, custom
                 // __init__, and (when passed in) object identity.
-                return Err(PyError::Raised(warning_instance));
+                return Err(PyError::raised(warning_instance));
             }
             _ => {
                 // "default", "always", "once", "module" — emit the warning.

@@ -222,7 +222,7 @@ impl BuiltinTypeOps for MappingProxyOps {
 
     fn get_item(&self, state: &BuiltinState, key: &Value) -> Result<Value> {
         let src = borrow_source(state)
-            .ok_or_else(|| PyError::Runtime("internal: bad mappingproxy state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad mappingproxy state".to_string()))?;
         match &src {
             MappingProxySource::Class(cls) => {
                 let key_str = match key.kind() {
@@ -246,7 +246,7 @@ impl BuiltinTypeOps for MappingProxyOps {
                     .cloned()
                     .ok_or_else(|| PyError::key_error(key.clone()))
             }
-            MappingProxySource::Object(_) => Err(PyError::Runtime(
+            MappingProxySource::Object(_) => Err(PyError::runtime(
                 "internal: mappingproxy object read requires interpreter dispatch".to_string(),
             )),
         }
@@ -257,7 +257,7 @@ impl BuiltinTypeOps for MappingProxyOps {
 
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
         let src = borrow_source(state)
-            .ok_or_else(|| PyError::Runtime("internal: bad mappingproxy state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad mappingproxy state".to_string()))?;
         match &src {
             MappingProxySource::Class(cls) => {
                 let key_str = match item.kind() {
@@ -276,7 +276,7 @@ impl BuiltinTypeOps for MappingProxyOps {
                     ),
                 )),
             },
-            MappingProxySource::Object(_) => Err(PyError::Runtime(
+            MappingProxySource::Object(_) => Err(PyError::runtime(
                 "internal: mappingproxy object membership requires interpreter dispatch"
                     .to_string(),
             )),
@@ -299,9 +299,9 @@ impl BuiltinTypeOps for MappingProxyOps {
     ) -> Result<Value> {
         validate_method_call(method, args.len(), !kwargs.is_empty())?;
         let src = borrow_source(state)
-            .ok_or_else(|| PyError::Runtime("internal: bad mappingproxy state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad mappingproxy state".to_string()))?;
         if matches!(&src, MappingProxySource::Object(_)) {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "internal: mappingproxy object method requires interpreter dispatch".to_string(),
             ));
         }

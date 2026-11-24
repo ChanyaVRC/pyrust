@@ -32,7 +32,7 @@ pub(crate) fn native_iterator_reduce(
         return reversed_iterator_reduce(value);
     }
     let ValueKind::Generator(state) = value.kind() else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "native iterator lost its state".to_string(),
         ));
     };
@@ -40,7 +40,7 @@ pub(crate) fn native_iterator_reduce(
     let frame = borrow
         .downcast_ref::<NativeIterFrame>()
         .filter(|frame| frame.class == Some(expected))
-        .ok_or_else(|| PyError::Runtime("native iterator class mismatch".to_string()))?;
+        .ok_or_else(|| PyError::runtime("native iterator class mismatch".to_string()))?;
 
     match expected {
         NativeIteratorClass::Bytearray => match &frame.source {
@@ -53,7 +53,7 @@ pub(crate) fn native_iterator_reduce(
                 Value::builtin_function("iter"),
                 Value::tuple(vec![Value::tuple(Vec::new())]),
             ])),
-            _ => Err(PyError::Runtime(
+            _ => Err(PyError::runtime(
                 "bytearray iterator lost its source".to_string(),
             )),
         },
@@ -62,7 +62,7 @@ pub(crate) fn native_iterator_reduce(
                 data, remaining, ..
             } = &frame.source
             else {
-                return Err(PyError::Runtime(
+                return Err(PyError::runtime(
                     "deque iterator lost its source".to_string(),
                 ));
             };
@@ -73,7 +73,7 @@ pub(crate) fn native_iterator_reduce(
                 .guard
                 .as_ref()
                 .map(|guard| guard.container.clone())
-                .ok_or_else(|| PyError::Runtime("deque iterator lost its owner".to_string()))?;
+                .ok_or_else(|| PyError::runtime("deque iterator lost its owner".to_string()))?;
             Ok(Value::tuple(vec![
                 Value::py_class(expected.singleton()),
                 Value::tuple(vec![owner, value_from_bigint(PyBigInt::from(reduce_index))]),
@@ -90,7 +90,7 @@ pub(crate) fn native_iterator_reduce(
 /// requested position to the buffer's current length.
 pub(crate) fn native_bytearray_iterator_setstate(value: &Value, position: usize) -> Result<Value> {
     let ValueKind::Generator(state) = value.kind() else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "native iterator lost its state".to_string(),
         ));
     };
@@ -98,7 +98,7 @@ pub(crate) fn native_bytearray_iterator_setstate(value: &Value, position: usize)
     let frame = borrow
         .downcast_mut::<NativeIterFrame>()
         .filter(|frame| frame.class == Some(NativeIteratorClass::Bytearray))
-        .ok_or_else(|| PyError::Runtime("native iterator class mismatch".to_string()))?;
+        .ok_or_else(|| PyError::runtime("native iterator class mismatch".to_string()))?;
     if let NativeIterSource::Bytearray { data, .. } = &frame.source {
         frame.pos = position.min(data.borrow().len());
     }
@@ -168,7 +168,7 @@ pub(crate) fn restore_native_iterator_position(value: &Value, position: usize) -
         } else {
             let advanced = i128::from(range.cur) + i128::from(range.step) * consumed;
             range.cur = i64::try_from(advanced)
-                .map_err(|_| PyError::Runtime("range iterator position overflow".into()))?;
+                .map_err(|_| PyError::runtime("range iterator position overflow".into()))?;
         }
         return Ok(true);
     }
@@ -247,9 +247,9 @@ impl NativeIterFrame {
             let guard = self
                 .guard
                 .as_ref()
-                .ok_or_else(|| PyError::Runtime("deque iterator lost its owner".to_string()))?;
+                .ok_or_else(|| PyError::runtime("deque iterator lost its owner".to_string()))?;
             let GuardVersion::DequeState { counter, .. } = &guard.kind else {
-                return Err(PyError::Runtime(
+                return Err(PyError::runtime(
                     "deque iterator lost its mutation state".to_string(),
                 ));
             };

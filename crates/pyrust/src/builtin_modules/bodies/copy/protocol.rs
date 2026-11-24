@@ -36,8 +36,8 @@ pub(super) fn raise_uncopyable_error(
     let kind = if is_deep { "deep" } else { "shallow" };
     let message = format!("un({kind})copyable object of type {cls_repr}");
     match current_copy_error_class_value().kind() {
-        ValueKind::PyClass(err_cls) => PyError::Class(Rc::clone(err_cls), message),
-        _ => PyError::Runtime(message),
+        ValueKind::PyClass(err_cls) => PyError::class(Rc::clone(err_cls), message),
+        _ => PyError::runtime(message),
     }
 }
 

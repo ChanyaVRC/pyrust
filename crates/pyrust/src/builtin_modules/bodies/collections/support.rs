@@ -9,10 +9,10 @@
 fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
     let first = args
         .first()
-        .ok_or_else(|| PyError::Runtime(format!("internal: {fn_name}() called without self")))?;
+        .ok_or_else(|| PyError::runtime(format!("internal: {fn_name}() called without self")))?;
     match first.value.kind() {
         ValueKind::PyInstance(rc) => Ok(Rc::clone(rc)),
-        _ => Err(PyError::Runtime(format!(
+        _ => Err(PyError::runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
     }

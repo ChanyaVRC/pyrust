@@ -20,13 +20,13 @@ fn decode_utf8_with_errors(bytes: &[u8], errors: &str, codec_name: &str) -> Resu
                     "invalid start byte"
                 }
             };
-            Err(PyError::UnicodeDecodeError {
+            Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
                 encoding: codec_name.to_string(),
                 object: bytes.to_vec(),
                 start,
                 end,
                 reason: reason.to_string(),
-            })
+            }))
         }
         "ignore" => Ok(Value::string(bytes_decode_utf8_ignore(bytes))),
         "replace" => Ok(Value::string(String::from_utf8_lossy(bytes).as_ref())),
@@ -45,13 +45,13 @@ fn decode_ascii_with_errors(bytes: &[u8], errors: &str) -> Result<Value> {
     match errors {
         "strict" => {
             let i = bytes.iter().position(|&b| b > 0x7F).unwrap();
-            Err(PyError::UnicodeDecodeError {
+            Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
                 encoding: "ascii".to_string(),
                 object: bytes.to_vec(),
                 start: i,
                 end: i + 1,
                 reason: "ordinal not in range(128)".to_string(),
-            })
+            }))
         }
         "ignore" => {
             let s: String = bytes
@@ -266,13 +266,13 @@ fn decode_utf16(
                 return Ok(Value::string(&s));
             }
             "strict" | "surrogateescape" => {
-                return Err(PyError::UnicodeDecodeError {
+                return Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
                     encoding: codec_name.to_string(),
                     object: original_bytes.to_vec(),
                     start: trunc_start,
                     end: trunc_end,
                     reason: "truncated data".to_string(),
-                });
+                }));
             }
             _ => {
                 return Err(PyError::named(
@@ -359,13 +359,15 @@ fn decode_utf16_units_to_string(
                                     format!("unknown error handler name '{errors}'"),
                                 ));
                             }
-                            return Err(PyError::UnicodeDecodeError {
-                                encoding: codec_name.to_string(),
-                                object: raw_bytes.to_vec(),
-                                start: bom_offset + i * 2,
-                                end: bom_offset + i * 2 + 2,
-                                reason: "unexpected end of data".to_string(),
-                            });
+                            return Err(PyError::new(
+                                pyrust_core::PyErrorKind::UnicodeDecodeError {
+                                    encoding: codec_name.to_string(),
+                                    object: raw_bytes.to_vec(),
+                                    start: bom_offset + i * 2,
+                                    end: bom_offset + i * 2 + 2,
+                                    reason: "unexpected end of data".to_string(),
+                                },
+                            ));
                         }
                     },
                     // A non-low-surrogate unit follows the high surrogate.
@@ -455,13 +457,15 @@ fn decode_utf16_units_to_string(
                                     format!("unknown error handler name '{errors}'"),
                                 ));
                             }
-                            return Err(PyError::UnicodeDecodeError {
-                                encoding: codec_name.to_string(),
-                                object: raw_bytes.to_vec(),
-                                start: bom_offset + i * 2,
-                                end: bom_offset + i * 2 + 2,
-                                reason: "illegal UTF-16 surrogate".to_string(),
-                            });
+                            return Err(PyError::new(
+                                pyrust_core::PyErrorKind::UnicodeDecodeError {
+                                    encoding: codec_name.to_string(),
+                                    object: raw_bytes.to_vec(),
+                                    start: bom_offset + i * 2,
+                                    end: bom_offset + i * 2 + 2,
+                                    reason: "illegal UTF-16 surrogate".to_string(),
+                                },
+                            ));
                         }
                     },
                 }
@@ -485,13 +489,13 @@ fn decode_utf16_units_to_string(
                             format!("unknown error handler name '{errors}'"),
                         ));
                     }
-                    return Err(PyError::UnicodeDecodeError {
+                    return Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
                         encoding: codec_name.to_string(),
                         object: raw_bytes.to_vec(),
                         start: bom_offset + i * 2,
                         end: bom_offset + i * 2 + 2,
                         reason: "illegal encoding".to_string(),
-                    });
+                    }));
                 }
             },
             // BMP character.
@@ -581,13 +585,13 @@ fn decode_utf32(
                             format!("unknown error handler name '{errors}'"),
                         ));
                     }
-                    return Err(PyError::UnicodeDecodeError {
+                    return Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
                         encoding: codec_name.to_string(),
                         object: original_bytes.to_vec(),
                         start: bom_offset + i * 4,
                         end: bom_offset + i * 4 + 4,
                         reason: "code point not in range(0x110000)".to_string(),
-                    });
+                    }));
                 }
             },
         }
@@ -610,13 +614,13 @@ fn decode_utf32(
                         format!("unknown error handler name '{errors}'"),
                     ));
                 }
-                return Err(PyError::UnicodeDecodeError {
+                return Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
                     encoding: codec_name.to_string(),
                     object: original_bytes.to_vec(),
                     start: bom_offset + n,
                     end: bom_offset + bytes.len(),
                     reason: "truncated data".to_string(),
-                });
+                }));
             }
         }
     }

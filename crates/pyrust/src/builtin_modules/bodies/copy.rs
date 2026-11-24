@@ -48,23 +48,23 @@ pub(crate) fn inject_python_members(
     let helper_shallow = ns
         .dict_with(|dict| dict.get(&PyKey::str_from("_reconstruct_shallow")).cloned())
         .flatten()
-        .ok_or_else(|| PyError::Runtime("copy: shallow reconstruction helper missing".into()))?;
+        .ok_or_else(|| PyError::runtime("copy: shallow reconstruction helper missing".into()))?;
     let helper_deep = ns
         .dict_with(|dict| dict.get(&PyKey::str_from("_reconstruct_deep")).cloned())
         .flatten()
-        .ok_or_else(|| PyError::Runtime("copy: deep reconstruction helper missing".into()))?;
+        .ok_or_else(|| PyError::runtime("copy: deep reconstruction helper missing".into()))?;
     let native_copy = module
         .borrow()
         .attrs
         .get("copy")
         .cloned()
-        .ok_or_else(|| PyError::Runtime("copy: native copy function missing".into()))?;
+        .ok_or_else(|| PyError::runtime("copy: native copy function missing".into()))?;
     let native_deepcopy = module
         .borrow()
         .attrs
         .get("deepcopy")
         .cloned()
-        .ok_or_else(|| PyError::Runtime("copy: native deepcopy function missing".into()))?;
+        .ok_or_else(|| PyError::runtime("copy: native deepcopy function missing".into()))?;
     let copy = pyrust_builtins::native_builtin_callable::native_generation_builtin(
         native_copy,
         helper_shallow,

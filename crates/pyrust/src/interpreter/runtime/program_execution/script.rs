@@ -122,10 +122,11 @@ impl Interpreter {
         ) {
             r
         } else {
-            Err(PyError::Runtime("compilation failed".to_string()))
+            Err(PyError::runtime("compilation failed".to_string()))
         };
         // Intercept SystemExit so finally/with handlers run before the process exits.
-        if let Err(PyError::Raised(exc)) = &result
+        if let Err(err) = &result
+            && let pyrust_core::PyErrorKind::Raised(exc) = err.kind()
             && let ValueKind::PyInstance(inst) = exc.kind()
         {
             let class = Rc::clone(&inst.borrow().class);
@@ -172,7 +173,7 @@ impl Interpreter {
             ScriptErrorMode::PropagateImport,
             ModuleNamespaceStorage::SharedGlobals,
         )
-        .unwrap_or_else(|| Err(PyError::Runtime("compilation failed".to_string())))
+        .unwrap_or_else(|| Err(PyError::runtime("compilation failed".to_string())))
     }
 
     fn try_exec_vm_script_with_src(
@@ -366,7 +367,7 @@ impl Interpreter {
         }
         let sys = self.load_module("sys")?;
         let ValueKind::PyModule(module) = sys.kind() else {
-            return Err(PyError::Runtime("sys is not a module".to_string()));
+            return Err(PyError::runtime("sys is not a module".to_string()));
         };
         module.borrow_mut().insert_attr(
             "argv".to_string(),
@@ -586,7 +587,7 @@ impl Interpreter {
                     // raised value carries such a chain, derive the inner frames from
                     // it; otherwise fall back to the captured snapshot (raw `PyError`
                     // variants and never-caught exceptions keep the snapshot path).
-                    let tb_inner = if let PyError::Raised(exc_val) = e {
+                    let tb_inner = if let pyrust_core::PyErrorKind::Raised(exc_val) = e.kind() {
                         // `reraise_is_bare` survives to here only when the last
                         // re-raise was bare and no `except` consumed it (i.e. the
                         // exception is genuinely uncaught) — it then tells the
@@ -635,7 +636,7 @@ impl Interpreter {
                             // keeping outer caller frames.
                             let mut inner_frames = inner_frames;
                             if self.reraise_is_bare
-                                && matches!(e, PyError::Raised(v) if is_exception_group_value(v))
+                                && matches!(e.kind(), pyrust_core::PyErrorKind::Raised(v) if is_exception_group_value(v))
                             {
                                 if inner_frames.is_empty() {
                                     frames.clear();
@@ -666,19 +667,23 @@ impl Interpreter {
                             }
                         }
                     }
-                    let error_line = match e {
-                        PyError::Lex(s) => format!("Lex error: {s}"),
-                        PyError::Parse(s) => format!("Parse error: {s}"),
-                        PyError::Runtime(s) => format!("RuntimeError: {s}"),
+                    let error_line = match e.kind() {
+                        pyrust_core::PyErrorKind::Lex(s) => format!("Lex error: {s}"),
+                        pyrust_core::PyErrorKind::Parse(s) => format!("Parse error: {s}"),
+                        pyrust_core::PyErrorKind::Runtime(s) => format!("RuntimeError: {s}"),
                         // CPython omits the `: msg` suffix when the exception's
                         // message is empty (e.g. internal `StopIteration` from an
                         // exhausted iterator displays as `StopIteration`, not
                         // `StopIteration: `).
-                        PyError::Named(cls, s) if s.is_empty() => cls.to_string(),
-                        PyError::Named(cls, s) => format!("{cls}: {s}"),
-                        PyError::Class(cls, s) if s.is_empty() => cls.borrow().name.clone(),
-                        PyError::Class(cls, s) => format!("{}: {s}", cls.borrow().name),
-                        PyError::KeyError(key) => {
+                        pyrust_core::PyErrorKind::Named(cls, s) if s.is_empty() => cls.to_string(),
+                        pyrust_core::PyErrorKind::Named(cls, s) => format!("{cls}: {s}"),
+                        pyrust_core::PyErrorKind::Class(cls, s) if s.is_empty() => {
+                            cls.borrow().name.clone()
+                        }
+                        pyrust_core::PyErrorKind::Class(cls, s) => {
+                            format!("{}: {s}", cls.borrow().name)
+                        }
+                        pyrust_core::PyErrorKind::KeyError(key) => {
                             // The raw-key fast-path variant: dispatch the key's
                             // __repr__ like CPython's traceback printer (issue
                             // #2390 review); a raising dunder falls back to the
@@ -692,24 +697,24 @@ impl Interpreter {
                             };
                             format!("KeyError: {key_repr}")
                         }
-                        PyError::NameError {
+                        pyrust_core::PyErrorKind::NameError {
                             class_name,
                             message,
                             ..
                         } => {
                             format!("{class_name}: {message}")
                         }
-                        PyError::AttributeError { message, .. } => {
+                        pyrust_core::PyErrorKind::AttributeError { message, .. } => {
                             format!("AttributeError: {message}")
                         }
-                        PyError::ImportError {
+                        pyrust_core::PyErrorKind::ImportError {
                             class_name,
                             message,
                             ..
                         } => {
                             format!("{class_name}: {message}")
                         }
-                        PyError::OsError {
+                        pyrust_core::PyErrorKind::OsError {
                             class_name,
                             errno,
                             strerror,
@@ -722,7 +727,7 @@ impl Interpreter {
                                 format!("{class_name}: [Errno {errno}] {strerror}")
                             }
                         }
-                        PyError::UnicodeDecodeError {
+                        pyrust_core::PyErrorKind::UnicodeDecodeError {
                             encoding,
                             object,
                             start,
@@ -734,7 +739,7 @@ impl Interpreter {
                             );
                             format!("UnicodeDecodeError: {msg}")
                         }
-                        PyError::UnicodeEncodeError {
+                        pyrust_core::PyErrorKind::UnicodeEncodeError {
                             encoding,
                             object,
                             start,
@@ -746,7 +751,7 @@ impl Interpreter {
                             );
                             format!("UnicodeEncodeError: {msg}")
                         }
-                        PyError::Raised(value) => match value.kind() {
+                        pyrust_core::PyErrorKind::Raised(value) => match value.kind() {
                             ValueKind::PyInstance(inst) => {
                                 let class_name = inst.borrow().class.borrow().name.clone();
                                 // exception_str_with_dispatch handles KeyError (repr of
@@ -794,12 +799,12 @@ impl Interpreter {
                     // chained exception's line with the appropriate connecting
                     // banner ("The above exception was the direct cause of..."
                     // or "During handling of the above exception...").
-                    let chain_prefix = if let PyError::Raised(exc_val) = e {
+                    let chain_prefix = if let pyrust_core::PyErrorKind::Raised(exc_val) = e.kind() {
                         format_exc_chain_prefix(self, exc_val, &owned_filename, src)
                     } else {
                         String::new()
                     };
-                    let main_tb = if let PyError::Raised(exc_val) = e
+                    let main_tb = if let pyrust_core::PyErrorKind::Raised(exc_val) = e.kind()
                         && is_exception_group_value(exc_val)
                     {
                         format_exception_group_traceback(
@@ -833,7 +838,7 @@ impl Interpreter {
         // `PyError::Runtime` (without the "Runtime error: " prefix) so the
         // formatted traceback reaches `main`'s `eprintln!` unchanged.
         if let Some(tb) = maybe_tb {
-            return Some(Err(PyError::Runtime(tb)));
+            return Some(Err(PyError::runtime(tb)));
         }
         Some(vm_result.map(|_| ()))
     }

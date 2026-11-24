@@ -39,7 +39,7 @@ impl Parser {
                         name
                     }
                     other => {
-                        return Err(PyError::Parse(format!(
+                        return Err(PyError::parse(format!(
                             "expected attribute name after '.', found {other:?}"
                         )));
                     }
@@ -120,7 +120,7 @@ impl Parser {
         } else {
             // Plain index. If a comma follows, collect into a tuple key
             // (e.g. `a[b, c]` parses the same as `a[(b, c)]`).
-            let first = first.ok_or_else(|| PyError::Parse("empty subscript".to_string()))?;
+            let first = first.ok_or_else(|| PyError::parse("empty subscript".to_string()))?;
             let index = if self.is(&Token::Comma) {
                 let mut items = vec![first];
                 while self.is(&Token::Comma) {
@@ -178,7 +178,7 @@ impl Parser {
             } else if self.is(&Token::Star) {
                 self.bump();
                 if seen_keyword {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "positional argument follows keyword argument".to_string(),
                     ));
                 }
@@ -201,7 +201,7 @@ impl Parser {
                     });
                 } else {
                     if seen_keyword {
-                        return Err(PyError::Parse(
+                        return Err(PyError::parse(
                             "positional argument follows keyword argument".to_string(),
                         ));
                     }
@@ -232,7 +232,7 @@ impl Parser {
                 }
             } else {
                 if seen_keyword {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "positional argument follows keyword argument".to_string(),
                     ));
                 }
@@ -276,7 +276,7 @@ impl Parser {
             if let Some(name) = &a.name
                 && !seen_kw.insert(name.as_str())
             {
-                return Err(PyError::Parse(format!("keyword argument repeated: {name}")));
+                return Err(PyError::parse(format!("keyword argument repeated: {name}")));
             }
         }
         Ok(args)

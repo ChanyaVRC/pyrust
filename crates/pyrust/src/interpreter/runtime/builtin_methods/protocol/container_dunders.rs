@@ -281,7 +281,7 @@ impl Interpreter {
                 let other = args.pop().unwrap();
                 self.eval_binary(other, crate::ast::BinaryOp::Mod, receiver)
             }
-            other => Err(PyError::Runtime(format!(
+            other => Err(PyError::runtime(format!(
                 "internal: unhandled builtin protocol dunder '{other}'"
             ))),
         }

@@ -11,7 +11,7 @@ fn count_indent_chars(chars: &[char], start: usize) -> Result<usize> {
                 pos += 1;
             }
             Some(&'\t') => {
-                return Err(PyError::Lex(
+                return Err(PyError::lex(
                     "tabs are not supported; use spaces".to_string(),
                 ));
             }

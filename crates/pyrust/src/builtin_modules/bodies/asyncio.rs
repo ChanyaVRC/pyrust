@@ -87,7 +87,7 @@ pub(crate) fn inject_python_members(
         None,
     )?;
     let dict = ns.as_dict().ok_or_else(|| {
-        crate::error::PyError::Runtime("asyncio: exec namespace not a dict".into())
+        crate::error::PyError::runtime("asyncio: exec namespace not a dict".into())
     })?;
     for name in ASYNCIO_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
@@ -116,7 +116,7 @@ fn asyncio_attr(interp: &mut Interpreter, name: &str) -> Result<Value> {
     {
         return Ok(v);
     }
-    Err(PyError::Runtime(format!("asyncio: {name} not loaded")))
+    Err(PyError::runtime(format!("asyncio: {name} not loaded")))
 }
 
 pyrust_module! {
@@ -219,7 +219,7 @@ pyrust_module! {
     fn _throw(args) -> Result<Value> {
         let coro = args[0].value.clone();
         let exc = args[1].value.clone();
-        let err = PyError::Raised(exc);
+        let err = PyError::raised(exc);
         match _interp.coro_step(&coro, Value::none(), Some(err))? {
             CoroStep::Yielded(v) => Ok(Value::tuple(vec![Value::int(0), v])),
             CoroStep::Returned(v) => Ok(Value::tuple(vec![Value::int(1), v])),

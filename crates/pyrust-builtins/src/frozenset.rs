@@ -137,7 +137,7 @@ impl BuiltinTypeOps for FrozenSetOps {
 
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
         let items = borrow_items(state)
-            .ok_or_else(|| PyError::Runtime("internal: bad frozenset state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad frozenset state".to_string()))?;
         if let Some(probe) = pyrust_core::ValueKeyRef::try_new(item) {
             return Ok(items.contains(&probe));
         }
@@ -212,7 +212,7 @@ impl FrozenSetOps {
         args: Vec<Value>,
     ) -> Result<Value> {
         let rc = borrow_items(state)
-            .ok_or_else(|| PyError::Runtime("internal: bad frozenset state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad frozenset state".to_string()))?;
         // Treat the frozenset as an immutable set for non-mutating methods.
         // Clone into a regular set Value, dispatch via the new
         // `set::call(&Value, ...)` API, and re-wrap result-returning

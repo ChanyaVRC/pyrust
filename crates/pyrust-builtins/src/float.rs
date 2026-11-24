@@ -115,7 +115,7 @@ pub fn call(method: &str, receiver: f64, args: &[Value]) -> Result<Value> {
             Ok(Value::tuple(vec![Value::float(receiver)]))
         }
 
-        _ => Err(PyError::Runtime(format!(
+        _ => Err(PyError::runtime(format!(
             "'float' object has no attribute '{method}'"
         ))),
     }

@@ -87,13 +87,13 @@ fn decode_utf7(bytes: &[u8], errors: &str) -> Result<Value> {
             };
             match errors {
                 "strict" => {
-                    return Err(PyError::UnicodeDecodeError {
+                    return Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
                         encoding: "utf7".to_string(),
                         object: bytes.to_vec(),
                         start: section_start,
                         end,
                         reason: reason.to_string(),
-                    });
+                    }));
                 }
                 "ignore" => {}
                 "replace" => cps.push(0xFFFD),

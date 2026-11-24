@@ -33,7 +33,7 @@ fn advance_repeat(
 ) -> Result<Option<Value>> {
     let mut state = state_rc.borrow_mut();
     let state = state.downcast_mut::<CounterRepeatState>().ok_or_else(|| {
-        PyError::Runtime("internal: Counter repeat iterator state corrupted".to_string())
+        PyError::runtime("internal: Counter repeat iterator state corrupted".to_string())
     })?;
     if state.remaining == 0 {
         return Ok(None);

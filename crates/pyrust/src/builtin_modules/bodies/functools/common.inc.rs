@@ -4,7 +4,7 @@
 fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|argument| argument.value.kind()) {
         Some(ValueKind::PyInstance(instance)) => Ok(Rc::clone(instance)),
-        _ => Err(PyError::Runtime(format!(
+        _ => Err(PyError::runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
     }
@@ -23,5 +23,5 @@ fn reject_extra_args(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
 
 /// Report inaccessible or corrupted private implementation state.
 fn internal(fn_name: &str) -> PyError {
-    PyError::Runtime(format!("internal: {fn_name}() instance state corrupted"))
+    PyError::runtime(format!("internal: {fn_name}() instance state corrupted"))
 }

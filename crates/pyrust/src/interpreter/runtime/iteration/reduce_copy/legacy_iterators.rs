@@ -113,7 +113,7 @@ fn getitem_iterator_reduction(value: &Value) -> Result<Option<(Value, Value, Opt
         .map_err(|_| pyrust_core::value_err!("generator already executing"))?;
     let iterator = borrow
         .downcast_ref::<GetItemIter>()
-        .ok_or_else(|| PyError::Runtime("legacy iterator lost its state".to_string()))?;
+        .ok_or_else(|| PyError::runtime("legacy iterator lost its state".to_string()))?;
     if iterator.exhausted {
         return Ok(Some((constructor, Value::tuple(Vec::new()), None)));
     }
@@ -130,7 +130,7 @@ fn getitem_iterator_reduction(value: &Value) -> Result<Option<(Value, Value, Opt
 /// following `next()` observes exhaustion.
 pub(crate) fn getitem_iterator_reduce(value: &Value) -> Result<Value> {
     let Some((constructor, owner, position)) = getitem_iterator_reduction(value)? else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "legacy iterator lost its state".to_string(),
         ));
     };
@@ -146,7 +146,7 @@ fn reversed_iterator_reduction(value: &Value) -> Result<Option<(Value, Value, Op
         return Ok(None);
     };
     let ValueKind::Generator(state) = backing.kind() else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "reversed iterator lost its state".to_string(),
         ));
     };
@@ -155,7 +155,7 @@ fn reversed_iterator_reduction(value: &Value) -> Result<Option<(Value, Value, Op
         .map_err(|_| pyrust_core::value_err!("generator already executing"))?;
     if let Some(iterator) = borrow.downcast_ref::<GetItemIter>() {
         if iterator.step >= 0 {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "reversed iterator lost its state".to_string(),
             ));
         }
@@ -168,7 +168,7 @@ fn reversed_iterator_reduction(value: &Value) -> Result<Option<(Value, Value, Op
     let frame = borrow
         .downcast_ref::<NativeIterFrame>()
         .filter(|frame| frame.class == Some(NativeIteratorClass::Reversed))
-        .ok_or_else(|| PyError::Runtime("reversed iterator lost its state".to_string()))?;
+        .ok_or_else(|| PyError::runtime("reversed iterator lost its state".to_string()))?;
     match &frame.source {
         NativeIterSource::ReverseIndexed { value, next_index } if !frame.exhausted => {
             let position = i64::try_from(*next_index)
@@ -179,7 +179,7 @@ fn reversed_iterator_reduction(value: &Value) -> Result<Option<(Value, Value, Op
         NativeIterSource::Exhausted { .. } if frame.exhausted => {
             Ok(Some((constructor, Value::tuple(Vec::new()), None)))
         }
-        _ => Err(PyError::Runtime(
+        _ => Err(PyError::runtime(
             "reversed iterator lost its source".to_string(),
         )),
     }
@@ -194,7 +194,7 @@ fn reversed_iterator_reduction(value: &Value) -> Result<Option<(Value, Value, Op
 /// tuple, while a cursor that only yielded its last value still reports `-1`.
 pub(crate) fn reversed_iterator_reduce(value: &Value) -> Result<Value> {
     let Some((constructor, owner, position)) = reversed_iterator_reduction(value)? else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "reversed iterator lost its state".to_string(),
         ));
     };
@@ -214,7 +214,7 @@ pub(crate) fn getitem_iterator_setstate(
     position: i64,
 ) -> Result<Value> {
     let Some((state, _)) = getitem_iterator_cell(value) else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "legacy iterator lost its state".to_string(),
         ));
     };
@@ -222,7 +222,7 @@ pub(crate) fn getitem_iterator_setstate(
         let borrow = state.borrow();
         let iterator = borrow
             .downcast_ref::<GetItemIter>()
-            .ok_or_else(|| PyError::Runtime("legacy iterator lost its state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("legacy iterator lost its state".to_string()))?;
         (iterator.obj.clone(), iterator.step < 0, iterator.exhausted)
     };
     if exhausted {
@@ -232,7 +232,7 @@ pub(crate) fn getitem_iterator_setstate(
         let mut borrow = state.borrow_mut();
         let iterator = borrow
             .downcast_mut::<GetItemIter>()
-            .ok_or_else(|| PyError::Runtime("legacy iterator lost its state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("legacy iterator lost its state".to_string()))?;
         if !iterator.exhausted {
             iterator.index = position.max(0);
             // Forward cursors normally keep `remaining` empty. After an
@@ -259,7 +259,7 @@ pub(crate) fn getitem_iterator_setstate(
     let mut borrow = state.borrow_mut();
     let iterator = borrow
         .downcast_mut::<GetItemIter>()
-        .ok_or_else(|| PyError::Runtime("legacy iterator lost its state".to_string()))?;
+        .ok_or_else(|| PyError::runtime("legacy iterator lost its state".to_string()))?;
     if !iterator.exhausted {
         let maximum = length.saturating_sub(1);
         iterator.index = position.clamp(-1, maximum);
@@ -279,12 +279,12 @@ pub(crate) fn reversed_iterator_setstate(
     position: i64,
 ) -> Result<Value> {
     let Some((backing, _)) = reversed_iterator_backing(value) else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "reversed iterator lost its state".to_string(),
         ));
     };
     let ValueKind::Generator(state) = backing.kind() else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "reversed iterator lost its state".to_string(),
         ));
     };
@@ -298,7 +298,7 @@ pub(crate) fn reversed_iterator_setstate(
             let frame = borrow
                 .downcast_ref::<NativeIterFrame>()
                 .filter(|frame| frame.class == Some(NativeIteratorClass::Reversed))
-                .ok_or_else(|| PyError::Runtime("reversed iterator lost its state".to_string()))?;
+                .ok_or_else(|| PyError::runtime("reversed iterator lost its state".to_string()))?;
             (false, frame.exhausted)
         }
     };
@@ -311,7 +311,7 @@ pub(crate) fn reversed_iterator_setstate(
     if restore_reduced_iterator_position(&backing, position)? {
         Ok(Value::none())
     } else {
-        Err(PyError::Runtime(
+        Err(PyError::runtime(
             "reversed iterator lost its source".to_string(),
         ))
     }
