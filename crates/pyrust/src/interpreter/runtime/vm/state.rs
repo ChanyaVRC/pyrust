@@ -400,6 +400,21 @@ pub(crate) struct TrampFrame {
     memo_key: Option<Box<MemoKey>>,
 }
 
+impl TrampFrame {
+    #[inline]
+    pub(crate) fn saved_regs_ptr(&self) -> *mut Value {
+        self.saved_regs.non_null_ptr().as_ptr()
+    }
+
+    #[inline]
+    pub(crate) fn saved_cur_line(&self) -> u32 {
+        // SAFETY: `saved_code_ptr` points at the caller's live `FnCode`
+        // for the full lifetime of this `TrampFrame`.
+        let caller_code = unsafe { &*self.saved_code_ptr };
+        caller_code.line_at(self.saved_pc.saturating_sub(1))
+    }
+}
+
 /// Placeholder left inside a generator's state cell (`Rc<GeneratorCell>`)
 /// while its `GeneratorFrame` is checked out and being driven (#2253).  Keeps the
 /// cell's contents valid (and the borrow released) during the drive, and lets a
@@ -441,6 +456,21 @@ pub(crate) struct GenDriveFrame {
     saved_exc_handlers: ExcHandlersBuf,
     /// `tramp_stack` depth at switch-in (error-unwind floor for this generator).
     tramp_floor: usize,
+}
+
+impl GenDriveFrame {
+    #[inline]
+    pub(crate) fn saved_regs_ptr(&self) -> *mut Value {
+        self.saved_regs.non_null_ptr().as_ptr()
+    }
+
+    #[inline]
+    pub(crate) fn saved_cur_line(&self) -> u32 {
+        // SAFETY: `saved_code_ptr` points at the consumer's live `FnCode`
+        // for the full lifetime of this `GenDriveFrame`.
+        let caller_code = unsafe { &*self.saved_code_ptr };
+        caller_code.line_at(self.saved_pc.saturating_sub(1))
+    }
 }
 
 /// Mutable references to the dispatch loop's live frame state, handed to the

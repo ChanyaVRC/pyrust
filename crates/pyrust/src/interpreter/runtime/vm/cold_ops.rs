@@ -146,7 +146,15 @@ impl Interpreter {
                 kw_dict,
             } => {
                 regs[*dst as usize] = self.exec_call_method_expanded(
-                    regs, num_locals, *dst, *obj, *name_idx, *pos_list, *kw_dict, code,
+                    regs,
+                    num_locals,
+                    *dst,
+                    *obj,
+                    *name_idx,
+                    *pos_list,
+                    *kw_dict,
+                    code,
+                    pc - 1,
                 )?;
             }
             Insn::CallMethodKw {

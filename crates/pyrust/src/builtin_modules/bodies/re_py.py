@@ -56,8 +56,9 @@ class error(Exception):
         self.pos = pos
         if pos is not None and pattern is not None:
             # Best-effort line/column derivation (CPython does this too).
-            self.lineno = pattern.count('\n', 0, pos) + 1
-            self.colno = pos - pattern.rfind('\n', 0, pos)
+            nl = b'\n' if isinstance(pattern, (bytes, bytearray)) else '\n'
+            self.lineno = pattern.count(nl, 0, pos) + 1
+            self.colno = pos - pattern.rfind(nl, 0, pos)
             full = '%s at position %d' % (msg, pos)
         else:
             self.lineno = None
@@ -73,11 +74,12 @@ class error(Exception):
 #   ('any',)                     '.'
 #   ('class', negated, items)    [...]  items: ('ch', c) / ('range', lo, hi) / ('cat', name)
 #   ('cat', name)                \d \w \s \D \W \S
-#   ('star', node, greedy)       node*
-#   ('plus', node, greedy)       node+
-#   ('opt', node, greedy)        node?
-#   ('repeat', node, lo, hi, greedy)   node{lo,hi}  (hi None = inf)
+#   ('star', node, mode)         node* / node*? / node*+
+#   ('plus', node, mode)         node+ / node+? / node++
+#   ('opt', node, mode)          node? / node?? / node?+
+#   ('repeat', node, lo, hi, mode)   node{lo,hi}  (hi None = inf)
 #   ('group', idx, name, node)   ( ... )  idx None for non-capturing
+#   ('atomic', node)             (?>...)
 #   ('alt', branches)            a|b|c   branches: list of seq
 #   ('seq', nodes)               concatenation
 #   ('start',)                   ^
@@ -91,10 +93,14 @@ class error(Exception):
 #   ('lookbehind', positive, node, width)   (?<=...) / (?<!...) (fixed width)
 #   ('scoped', flags, node)       (?i:...) / (?-i:...)
 
+_HEX_DIGITS = frozenset('0123456789abcdefABCDEF')
+
 
 class _Parser:
-    def __init__(self, pattern, flags):
+    def __init__(self, pattern, flags, is_bytes=False, orig_pattern=None):
         self.s = pattern
+        self.orig_pattern = orig_pattern if orig_pattern is not None else pattern
+        self.is_bytes = is_bytes
         self.i = 0
         self.n = len(pattern)
         self.flags = flags
@@ -115,7 +121,7 @@ class _Parser:
     def _err(self, msg, pos=None):
         if pos is None:
             pos = self.i
-        raise error(msg, self.s, pos)
+        raise error(msg, self.orig_pattern, pos)
 
     def parse(self):
         node = self._parse_alt()
@@ -155,19 +161,20 @@ class _Parser:
         if self.i >= self.n:
             return atom
         c = self.s[self.i]
+        quant = None
         if c == '*':
             self.i += 1
-            greedy = self._consume_lazy()
-            return ('star', atom, greedy)
-        if c == '+':
+            mode = self._consume_modifier()
+            quant = ('star', atom, mode)
+        elif c == '+':
             self.i += 1
-            greedy = self._consume_lazy()
-            return ('plus', atom, greedy)
-        if c == '?':
+            mode = self._consume_modifier()
+            quant = ('plus', atom, mode)
+        elif c == '?':
             self.i += 1
-            greedy = self._consume_lazy()
-            return ('opt', atom, greedy)
-        if c == '{':
+            mode = self._consume_modifier()
+            quant = ('opt', atom, mode)
+        elif c == '{':
             saved = self.i
             rep = self._try_parse_brace()
             if rep is None:
@@ -175,16 +182,25 @@ class _Parser:
                 self.i = saved
                 return atom
             lo, hi = rep
-            greedy = self._consume_lazy()
-            return ('repeat', atom, lo, hi, greedy)
+            mode = self._consume_modifier()
+            quant = ('repeat', atom, lo, hi, mode)
+        if quant is not None:
+            if self.i < self.n and self.s[self.i] in '*+?':
+                self._err("multiple repeat")
+            return quant
         return atom
 
-    def _consume_lazy(self):
-        # Returns greedy flag; consumes a trailing '?' (lazy) if present.
-        if self.i < self.n and self.s[self.i] == '?':
-            self.i += 1
-            return False
-        return True
+    def _consume_modifier(self):
+        # Returns quantifier mode: 'lazy' ('?'), 'possessive' ('+'), or 'greedy'.
+        if self.i < self.n:
+            ch = self.s[self.i]
+            if ch == '?':
+                self.i += 1
+                return 'lazy'
+            if ch == '+':
+                self.i += 1
+                return 'possessive'
+        return 'greedy'
 
     def _try_parse_brace(self):
         # self.i points at '{'. Returns (lo, hi) or None if not a valid brace.
@@ -263,6 +279,11 @@ class _Parser:
                 node = self._parse_alt()
                 self._expect(')')
                 return ('group', None, None, node)
+            if kind == '>':
+                self.i += 1
+                node = self._parse_alt()
+                self._expect(')')
+                return ('atomic', node)
             if kind == 'P':
                 self.i += 1
                 if self.i < self.n and self.s[self.i] == '<':
@@ -336,6 +357,12 @@ class _Parser:
             if self._seen_atom:
                 self._err("global flags not at the start of the expression",
                           start - 2)
+            if self.is_bytes and (add & UNICODE):
+                raise ValueError(
+                    "cannot use UNICODE flag with a bytes pattern")
+            if not self.is_bytes and (add & LOCALE):
+                raise ValueError(
+                    "cannot use LOCALE flag with a str pattern")
             self.i += 1
             self.flags |= add
             return ('seq', [])
@@ -414,6 +441,7 @@ class _Parser:
         while self.i < self.n and self.s[self.i] != ']':
             c = self.s[self.i]
             if c == '\\':
+                esc_start = self.i
                 self.i += 1
                 if self.i >= self.n:
                     self._err("bad escape (end of pattern)")
@@ -423,11 +451,13 @@ class _Parser:
                 if cat is not None:
                     items.append(('cat', cat))
                     continue
-                lo = _decode_class_escape(esc)
+                lo = self._decode_class_escape_at(esc, esc_start)
                 if (self.i < self.n and self.s[self.i] == '-'
                         and self.i + 1 < self.n and self.s[self.i + 1] != ']'):
                     self.i += 1
                     hi = self._read_class_member_char()
+                    if ord(hi) < ord(lo):
+                        self._err("bad character range %s-%s" % (lo, hi))
                     items.append(('range', lo, hi))
                 else:
                     items.append(('ch', lo))
@@ -451,16 +481,58 @@ class _Parser:
     def _read_class_member_char(self):
         c = self.s[self.i]
         if c == '\\':
+            esc_start = self.i
             self.i += 1
             if self.i >= self.n:
                 self._err("bad escape (end of pattern)")
             esc = self.s[self.i]
             self.i += 1
-            return _decode_class_escape(esc)
+            return self._decode_class_escape_at(esc, esc_start)
         self.i += 1
         return c
 
+    def _parse_hex_escape(self, esc, esc_start):
+        if esc == 'x':
+            count = 2
+        elif esc == 'u':
+            if self.is_bytes:
+                self._err("bad escape \\u", esc_start)
+            count = 4
+        elif esc == 'U':
+            if self.is_bytes:
+                self._err("bad escape \\U", esc_start)
+            count = 8
+        else:
+            return None
+        digits = self.s[self.i:self.i + count]
+        if len(digits) < count or any(ch not in _HEX_DIGITS for ch in digits):
+            self._err("incomplete escape \\%s%s" % (esc, digits), esc_start)
+        self.i += count
+        cp = int(digits, 16)
+        if cp > 0x10FFFF:
+            self._err("bad escape \\%s%s" % (esc, digits), esc_start)
+        return chr(cp)
+
+    def _decode_class_escape_at(self, esc, esc_start):
+        if esc in ('x', 'u', 'U'):
+            return self._parse_hex_escape(esc, esc_start)
+        if esc == '0':
+            return self._parse_octal_escape(esc)
+        return _decode_class_escape(esc)
+
+    def _parse_octal_escape(self, first):
+        oct_digits = first
+        while (self.i < self.n and len(oct_digits) < 3
+               and '0' <= self.s[self.i] <= '7'):
+            oct_digits += self.s[self.i]
+            self.i += 1
+        cp = int(oct_digits, 8)
+        if cp > 0o377:
+            self._err("octal escape value \\%s outside of range 0-0o377" % oct_digits)
+        return chr(cp)
+
     def _parse_escape(self):
+        esc_start = self.i
         self.i += 1  # consume '\'
         if self.i >= self.n:
             self._err("bad escape (end of pattern)")
@@ -476,7 +548,18 @@ class _Parser:
             return ('bol_a',)
         if c == 'Z':
             return ('eol_z',)
-        if c.isdigit() and c != '0':
+        if c in ('x', 'u', 'U'):
+            return ('lit', self._parse_hex_escape(c, esc_start))
+        if c == '0':
+            return ('lit', self._parse_octal_escape(c))
+        if c.isdigit():
+            # Three octal digits \100..\377 denote a character literal;
+            # otherwise 1-2 digits denote a backreference \1..\99.
+            if (self.i + 1 < self.n
+                    and '0' <= c <= '7'
+                    and '0' <= self.s[self.i] <= '7'
+                    and '0' <= self.s[self.i + 1] <= '7'):
+                return ('lit', self._parse_octal_escape(c))
             num = c
             while self.i < self.n and self.s[self.i].isdigit() and len(num) < 2:
                 num += self.s[self.i]
@@ -579,6 +662,9 @@ def _fixed_width(node, group_nodes=None, groupindex=None, max_group=None,
     if tag == 'group':
         return _fixed_width(node[3], group_nodes, groupindex, max_group,
                             resolving, width_cache)
+    if tag == 'atomic':
+        return _fixed_width(node[1], group_nodes, groupindex, max_group,
+                            resolving, width_cache)
     if tag == 'scoped':
         return _fixed_width(node[2], group_nodes, groupindex, max_group,
                             resolving, width_cache)
@@ -623,8 +709,26 @@ def _fixed_width(node, group_nodes=None, groupindex=None, max_group=None,
     return -1
 
 
-def _is_word(ch):
+def _is_word(ch, ascii_only=False):
+    if ascii_only:
+        return ch == '_' or ('a' <= ch <= 'z') or ('A' <= ch <= 'Z') or ('0' <= ch <= '9')
     return ch == '_' or ch.isalnum()
+
+
+def _ascii_lower(ch):
+    if 'A' <= ch <= 'Z':
+        return chr(ord(ch) + 32)
+    return ch
+
+
+def _ascii_upper(ch):
+    if 'a' <= ch <= 'z':
+        return chr(ord(ch) - 32)
+    return ch
+
+
+def _ascii_lower_str(s):
+    return ''.join(_ascii_lower(ch) for ch in s)
 
 
 def _cat_matches(name, ch, ascii_only):
@@ -633,9 +737,7 @@ def _cat_matches(name, ch, ascii_only):
     if name == 'D':
         return not _cat_matches('d', ch, ascii_only)
     if name == 'w':
-        if ascii_only:
-            return ch == '_' or ('a' <= ch <= 'z') or ('A' <= ch <= 'Z') or ('0' <= ch <= '9')
-        return _is_word(ch)
+        return _is_word(ch, ascii_only)
     if name == 'W':
         return not _cat_matches('w', ch, ascii_only)
     if name == 's':
@@ -648,15 +750,16 @@ def _cat_matches(name, ch, ascii_only):
 
 
 class _Matcher:
-    def __init__(self, node, text, flags, ngroups, groupindex):
+    def __init__(self, node, text, flags, ngroups, groupindex, is_bytes=False):
         self.node = node
         self.text = text
         self.n = len(text)
         self.flags = flags
+        self.is_bytes = is_bytes
         self.ignorecase = bool(flags & IGNORECASE)
         self.multiline = bool(flags & MULTILINE)
         self.dotall = bool(flags & DOTALL)
-        self.ascii_only = bool(flags & ASCII)
+        self.ascii_only = bool(flags & ASCII) or is_bytes
         self.ngroups = ngroups
         self.groupindex = groupindex
         self.groups = None
@@ -687,6 +790,8 @@ class _Matcher:
         if a == b:
             return True
         if self.ignorecase:
+            if self.is_bytes:
+                return _ascii_lower(a) == _ascii_lower(b)
             return a.lower() == b.lower()
         return False
 
@@ -733,8 +838,8 @@ class _Matcher:
             return None
         if tag == 'wordb':
             negated = node[1]
-            before = pos > 0 and _is_word(self.text[pos - 1])
-            after = pos < self.n and _is_word(self.text[pos])
+            before = pos > 0 and _is_word(self.text[pos - 1], self.ascii_only)
+            after = pos < self.n and _is_word(self.text[pos], self.ascii_only)
             at_boundary = before != after
             if at_boundary != negated:
                 return cont(pos)
@@ -743,6 +848,16 @@ class _Matcher:
             return self._m_scoped(node, pos, cont)
         if tag == 'group':
             return self._m_group(node, pos, cont)
+        if tag == 'atomic':
+            saved = list(self.groups)
+            end = self._m(node[1], pos, lambda p: p)
+            if end is None:
+                self.groups = saved
+                return None
+            r = cont(end)
+            if r is None:
+                self.groups = saved
+            return r
         if tag == 'alt':
             for branch in node[1]:
                 r = self._m(branch, pos, cont)
@@ -824,11 +939,11 @@ class _Matcher:
             if r is None:
                 # Re-enter the scope for further backtracking inside `sub`.
                 set_flags(bool(flags & IGNORECASE), bool(flags & MULTILINE),
-                          bool(flags & DOTALL), bool(flags & ASCII))
+                          bool(flags & DOTALL), bool(flags & ASCII) or self.is_bytes)
             return r
 
         set_flags(bool(flags & IGNORECASE), bool(flags & MULTILINE),
-                  bool(flags & DOTALL), bool(flags & ASCII))
+                  bool(flags & DOTALL), bool(flags & ASCII) or self.is_bytes)
         r = self._m(sub, pos, restore_cont)
         set_flags(*outer)
         return r
@@ -853,8 +968,35 @@ class _Matcher:
             self.groups[idx] = saved
         return r
 
-    def _m_repeat(self, node, lo, hi, greedy, pos, cont):
+    def _m_repeat(self, node, lo, hi, mode, pos, cont):
         # Match `node` between lo and hi times (hi None = unbounded).
+        if mode == 'possessive':
+            saved = list(self.groups)
+            p = pos
+            count = 0
+            while hi is None or count < hi:
+                prev_groups = list(self.groups)
+                np = self._m(node, p, lambda end: end)
+                if np is None:
+                    self.groups = prev_groups
+                    break
+                if np == p and count >= lo:
+                    # Stop looping on a zero-width match once minimum `lo` is
+                    # satisfied (retaining group updates from this iteration to
+                    # match CPython 3.12).
+                    break
+                p = np
+                count += 1
+            if count < lo:
+                self.groups = saved
+                return None
+            r = cont(p)
+            if r is None:
+                self.groups = saved
+            return r
+
+        greedy = (mode == 'greedy' or mode is True)
+
         def rec(count, p):
             can_more = hi is None or count < hi
             if greedy:
@@ -891,6 +1033,10 @@ class _Matcher:
         sub = self.text[gs:ge]
         ln = len(sub)
         if self.ignorecase:
+            if self.is_bytes:
+                if _ascii_lower_str(self.text[pos:pos + ln]) == _ascii_lower_str(sub):
+                    return cont(pos + ln)
+                return None
             if self.text[pos:pos + ln].lower() == sub.lower():
                 return cont(pos + ln)
             return None
@@ -913,8 +1059,12 @@ class _Matcher:
                     matched = True
                     break
                 if self.ignorecase:
-                    cl = ch.lower()
-                    cu = ch.upper()
+                    if self.is_bytes:
+                        cl = _ascii_lower(ch)
+                        cu = _ascii_upper(ch)
+                    else:
+                        cl = ch.lower()
+                        cu = ch.upper()
                     if (lo <= cl <= hi) or (lo <= cu <= hi):
                         matched = True
                         break
@@ -968,15 +1118,21 @@ class Match:
             return self._get(self._resolve(args[0]))
         return tuple(self._get(self._resolve(a)) for a in args)
 
+    def _slice(self, start, end):
+        part = self.string[start:end]
+        if self.re._is_bytes and isinstance(part, bytearray):
+            return bytes(part)
+        return part
+
     def _get(self, idx):
         if idx == 0:
-            return self.string[self._start:self._end]
+            return self._slice(self._start, self._end)
         if idx < 0 or idx >= len(self._groups):
             raise IndexError("no such group")
         span = self._groups[idx]
         if span is None:
             return None
-        return self.string[span[0]:span[1]]
+        return self._slice(span[0], span[1])
 
     def __getitem__(self, key):
         return self._get(self._resolve(key))
@@ -988,7 +1144,7 @@ class Match:
             if span is None:
                 out.append(default)
             else:
-                out.append(self.string[span[0]:span[1]])
+                out.append(self._slice(span[0], span[1]))
         return tuple(out)
 
     def groupdict(self, default=None):
@@ -998,8 +1154,11 @@ class Match:
             if span is None:
                 out[name] = default
             else:
-                out[name] = self.string[span[0]:span[1]]
+                out[name] = self._slice(span[0], span[1])
         return out
+
+    def expand(self, template):
+        return _expand_template(template, self)
 
     def start(self, group=0):
         return self._span(group)[0]
@@ -1023,7 +1182,7 @@ class Match:
 
     def __repr__(self):
         return "<re.Match object; span=(%d, %d), match=%r>" % (
-            self._start, self._end, self.string[self._start:self._end])
+            self._start, self._end, self._slice(self._start, self._end))
 
 
 # --------------------------------------------------------------------------- #
@@ -1031,11 +1190,33 @@ class Match:
 # --------------------------------------------------------------------------- #
 
 
+def _is_bytes_like(obj):
+    return isinstance(obj, (bytes, bytearray))
+
+
 class Pattern:
     def __init__(self, pattern, flags):
-        self.pattern = pattern
+        if isinstance(pattern, str):
+            if flags & LOCALE:
+                raise ValueError("cannot use LOCALE flag with a str pattern")
+            if (flags & ASCII) and (flags & UNICODE):
+                raise ValueError("ASCII and UNICODE flags are incompatible")
+            self._is_bytes = False
+            self.pattern = pattern
+            str_pattern = pattern
+        elif _is_bytes_like(pattern):
+            if flags & UNICODE:
+                raise ValueError("cannot use UNICODE flag with a bytes pattern")
+            if (flags & ASCII) and (flags & LOCALE):
+                raise ValueError("ASCII and LOCALE flags are incompatible")
+            self._is_bytes = True
+            self.pattern = pattern
+            str_pattern = pattern.decode('latin-1')
+        else:
+            raise TypeError("first argument must be string or compiled pattern")
         self.flags = flags
-        parser = _Parser(pattern, flags)
+        parser = _Parser(str_pattern, flags, is_bytes=self._is_bytes,
+                         orig_pattern=pattern)
         self._ast = parser.parse()
         # Global inline flags ``(?i)`` update the parser's flags in place;
         # pick them up so the matcher sees the effective pattern-wide flags.
@@ -1043,23 +1224,45 @@ class Pattern:
         self.groups = parser.group_count
         self.groupindex = parser.groupindex
 
+    def _prepare_subject(self, string):
+        if self._is_bytes:
+            if _is_bytes_like(string):
+                return string.decode('latin-1')
+            if isinstance(string, str):
+                raise TypeError(
+                    "cannot use a bytes pattern on a string-like object")
+            raise TypeError(
+                "expected string or bytes-like object, got %r"
+                % type(string).__name__)
+        if isinstance(string, str):
+            return string
+        if _is_bytes_like(string):
+            raise TypeError(
+                "cannot use a string pattern on a bytes-like object")
+        raise TypeError(
+            "expected string or bytes-like object, got %r"
+            % type(string).__name__)
+
     def _match_at(self, text, start, require_end=None):
-        m = _Matcher(self._ast, text, self.flags, self.groups, self.groupindex)
+        m = _Matcher(self._ast, text, self.flags, self.groups, self.groupindex,
+                     is_bytes=self._is_bytes)
         return m.match_at(start, require_end)
 
     def match(self, string, pos=0, endpos=None):
+        text = self._prepare_subject(string)
         if endpos is None:
-            endpos = len(string)
-        res = self._match_at(string[:endpos], pos)
+            endpos = len(text)
+        res = self._match_at(text[:endpos], pos)
         if res is None:
             return None
         s, e, groups = res
         return Match(self, string, s, e, groups, pos, endpos)
 
     def fullmatch(self, string, pos=0, endpos=None):
+        text = self._prepare_subject(string)
         if endpos is None:
-            endpos = len(string)
-        sub = string[:endpos]
+            endpos = len(text)
+        sub = text[:endpos]
         res = self._match_at(sub, pos, endpos)
         if res is None:
             return None
@@ -1067,9 +1270,10 @@ class Pattern:
         return Match(self, string, s, e, groups, pos, endpos)
 
     def search(self, string, pos=0, endpos=None):
+        text = self._prepare_subject(string)
         if endpos is None:
-            endpos = len(string)
-        sub = string[:endpos]
+            endpos = len(text)
+        sub = text[:endpos]
         i = pos
         while i <= endpos:
             res = self._match_at(sub, i)
@@ -1080,9 +1284,10 @@ class Pattern:
         return None
 
     def finditer(self, string, pos=0, endpos=None):
+        text = self._prepare_subject(string)
         if endpos is None:
-            endpos = len(string)
-        sub = string[:endpos]
+            endpos = len(text)
+        sub = text[:endpos]
         # Preserve the eager range/type check that _findall_matches performed
         # before returning its list iterator.
         past_end = pos > endpos
@@ -1105,9 +1310,10 @@ class Pattern:
                 i = e
 
     def _findall_matches(self, string, pos=0, endpos=None):
+        text = self._prepare_subject(string)
         if endpos is None:
-            endpos = len(string)
-        sub = string[:endpos]
+            endpos = len(text)
+        sub = text[:endpos]
         out = []
         i = pos
         while i <= endpos:
@@ -1125,15 +1331,16 @@ class Pattern:
 
     def findall(self, string, pos=0, endpos=None):
         matches = self._findall_matches(string, pos, endpos)
+        empty = b'' if self._is_bytes else ''
         out = []
         for m in matches:
             if self.groups == 0:
                 out.append(m.group(0))
             elif self.groups == 1:
                 g = m.group(1)
-                out.append(g if g is not None else '')
+                out.append(g if g is not None else empty)
             else:
-                out.append(m.groups(''))
+                out.append(m.groups(empty))
         return out
 
     def sub(self, repl, string, count=0):
@@ -1141,39 +1348,53 @@ class Pattern:
 
     def subn(self, repl, string, count=0):
         matches = self._findall_matches(string)
+        src = bytes(string) if (self._is_bytes and isinstance(string, bytearray)) else string
+        empty = b'' if self._is_bytes else ''
         out = []
         last = 0
         n = 0
         for m in matches:
             if count and n >= count:
                 break
-            out.append(string[last:m._start])
+            out.append(src[last:m._start])
             out.append(_expand(repl, m))
             last = m._end
             n += 1
-        out.append(string[last:])
-        return (''.join(out), n)
+        out.append(src[last:])
+        return (empty.join(out), n)
 
     def split(self, string, maxsplit=0):
         matches = self._findall_matches(string)
+        src = bytes(string) if (self._is_bytes and isinstance(string, bytearray)) else string
         out = []
         last = 0
         n = 0
         for m in matches:
             if maxsplit and n >= maxsplit:
                 break
-            out.append(string[last:m._start])
+            out.append(src[last:m._start])
             if self.groups:
                 for gi in range(1, self.groups + 1):
                     span = m._groups[gi]
                     if span is None:
                         out.append(None)
                     else:
-                        out.append(string[span[0]:span[1]])
+                        out.append(src[span[0]:span[1]])
             last = m._end
             n += 1
-        out.append(string[last:])
+        out.append(src[last:])
         return out
+
+    def __eq__(self, other):
+        if not isinstance(other, Pattern):
+            return NotImplemented
+        return (self._is_bytes == other._is_bytes
+                and self.pattern == other.pattern
+                and self.flags == other.flags)
+
+    def __hash__(self):
+        pat = bytes(self.pattern) if isinstance(self.pattern, bytearray) else self.pattern
+        return hash((type(self.pattern), pat, self.flags))
 
     def __repr__(self):
         return "re.compile(%r)" % self.pattern
@@ -1183,10 +1404,37 @@ class Pattern:
 # Replacement template expansion
 # --------------------------------------------------------------------------- #
 
+_TEMPLATE_ESCAPES = {
+    'a': '\a',
+    'b': '\b',
+    'f': '\f',
+    'n': '\n',
+    'r': '\r',
+    't': '\t',
+    'v': '\v',
+    '\\': '\\',
+}
 
-def _expand(repl, match):
-    if callable(repl):
-        return repl(match)
+
+def _expand_template(template, match):
+    is_bytes = match.re._is_bytes
+    if is_bytes:
+        if not _is_bytes_like(template):
+            if isinstance(template, str):
+                raise TypeError(
+                    "cannot use a string pattern on a bytes-like object")
+            raise TypeError(
+                "expected bytes-like object, got %r" % type(template).__name__)
+        repl = template.decode('latin-1')
+    else:
+        if not isinstance(template, str):
+            if _is_bytes_like(template):
+                raise TypeError(
+                    "cannot use a bytes pattern on a string-like object")
+            raise TypeError(
+                "expected string, got %r" % type(template).__name__)
+        repl = template
+
     out = []
     i = 0
     n = len(repl)
@@ -1196,52 +1444,104 @@ def _expand(repl, match):
             out.append(c)
             i += 1
             continue
+        esc_pos = i
         i += 1
         if i >= n:
-            raise error("bad escape (end of pattern)")
+            raise error("bad escape (end of pattern)", template, esc_pos)
         d = repl[i]
-        if d.isdigit():
-            num = d
+        if d == '0':
             i += 1
-            while i < n and repl[i].isdigit() and len(num) < 2:
-                num += repl[i]
+            oct_digits = '0'
+            while i < n and len(oct_digits) < 3 and '0' <= repl[i] <= '7':
+                oct_digits += repl[i]
                 i += 1
-            g = match.group(int(num))
-            out.append(g if g is not None else '')
+            out.append(chr(int(oct_digits, 8)))
+        elif d.isdigit():
+            # 3 octal digits \100..\377 denote a character literal;
+            # 1-2 digits denote a group backreference.
+            if (i + 2 < n
+                    and '0' <= d <= '7'
+                    and '0' <= repl[i + 1] <= '7'
+                    and '0' <= repl[i + 2] <= '7'):
+                cp = int(repl[i:i + 3], 8)
+                if cp > 0o377:
+                    raise error(
+                        "octal escape value \\%s outside of range 0-0o377"
+                        % repl[i:i + 3], template, esc_pos)
+                out.append(chr(cp))
+                i += 3
+            else:
+                num = d
+                i += 1
+                while i < n and repl[i].isdigit() and len(num) < 2:
+                    num += repl[i]
+                    i += 1
+                gidx = int(num)
+                if gidx > match.re.groups:
+                    raise error(
+                        "invalid group reference %d" % gidx,
+                        template,
+                        esc_pos + 1,
+                    )
+                g = match.group(gidx)
+                if g is not None:
+                    out.append(g.decode('latin-1') if is_bytes else g)
         elif d == 'g':
             i += 1
             if i >= n or repl[i] != '<':
-                raise error("missing <")
+                raise error("missing <", template, i)
             i += 1
             name = ''
             while i < n and repl[i] != '>':
                 name += repl[i]
                 i += 1
             if i >= n:
-                raise error("missing >, unterminated name")
+                raise error("missing >, unterminated name", template, esc_pos)
             i += 1
-            if name.isdigit():
-                g = match.group(int(name))
+            stripped = name.strip()
+            if not stripped:
+                raise error("missing group name", template, esc_pos)
+            if stripped.isdigit() or (stripped.startswith('+') and stripped[1:].isdigit()):
+                gidx = int(stripped)
+                if gidx > match.re.groups:
+                    raise error(
+                        "invalid group reference %d" % gidx,
+                        template,
+                        esc_pos + 3,
+                    )
+                g = match.group(gidx)
+            elif stripped.startswith('-') and stripped[1:].isdigit():
+                raise error("negative group number", template, esc_pos)
             else:
                 g = match.group(name)
-            out.append(g if g is not None else '')
-        elif d == 'n':
-            out.append('\n')
+            if g is not None:
+                out.append(g.decode('latin-1') if is_bytes else g)
+        elif d in _TEMPLATE_ESCAPES:
+            out.append(_TEMPLATE_ESCAPES[d])
             i += 1
-        elif d == 't':
-            out.append('\t')
-            i += 1
-        elif d == 'r':
-            out.append('\r')
-            i += 1
-        elif d == '\\':
-            out.append('\\')
-            i += 1
+        elif ('a' <= d <= 'z') or ('A' <= d <= 'Z'):
+            raise error("bad escape \\%s" % d, template, esc_pos)
         else:
             out.append('\\')
             out.append(d)
             i += 1
-    return ''.join(out)
+    res = ''.join(out)
+    return res.encode('latin-1') if is_bytes else res
+
+
+def _expand(repl, match):
+    if callable(repl):
+        res = repl(match)
+        if match.re._is_bytes:
+            if isinstance(res, bytearray):
+                return bytes(res)
+            if not isinstance(res, bytes):
+                raise TypeError(
+                    "expected bytes-like object, got %r" % type(res).__name__)
+        elif not isinstance(res, str):
+            raise TypeError("expected string, got %r" % type(res).__name__)
+        return res
+    return _expand_template(repl, match)
 
 
 # --------------------------------------------------------------------------- #
@@ -1257,7 +1557,10 @@ def compile(pattern, flags=0):
             raise ValueError(
                 "cannot process flags argument with a compiled pattern")
         return pattern
-    key = (pattern, flags)
+    if isinstance(pattern, bytearray):
+        key = (bytearray, bytes(pattern), flags)
+    else:
+        key = (type(pattern), pattern, flags)
     cached = _cache.get(key)
     if cached is not None:
         return cached
@@ -1300,11 +1603,27 @@ def split(pattern, string, maxsplit=0, flags=0):
     return compile(pattern, flags).split(string, maxsplit)
 
 
+_SPECIAL_CHARS = set('()[]{}?*+-|^$\\.&~# \t\n\r\v\f\x00')
+_SPECIAL_BYTES = set(b'()[]{}?*+-|^$\\.&~# \t\n\r\v\f\x00')
+
+
 def escape(pattern):
-    special = set('()[]{}?*+-|^$\\.&~# \t\n\r\v\f')
+    if _is_bytes_like(pattern):
+        out = bytearray()
+        for b in pattern:
+            if b in _SPECIAL_BYTES:
+                if b == 0:
+                    out.extend(b'\\000')
+                    continue
+                out.append(92)  # ord('\\')
+            out.append(b)
+        return bytes(out)
     out = []
     for c in pattern:
-        if c in special:
+        if c in _SPECIAL_CHARS:
+            if c == '\x00':
+                out.append('\\000')
+                continue
             out.append('\\')
         out.append(c)
     return ''.join(out)

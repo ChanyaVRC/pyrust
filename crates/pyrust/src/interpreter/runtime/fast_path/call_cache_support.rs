@@ -445,7 +445,21 @@ impl Interpreter {
             }
         };
         Self::publish_frame_line_for_builtin(&function, code, call_site);
+        let current_line = if !matches!(function.kind(), ValueKind::BuiltinFunction(_)) {
+            code.line_at(call_site)
+        } else {
+            0
+        };
+        let pushed_line = current_line != 0;
+        if pushed_line {
+            self.cold
+                .call_site_lines
+                .push((registers.non_null_ptr().as_ptr(), current_line));
+        }
         let result = self.call_with_builtin_site_cache(code, call_site, function, &buffer, probe);
+        if pushed_line {
+            self.cold.call_site_lines.pop();
+        }
 
         if lend_by_move {
             for (offset, argument) in buffer.drain(..).enumerate() {

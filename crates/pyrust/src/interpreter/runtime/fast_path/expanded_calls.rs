@@ -154,8 +154,23 @@ impl Interpreter {
                 value: vm_read(regs, func + 1 + i, num_locals)?,
             });
         }
+        Self::publish_frame_line_for_builtin(&func_val, code, pc - 1);
+        let cur_line = if !matches!(func_val.kind(), ValueKind::BuiltinFunction(_)) {
+            code.line_at(pc - 1)
+        } else {
+            0
+        };
+        let pushed_line = cur_line != 0;
+        if pushed_line {
+            self.cold
+                .call_site_lines
+                .push((regs.non_null_ptr().as_ptr(), cur_line));
+        }
         let extend_result = self.expand_kwargs_into(&func_val, &kwargs_val, &mut buf);
         let call_result = extend_result.and_then(|()| self.call_function_expanded(func_val, &buf));
+        if pushed_line {
+            self.cold.call_site_lines.pop();
+        }
         self.call_arg_buf = buf;
         call_result
     }
@@ -505,7 +520,23 @@ impl Interpreter {
                 if let Some(kwargs_val) = &kwargs_val {
                     self.expand_kwargs_into(&func_val, kwargs_val, &mut buf)?;
                 }
-                self.call_function_expanded(func_val, &buf)
+                Self::publish_frame_line_for_builtin(&func_val, code, pc - 1);
+                let cur_line = if !matches!(func_val.kind(), ValueKind::BuiltinFunction(_)) {
+                    code.line_at(pc - 1)
+                } else {
+                    0
+                };
+                let pushed_line = cur_line != 0;
+                if pushed_line {
+                    self.cold
+                        .call_site_lines
+                        .push((regs.non_null_ptr().as_ptr(), cur_line));
+                }
+                let res = self.call_function_expanded(func_val, &buf);
+                if pushed_line {
+                    self.cold.call_site_lines.pop();
+                }
+                res
             });
         self.call_arg_buf = buf;
         result

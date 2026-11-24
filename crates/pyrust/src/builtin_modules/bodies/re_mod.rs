@@ -31,7 +31,7 @@ use pyrust_derive::pyrust_module;
 const RE_PY_SOURCE: &str = include_str!("re_py.py");
 
 /// Public names from `RE_PY_SOURCE` exported onto the `re` module.
-const RE_PY_EXPORTS: [&str; 27] = [
+const RE_PY_EXPORTS: [&str; 31] = [
     "error",
     "Pattern",
     "Match",
@@ -50,10 +50,14 @@ const RE_PY_EXPORTS: [&str; 27] = [
     "ASCII",
     "I",
     "IGNORECASE",
+    "L",
+    "LOCALE",
     "M",
     "MULTILINE",
     "S",
     "DOTALL",
+    "U",
+    "UNICODE",
     "X",
     "VERBOSE",
     "_Parser",

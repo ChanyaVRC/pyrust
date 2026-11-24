@@ -28,7 +28,16 @@ use pyrust_derive::pyrust_module;
 const JSON_PY_SOURCE: &str = include_str!("json_py.py");
 
 /// Public names from `JSON_PY_SOURCE` exported onto the `json` module.
-const JSON_PY_EXPORTS: [&str; 5] = ["JSONDecodeError", "dump", "dumps", "load", "loads"];
+const JSON_PY_EXPORTS: [&str; 8] = [
+    "JSONDecodeError",
+    "JSONDecoder",
+    "JSONEncoder",
+    "detect_encoding",
+    "dump",
+    "dumps",
+    "load",
+    "loads",
+];
 
 /// Execute `JSON_PY_SOURCE` once and copy its public names onto the `json`
 /// module's attribute map.  Called from the `json` post-load hook in
