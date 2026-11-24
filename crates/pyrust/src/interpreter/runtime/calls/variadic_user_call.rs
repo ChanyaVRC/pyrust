@@ -125,10 +125,8 @@ impl Interpreter {
             } else if param.is_kwargs {
                 let mut dict: PyDict = PyDict::default();
                 for (k, v) in &keyword_vals {
-                    if !consumed_keywords.contains(k)
-                        && let Some(key) = Value::string(k.clone()).to_key()
-                    {
-                        dict.insert(key, v.clone());
+                    if !consumed_keywords.contains(k) {
+                        dict.insert(PyKey::str_from(k), v.clone());
                     }
                 }
                 Value::dict(dict)

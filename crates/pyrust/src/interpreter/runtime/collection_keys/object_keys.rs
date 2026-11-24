@@ -232,7 +232,7 @@ pub(super) fn key_contains_object(key: &PyKey) -> bool {
     match key {
         PyKey::Object { .. } => true,
         PyKey::Tuple(items) => items.iter().any(key_contains_object),
-        PyKey::FrozenSet(key) => key.items().iter().any(key_contains_object),
+        PyKey::FrozenSet(key) => key.contains_object(),
         _ => false,
     }
 }

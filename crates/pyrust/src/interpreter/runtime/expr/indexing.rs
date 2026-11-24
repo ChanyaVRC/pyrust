@@ -143,15 +143,7 @@ impl Interpreter {
         // (which may run user `__eq__` that mutates the dict — see the
         // aliasing notes on `Value::as_dict_mut`).
         if target.is_dict() {
-            // Fast path for string keys (issue #506): probe via `StrKey` to
-            // skip constructing a `PyKey::Str(Value)` (which bumps the RC).
-            let lookup = if let Some(s) = index.as_str() {
-                self.dict_str_lookup(target, s)?
-            } else {
-                let key = self.value_to_pykey(&index)?;
-                self.dict_lookup(target, &key)?
-            };
-            return match lookup {
+            return match self.dict_lookup_value(target, &index)? {
                 Some((_, v)) => Ok(v),
                 None => Err(PyError::key_error(index)),
             };
@@ -439,13 +431,7 @@ impl Interpreter {
                 // missing key (issue #1134).
                 if let Some(backing) = builtin_data_backing(target) {
                     if backing.is_dict() {
-                        let lookup = if let Some(s) = index.as_str() {
-                            self.dict_str_lookup(&backing, s)?
-                        } else {
-                            let key = self.value_to_pykey(&index)?;
-                            self.dict_lookup(&backing, &key)?
-                        };
-                        return match lookup {
+                        return match self.dict_lookup_value(&backing, &index)? {
                             Some((_, v)) => Ok(v),
                             None => {
                                 if let Some(missing_fn) = lookup_class_attr(&class, "__missing__") {

@@ -242,6 +242,16 @@ pub trait BuiltinTypeOps: Any {
         None
     }
 
+    /// Borrow this object's immutable [`FrozenSetKey`] without cloning its `Rc`.
+    ///
+    /// Only the canonical `frozenset` ops table overrides this; every other
+    /// built-in keeps the default `false`. Used by [`ValueKeyRef`] to probe
+    /// dicts and sets with frozenset keys without allocating or bumping refcounts.
+    fn with_frozenset_key(&self, state: &BuiltinState, f: &mut dyn FnMut(&FrozenSetKey)) -> bool {
+        let _ = (state, f);
+        false
+    }
+
     /// Produce an *independent* copy of this object's storage — the built-in
     /// half of `copy.copy`.  The returned value must share no mutable backing
     /// with `state`, so writing to it can never be observed through the

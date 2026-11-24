@@ -157,9 +157,7 @@ impl Interpreter {
         } else {
             let mut dict: PyDict = PyDict::default();
             for (k, v) in lit_kw {
-                if let Some(key) = Value::string(k.clone()).to_key() {
-                    dict.insert(key, v.clone());
-                }
+                dict.insert(pyrust_core::PyKey::str_from(k), v.clone());
             }
             if let Some(v) = kwargs_val {
                 // Reject a non-plain-dict or non-`str` key → slow path.

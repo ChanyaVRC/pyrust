@@ -195,49 +195,83 @@ impl Interpreter {
         Ok(None)
     }
 
-    /// Zero-allocation string key lookup in a dict receiver (issue #506).
+    /// Zero-allocation dict lookup directly from a `&Value` key (#454).
     ///
-    /// Probes the `PyDict` using `StrKey`, which hashes
-    /// identically to `PyKey::Str` without constructing a `PyKey` (zero RC
-    /// bump, zero allocation).  Use this in place of
-    /// `dict_lookup(&PyKey::str_from(s))` whenever the lookup key is already
-    /// a `&str`.  The allocation-free hit remains unchanged; a miss enters the
-    /// equality-aware fallback because a stored Object may compare equal to
-    /// the string (#2820).
+    /// Probes with [`pyrust_core::ValueKeyRef`] when `key` is a pure non-dynamic
+    /// hashable value and the dict has no dynamic key that could match it,
+    /// avoiding `PyKey` construction (`Box<[PyKey]>`, `Box<BigInt>`, or RC
+    /// bumps). Dynamic keys and mixed dicts fall back to `value_to_pykey` +
+    /// `dict_lookup` so user `__hash__` runs at most once and CPython probe-order
+    /// `__eq__` is preserved.
     #[inline]
-    pub(crate) fn dict_str_lookup(
+    pub(crate) fn dict_lookup_value(
         &mut self,
         receiver: &Value,
-        key: &str,
+        key: &Value,
     ) -> Result<Option<(usize, Value)>> {
-        {
-            let dict = receiver
-                .as_dict()
-                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-            let exact = dict
-                .get_full(&StrKey(key))
-                .map(|(idx, _, value)| (idx, value.clone()));
-            if !dict.may_have_object_key() {
-                return Ok(exact);
+        if let Some(probe) = pyrust_core::ValueKeyRef::try_new(key) {
+            {
+                let dict = receiver
+                    .as_dict()
+                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                if !dict.may_have_dynamic_key()
+                    || (!matches!(
+                        key.kind(),
+                        ValueKind::Tuple(_) | ValueKind::BuiltinObject { .. }
+                    ) && !dict.may_have_object_key())
+                {
+                    return Ok(dict.get_full(&probe).map(|(idx, _, v)| (idx, v.clone())));
+                }
             }
+            let py_key = key
+                .to_key()
+                .expect("ValueKeyRef::try_new guarantees Value::to_key succeeds");
+            return self.dict_lookup(receiver, &py_key);
         }
-        // A dict containing Object keys must use the unified Python probe even
-        // for an exact string hit: an earlier same-hash Object may dispatch
-        // `__eq__` before CPython reaches that exact key. The rare mixed path
-        // can allocate a canonical PyKey and reuse dict_lookup's structural-
-        // mutation restart logic; homogeneous hits/misses remain allocation-
-        // free above.
-        self.dict_str_lookup_object_miss(receiver, key)
+        let py_key = self.value_to_pykey(key)?;
+        self.dict_lookup(receiver, &py_key)
     }
 
-    #[cold]
-    #[inline(never)]
-    fn dict_str_lookup_object_miss(
+    /// Zero-allocation set lookup directly from a `&Value` key (#454).
+    #[inline]
+    pub(crate) fn set_lookup_value(
         &mut self,
         receiver: &Value,
-        key: &str,
-    ) -> Result<Option<(usize, Value)>> {
-        self.dict_lookup(receiver, &PyKey::str_from(key))
+        key: &Value,
+    ) -> Result<Option<usize>> {
+        if let Some(probe) = pyrust_core::ValueKeyRef::try_new(key) {
+            let hit = {
+                let set = receiver
+                    .as_set()
+                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                set.get_index_of(&probe)
+            };
+            if hit.is_some() || !key.is_none() {
+                return Ok(hit);
+            }
+            return self.set_lookup(receiver, &PyKey::None);
+        }
+        let py_key = self.value_to_pykey(key)?;
+        self.set_lookup(receiver, &py_key)
+    }
+
+    /// Zero-allocation `&PySet` lookup directly from a `&Value` key (#454).
+    /// Used by `frozenset` membership checks (`item in fs`).
+    #[inline]
+    pub(crate) fn set_lookup_in_value(
+        &mut self,
+        set: &PySet,
+        key: &Value,
+    ) -> Result<Option<usize>> {
+        if let Some(probe) = pyrust_core::ValueKeyRef::try_new(key) {
+            let hit = set.get_index_of(&probe);
+            if hit.is_some() || !key.is_none() {
+                return Ok(hit);
+            }
+            return self.set_lookup_in(set, &PyKey::None);
+        }
+        let py_key = self.value_to_pykey(key)?;
+        self.set_lookup_in(set, &py_key)
     }
 
     /// Check whether a set contains `key`, dispatching user `__eq__` for

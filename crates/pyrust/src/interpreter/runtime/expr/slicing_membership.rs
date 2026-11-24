@@ -427,27 +427,25 @@ impl Interpreter {
         // from `container.kind()` doesn't outlive the call into
         // `dict_lookup`/`set_lookup` (which may run user `__eq__`).
         if container.is_dict() {
-            let found = if let Some(s) = item.as_str() {
-                self.dict_str_lookup(&container, s)?.is_some()
-            } else {
-                let key = self.value_to_pykey(&item)?;
-                self.dict_lookup(&container, &key)?.is_some()
-            };
-            return Ok(Value::bool_(found));
+            return Ok(Value::bool_(
+                self.dict_lookup_value(&container, &item)?.is_some(),
+            ));
         }
         if container.is_set() {
-            let key = self.value_to_pykey(&item)?;
-            return Ok(Value::bool_(self.set_lookup(&container, &key)?.is_some()));
+            return Ok(Value::bool_(
+                self.set_lookup_value(&container, &item)?.is_some(),
+            ));
         }
         // Frozenset membership — must intercept before the generic BuiltinObject
         // arm because `FrozenSetOps::contains` calls `item.to_key()` which has
         // no interpreter access and cannot dispatch user `__hash__`.  Mirror the
-        // Set path above: get the key via `value_to_pykey` (which runs user
-        // `__hash__`) then search the underlying `IndexSet` via `set_lookup_in`
-        // (which dispatches user `__eq__` for `PyKey::Object` entries).
+        // Set path above via `set_lookup_in_value`, which probes directly with
+        // `ValueKeyRef` for pure non-dynamic keys and falls back to `value_to_pykey`
+        // + `set_lookup_in` for dynamic keys.
         if let Some(rc) = pyrust_builtins::frozenset::as_items(&container) {
-            let key = self.value_to_pykey(&item)?;
-            return Ok(Value::bool_(self.set_lookup_in(&rc, &key)?.is_some()));
+            return Ok(Value::bool_(
+                self.set_lookup_in_value(&rc, &item)?.is_some(),
+            ));
         }
         // List and Tuple: `seq_membership` does a single-pass primitive scan
         // and only snapshots + dispatches user `__eq__` when an operand can

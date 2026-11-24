@@ -37,7 +37,7 @@ impl Interpreter {
                         Ok(vk) => vk,
                         Err(e) => return Some(Err(e)),
                     };
-                    out.insert(PyKey::Tuple(vec![k, val_key]));
+                    out.insert(PyKey::Tuple(Box::from([k, val_key])));
                 }
                 Some(Ok((out, false)))
             }

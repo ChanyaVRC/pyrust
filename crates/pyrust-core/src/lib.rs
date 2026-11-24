@@ -61,7 +61,7 @@ pub use object_model::{
     IntMaxStrDigitsGuard, IterValuesFn, ListInner, MemberSlotId, ModuleAttrs, ModuleMutationState,
     Opaque, ParamBind, PyBigInt, PyBigIntSign, PyClass, PyDict, PyHasher, PyInstance, PyKey,
     PyModule, PyPow, PySet, PySetProbeSnapshot, PyToPrimitive, PyZero, SetInner, SortKind, StrKey,
-    TupleInner, UserFunction, UserFunctionKind, UserFunctionParam, Value, ValueKind,
+    TupleInner, UserFunction, UserFunctionKind, UserFunctionParam, Value, ValueKeyRef, ValueKind,
     WeakValueCache, bigint_str_digits_exceed_limit, bigrange_eq, bigrange_len,
     builtin_callable_presentation, builtin_layout_type_name, builtin_ops_is, builtin_type_name,
     cesu8_codepoints, cesu8_encode_codepoint, cesu8_next_codepoint, check_int_parse_digits,

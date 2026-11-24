@@ -501,6 +501,50 @@ impl Value {
         Ok(replaced)
     }
 
+    /// Replace the value of an existing dict entry using a borrowed probe key
+    /// (e.g. [`ValueKeyRef`] or [`StrKey`]) without allocating a `PyKey` (#454).
+    ///
+    /// Returns `Ok(Ok(old_value))` on a hit (having updated `PyDict` table
+    /// kind, `CollectionMutationState` version, and namespace-alias mirrors
+    /// identically to [`Self::dict_insert`]), or `Ok(Err(value))` on a miss so
+    /// the caller can construct the owned `PyKey` and insert.
+    pub fn dict_replace_existing<Q>(
+        &self,
+        key: &Q,
+        key_is_str: bool,
+        str_name: Option<&str>,
+        value: Value,
+    ) -> Result<std::result::Result<Value, Value>>
+    where
+        Q: ?Sized + Hash + indexmap::Equivalent<PyKey>,
+    {
+        let rc = self.dict_rc().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "dict_replace_existing receiver is not a dict".to_string(),
+            )
+        })?;
+        let replaced = {
+            let mut dict = rc.borrow_mut();
+            dict.prepare_python_insert_is_str(key_is_str);
+            if let Some(slot) = dict.get_mut(key) {
+                Some(std::mem::replace(slot, value))
+            } else {
+                return Ok(Err(value));
+            }
+        };
+        let old = replaced.expect("just replaced existing dict value");
+        if let Some(mutation_state) = active_collection_mutation_state(dict_container_key(rc)) {
+            bump_active_collection_mutation_state(Some(mutation_state), None);
+        }
+        if crate::environment::namespace_alias_tracking_active()
+            && let Some(name) = str_name
+        {
+            crate::environment::notify_namespace_dict_key_mutation(rc, name);
+        }
+        Ok(Ok(old))
+    }
+
     /// `dict.shift_remove(key)`.
     pub fn dict_shift_remove(&self, key: &PyKey) -> Result<Option<Value>> {
         let rc = self.dict_rc().ok_or_else(|| {

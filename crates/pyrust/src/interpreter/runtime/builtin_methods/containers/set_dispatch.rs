@@ -27,13 +27,11 @@ impl Interpreter {
                         self.set_insert_value(&receiver, key_val)?;
                         Ok(Value::none())
                     }
-                    SetMethod::Contains => {
-                        let pk = self.value_to_pykey(&key_val)?;
-                        Ok(Value::bool_(self.set_lookup(&receiver, &pk)?.is_some()))
-                    }
+                    SetMethod::Contains => Ok(Value::bool_(
+                        self.set_lookup_value(&receiver, &key_val)?.is_some(),
+                    )),
                     SetMethod::Discard => {
-                        let pk = self.value_to_pykey(&key_val)?;
-                        if let Some(idx) = self.set_lookup(&receiver, &pk)? {
+                        if let Some(idx) = self.set_lookup_value(&receiver, &key_val)? {
                             receiver
                                 .set_with_mut(|set| {
                                     set.shift_remove_index(idx);
@@ -44,22 +42,19 @@ impl Interpreter {
                         }
                         Ok(Value::none())
                     }
-                    SetMethod::Remove => {
-                        let pk = self.value_to_pykey(&key_val)?;
-                        match self.set_lookup(&receiver, &pk)? {
-                            Some(idx) => {
-                                receiver
-                                    .set_with_mut(|set| {
-                                        set.shift_remove_index(idx);
-                                    })
-                                    .ok_or_else(|| {
-                                        PyError::Runtime("internal: expected set".to_string())
-                                    })?;
-                                Ok(Value::none())
-                            }
-                            None => Err(PyError::key_error(key_val.clone())),
+                    SetMethod::Remove => match self.set_lookup_value(&receiver, &key_val)? {
+                        Some(idx) => {
+                            receiver
+                                .set_with_mut(|set| {
+                                    set.shift_remove_index(idx);
+                                })
+                                .ok_or_else(|| {
+                                    PyError::Runtime("internal: expected set".to_string())
+                                })?;
+                            Ok(Value::none())
                         }
-                    }
+                        None => Err(PyError::key_error(key_val.clone())),
+                    },
                     _ => unreachable!(),
                 }
             }
@@ -138,10 +133,7 @@ impl Interpreter {
                             | ValueKind::Bytes(_)
                     ) {
                         for item in self.collect_iterable(&arg)? {
-                            let pk = self.value_to_pykey(&item)?;
-                            if self.set_lookup(&receiver, &pk)?.is_none() {
-                                receiver.set_add(pk)?;
-                            }
+                            self.set_insert_value(&receiver, item)?;
                         }
                         continue;
                     }
@@ -157,10 +149,7 @@ impl Interpreter {
                             Err(ref error) if is_stop_iteration_error(error) => break,
                             Err(error) => return Err(error),
                         };
-                        let pk = self.value_to_pykey(&item)?;
-                        if self.set_lookup(&receiver, &pk)?.is_none() {
-                            receiver.set_add(pk)?;
-                        }
+                        self.set_insert_value(&receiver, item)?;
                     }
                 }
                 Ok(Value::none())

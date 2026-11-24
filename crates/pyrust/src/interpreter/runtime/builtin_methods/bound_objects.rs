@@ -48,12 +48,7 @@ impl Interpreter {
             let default = pos.get(1).cloned().unwrap_or_else(Value::none);
             if let Some(dict_rc) = pyrust_builtins::mapping_proxy::as_dict_rc(receiver) {
                 let dict_val = Value::dict_shared(dict_rc);
-                let found = if let Some(s) = key_val.as_str() {
-                    self.dict_str_lookup(&dict_val, s)?
-                } else {
-                    let key = self.value_to_pykey(&key_val)?;
-                    self.dict_lookup(&dict_val, &key)?
-                };
+                let found = self.dict_lookup_value(&dict_val, &key_val)?;
                 return Ok(found.map_or(default, |(_, v)| v));
             }
             if let Some(class_rc) = pyrust_builtins::mapping_proxy::as_class_rc(receiver) {

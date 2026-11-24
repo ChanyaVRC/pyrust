@@ -167,8 +167,8 @@ mod collection_keys {
         ordered_iteration_watch, ordered_mapping_guard_outcome,
     };
     use super::{
-        Interpreter, PyClass, PyDict, PyError, PyKey, PySet, Rc, RefCell, Result, StrKey, Value,
-        ValueKind, bind_class_level_method_wrapper, builtin_data_backing, call_descriptor_get,
+        Interpreter, PyClass, PyDict, PyError, PyKey, PySet, Rc, RefCell, Result, Value, ValueKind,
+        bind_class_level_method_wrapper, builtin_data_backing, call_descriptor_get,
         call_slot_value_unbound, class_hash_inherits_builtin_none, coerce_numeric,
         coerce_subclass_backing, invoke_class_method, lookup_class_attr, py_hash_bigint,
         py_hash_float, py_hash_int, range_len, slot_supports_descriptor_get, values_are_identical,
