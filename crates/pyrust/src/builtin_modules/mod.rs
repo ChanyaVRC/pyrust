@@ -433,6 +433,13 @@ pyrust_builtin_modules! {
     "html.entities" as html_entities,
     "html.parser" as html_parser @inject,
     html @inject,
+    // `logging` (issue #3151): Python 3.12 standard logging facility —
+    // levels, `Logger`/`Manager`/`PlaceHolder`/`LoggerAdapter`, `LogRecord`,
+    // `Handler`/`StreamHandler`/`FileHandler`/`NullHandler`/`lastResort`,
+    // `Formatter` (`%`, `{`, `$` styles)/`BufferingFormatter`, `Filter`,
+    // `basicConfig`, and `captureWarnings` — injected from `logging_py.py`
+    // backed by a real `std::fs::File` stream helper in `logging.rs`.
+    logging @inject,
 }
 
 include!("finalization.rs");
