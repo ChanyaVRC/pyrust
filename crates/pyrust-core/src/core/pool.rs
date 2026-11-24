@@ -180,6 +180,11 @@ thread_local! {
     /// Free list of `OpaqueSlot` slabs (#281), recycled once the final aliased
     /// `Value` drops.
     static POOL_OPAQUE: PoolOpaque = const { PoolOpaque::new() };
+
+    /// Test-only counter of `pool_opaque_alloc` calls on the current thread so
+    /// tests can assert zero slab allocations across repeated cache hits.
+    #[cfg(test)]
+    static POOL_OPAQUE_ALLOC_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 #[inline(always)]
@@ -233,6 +238,8 @@ pub(crate) unsafe fn pool_b_dealloc(ptr: *mut u8) {
 
 #[inline(always)]
 pub(crate) unsafe fn pool_opaque_alloc() -> *mut u8 {
+    #[cfg(test)]
+    let _ = POOL_OPAQUE_ALLOC_COUNT.try_with(|c| c.set(c.get().wrapping_add(1)));
     let layout = opaque_layout();
     POOL_OPAQUE
         .try_with(|c| {
@@ -275,6 +282,11 @@ pub(crate) fn pool_b_len() -> usize {
 #[cfg(test)]
 pub(crate) fn pool_opaque_len() -> usize {
     POOL_OPAQUE.with(|pool| pool.0.get().1)
+}
+
+#[cfg(test)]
+pub(crate) fn pool_opaque_alloc_count() -> usize {
+    POOL_OPAQUE_ALLOC_COUNT.with(Cell::get)
 }
 
 #[cfg(test)]

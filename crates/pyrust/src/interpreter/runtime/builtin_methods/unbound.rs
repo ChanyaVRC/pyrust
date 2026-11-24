@@ -758,7 +758,7 @@ impl Interpreter {
                         kind,
                         self_val,
                         method,
-                        pos,
+                        pos.into(),
                         &kw,
                         receiver_ordered,
                     );

@@ -5,12 +5,12 @@ impl Interpreter {
         &mut self,
         receiver: Value,
         method: &str,
-        pos: Vec<Value>,
+        pos: smallvec::SmallVec<[Value; 4]>,
         kw: &PyDict,
         ordered_mapping: bool,
     ) -> Result<Value> {
         let Some(spec) = pyrust_builtins::dict::method_spec(method) else {
-            return pyrust_builtins::dict::call(method, &receiver, pos, kw);
+            return pyrust_builtins::dict::call(method, &receiver, pos.into_vec(), kw);
         };
         spec.validate_keywords(!kw.is_empty())?;
         spec.validate_positional_arity(pos.len())?;

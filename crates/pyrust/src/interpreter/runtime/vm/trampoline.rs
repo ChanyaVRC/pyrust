@@ -143,7 +143,6 @@ impl Interpreter {
             saved_pc: *st.pc,
             dst,
             saved_base: *st.tramp_active_base,
-            saved_cur_line: *st.cur_line,
             saved_code_ptr: *st.code_ptr,
             saved_num_locals: *st.num_locals,
             saved_env,
@@ -363,7 +362,6 @@ impl Interpreter {
     ) -> Result<TrampEnter<()>> {
         let num_locals = *st.num_locals;
         let pc = *st.pc;
-        let cur_line = *st.cur_line;
         let func_val = match vm_read(st.regs, func_reg, num_locals) {
             Ok(v) => v,
             Err(e) => return Ok(TrampEnter::VmErr(e)),
@@ -412,7 +410,6 @@ impl Interpreter {
                     func_val,
                     code,
                     pc - 1,
-                    cur_line,
                     PositionalCallCacheProbe::Unprobed,
                 ) {
                     Ok(v) => {
@@ -448,7 +445,6 @@ impl Interpreter {
             *st.regs = saved.saved_regs;
             *st.cells = saved.saved_cells;
             *st.pc = saved.saved_pc;
-            *st.cur_line = saved.saved_cur_line;
             // Restore the caller's code / locals / env BEFORE dropping the
             // detached frame view (whose `FrameOwner` keeps the callee's
             // `FnCode` alive, #2924) and finalizing any escaping frame cache
@@ -481,7 +477,6 @@ impl Interpreter {
         *st.regs = gd.saved_regs;
         *st.cells = gd.saved_cells;
         *st.pc = gd.exit_pc;
-        *st.cur_line = gd.saved_cur_line;
         *st.code_ptr = gd.saved_code_ptr;
         *st.num_locals = gd.saved_num_locals;
         self.env = gd.saved_env;
@@ -502,6 +497,7 @@ impl Interpreter {
         yielded: Value,
         resume_pc: usize,
         yield_dst: crate::bytecode::Reg,
+        suspended_line: u32,
         st: &mut UnwindState,
     ) {
         let mut gd = self.gen_drive_stack.pop().unwrap();
@@ -512,14 +508,13 @@ impl Interpreter {
         gd.gframe.yield_dst = yield_dst;
         // Issue #2445: persist the yield / yield-from line so a later
         // `generator.throw()` reports it.
-        gd.gframe.suspended_line = *st.cur_line;
+        gd.gframe.suspended_line = suspended_line;
         self.sync_top_generator_frame_cache_if_present();
         self.vm_frame_views.pop();
         let dst_reg = gd.dst as usize;
         *st.regs = gd.saved_regs;
         *st.cells = gd.saved_cells;
         *st.pc = gd.saved_pc;
-        *st.cur_line = gd.saved_cur_line;
         *st.code_ptr = gd.saved_code_ptr;
         *st.num_locals = gd.saved_num_locals;
         self.env = gd.saved_env;

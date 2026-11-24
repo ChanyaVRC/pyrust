@@ -16,8 +16,8 @@ fn optimizer_keeps_dead_call_loaded_from_rebindable_builtin_name() {
     code.consts = vec![Value::int(-5)];
     code.num_locals = 2;
     code.num_regs = 4;
-    code.lineno_table = vec![1; code.insns.len()];
-    code.col_table = vec![(0, 0, 0, 0); code.insns.len()];
+    code.lineno_table = crate::bytecode::LinenoTable::from_dense(&vec![1; code.insns.len()]);
+    code.col_table = crate::bytecode::ColTable::empty();
 
     let optimized = optimize(code);
     assert!(

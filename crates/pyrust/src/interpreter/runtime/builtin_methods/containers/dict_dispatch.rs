@@ -21,7 +21,7 @@ impl Interpreter {
         };
         spec.validate_keywords(!kwargs.is_empty())?;
         spec.validate_positional_arity(args.len())?;
-        self.call_dict_method_resolved(spec.method(), receiver, args, kwargs)
+        self.call_dict_method_resolved(spec.method(), receiver, args.into(), kwargs)
     }
 
     /// Dispatch a dict method whose name and signature were already resolved
@@ -30,7 +30,7 @@ impl Interpreter {
         &mut self,
         resolved: pyrust_builtins::dict::Method,
         receiver: Value,
-        args: Vec<Value>,
+        args: smallvec::SmallVec<[Value; 4]>,
         kwargs: &PyDict,
     ) -> Result<Value> {
         self.call_dict_method_resolved_inner(resolved, receiver, args, kwargs)
@@ -40,7 +40,7 @@ impl Interpreter {
         &mut self,
         resolved: pyrust_builtins::dict::Method,
         receiver: Value,
-        args: Vec<Value>,
+        args: smallvec::SmallVec<[Value; 4]>,
         kwargs: &PyDict,
     ) -> Result<Value> {
         use pyrust_builtins::dict::Method as DictMethod;
@@ -163,7 +163,7 @@ impl Interpreter {
                     return pyrust_builtins::dict::call_resolved(
                         DictMethod::Update,
                         &receiver,
-                        args,
+                        args.into_vec(),
                         kwargs,
                     );
                 }
@@ -325,7 +325,7 @@ impl Interpreter {
             {
                 Self::dict_view_for_backing(&receiver, resolved.name(), false)
             }
-            _ => pyrust_builtins::dict::call_resolved(resolved, &receiver, args, kwargs),
+            _ => pyrust_builtins::dict::call_resolved(resolved, &receiver, args.into_vec(), kwargs),
         }
     }
 }

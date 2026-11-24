@@ -387,8 +387,6 @@ pub(crate) struct TrampFrame {
     /// Caller's base offset in `tramp_arena` (`usize::MAX` for the bottom,
     /// natively-called frame, which uses the param `regs`).
     saved_base: usize,
-    /// Caller's source line at the call site (restored for tracebacks).
-    saved_cur_line: u32,
     /// Caller's `code` pointer, `num_locals`, and env — restored when the callee
     /// returns.  (Equal to the callee's for a self-recursive call; differ for a
     /// general Python→Python call.)
@@ -435,7 +433,6 @@ pub(crate) struct GenDriveFrame {
     dst: u32,
     /// Consumer's `tramp_active_base`.
     saved_base: usize,
-    saved_cur_line: u32,
     saved_code_ptr: *const crate::bytecode::FnCode,
     saved_num_locals: u32,
     saved_env: EnvRef,
@@ -459,7 +456,6 @@ struct UnwindState<'a> {
     /// the generator's pc); the unwinder reports its resume pc via `Resume`
     /// instead and leaves this untouched.
     pc: &'a mut usize,
-    cur_line: &'a mut u32,
     code_ptr: &'a mut *const crate::bytecode::FnCode,
     num_locals: &'a mut u32,
     iters: &'a mut ItersBuf,

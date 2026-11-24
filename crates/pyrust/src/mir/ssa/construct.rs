@@ -117,12 +117,12 @@ impl<'a> SsaRenamer<'a> {
 
     #[inline]
     pub(super) fn lineno_of(&self, pc: usize) -> u32 {
-        self.code.lineno_table.get(pc).copied().unwrap_or(0)
+        self.code.line_at(pc)
     }
 
     #[inline]
     pub(super) fn span_of(&self, pc: usize) -> CaretSpan {
-        self.code.col_table.get(pc).copied().unwrap_or((0, 0, 0, 0))
+        self.code.col_at(pc).unwrap_or((0, 0, 0, 0))
     }
 
     pub(super) fn collect_edge_args(

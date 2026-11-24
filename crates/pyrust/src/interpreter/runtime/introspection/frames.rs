@@ -183,12 +183,16 @@ impl Interpreter {
     /// built-in. Exact `sys` API recognition belongs to this domain rather
     /// than the opcode loop or generic method-call router.
     #[inline]
-    pub(crate) fn publish_frame_line_for_builtin(callable: &Value, line: u32) {
+    pub(crate) fn publish_frame_line_for_builtin(
+        callable: &Value,
+        code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
+    ) {
         if matches!(
             callable.kind(),
             ValueKind::BuiltinFunction(name) if name.ends_with("_getframe")
         ) {
-            pyrust_core::set_current_vm_line(line);
+            pyrust_core::set_current_vm_line(code.line_at(call_site_pc));
         }
     }
 
@@ -787,15 +791,12 @@ impl Interpreter {
         let lineno = if frame.pc == 0 {
             frame.code.first_lineno as i64
         } else {
-            frame
-                .code
-                .lineno_table
-                .iter()
-                .take(frame.pc)
-                .rev()
-                .copied()
-                .find(|&n| n != 0)
-                .unwrap_or(frame.code.first_lineno) as i64
+            let line = frame.code.line_at(frame.pc - 1);
+            if line != 0 {
+                line as i64
+            } else {
+                frame.code.first_lineno as i64
+            }
         };
 
         let (cached_frame, retained_locals) = frame.with_frame_cache(|cache| {

@@ -346,7 +346,7 @@ impl Interpreter {
                 kind,
                 receiver,
                 method,
-                std::mem::take(pos),
+                std::mem::take(pos).into(),
                 &kw,
                 false,
             );

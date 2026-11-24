@@ -63,10 +63,26 @@ impl Value {
     }
 
     unsafe fn opaque_ptr(&self) -> *mut Opaque {
-        unsafe { std::ptr::addr_of_mut!((*self.opaque_slot_ptr()).value) }
+        unsafe { std::ptr::addr_of_mut!((*self.opaque_slot_ptr()).value).cast::<Opaque>() }
     }
 
     // ── Public primitive accessors ───────────────────────────────────────────
+
+    /// Fast scalar truthiness for NaN-boxed immediate `None`, `bool`, and
+    /// inline `int`, using direct bit-checks without decoding [`ValueKind`].
+    ///
+    /// Returns `None` for floats, strings, containers, bigints, user objects,
+    /// and `Value::unset()` so callers fall back to the full truthiness
+    /// protocol (and unbound-register diagnostics).
+    #[inline(always)]
+    pub fn try_scalar_truthiness(&self) -> Option<bool> {
+        match top16(self.0) {
+            TAG_BOOL => Some((self.0 & 1) != 0),
+            TAG_INT => Some(self.0 != TAG_INT_BITS),
+            TAG_NONE => Some(false),
+            _ => None,
+        }
+    }
 
     pub fn as_bool(&self) -> bool {
         debug_assert!(

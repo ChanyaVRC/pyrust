@@ -11,7 +11,6 @@ impl Interpreter {
         nargs: u8,
         code: &crate::bytecode::FnCode,
         call_site_pc: usize,
-        cur_line: u32,
     ) -> Result<Value> {
         let method: &str = code
             .names
@@ -42,14 +41,15 @@ impl Interpreter {
                         kind,
                         receiver,
                         method,
-                        vec![arg],
+                        smallvec::smallvec![arg],
                         &empty_kw,
                         false,
                     );
                 }
             }
         }
-        let mut args: Vec<Value> = Vec::with_capacity(nargs as usize);
+        let mut args: smallvec::SmallVec<[Value; 4]> =
+            smallvec::SmallVec::with_capacity(nargs as usize);
         for i in 0..crate::bytecode::Reg::from(nargs) {
             args.push(vm_read(regs, args_base + i, num_locals)?);
         }
@@ -80,7 +80,7 @@ impl Interpreter {
             );
             if is_generator {
                 let obj_val = vm_read(regs, obj, num_locals)?;
-                return self.call_generator_method(obj_val, method, args);
+                return self.call_generator_method(obj_val, method, args.into_vec());
             }
 
             // Inline cache fast path for user-defined class methods on PyInstance
@@ -93,7 +93,7 @@ impl Interpreter {
 
             let obj_val = vm_read(regs, obj, num_locals)?;
             let method_val = self.get_attr(&obj_val, method)?;
-            Self::publish_frame_line_for_builtin(&method_val, cur_line);
+            Self::publish_frame_line_for_builtin(&method_val, code, call_site_pc);
             let mut buf = std::mem::take(&mut self.call_arg_buf);
             buf.clear();
             for arg in args {
@@ -202,7 +202,12 @@ impl Interpreter {
         if let Some(kind) = obj_kind.filter(|kind| kind.supports_direct_method(method)) {
             let receiver = regs[obj as usize].clone();
             return self.dispatch_builtin_container_method(
-                kind, receiver, method, pos_items, &kw_map, false,
+                kind,
+                receiver,
+                method,
+                pos_items.into(),
+                &kw_map,
+                false,
             );
         }
 

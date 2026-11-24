@@ -121,7 +121,7 @@ impl Drop for Value {
                 let ptr = self.opaque_slot_ptr();
                 let strong = (*ptr).strong.get();
                 debug_assert!(strong > 0, "dropping an already released opaque slot");
-                if strong == usize::MAX {
+                if strong == u32::MAX {
                     // Saturated clones are intentionally immortal; see Clone.
                     return;
                 }
@@ -129,10 +129,21 @@ impl Drop for Value {
                     (*ptr).strong.set(strong - 1);
                     return;
                 }
-                // Matched allocator: destroy the final payload and hand the
-                // whole slot back to the same per-thread pool.
-                std::ptr::drop_in_place(ptr);
-                pool_opaque_dealloc(ptr as *mut u8);
+                // Transition strong to 0 BEFORE dropping the inner `Opaque`
+                // payload: any `WeakOpaqueSlot::upgrade` reached re-entrantly
+                // during drop sees `strong == 0` and fails cleanly, while the
+                // implicit weak reference keeps the slab alive until payload
+                // destruction finishes.
+                (*ptr).strong.set(0);
+                std::ptr::drop_in_place(std::ptr::addr_of_mut!((*ptr).value).cast::<Opaque>());
+                let weak = (*ptr).weak.get();
+                debug_assert!(weak > 0, "opaque slot missing implicit weak reference");
+                if weak == 1 {
+                    // Matched allocator: hand the slot back to the per-thread pool.
+                    pool_opaque_dealloc(ptr as *mut u8);
+                } else if weak != u32::MAX {
+                    (*ptr).weak.set(weak - 1);
+                }
             },
             _ => unreachable!(),
         }

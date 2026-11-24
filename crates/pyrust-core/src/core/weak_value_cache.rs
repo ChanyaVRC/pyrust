@@ -1,16 +1,107 @@
+/// Non-owning weak handle to an existing [`OpaqueSlot`] slab.
+///
+/// Holds one weak count on the slot so `upgrade()` can bump `strong` and return
+/// the exact existing NaN-boxed `Value` with **zero** slab allocations while
+/// still letting the `Opaque` payload drop deterministically as soon as the
+/// final strong `Value` disappears.
+struct WeakOpaqueSlot {
+    bits: u64,
+    _thread_bound: ThreadBoundValueMarker,
+}
+
+impl WeakOpaqueSlot {
+    #[inline]
+    fn slot_ptr(&self) -> *mut OpaqueSlot {
+        (self.bits & PAYLOAD_MASK) as *mut OpaqueSlot
+    }
+
+    #[inline]
+    fn downgrade(value: &Value) -> Option<Self> {
+        debug_assert_eq!(top16(value.0), TAG_OPAQUE);
+        let ptr = unsafe { value.opaque_slot_ptr() };
+        let weak = unsafe { (*ptr).weak.get() };
+        debug_assert!(weak > 0, "live opaque slot missing implicit weak reference");
+        if weak == u32::MAX {
+            return None;
+        }
+        unsafe { (*ptr).weak.set(weak + 1) };
+        Some(Self {
+            bits: value.0,
+            _thread_bound: std::marker::PhantomData,
+        })
+    }
+
+    #[inline]
+    fn upgrade(&self) -> Option<Value> {
+        let ptr = self.slot_ptr();
+        let strong = unsafe { (*ptr).strong.get() };
+        if strong == 0 {
+            return None;
+        }
+        unsafe { (*ptr).strong.set(strong.saturating_add(1)) };
+        Some(Value::from_bits(self.bits))
+    }
+
+    #[inline]
+    fn with_live_opaque<R>(&self, f: impl FnOnce(&Opaque) -> Option<R>) -> Option<R> {
+        let ptr = self.slot_ptr();
+        if unsafe { (*ptr).strong.get() } == 0 {
+            return None;
+        }
+        let opaque = unsafe { &*std::ptr::addr_of!((*ptr).value).cast::<Opaque>() };
+        f(opaque)
+    }
+}
+
+impl Clone for WeakOpaqueSlot {
+    #[inline]
+    fn clone(&self) -> Self {
+        let ptr = self.slot_ptr();
+        let weak = unsafe { (*ptr).weak.get() };
+        debug_assert!(weak > 0, "cloning a released weak opaque slot");
+        unsafe { (*ptr).weak.set(weak.saturating_add(1)) };
+        Self {
+            bits: self.bits,
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for WeakOpaqueSlot {
+    #[inline]
+    fn drop(&mut self) {
+        let ptr = self.slot_ptr();
+        let weak = unsafe { (*ptr).weak.get() };
+        debug_assert!(weak > 0, "dropping an already released weak opaque slot");
+        if weak == u32::MAX {
+            return;
+        }
+        if weak > 1 {
+            unsafe { (*ptr).weak.set(weak - 1) };
+        } else {
+            debug_assert_eq!(
+                unsafe { (*ptr).strong.get() },
+                0,
+                "deallocating opaque slot while strong refs remain"
+            );
+            unsafe { pool_opaque_dealloc(ptr as *mut u8) };
+        }
+    }
+}
+
 /// Cache-safe representation of a [`Value`] stored by an inline cache.
 ///
 /// Global-name caches must not become an additional Python-visible owner of the
 /// resolved object: a function can point back to the `FnCode` that owns the
 /// cache, and an obsolete reference-bearing global must be collectable after
 /// its binding is replaced. Scalar values are copied inline. Values with an
-/// `Rc`-backed identity retain only a [`Weak`] handle and reconstruct a normal
-/// `Value` after a successful upgrade. Only inline strings are cacheable:
-/// heap-string storage has no weak control block, and a cache must never become
-/// an extra owner merely because a value appears cycle-free today. Native and
-/// Python user functions uniformly use the weak function lane. Identity-free
-/// opaque scalars may use the owned lane; reference-bearing wrappers deliberately
-/// remain uncacheable.
+/// `Rc`-backed identity or a weak-counted [`OpaqueSlot`] retain only a non-owning
+/// handle and upgrade directly to the existing `Value` with zero slab
+/// allocations. Only inline strings are cacheable: heap-string storage has no
+/// weak control block, and a cache must never become an extra owner merely
+/// because a value appears cycle-free today. Identity-free opaque scalars may
+/// use the owned lane; reference-bearing wrappers deliberately remain
+/// uncacheable.
 #[derive(Clone)]
 pub struct WeakValueCache(WeakValueCacheKind);
 
@@ -26,20 +117,7 @@ enum WeakValueCacheKind {
     Owned(Value),
     Tuple(Weak<TupleInner>),
     List(Weak<ListInner>),
-    BigInt(Weak<BigInt>),
-    Dict(Weak<RefCell<PyDict>>),
-    Set(Weak<SetInner>),
-    BigRange(Weak<BigRangeData>),
-    UserFunction(Weak<UserFunction>),
-    PyClass(Weak<RefCell<PyClass>>),
-    PyInstance(Weak<RefCell<PyInstance>>),
-    PyModule(Weak<RefCell<PyModule>>),
-    Generator(Weak<GeneratorCell>),
-    Bytes(Weak<Vec<u8>>),
-    BuiltinObject {
-        ops: &'static dyn BuiltinTypeOps,
-        state: Weak<RefCell<Box<dyn Any>>>,
-    },
+    Opaque(WeakOpaqueSlot),
 }
 
 impl WeakValueCache {
@@ -81,24 +159,21 @@ impl WeakValueCache {
                 Some(Self(Kind::List(weak)))
             }
             TAG_OPAQUE => match unsafe { &*value.opaque_ptr() } {
-                Opaque::PyBigInt(value) => Some(Self(Kind::BigInt(Rc::downgrade(value)))),
-                Opaque::Dict(value) => Some(Self(Kind::Dict(Rc::downgrade(value)))),
-                Opaque::Set(value) => Some(Self(Kind::Set(Rc::downgrade(value)))),
-                Opaque::BigRange(value) => Some(Self(Kind::BigRange(Rc::downgrade(value)))),
-                Opaque::UserFunction(value) => Some(Self(Kind::UserFunction(Rc::downgrade(value)))),
-                Opaque::PyClass(value) => Some(Self(Kind::PyClass(Rc::downgrade(value)))),
-                Opaque::PyInstance(value) => Some(Self(Kind::PyInstance(Rc::downgrade(value)))),
-                Opaque::PyModule(value) => Some(Self(Kind::PyModule(Rc::downgrade(value)))),
-                Opaque::Generator(value) => Some(Self(Kind::Generator(Rc::downgrade(value)))),
-                Opaque::Bytes(value) => Some(Self(Kind::Bytes(Rc::downgrade(value)))),
-                Opaque::BuiltinObject { ops, state } => Some(Self(Kind::BuiltinObject {
-                    ops: *ops,
-                    state: Rc::downgrade(state),
-                })),
-                // These values live only in the custom OpaqueSlot allocation.
-                // Their nested Rc fields (where present) do not prove that the
-                // wrapper object itself is still alive, so they cannot implement a
-                // faithful weak reference.
+                Opaque::PyBigInt(_)
+                | Opaque::Dict(_)
+                | Opaque::Set(_)
+                | Opaque::BigRange(_)
+                | Opaque::UserFunction(_)
+                | Opaque::PyClass(_)
+                | Opaque::PyInstance(_)
+                | Opaque::PyModule(_)
+                | Opaque::Generator(_)
+                | Opaque::Bytes(_)
+                | Opaque::BuiltinObject { .. } => {
+                    WeakOpaqueSlot::downgrade(value).map(|slot| Self(Kind::Opaque(slot)))
+                }
+                // Identity-free immutable scalars with no reference-bearing
+                // payload may be cloned directly.
                 Opaque::Range { .. } | Opaque::Complex(..) => {
                     Some(Self(Kind::Owned(value.clone())))
                 }
@@ -117,23 +192,18 @@ impl WeakValueCache {
     /// Whether upgrading this representation avoids allocating a replacement
     /// opaque wrapper.
     ///
-    /// Script fastlocal caches use their live register locator for the other
-    /// representations. That preserves the cache's non-owning policy while
-    /// avoiding one OpaqueSlot allocation on every global-load hit.
+    /// Every cacheable representation now upgrades allocation-free: scalars and
+    /// owned immediates copy/bump bits, `Tuple`/`List` upgrade their `Rc`
+    /// directly, and `Opaque` upgrades its existing weak-counted `OpaqueSlot`.
     #[inline]
     pub fn upgrade_is_allocation_free(&self) -> bool {
-        matches!(
-            &self.0,
-            WeakValueCacheKind::Inline(_)
-                | WeakValueCacheKind::Owned(_)
-                | WeakValueCacheKind::Tuple(_)
-                | WeakValueCacheKind::List(_)
-        )
+        true
     }
 
     /// Upgrade the cached value while its Python-visible owner is still alive.
     ///
     /// A failed upgrade is an ordinary inline-cache miss.
+    #[inline]
     pub fn upgrade(&self) -> Option<Value> {
         use WeakValueCacheKind as Kind;
 
@@ -146,55 +216,32 @@ impl WeakValueCache {
             Kind::List(value) => value
                 .upgrade()
                 .map(|value| unsafe { Value::list_from_rc(value) }),
-            Kind::BigInt(value) => value
-                .upgrade()
-                .map(|value| Value::opaque(Opaque::PyBigInt(value))),
-            Kind::Dict(value) => value
-                .upgrade()
-                .map(|value| Value::opaque(Opaque::Dict(value))),
-            Kind::Set(value) => value
-                .upgrade()
-                .map(|value| Value::opaque(Opaque::Set(value))),
-            Kind::BigRange(value) => value
-                .upgrade()
-                .map(|value| Value::opaque(Opaque::BigRange(value))),
-            Kind::UserFunction(value) => value.upgrade().map(Value::user_function),
-            Kind::PyClass(value) => value.upgrade().map(Value::py_class),
-            Kind::PyInstance(value) => value.upgrade().map(Value::py_instance),
-            Kind::PyModule(value) => value.upgrade().map(Value::py_module),
-            Kind::Generator(value) => value
-                .upgrade()
-                .map(|value| Value::opaque(Opaque::Generator(value))),
-            Kind::Bytes(value) => value
-                .upgrade()
-                .map(|value| Value::opaque(Opaque::Bytes(value))),
-            Kind::BuiltinObject { ops, state } => state
-                .upgrade()
-                .map(|state| Value::builtin_object_shared(*ops, state)),
+            Kind::Opaque(slot) => slot.upgrade(),
         }
     }
 
-    /// Upgrade a cached function directly to its shared backing.
-    ///
-    /// Method-call caches use this form to avoid allocating a temporary
-    /// `OpaqueSlot` merely to inspect a regular function and extract the same
-    /// `Rc` again.
+    /// Upgrade a cached function directly to its shared backing without
+    /// touching the slot's strong reference count.
     #[inline]
     pub fn upgrade_user_function(&self) -> Option<Rc<UserFunction>> {
         match &self.0 {
-            WeakValueCacheKind::UserFunction(value) => value.upgrade(),
+            WeakValueCacheKind::Opaque(slot) => slot.with_live_opaque(|opaque| match opaque {
+                Opaque::UserFunction(value) => Some(Rc::clone(value)),
+                _ => None,
+            }),
             _ => None,
         }
     }
 
-    /// Upgrade a cached exact dict directly to its shared backing.
-    ///
-    /// Import-registry reads operate on the backing `Rc` and must not allocate
-    /// a temporary `OpaqueSlot` merely to recover the same dictionary.
+    /// Upgrade a cached exact dict directly to its shared backing without
+    /// touching the slot's strong reference count.
     #[inline]
     pub fn upgrade_dict(&self) -> Option<Rc<RefCell<PyDict>>> {
         match &self.0 {
-            WeakValueCacheKind::Dict(value) => value.upgrade(),
+            WeakValueCacheKind::Opaque(slot) => slot.with_live_opaque(|opaque| match opaque {
+                Opaque::Dict(value) => Some(Rc::clone(value)),
+                _ => None,
+            }),
             _ => None,
         }
     }
@@ -346,5 +393,133 @@ mod weak_value_cache_tests {
         );
         assert!(cache.upgrade().is_none());
         assert!(cache.upgrade_user_function().is_none());
+    }
+
+    #[test]
+    fn opaque_weak_cache_upgrades_allocate_zero_opaque_slots() {
+        use crate::pool::{pool_opaque_alloc_count, pool_opaque_len};
+
+        assert_eq!(
+            std::mem::size_of::<super::OpaqueSlot>(),
+            std::mem::size_of::<usize>() + std::mem::size_of::<super::Opaque>(),
+            "adding weak count to OpaqueSlot must not grow it beyond its 8-byte header"
+        );
+        assert!(std::mem::size_of::<WeakValueCache>() <= 16);
+
+        let user_fn = Value::user_function(make_cache_user_function());
+        let builtin_fn = Value::fresh_builtin_function("__weak_zero_alloc_test");
+        let py_class = Value::py_class(Rc::new(RefCell::new(PyClass::new(
+            "C",
+            "C",
+            None,
+            IndexMap::new(),
+        ))));
+        let py_dict = Value::dict(super::PyDict::default());
+
+        let fn_cache = WeakValueCache::new(&user_fn).expect("user function is cacheable");
+        let builtin_cache =
+            WeakValueCache::new(&builtin_fn).expect("builtin function is cacheable");
+        let class_cache = WeakValueCache::new(&py_class).expect("class is cacheable");
+        let dict_cache = WeakValueCache::new(&py_dict).expect("dict is cacheable");
+        assert!(fn_cache.upgrade_is_allocation_free());
+        assert!(builtin_cache.upgrade_is_allocation_free());
+        assert!(class_cache.upgrade_is_allocation_free());
+        assert!(dict_cache.upgrade_is_allocation_free());
+
+        let allocs_before = pool_opaque_alloc_count();
+        let pool_len_before = pool_opaque_len();
+        for _ in 0..1_000 {
+            let u = fn_cache.upgrade().expect("user function alive");
+            assert_eq!(u.value_id(), user_fn.value_id());
+            let b = builtin_cache.upgrade().expect("builtin function alive");
+            assert_eq!(b.value_id(), builtin_fn.value_id());
+            let c = class_cache.upgrade().expect("class alive");
+            assert_eq!(c.value_id(), py_class.value_id());
+            let d = dict_cache.upgrade().expect("dict alive");
+            assert_eq!(d.value_id(), py_dict.value_id());
+            assert!(fn_cache.upgrade_user_function().is_some());
+            assert!(dict_cache.upgrade_dict().is_some());
+            drop((u, b, c, d));
+        }
+        assert_eq!(
+            pool_opaque_alloc_count(),
+            allocs_before,
+            "repeated WeakValueCache::upgrade hits must allocate 0 OpaqueSlots"
+        );
+        assert_eq!(
+            pool_opaque_len(),
+            pool_len_before,
+            "repeated WeakValueCache::upgrade hits must not churn POOL_OPAQUE"
+        );
+    }
+
+    #[test]
+    fn self_referential_opaque_drop_releases_slot_safely() {
+        use crate::pool::pool_opaque_len;
+
+        std::thread::spawn(|| {
+            struct SelfWeakHolder(RefCell<Option<WeakValueCache>>);
+            struct HolderOps;
+            impl super::BuiltinTypeOps for HolderOps {
+                fn type_name(&self) -> &'static str {
+                    "SelfWeakHolder"
+                }
+            }
+            static HOLDER_OPS: HolderOps = HolderOps;
+
+            let holder =
+                Value::builtin_object(&HOLDER_OPS, Box::new(SelfWeakHolder(RefCell::new(None))));
+            let weak = WeakValueCache::new(&holder).expect("builtin object is cacheable");
+            let ValueKind::BuiltinObject { state, .. } = holder.kind() else {
+                panic!("expected builtin object");
+            };
+            *state
+                .borrow()
+                .downcast_ref::<SelfWeakHolder>()
+                .expect("holder state")
+                .0
+                .borrow_mut() = Some(weak);
+            assert_eq!(pool_opaque_len(), 0);
+            drop(holder);
+            assert_eq!(
+                pool_opaque_len(),
+                1,
+                "dropping a self-weak-referencing OpaqueSlot must return the slab to POOL_OPAQUE"
+            );
+        })
+        .join()
+        .expect("self-referential opaque drop test thread");
+    }
+
+    #[test]
+    fn try_scalar_truthiness_covers_bool_int_none_and_rejects_others() {
+        assert_eq!(Value::none().try_scalar_truthiness(), Some(false));
+        assert_eq!(Value::bool_(false).try_scalar_truthiness(), Some(false));
+        assert_eq!(Value::bool_(true).try_scalar_truthiness(), Some(true));
+        assert_eq!(Value::int(0).try_scalar_truthiness(), Some(false));
+        assert_eq!(Value::int(1).try_scalar_truthiness(), Some(true));
+        assert_eq!(Value::int(-1).try_scalar_truthiness(), Some(true));
+        assert_eq!(
+            Value::int(-(1i64 << 47)).try_scalar_truthiness(),
+            Some(true)
+        );
+        assert_eq!(
+            Value::int((1i64 << 47) - 1).try_scalar_truthiness(),
+            Some(true)
+        );
+        // Non-immediate / non-scalar / sentinel values defer to the slow path.
+        assert_eq!(Value::unset().try_scalar_truthiness(), None);
+        assert_eq!(Value::not_implemented().try_scalar_truthiness(), None);
+        assert_eq!(Value::ellipsis().try_scalar_truthiness(), None);
+        assert_eq!(Value::float(0.0).try_scalar_truthiness(), None);
+        assert_eq!(Value::float(1.0).try_scalar_truthiness(), None);
+        assert_eq!(Value::string("").try_scalar_truthiness(), None);
+        assert_eq!(Value::string("hi").try_scalar_truthiness(), None);
+        assert_eq!(Value::int(1i64 << 60).try_scalar_truthiness(), None);
+        assert_eq!(Value::list(vec![]).try_scalar_truthiness(), None);
+        assert_eq!(
+            Value::dict(super::PyDict::default()).try_scalar_truthiness(),
+            None
+        );
     }
 }

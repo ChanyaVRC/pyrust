@@ -58,7 +58,7 @@ impl Interpreter {
         &mut self,
         method: &str,
         receiver: Value,
-        mut args: Vec<Value>,
+        mut args: smallvec::SmallVec<[Value; 4]>,
     ) -> Result<Value> {
         pyrust_builtins::string::validate_method_positional_arity(method, args.len())?;
         if method == "splitlines" {
@@ -75,7 +75,7 @@ impl Interpreter {
         // for non-str-backed instances, so wrong-type args still raise the
         // existing TypeError.  startswith/endswith also accept a *tuple* of str
         // prefixes/suffixes — coerce each element of a tuple arg too.
-        let args = coerce_str_subclass_method_args(method, args);
+        coerce_str_subclass_method_args(method, &mut args);
         if method == "format_map" {
             if args.len() != 1 {
                 return Err(pyrust_core::type_err!(

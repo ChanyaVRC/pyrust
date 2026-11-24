@@ -5,7 +5,7 @@ impl Interpreter {
         &mut self,
         receiver: Value,
         method: &str,
-        pos: Vec<Value>,
+        pos: smallvec::SmallVec<[Value; 4]>,
         kw: &PyDict,
     ) -> Result<Value> {
         if let Some(template_method) = pyrust_builtins::string::interpreter_method(method) {
@@ -14,9 +14,9 @@ impl Interpreter {
         if kw.is_empty() {
             self.call_str_method(method, receiver, pos)
         } else if let Some(binder) = pyrust_builtins::string::keyword_binder(method) {
-            let mut pos = pos;
+            let mut pos = pos.into_vec();
             str_merge_kwargs(binder, &mut pos, kw.clone())?;
-            self.call_str_method(method, receiver, pos)
+            self.call_str_method(method, receiver, pos.into())
         } else {
             pyrust_builtins::string::validate_method_keywords(method, true)?;
             self.call_str_method(method, receiver, pos)
@@ -27,15 +27,20 @@ impl Interpreter {
         &mut self,
         receiver: Value,
         method: &str,
-        pos: Vec<Value>,
+        pos: smallvec::SmallVec<[Value; 4]>,
         kw: &PyDict,
     ) -> Result<Value> {
         pyrust_builtins::bytes::validate_method_keywords(method, !kw.is_empty())?;
         pyrust_builtins::bytes::validate_method_positional_arity(method, pos.len())?;
         if method == "join" {
-            self.call_bytes_join(receiver, pos)
+            self.call_bytes_join(receiver, pos.into_vec())
         } else {
-            self.call_bytes_method_with_protocols_prevalidated(method, &receiver, pos, kw)
+            self.call_bytes_method_with_protocols_prevalidated(
+                method,
+                &receiver,
+                pos.into_vec(),
+                kw,
+            )
         }
     }
 
@@ -46,7 +51,7 @@ impl Interpreter {
         &mut self,
         receiver: &Value,
         method: pyrust_builtins::string::InterpreterMethod,
-        pos: Vec<Value>,
+        pos: smallvec::SmallVec<[Value; 4]>,
         kw: &PyDict,
     ) -> Result<Value> {
         use pyrust_builtins::string::InterpreterMethod;

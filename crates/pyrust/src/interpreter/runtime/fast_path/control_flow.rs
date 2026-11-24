@@ -1,11 +1,8 @@
-/// Truthiness for tagged scalar values that cannot invoke user code.
-#[inline]
+/// Truthiness for tagged scalar values (`None`, `bool`, inline `int`) that
+/// cannot invoke user code, using direct NaN-box bit-checks.
+#[inline(always)]
 pub(super) fn try_scalar_truthiness_fast(value: &Value) -> Option<bool> {
-    match value.kind() {
-        ValueKind::Int(integer) => Some(integer != 0),
-        ValueKind::Bool(boolean) => Some(boolean),
-        _ => None,
-    }
+    value.try_scalar_truthiness()
 }
 
 #[inline]

@@ -6,13 +6,12 @@ mod vm_tests {
     use crate::interpreter::fast_path::BuiltinCallCacheMiss;
 
     fn empty_code(insns: Vec<Insn>) -> FnCode {
-        let n = insns.len();
         FnCode {
             insns,
             filename: std::sync::Arc::from("<unknown>"),
             qualname: std::sync::Arc::from("<module>"),
-            lineno_table: vec![0u32; n],
-            col_table: vec![(0, 0, 0, 0); n],
+            lineno_table: crate::bytecode::LinenoTable::empty(),
+            col_table: crate::bytecode::ColTable::empty(),
             first_lineno: 0,
             consts: vec![],
             names: vec![],
@@ -118,7 +117,6 @@ mod vm_tests {
             function,
             code,
             0,
-            0,
             PositionalCallCacheProbe::Probed(probe),
         )
     }
@@ -131,8 +129,6 @@ mod vm_tests {
         code.insns.push(Insn::LoadNone(0)); // type_reg = None (placeholder)
         code.insns.push(Insn::MatchExcept(0, 1)); // no active_exception → error
         code.insns.push(Insn::ReturnNone);
-        code.lineno_table.extend([0u32, 0, 0]);
-        code.col_table.extend([(0u32, 0u32, 0u32, 0u32); 3]);
         let mut interp = Interpreter::default();
         let mut regs: Vec<Value> = vec![Value::unset(); 1];
         // SAFETY (test): regs is alive for the duration of run_bytecode;
@@ -843,8 +839,8 @@ assert exc_first == 42
         fn sum_fncode_stats(code: &FnCode) -> (usize, usize, usize, usize) {
             let mut insns = code.insns.len();
             let mut base_heap = code.insns.capacity() * size_of::<Insn>()
-                + code.lineno_table.capacity() * size_of::<u32>()
-                + code.col_table.capacity() * size_of::<crate::ast::CaretSpan>()
+                + code.lineno_table.heap_bytes()
+                + code.col_table.heap_bytes()
                 + code.consts.capacity() * size_of::<Value>()
                 + code.names.capacity() * size_of::<pyrust_core::Symbol>()
                 + code.global_cache_interest_masks.capacity() * size_of::<u64>();
@@ -914,9 +910,11 @@ out = driver()
 assert out > 0
 "#;
 
-        let tokens = crate::lexer::Lexer::new(src).unwrap().into_tokens();
-        let mut parser = crate::parser::Parser::new(tokens);
-        let stmts = parser.parse_program().unwrap();
+        let (tokens, line_nos, cols, cols_end) = crate::lexer::Lexer::new(src)
+            .unwrap()
+            .into_tokens_with_pos();
+        let mut parser = crate::parser::Parser::new_with_pos(tokens, line_nos, cols, cols_end);
+        let (stmts, stmt_linenos) = parser.parse_program_with_linenos().unwrap();
         let empty = HashSet::new();
         let names = crate::interpreter::collect_local_names(&[], &stmts, &empty, &empty);
         let local_index = Rc::new(
@@ -925,9 +923,14 @@ assert out > 0
                 .map(|(slot, name)| (name, slot))
                 .collect(),
         );
-        let raw =
-            crate::compiler::compile_script_with_linenos(&stmts, local_index, false, &[], "<test>")
-                .unwrap();
+        let raw = crate::compiler::compile_script_with_linenos(
+            &stmts,
+            local_index,
+            false,
+            &stmt_linenos,
+            "<test>",
+        )
+        .unwrap();
         let optimized = crate::optimizer::optimize(raw);
 
         let (insns, base_heap, cold_cache_heap, cold_exc_heap) = sum_fncode_stats(&optimized);
@@ -980,6 +983,24 @@ assert out > 0
             }
         }
 
+        fn sum_debug_bytes(code: &FnCode) -> (usize, usize) {
+            let mut lineno_bytes = code.lineno_table.heap_bytes();
+            let mut col_bytes = code.col_table.heap_bytes();
+            for proto in &code.fn_protos {
+                let (l, c) = sum_debug_bytes(&proto.code);
+                lineno_bytes += l;
+                col_bytes += c;
+            }
+            (lineno_bytes, col_bytes)
+        }
+
+        let (lineno_bytes, col_bytes) = sum_debug_bytes(&optimized);
+        let debug_bytes_per_insn = (lineno_bytes + col_bytes) as f64 / insns as f64;
+        assert!(
+            debug_bytes_per_insn < 10.0,
+            "compressed debug tables regressed to {debug_bytes_per_insn:.2} B/insn (dense baseline 20.0 B/insn)"
+        );
+
         let total_names = sum_names(&optimized);
         let legacy_cache_and_exc = insns * (120 + 64 + 48 + 24 + 2 + 4) + total_names * 72;
         let legacy_total_per_insn = (base_heap + legacy_cache_and_exc) as f64 / insns as f64;
@@ -993,6 +1014,11 @@ assert out > 0
             size_of::<crate::interpreter::FmtSpecCacheEntry>(),
             size_of::<BinOpCacheEntry>(),
             size_of::<GlobalCacheEntry>(),
+        );
+        eprintln!(
+            "DEBUG TABLES (insns={insns}): lineno={:.2} B/insn | col={:.2} B/insn | total={debug_bytes_per_insn:.2} B/insn (dense baseline=20.00 B/insn)",
+            lineno_bytes as f64 / insns as f64,
+            col_bytes as f64 / insns as f64,
         );
         eprintln!(
             "FNCODE MEM (insns={insns}, names={total_names}): legacy={legacy_total_per_insn:.1} B/insn | cold={cold_total_per_insn:.1} B/insn (cache=0.0 B/insn) | warm={warm_total_per_insn:.1} B/insn (cache={warm_cache_per_insn:.1} B/insn)",
@@ -1384,5 +1410,214 @@ finally:
         assert!(interp.tramp_arena.is_empty());
         assert!(interp.tramp_stack.is_empty());
         assert!(interp.gen_drive_stack.is_empty());
+    }
+
+    #[test]
+    fn load_const_interns_short_strings_at_fncode_build() {
+        let src = r#"
+def first():
+    return "shared_short_key_3157"
+
+def second():
+    return "shared_short_key_3157"
+
+assert first() is second()
+assert first() == "shared_short_key_3157"
+"#;
+        let tokens = crate::lexer::Lexer::new(src).unwrap().into_tokens();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let stmts = parser.parse_program().unwrap();
+        let code = crate::compiler::compile_script_with_linenos(
+            &stmts,
+            std::rc::Rc::new(std::collections::HashMap::new()),
+            false,
+            &[],
+            "<intern-test>",
+        )
+        .unwrap();
+        let optimized = crate::optimizer::optimize(code);
+        let first_const = optimized
+            .fn_protos
+            .iter()
+            .find(|p| p.name.as_ref() == "first")
+            .and_then(|p| {
+                p.code
+                    .consts
+                    .iter()
+                    .find(|v| v.as_str() == Some("shared_short_key_3157"))
+            })
+            .expect("first() must keep string constant");
+        let second_const = optimized
+            .fn_protos
+            .iter()
+            .find(|p| p.name.as_ref() == "second")
+            .and_then(|p| {
+                p.code
+                    .consts
+                    .iter()
+                    .find(|v| v.as_str() == Some("shared_short_key_3157"))
+            })
+            .expect("second() must keep string constant");
+        assert_eq!(
+            first_const.value_id(),
+            second_const.value_id(),
+            "short string constants across FnCode pools must be pre-interned at build time"
+        );
+
+        let mut interp = Interpreter::default();
+        interp
+            .exec_source(src, None, None)
+            .expect("pre-interned LoadConst identity check must succeed");
+    }
+
+    fn run_script_with_tracebacks(src: &str, filename: &str) -> crate::error::Result<()> {
+        let (tokens, line_nos, cols, cols_end) = crate::lexer::Lexer::new(src)
+            .unwrap()
+            .into_tokens_with_pos();
+        let mut parser = crate::parser::Parser::new_with_pos(tokens, line_nos, cols, cols_end);
+        let (stmts, linenos) = parser.parse_program_with_linenos().unwrap();
+        let mut interp = Interpreter::default();
+        interp.cold.script_filename = Some(std::sync::Arc::from(filename));
+        interp.exec_program_with_linenos(&stmts, &linenos, src, false)
+    }
+
+    #[test]
+    fn lazy_line_resolution_preserves_f_lineno_and_generator_suspended_line() {
+        let src = "\
+import sys
+
+def tramp_callee(x):
+    a = sys._getframe().f_lineno
+    gf = sys._getframe
+    b = gf().f_lineno
+    return (a, b)
+
+def gen_throw_caught():
+    try:
+        yield 1
+    except ValueError as e:
+        yield e.__traceback__.tb_lineno
+
+def gen_throw_uncaught():
+    yield 10
+
+def sub_gen():
+    yield 100
+
+def delegator():
+    yield from sub_gen()
+
+# 1. sys._getframe().f_lineno via both CallMethod and Call inside a trampolined callee.
+a, b = tramp_callee(1)
+assert a == 4, f'expected line 4, got {a}'
+assert b == 6, f'expected line 6, got {b}'
+
+# 2. generator.gi_frame.f_lineno before first next() and while suspended.
+g_unstarted = gen_throw_uncaught()
+assert g_unstarted.gi_frame.f_lineno == 15, g_unstarted.gi_frame.f_lineno
+assert next(g_unstarted) == 10
+assert g_unstarted.gi_frame.f_lineno == 16, g_unstarted.gi_frame.f_lineno
+
+# 3. generator.throw() caught inside generator reports the yield line (#2445).
+g = gen_throw_caught()
+assert next(g) == 1
+caught_line = g.throw(ValueError('boom'))
+assert caught_line == 11, f'expected yield line 11, got {caught_line}'
+
+# 4. generator.throw() escaping generator reports the yield line (#2445).
+g2 = gen_throw_uncaught()
+assert next(g2) == 10
+try:
+    g2.throw(RuntimeError('escape'))
+except RuntimeError as e:
+    tb = e.__traceback__
+    lines = []
+    while tb is not None:
+        lines.append(tb.tb_lineno)
+        tb = tb.tb_next
+    assert lines[-1] == 16, f'expected yield line 16 at inner frame, got {lines}'
+
+# 5. yield from suspended line parity.
+d = delegator()
+assert next(d) == 100
+assert d.gi_frame.f_lineno == 22, d.gi_frame.f_lineno
+";
+        run_script_with_tracebacks(src, "<lazy-line-test>")
+            .expect("lazy f_lineno and generator suspended_line parity must hold");
+    }
+
+    #[test]
+    fn lazy_line_and_sparse_col_preserve_pep657_carets_across_trampoline_and_generators() {
+        // 1. Trampolined call chain preserves both caller call-site and inner BinOp carets (#2411/#2443).
+        let tramp_src = "\
+def boom(a, b):
+    return a / b
+
+def caller(x):
+    return boom(x, 0)
+
+caller(10)
+";
+        let err = run_script_with_tracebacks(tramp_src, "<pep657-tramp>")
+            .expect_err("must raise ZeroDivisionError");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("line 7")
+                && rendered.contains("line 5")
+                && rendered.contains("line 2"),
+            "all traceback lines must be preserved:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("~~~~^~~~~") || rendered.contains("~~^~~") || rendered.contains("^"),
+            "PEP 657 carets must be rendered across trampolined frames:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("caller(10)") && rendered.contains("boom(x, 0)"),
+            "caller source lines must appear in traceback:\n{rendered}"
+        );
+
+        // 2. Generator driven via `for` (gen-drive trampoline) preserves yield-body PEP 657 caret (#2904).
+        let gen_src = "\
+def gen():
+    yield 1 / 0
+
+def drive():
+    for v in gen():
+        pass
+
+drive()
+";
+        let err2 = run_script_with_tracebacks(gen_src, "<pep657-gen>")
+            .expect_err("must raise ZeroDivisionError");
+        let rendered2 = err2.to_string();
+        assert!(
+            rendered2.contains("line 2")
+                && rendered2.contains("line 5")
+                && rendered2.contains("line 8"),
+            "generator-drive traceback lines must be preserved:\n{rendered2}"
+        );
+        assert!(
+            rendered2.contains("~~^~~"),
+            "generator yield 1 / 0 must preserve PEP 657 caret:\n{rendered2}"
+        );
+
+        // 3. Inlined list comprehension preserves PEP 657 caret without synthetic <listcomp> frame (#2993).
+        let comp_src = "\
+def f():
+    return [1 / x for x in [0]]
+
+f()
+";
+        let err3 = run_script_with_tracebacks(comp_src, "<pep657-comp>")
+            .expect_err("must raise ZeroDivisionError");
+        let rendered3 = err3.to_string();
+        assert!(
+            !rendered3.contains("<listcomp>"),
+            "inlined comprehension must omit synthetic <listcomp> frame:\n{rendered3}"
+        );
+        assert!(
+            rendered3.contains("line 2") && rendered3.contains("~~^~~"),
+            "inlined comprehension must preserve line and PEP 657 caret:\n{rendered3}"
+        );
     }
 }

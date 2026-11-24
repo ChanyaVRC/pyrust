@@ -386,7 +386,6 @@ impl Interpreter {
         function: Value,
         code: &crate::bytecode::FnCode,
         call_site: usize,
-        current_line: u32,
         probe: PositionalCallCacheProbe,
     ) -> Result<Value> {
         let argument_base = (function_register + 1) as usize;
@@ -445,7 +444,7 @@ impl Interpreter {
                 Self::probe_builtin_call_cache(code, call_site, &function, None)
             }
         };
-        Self::publish_frame_line_for_builtin(&function, current_line);
+        Self::publish_frame_line_for_builtin(&function, code, call_site);
         let result = self.call_with_builtin_site_cache(code, call_site, function, &buffer, probe);
 
         if lend_by_move {

@@ -29,7 +29,6 @@ impl Interpreter {
         regs: &mut RegSlice,
         cells: CellSlice,
         pc: usize,
-        cur_line: u32,
         num_locals: crate::bytecode::Reg,
         exc_ctx_frame_base: usize,
         exc_saved_active_frame_base: usize,
@@ -171,7 +170,6 @@ impl Interpreter {
                     *kwnames_idx,
                     code,
                     pc - 1,
-                    cur_line,
                 )?;
             }
 

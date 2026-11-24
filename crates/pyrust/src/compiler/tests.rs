@@ -163,11 +163,8 @@ fn discarded_module_name_only_uses_checked_load_when_namespace_may_escape() {
             .iter()
             .position(|insn| matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name))
             .expect("an exposed module name must perform a checked global load");
-        assert_eq!(
-            exposed.lineno_table[checked_load],
-            source.lines().count() as u32
-        );
-        assert_ne!(exposed.col_table[checked_load], (0, 0, 0, 0));
+        assert_eq!(exposed.line_at(checked_load), source.lines().count() as u32);
+        assert!(exposed.col_at(checked_load).is_some());
     }
 
     let consumed = compile_source("value = 1\nglobals()\ncopy = value\n");
