@@ -33,8 +33,16 @@ const TYPING_ALIAS_METHODS: &[(&str, &str)] = &[
 ];
 
 // `typing.Generic` is backed by `_typing` and remains identical across a
-// `typing` re-import in CPython 3.12. Keep that one class process-stable while
+// `typing` re-import in CPython 3.12. Keep that one class thread-stable while
 // every Python-owned class below is generation-local.
+//
+// Thread-local justification:
+// (a) Why `thread_local!`: Holds `!Send` `Rc`/`Weak<RefCell<PyClass>>` and
+//     `Weak<RefCell<PyInstance>>` entries for `typing.Generic` and weak
+//     per-import `typing` module generations.
+// (b) Multi-interpreter / multi-threaded impact: Weak generation records keep
+//     re-imported `typing` modules isolated per import on a thread (while
+//     sharing the immutable `Generic` base); separate threads are isolated.
 thread_local! {
     static STABLE_GENERIC_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
@@ -45,6 +53,9 @@ thread_local! {
         attrs.insert("__module__".to_string(), Value::string("typing"));
         Rc::new(RefCell::new(PyClass::new("Generic", "Generic", None, attrs)))
     };
+
+    static TYPING_GENERATIONS: RefCell<Vec<TypingGeneration>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Default)]
@@ -79,11 +90,6 @@ impl TypingGeneration {
                 .values()
                 .any(|class| class.strong_count() > 0)
     }
-}
-
-thread_local! {
-    static TYPING_GENERATIONS: RefCell<Vec<TypingGeneration>> =
-        const { RefCell::new(Vec::new()) };
 }
 
 pub(super) fn stable_generic_class() -> Rc<RefCell<PyClass>> {

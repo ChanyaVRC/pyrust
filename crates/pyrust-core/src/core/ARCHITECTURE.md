@@ -12,7 +12,8 @@ re-exports the stable API that downstream crates already consume.
 | `class_epoch` | Class-mutation cache invalidation |
 | `object_identity` | Monotonic internal object IDs |
 | `string_interning` | Bounded constant-string interning |
-| `cycle_guards` | Thread-local recursion guards for repr/equality |
+| `cycle_guards` | Generic thread-local RAII recursion guards for repr/equality |
+| `pool` | Thread-local bounded fixed-size slab free lists (`POOL_B`, `POOL_OPAQUE`) |
 | `object_model` | The mutually recursive `Value` representation, keys, containers, functions, and classes |
 
 The value representation remains cohesive on purpose. Its fragments share

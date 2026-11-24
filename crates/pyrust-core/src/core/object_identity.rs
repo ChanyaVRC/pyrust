@@ -4,12 +4,26 @@ use std::collections::HashMap;
 
 use rustc_hash::FxBuildHasher;
 
-// Monotonic identity shared by the container/method representations that do
-// not carry a backing allocation address.  `None` is the exhausted state: the
-// last `u64` id is returned once, and the next allocation fails loudly instead
-// of wrapping to a live object's id.
+// Thread-local justification:
+// (a) Why `thread_local!`: `Value` is `!Send + !Sync`, and `next_obj_id()`
+//     runs on every list/tuple/set/bound-method allocation where an atomic
+//     fetch-add would add unnecessary hot-path overhead; `BOUNDED_OBJECT_IDS`
+//     caches synthetic `id()` assignments for thread-confined values.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread draw disjoint ids from the same monotonic counter and share
+//     synthetic id mappings for identical raw values; separate threads maintain
+//     independent id spaces with zero contention.
 thread_local! {
+    /// Monotonic identity shared by container/method representations that do
+    /// not carry a backing allocation address.  `None` is the exhausted state:
+    /// the last `u64` id is returned once, and the next allocation fails loudly
+    /// instead of wrapping to a live object's id.
     static OBJ_ID_COUNTER: Cell<Option<u64>> = const { Cell::new(Some(1)) };
+
+    /// Append-only per-thread assignment of typed identities to bounded odd
+    /// inline `id()` integers.
+    static BOUNDED_OBJECT_IDS: RefCell<BoundedObjectIds> =
+        RefCell::new(BoundedObjectIds::new());
 }
 
 fn take_next_obj_id(counter: &Cell<Option<u64>>) -> u64 {
@@ -92,11 +106,6 @@ impl BoundedObjectIds {
         self.ids.insert(identity, id);
         id
     }
-}
-
-thread_local! {
-    static BOUNDED_OBJECT_IDS: RefCell<BoundedObjectIds> =
-        RefCell::new(BoundedObjectIds::new());
 }
 
 fn synthetic_object_id(identity: ObjectIdentity) -> u64 {

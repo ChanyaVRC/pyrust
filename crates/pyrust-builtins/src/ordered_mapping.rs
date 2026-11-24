@@ -10,6 +10,13 @@ use std::rc::{Rc, Weak};
 
 use pyrust_core::{CollectionMutationState, PyClass, PyError, Value};
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Stores `!Send` `Weak<RefCell<PyClass>>` identities
+//     for `OrderedDict` generations plus per-thread clear-sequence tracking for
+//     live view invalidation without locking.
+// (b) Multi-interpreter / multi-threaded impact: Weak class entries and
+//     object-id-keyed clear marks isolate distinct instances across
+//     interpreters on the same thread; separate threads are fully isolated.
 thread_local! {
     static CLASSES: RefCell<Vec<Weak<RefCell<PyClass>>>> =
         const { RefCell::new(Vec::new()) };

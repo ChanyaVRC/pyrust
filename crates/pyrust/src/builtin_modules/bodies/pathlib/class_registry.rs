@@ -69,6 +69,12 @@ struct PathClassGeneration {
     posix: Weak<RefCell<PyClass>>,
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Holds `!Send` `Weak<RefCell<PyClass>>` generation
+//     pairs for `pathlib.Path` / `pathlib.PosixPath`.
+// (b) Multi-interpreter / multi-threaded impact: Weak per-import entries keep
+//     re-imported `pathlib` modules isolated across interpreters on one thread
+//     and prune collected generations; separate threads are isolated.
 thread_local! {
     static PATH_CLASS_GENERATIONS: RefCell<Vec<PathClassGeneration>> =
         const { RefCell::new(Vec::new()) };

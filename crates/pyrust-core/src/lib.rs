@@ -21,6 +21,8 @@ mod errors;
 mod object_identity;
 #[path = "core/object_model.rs"]
 mod object_model;
+#[path = "core/pool.rs"]
+mod pool;
 #[path = "core/string_interning.rs"]
 mod string_interning;
 #[path = "core/traceback.rs"]
@@ -33,6 +35,7 @@ pub use arguments::{
 pub use class_epoch::{
     bump_class_epoch, class_cache_stamp, class_cache_stamp_matches, class_epoch,
 };
+pub use cycle_guards::{CycleGuard, enter_repr_cycle_guard};
 pub use environment::{
     EnvRef, EnvValues, Environment, NameSet, NamespaceFastLocalCacheSource, NamespaceMirrorGuard,
     namespace_name_interest_mask,

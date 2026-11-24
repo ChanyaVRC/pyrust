@@ -30,6 +30,12 @@ const CO_FUTURE_ANNOTATIONS: i64 = 0x1000000;
 
 // ── _Feature class generations ────────────────────────────────────────────────
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Stores `!Send` `Weak<RefCell<PyClass>>` identities
+//     for still-live `__future__._Feature` class generations.
+// (b) Multi-interpreter / multi-threaded impact: Weak per-import entries keep
+//     re-imported `__future__` modules isolated across interpreters on one
+//     thread; separate threads maintain independent registries.
 thread_local! {
     /// Weak identities of still-live imported `__future__` generations.
     ///

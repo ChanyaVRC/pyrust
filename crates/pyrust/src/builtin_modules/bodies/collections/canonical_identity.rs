@@ -35,6 +35,13 @@ enum CanonicalCollectionKind {
     Deque,
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Holds `!Send` `Weak<RefCell<PyClass>>` registries
+//     for `collections` classes (`Counter`, `defaultdict`, `deque`) across
+//     import generations.
+// (b) Multi-interpreter / multi-threaded impact: Weak entries prune dead
+//     generations and match by `Rc::ptr_eq`, keeping interpreters on the same
+//     thread isolated; separate threads maintain independent registries.
 thread_local! {
     static CANONICAL_COLLECTION_CLASSES: RefCell<CanonicalCollectionClasses> =
         const { RefCell::new(CanonicalCollectionClasses {

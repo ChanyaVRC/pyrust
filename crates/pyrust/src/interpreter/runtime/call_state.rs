@@ -2,6 +2,16 @@
 // generator drives, and nested Interpreter entries all contribute to the same
 // logical recursion chain. The configurable recursion limit belongs to the
 // active Interpreter.
+//
+// Thread-local justification:
+// (a) Why `thread_local!`: Tracks the live OS thread's total native/Python
+//     call depth (`CALL_DEPTH`) and active `Interpreter` owner address for
+//     dynamically-scoped `int_max_str_digits` without atomic overhead on every
+//     function call.
+// (b) Multi-interpreter / multi-threaded impact: Nested interpreters on one
+//     thread share the native stack so accumulating `CALL_DEPTH` protects the
+//     OS stack while `ACTIVE_INT_MAX_STR_DIGITS_OWNER` saves/restores per
+//     entry; separate threads track depth and ownership independently.
 thread_local! {
     static CALL_DEPTH: Cell<usize> = const { Cell::new(0) };
     /// Address identity of the Interpreter whose execution entry currently

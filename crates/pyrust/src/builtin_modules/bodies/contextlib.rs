@@ -58,6 +58,13 @@ struct ExitStackClassGeneration {
     callback: Rc<RefCell<PyClass>>,
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Stores `!Send` `Rc`/`Weak<RefCell<PyClass>>`
+//     mappings pairing public `contextlib` classes with their internal helper
+//     classes for each still-live import generation.
+// (b) Multi-interpreter / multi-threaded impact: Weak generation tracking
+//     isolates distinct `contextlib` imports across interpreters on one thread
+//     and prunes dead generations; separate threads are completely isolated.
 thread_local! {
     /// Weak identities for every still-live imported contextlib generation.
     ///

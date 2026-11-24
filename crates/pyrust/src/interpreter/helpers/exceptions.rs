@@ -774,6 +774,14 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     ]
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Holds `!Send` `Rc<RefCell<PyClass>>` objects for
+//     the full built-in exception hierarchy so `Interpreter::default()` and
+//     `lookup_exc_class` avoid rebuilding ~70 classes per invocation.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share the built-in exception class objects (mutations on a
+//     built-in exception class would be visible on the same thread); separate
+//     threads own independent hierarchies.
 thread_local! {
     /// Per-thread cache of all built-in exception class `Rc`s.
     /// Built once per thread; each `Interpreter::default()` call clones the

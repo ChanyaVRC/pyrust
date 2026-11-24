@@ -187,6 +187,14 @@ pub(crate) fn c3_linearize_classes(class: &Rc<RefCell<PyClass>>) -> Vec<Rc<RefCe
     mro
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Stores `!Send` `Rc<RefCell<PyClass>>` singletons
+//     for `object`, primitive types, and weak `itertools.chain` class
+//     generations used across MRO and type-dispatch hot paths.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share the immutable built-in type objects (and track the latest
+//     weak `itertools.chain` import generation); separate threads build
+//     independent type singletons with zero synchronization.
 thread_local! {
     static OBJECT_CLASS: Rc<RefCell<PyClass>> = {
         // Issue #1047: object.__init_subclass__ is a no-op classmethod in
@@ -747,9 +755,7 @@ thread_local! {
         });
         cell
     };
-}
 
-thread_local! {
     /// The newest imported `itertools.chain` class generation.
     ///
     /// Iterator states snapshot an Rc at construction. Re-importing

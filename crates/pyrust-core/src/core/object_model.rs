@@ -6,7 +6,7 @@
 //! details as a pseudo-public API.  Dependencies on the surrounding domains
 //! are explicit here.
 
-use std::alloc::{Layout, alloc, dealloc, realloc};
+use std::alloc::{Layout, dealloc, realloc};
 use std::any::Any;
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -26,6 +26,9 @@ use crate::cycle_guards::{EqGuard, ReprGuard};
 use crate::environment::{EnvRef, Environment, NameSet};
 use crate::errors::{PyError, Result};
 use crate::object_identity::{ObjectIdentity, next_obj_id};
+use crate::pool::{
+    alloc_or_handle, pool_b_alloc, pool_b_dealloc, pool_opaque_alloc, pool_opaque_dealloc,
+};
 
 include!("dict_probe_index.rs");
 include!("set_probe_index.rs");

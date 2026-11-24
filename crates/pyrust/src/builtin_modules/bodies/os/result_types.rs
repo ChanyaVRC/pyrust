@@ -16,6 +16,12 @@ use super::{
     TERMINAL_SIZE_REPR_REGISTRY,
 };
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Holds `!Send` `Rc<RefCell<PyClass>>` singletons for
+//     `os.terminal_size` and `os.stat_result` structseq classes.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share the immutable `os` result-type class singletons; separate
+//     threads build independent singletons.
 thread_local! {
     static TERMINAL_SIZE_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs = indexmap::IndexMap::new();

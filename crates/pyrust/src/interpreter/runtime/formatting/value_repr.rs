@@ -218,12 +218,9 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
     }
 
     // For containers, we need to recurse with interpreter access on each
-    // element.  Use a thread-local cycle-detection stack identical in spirit
-    // to the one in `Value::repr_raw()`.
-    thread_local! {
-        static REPR_IN_PROGRESS: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
-    }
-
+    // element.  Share `pyrust_core`'s RAII `CycleGuard` repr stack so both
+    // `Value::repr_raw` and interpreter-dispatched repr share one cycle stack
+    // and early `?` returns always pop cleanly.
     match value.kind() {
         ValueKind::List(items) => {
             // Fast path: all elements are plain scalars — no interpreter
@@ -233,15 +230,13 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 drop(items);
                 return Ok(value.repr_raw());
             }
-            let id = value.value_id();
-            let already_in =
-                id.is_some_and(|id| REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id)));
-            if already_in {
-                return Ok("[...]".to_string());
-            }
-            if let Some(id) = id {
-                REPR_IN_PROGRESS.with(|c| c.borrow_mut().push(id));
-            }
+            let _repr_guard = match value.value_id() {
+                Some(id) => match pyrust_core::enter_repr_cycle_guard(id) {
+                    Some(guard) => Some(guard),
+                    None => return Ok("[...]".to_string()),
+                },
+                None => None,
+            };
             // Release the guard before calling user __repr__. CPython walks a
             // list live here: an element repr that appends to this list makes
             // the appended element part of the same representation.
@@ -256,14 +251,6 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 parts.push(render_value_repr(interp, &item)?);
                 index += 1;
             }
-            if let Some(id) = id {
-                REPR_IN_PROGRESS.with(|c| {
-                    let mut v = c.borrow_mut();
-                    if let Some(pos) = v.iter().rposition(|&x| x == id) {
-                        v.remove(pos);
-                    }
-                });
-            }
             Ok(format!("[{}]", parts.join(", ")))
         }
         ValueKind::Tuple(items) => {
@@ -272,28 +259,18 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             if !items.iter().any(value_needs_interp_repr) {
                 return Ok(value.repr_raw());
             }
-            let id = value.value_id();
-            let already_in =
-                id.is_some_and(|id| REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id)));
-            if already_in {
-                return Ok("(...)".to_string());
-            }
-            if let Some(id) = id {
-                REPR_IN_PROGRESS.with(|c| c.borrow_mut().push(id));
-            }
+            let _repr_guard = match value.value_id() {
+                Some(id) => match pyrust_core::enter_repr_cycle_guard(id) {
+                    Some(guard) => Some(guard),
+                    None => return Ok("(...)".to_string()),
+                },
+                None => None,
+            };
             // Tuple items are `&[Value]` — no Ref guard to drop.
             let snapshot: Vec<Value> = items.to_vec();
             let mut parts = Vec::with_capacity(snapshot.len());
             for item in &snapshot {
                 parts.push(render_value_repr(interp, item)?);
-            }
-            if let Some(id) = id {
-                REPR_IN_PROGRESS.with(|c| {
-                    let mut v = c.borrow_mut();
-                    if let Some(pos) = v.iter().rposition(|&x| x == id) {
-                        v.remove(pos);
-                    }
-                });
             }
             let inner = parts.join(", ");
             if snapshot.len() == 1 {
@@ -312,15 +289,13 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 drop(items);
                 return Ok(value.repr_raw());
             }
-            let id = value.value_id();
-            let already_in =
-                id.is_some_and(|id| REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id)));
-            if already_in {
-                return Ok("{...}".to_string());
-            }
-            if let Some(id) = id {
-                REPR_IN_PROGRESS.with(|c| c.borrow_mut().push(id));
-            }
+            let _repr_guard = match value.value_id() {
+                Some(id) => match pyrust_core::enter_repr_cycle_guard(id) {
+                    Some(guard) => Some(guard),
+                    None => return Ok("{...}".to_string()),
+                },
+                None => None,
+            };
             // Release the guard before dispatch. Like CPython's dict repr,
             // continue the live insertion-order walk so entries appended by a
             // key/value __repr__ can be rendered by this same call.
@@ -346,14 +321,6 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 index += 1;
             }
             out.push('}');
-            if let Some(id) = id {
-                REPR_IN_PROGRESS.with(|c| {
-                    let mut v = c.borrow_mut();
-                    if let Some(pos) = v.iter().rposition(|&x| x == id) {
-                        v.remove(pos);
-                    }
-                });
-            }
             Ok(out)
         }
         ValueKind::Set(items) => {
@@ -366,28 +333,18 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 drop(items);
                 return Ok(value.repr_raw());
             }
-            let id = value.value_id();
-            let already_in =
-                id.is_some_and(|id| REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id)));
-            if already_in {
-                return Ok("{...}".to_string());
-            }
-            if let Some(id) = id {
-                REPR_IN_PROGRESS.with(|c| c.borrow_mut().push(id));
-            }
+            let _repr_guard = match value.value_id() {
+                Some(id) => match pyrust_core::enter_repr_cycle_guard(id) {
+                    Some(guard) => Some(guard),
+                    None => return Ok("{...}".to_string()),
+                },
+                None => None,
+            };
             let snapshot: Vec<PyKey> = items.iter().cloned().collect();
             drop(items);
             let mut parts = Vec::with_capacity(snapshot.len());
             for k in &snapshot {
                 parts.push(render_key_repr(interp, k)?);
-            }
-            if let Some(id) = id {
-                REPR_IN_PROGRESS.with(|c| {
-                    let mut v = c.borrow_mut();
-                    if let Some(pos) = v.iter().rposition(|&x| x == id) {
-                        v.remove(pos);
-                    }
-                });
             }
             Ok(format!("{{{}}}", parts.join(", ")))
         }
@@ -409,28 +366,18 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 drop(items);
                 return Ok(value.repr_raw());
             }
-            let id = value.value_id();
-            let already_in =
-                id.is_some_and(|id| REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id)));
-            if already_in {
-                return Ok("{...}".to_string());
-            }
-            if let Some(id) = id {
-                REPR_IN_PROGRESS.with(|c| c.borrow_mut().push(id));
-            }
+            let _repr_guard = match value.value_id() {
+                Some(id) => match pyrust_core::enter_repr_cycle_guard(id) {
+                    Some(guard) => Some(guard),
+                    None => return Ok("{...}".to_string()),
+                },
+                None => None,
+            };
             let snapshot: Vec<PyKey> = items.iter().cloned().collect();
             drop(items);
             let mut parts = Vec::with_capacity(snapshot.len());
             for k in &snapshot {
                 parts.push(render_key_repr(interp, k)?);
-            }
-            if let Some(id) = id {
-                REPR_IN_PROGRESS.with(|c| {
-                    let mut v = c.borrow_mut();
-                    if let Some(pos) = v.iter().rposition(|&x| x == id) {
-                        v.remove(pos);
-                    }
-                });
             }
             Ok(format!("frozenset({{{}}})", parts.join(", ")))
         }

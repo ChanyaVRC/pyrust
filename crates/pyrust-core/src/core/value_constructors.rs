@@ -1,3 +1,28 @@
+// Thread-local justification:
+// (a) Why `thread_local!`: Both `EMPTY_TUPLE` (`Value`) and `BUILTIN_FN_CACHE`
+//     (`Rc<UserFunction>`) hold `!Send + !Sync` thread-confined runtime objects
+//     needed on hot constructor paths without passing an `&Interpreter`.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share the immutable `()` singleton and interned builtin function
+//     stubs (note: mutating attributes on an interned builtin stub is visible
+//     on the same thread); separate threads own independent singletons.
+thread_local! {
+    /// Immutable empty-tuple singleton so `() is ()` is True and empty `*args`
+    /// collection avoids heap allocation.
+    static EMPTY_TUPLE: Value = {
+        let inner = Rc::new(TupleInner {
+            items: Vec::new(),
+            obj_id: next_obj_id(),
+        });
+        unsafe { Value::tuple_from_rc(inner) }
+    };
+
+    /// Per-thread intern cache mapping static builtin function names to their
+    /// shared `Rc<UserFunction>` stub.
+    static BUILTIN_FN_CACHE: RefCell<HashMap<&'static str, Rc<UserFunction>>> =
+        RefCell::new(HashMap::new());
+}
+
 impl Value {
     // ── Constructors ─────────────────────────────────────────────────────────
 
@@ -376,15 +401,6 @@ impl Value {
                 // Empty tuple: share one immutable singleton, so `() is ()` is
                 // True (CPython parity, where `()` is a singleton) and an empty
                 // `*args` collection costs no allocation.
-                thread_local! {
-                    static EMPTY_TUPLE: Value = {
-                        let inner = Rc::new(TupleInner {
-                            items: Vec::new(),
-                            obj_id: next_obj_id(),
-                        });
-                        unsafe { Value::tuple_from_rc(inner) }
-                    };
-                }
                 EMPTY_TUPLE.with(|t| t.clone())
             }
             2 => {
@@ -490,11 +506,7 @@ impl Value {
     /// calls don't reallocate it — equivalent in cost to the previous
     /// single-pointer payload.
     fn interned_builtin_function_rc(name: &'static str) -> Rc<UserFunction> {
-        thread_local! {
-            static CACHE: RefCell<HashMap<&'static str, Rc<UserFunction>>>
-                = RefCell::new(HashMap::new());
-        }
-        CACHE.with(|c| {
+        BUILTIN_FN_CACHE.with(|c| {
             if let Some(f) = c.borrow().get(name) {
                 return Rc::clone(f);
             }

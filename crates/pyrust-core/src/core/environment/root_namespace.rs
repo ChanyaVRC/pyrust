@@ -1,3 +1,10 @@
+// Thread-local justification:
+// (a) Why `thread_local!`: Tracks `!Send` `Weak<RootNamespaceState>` owners and
+//     a non-atomic `Cell<bool>` fast-path gate for escaped namespace dicts on
+//     this thread.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share monotonic namespace ids and an address-keyed weak alias map
+//     (no cross-interpreter state bleed); separate threads are fully isolated.
 thread_local! {
     /// Stable identities for root/global namespaces on this interpreter
     /// thread. `u64::MAX` is a saturated, uncacheable sentinel.

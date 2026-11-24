@@ -53,6 +53,7 @@ fn non_value_responsibilities_are_not_folded_back_into_object_model() {
         "include!(\"object_identity.rs\")",
         "include!(\"string_interning.rs\")",
         "include!(\"cycle_guards.rs\")",
+        "include!(\"pool.rs\")",
     ] {
         assert!(
             !source.contains(forbidden),

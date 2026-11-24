@@ -38,14 +38,15 @@ const CANONICAL_DESCRIPTOR_OWNER_TAGS: [pyrust_core::CanonicalClassTag; 17] = [
     pyrust_core::CanonicalClassTag::Tuple,
 ];
 
-thread_local! {
-    /// Unregistered protocol sentinels are immutable. Resolve their canonical
-    /// owner by Value identity once, then keep the typed result for subsequent
-    /// dispatches instead of rescanning every canonical class attribute map.
-    static UNREGISTERED_DESCRIPTOR_OWNER_CACHE:
-        RefCell<HashMap<&'static str, Option<pyrust_core::CanonicalClassTag>>> =
-        RefCell::new(HashMap::new());
-}
+/// Process-global immutable index mapping canonical classes' builtin protocol
+/// sentinel keys to their owning [`pyrust_core::CanonicalClassTag`].
+///
+/// Built once from the static canonical class definitions on first fallback
+/// lookup so unregistered protocol sentinels resolve lock-free across threads
+/// without `thread_local!` or `RefCell` state.
+static UNREGISTERED_DESCRIPTOR_OWNERS: std::sync::OnceLock<
+    HashMap<&'static str, pyrust_core::CanonicalClassTag>,
+> = std::sync::OnceLock::new();
 
 #[derive(Clone, Copy)]
 struct BuiltinMethodResolution {
@@ -57,8 +58,8 @@ struct BuiltinMethodResolution {
 /// semantics from its qualified display/registry name.
 ///
 /// Registered descriptors carry a typed tag. Protocol sentinels without a
-/// registry body (notably `bytes.__iter__`) fall back to Value-identity
-/// matching against canonical classes' own attribute dictionaries.
+/// registry body (notably `bytes.__iter__`) fall back to matching against
+/// canonical classes' own attribute dictionaries.
 fn canonical_builtin_descriptor_owner_tag(
     method: &Value,
     registration: Option<&'static crate::builtin_registry::BuiltinReg>,
@@ -70,26 +71,19 @@ fn canonical_builtin_descriptor_owner_tag(
         return Some(owner);
     }
 
-    if let Some(cached) =
-        UNREGISTERED_DESCRIPTOR_OWNER_CACHE.with(|cache| cache.borrow().get(registry_key).copied())
-    {
-        return cached;
-    }
-    let resolved = CANONICAL_DESCRIPTOR_OWNER_TAGS
-        .iter()
-        .copied()
-        .find(|&tag| {
+    let owners = UNREGISTERED_DESCRIPTOR_OWNERS.get_or_init(|| {
+        let mut map = HashMap::new();
+        for &tag in &CANONICAL_DESCRIPTOR_OWNER_TAGS {
             let owner = canonical_class_by_tag(tag);
-            owner
-                .borrow()
-                .attrs
-                .values()
-                .any(|owned| values_are_identical(owned, method))
-        });
-    UNREGISTERED_DESCRIPTOR_OWNER_CACHE.with(|cache| {
-        cache.borrow_mut().insert(registry_key, resolved);
+            for owned in owner.borrow().attrs.values() {
+                if let ValueKind::BuiltinFunction(key) = owned.kind() {
+                    map.entry(key).or_insert(tag);
+                }
+            }
+        }
+        map
     });
-    resolved
+    owners.get(registry_key).copied()
 }
 
 fn canonical_descriptor_method_name(

@@ -358,6 +358,14 @@ struct MutableContainerKey {
     ptr: usize,
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Holds `!Send` `Rc`/`Weak<CollectionMutationStateInner>`
+//     entries and a non-atomic `Cell<usize>` fast-path gate keyed by
+//     thread-confined container addresses.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share the address-keyed registry safely (distinct containers have
+//     distinct addresses; idle cache holds weak targets only); separate threads
+//     never perturb each other's dict/set mutation fast path.
 thread_local! {
     /// Keyed by backing address, so the registry is a pointer-identity lookup
     /// on the loop-entry and tracked-write paths. The stdlib's DoS-resistant

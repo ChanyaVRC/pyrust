@@ -5,6 +5,13 @@ include!("type_objects/value_class.rs");
 include!("type_objects/type_names.rs");
 include!("type_objects/member_descriptors.rs");
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Stores `!Send` `Rc<RefCell<PyClass>>` singletons for
+//     runtime type objects (`TypeAliasType`, `TypeVar`, `ParamSpec`,
+//     `TypeVarTuple`, `UnionType`, `GenericAlias`, etc.).
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share these built-in runtime type singletons; separate threads
+//     initialize independent class singletons.
 thread_local! {
     /// Class singleton for `TypeAliasType` objects created by `type X = ...`.
     static TYPE_ALIAS_CLASS: Rc<RefCell<PyClass>> = {

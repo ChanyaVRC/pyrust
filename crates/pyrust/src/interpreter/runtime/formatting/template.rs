@@ -105,6 +105,14 @@ struct ParsedTemplate {
 /// generators.  On overflow the cache is cleared wholesale.
 const TEMPLATE_CACHE_MAX: usize = 512;
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Caches parsed `str.format` templates as `!Send`
+//     `Rc<ParsedTemplate>` in a dynamically-populated `RefCell<HashMap>` on the
+//     hot formatting path; a global `RwLock`/`Arc` map would add lock and
+//     atomic contention to every `str.format` call.
+// (b) Multi-interpreter / multi-threaded impact: Entries are pure immutable
+//     parsed templates with no `Value`/interpreter references, so sharing on
+//     one thread has zero semantic bleed; separate threads own bounded caches.
 thread_local! {
     /// Per-thread `template content -> parsed descriptors` cache.  Entries own
     /// their data (no `Value`/interpreter references), so the table is safe to
