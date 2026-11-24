@@ -1,3 +1,38 @@
+struct FilesystemModuleTarget {
+    file_path: PathBuf,
+    package_dir: Option<PathBuf>,
+}
+
+/// Locate a filesystem package (`<dir>/<leaf>/__init__.py`) or module
+/// (`<dir>/<leaf>.py`) across `search_dirs`.
+///
+/// Within each search directory, a package takes precedence over a sibling
+/// `.py` module, matching CPython 3.12's `FileFinder`. Across directories,
+/// earlier entries in `search_dirs` win.
+fn find_filesystem_module(
+    search_dirs: &[PathBuf],
+    leaf_name: &str,
+) -> Option<FilesystemModuleTarget> {
+    for dir in search_dirs {
+        let pkg_dir = dir.join(leaf_name);
+        let init_path = pkg_dir.join("__init__.py");
+        if init_path.is_file() {
+            return Some(FilesystemModuleTarget {
+                file_path: init_path,
+                package_dir: Some(pkg_dir),
+            });
+        }
+        let mod_path = dir.join(format!("{leaf_name}.py"));
+        if mod_path.is_file() {
+            return Some(FilesystemModuleTarget {
+                file_path: mod_path,
+                package_dir: None,
+            });
+        }
+    }
+    None
+}
+
 // Generic module loading and lookup.
 fn validate_import_cache_entry(name: &str, cached: Option<Value>) -> Result<Option<Value>> {
     if cached.as_ref().is_some_and(Value::is_none) {
@@ -263,6 +298,210 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Read a module-scope dunder (`__package__`, `__name__`, `__path__`) from
+    /// the active defining module's root namespace without forcing a globals
+    /// alias exposure on fastlocal scripts.
+    fn lookup_active_module_global(&self, name: &str) -> Option<Value> {
+        let namespace = self.prepare_global_namespace(name);
+        let root = module_env(&self.env);
+        let root_ref = root.borrow();
+        if let Some(val) = root_ref.namespace_fastlocal_value(name) {
+            return (!val.is_unset()).then_some(val);
+        }
+        if let Some(val) = root_ref
+            .try_namespace_values()
+            .and_then(|values| values.get(name).cloned())
+        {
+            return (!val.is_unset()).then_some(val);
+        }
+        namespace
+            .globals()
+            .dict_with(|dict| dict.get(&StrKey(name)).cloned())
+            .flatten()
+            .filter(|val| !val.is_unset())
+    }
+
+    /// Resolve a relative import `(rel_name, level)` (`level >= 1`) against the
+    /// importing module's `__package__`, matching CPython 3.12's
+    /// `importlib._bootstrap._calc___package__` and `_resolve_name`.
+    pub(crate) fn resolve_relative_module_name(
+        &self,
+        rel_name: &str,
+        level: usize,
+        globals_override: Option<&Value>,
+    ) -> Result<String> {
+        let lookup_key = |key: &str| -> Option<Value> {
+            if let Some(globals) = globals_override {
+                globals
+                    .dict_with(|dict| dict.get(&StrKey(key)).cloned())
+                    .flatten()
+                    .filter(|val| !val.is_unset())
+            } else {
+                self.lookup_active_module_global(key)
+            }
+        };
+
+        let package_val = lookup_key("__package__");
+        let package = match package_val {
+            Some(val) if !val.is_none() => match val.as_str() {
+                Some(s) => s.to_string(),
+                None => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "package must be a string".to_string(),
+                    ));
+                }
+            },
+            _ => {
+                // Fallback matching CPython `_calc___package__`: when
+                // `__package__` is `None` or absent, infer from `__name__` and
+                // `__path__`.
+                if let Some(name_str) =
+                    lookup_key("__name__").and_then(|val| val.as_str().map(str::to_string))
+                {
+                    if lookup_key("__path__").is_some() {
+                        name_str
+                    } else {
+                        name_str
+                            .rsplit_once('.')
+                            .map(|(parent, _)| parent.to_string())
+                            .unwrap_or_default()
+                    }
+                } else {
+                    String::new()
+                }
+            }
+        };
+
+        if package.is_empty() {
+            return Err(PyError::import_error(
+                "ImportError",
+                "attempted relative import with no known parent package".to_string(),
+                None,
+            ));
+        }
+
+        let parts: Vec<&str> = package.rsplitn(level, '.').collect();
+        if parts.len() < level {
+            return Err(PyError::import_error(
+                "ImportError",
+                "attempted relative import beyond top-level package".to_string(),
+                None,
+            ));
+        }
+        let base = *parts.last().expect("rsplitn with level >= 1 is non-empty");
+        if base.is_empty() {
+            return Err(PyError::import_error(
+                "ImportError",
+                "attempted relative import beyond top-level package".to_string(),
+                None,
+            ));
+        }
+        if rel_name.is_empty() {
+            Ok(base.to_string())
+        } else {
+            Ok(format!("{base}.{rel_name}"))
+        }
+    }
+
+    /// Entry point for VM `ImportModule` instructions (`import ...` and
+    /// `from ... import ...`). Resolves parser-encoded leading dots for
+    /// relative imports before delegating to [`Self::load_module`].
+    pub(crate) fn load_import_module(&mut self, name: &str) -> Result<Value> {
+        if name.starts_with('.') {
+            let level = name.bytes().take_while(|&b| b == b'.').count();
+            let rel_name = &name[level..];
+            let resolved = self.resolve_relative_module_name(rel_name, level, None)?;
+            return self.load_module(&resolved);
+        }
+        self.load_module(name)
+    }
+
+    /// Check whether `module` exposes a package `__path__` attribute.
+    pub(crate) fn module_has_package_path(&mut self, module: &Value) -> Result<bool> {
+        if let ValueKind::PyModule(m) = module.kind() {
+            if m.borrow().filesystem_namespace().is_some() {
+                self.ensure_module_namespace_synced(m);
+            }
+            let borrowed = m.borrow();
+            if let Some(val) = borrowed.get_attr_value("__path__") {
+                return Ok(!val.is_unset());
+            }
+            if borrowed.filesystem_namespace().is_some() || borrowed.live_namespace().is_some() {
+                return Ok(false);
+            }
+        }
+        match self.get_attr(module, "__path__") {
+            Ok(_) => Ok(true),
+            Err(err) if err.class_name_is("AttributeError") => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Extract filesystem search directories from a parent package's
+    /// `__path__` attribute. Returns `Ok(None)` when the parent module has no
+    /// `__path__` (i.e. is not a package).
+    fn extract_package_search_dirs(
+        &mut self,
+        parent_module: &Value,
+    ) -> Result<Option<Vec<PathBuf>>> {
+        let path_val = match self.get_attr(parent_module, "__path__") {
+            Ok(val) => val,
+            Err(err) if err.class_name_is("AttributeError") => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let dirs = match path_val.kind() {
+            ValueKind::List(entries) => entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(PathBuf::from))
+                .collect(),
+            ValueKind::Tuple(entries) => entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(PathBuf::from))
+                .collect(),
+            _ => self
+                .collect_iterable(&path_val)?
+                .into_iter()
+                .filter_map(|entry| entry.as_str().map(PathBuf::from))
+                .collect(),
+        };
+        Ok(Some(dirs))
+    }
+
+    /// Return `true` when `err` is a `ModuleNotFoundError` for `expected_name`
+    /// itself (not a missing transitive dependency) and `expected_name` is not
+    /// explicitly halted via `sys.modules[expected_name] = None`.
+    pub(crate) fn is_missing_module_error(&mut self, err: &PyError, expected_name: &str) -> bool {
+        let matches_name = match err {
+            PyError::ImportError {
+                class_name: "ModuleNotFoundError",
+                module_name: Some(m),
+                ..
+            } => m == expected_name,
+            PyError::Raised(exc) if err.class_name_is("ModuleNotFoundError") => self
+                .get_attr(exc, "name")
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s == expected_name))
+                .unwrap_or(false),
+            _ => false,
+        };
+        if !matches_name {
+            return false;
+        }
+        if self
+            .lookup_internal_import_registry(expected_name)
+            .is_some_and(|v| v.is_none())
+        {
+            return false;
+        }
+        let halted_visible = self
+            .lookup_import_registry(expected_name)
+            .ok()
+            .flatten()
+            .is_some_and(|v| v.is_none());
+        !halted_visible
+    }
+
     pub(crate) fn load_module(&mut self, name: &str) -> Result<Value> {
         // CPython first probes its interpreter-owned original modules dict. The
         // public `sys.modules` attribute initially aliases it, but rebinding the
@@ -352,117 +591,176 @@ impl Interpreter {
             }
             return Ok(val);
         }
-        // User .py file: look for <name>.py in the active sys.path roots.
-        // Convert dotted name to path: "foo.bar" -> "foo/bar.py".
-        let rel_path = name.replace('.', "/") + ".py";
-        for dir in self.user_module_search_dirs() {
-            let full_path = dir.join(&rel_path);
-            if full_path.exists() {
-                let src = std::fs::read_to_string(&full_path).map_err(|e| {
-                    PyError::Runtime(format!("failed to read '{}': {e}", full_path.display()))
-                })?;
-                // The module's own path: tags its code objects' `co_filename` and
-                // the traceback `File "..."` line for frames raised inside it,
-                // instead of inheriting the importing script's path (#2438).
-                let module_filename = full_path.to_string_lossy().into_owned();
-                // Parse with per-statement line numbers and per-token positions so
-                // frames raised inside the imported module carry the correct
-                // `tb_lineno` and PEP 657 caret anchors (#2438); the import path
-                // previously parsed without line info, so module frames printed no
-                // line number / source line.
-                let (program, linenos) = Self::parse_source_to_stmts_with_linenos(&src)?;
-                // Subinterpreter shares the same module_cache so results are visible to parent
-                let mut sub = Interpreter {
-                    script_dir: self.script_dir.clone(),
-                    script_filename: Some(std::sync::Arc::from(module_filename.as_str())),
-                    // Imported modules run in the top-level script's process
-                    // context, so a later `import sys` must see the original
-                    // command-line arguments rather than an empty vector.
-                    script_argv: self.script_argv.clone(),
-                    module_cache: Rc::clone(&self.module_cache),
-                    bootstrap_module_registry: self.bootstrap_module_registry.clone(),
-                    // Filesystem imports execute through a child object but
-                    // remain inside the parent's Python interpreter. Sharing
-                    // warnings state mirrors the singleton `warnings` module
-                    // already shared through `module_cache`/`sys.modules`.
-                    warnings_state: Rc::clone(&self.warnings_state),
-                    sys_state: Rc::clone(&self.sys_state),
-                    // This child is an implementation detail of importing a
-                    // module into the same Python interpreter. Start with the
-                    // parent's integer conversion policy; changes are copied
-                    // back below even if module execution raises.
-                    int_max_str_digits: get_int_max_str_digits(self),
-                    // Imported Python modules execute in a child Interpreter
-                    // but share the parent's recursion policy.
-                    recursion_limit: self.recursion_limit,
-                    ..Default::default()
-                };
-                // Source modules and functions must observe one namespace
-                // owner, not a post-execution `env.values -> PyModule.attrs`
-                // snapshot. The module keeps the root globals dict strongly
-                // and only a weak environment link; captured functions keep
-                // their own root alive, while circular imports do not gain a
-                // direct strong PyModule/Environment ownership cycle.
-                let module_rc = Rc::new(RefCell::new(PyModule::new(
-                    name.to_string(),
-                    crate::value::ModuleAttrs::default(),
-                )));
-                {
-                    let mut module = module_rc.borrow_mut();
-                    module.attach_filesystem_namespace(&sub.env);
-                    // Seed the import identity before execution. The script
-                    // dunder initializer uses get-or-insert and therefore
-                    // preserves these filesystem-module values.
-                    //
-                    // `__doc__` is seeded between them purely for position:
-                    // these keys are inserted before the script initializer
-                    // runs, so they fix the head of `list(vars(module))`, and
-                    // CPython's module dict starts `__name__`, `__doc__`,
-                    // `__package__` (issue #2918 — the same head the built-in
-                    // module paths now produce). A module docstring overwrites
-                    // the `None` in place when the body executes.
-                    module.insert_attr("__name__".to_string(), Value::string(name));
-                    module.insert_attr("__doc__".to_string(), Value::none());
-                    module.insert_attr("__package__".to_string(), Value::string(""));
-                }
-                let module = Value::py_module(Rc::clone(&module_rc));
-                // Register before executing the body so a circular import sees
-                // this partial object. Script writes are mirrored into its live
-                // backing immediately, making already-executed bindings visible.
-                self.module_cache
-                    .borrow_mut()
-                    .insert(name.to_string(), module.clone());
-                if let Err(error) = self.register_in_sys_modules(name, &module) {
-                    self.unregister_failed_module(name);
-                    return Err(error);
-                }
-                // call_depth is thread_local — the child automatically shares
-                // the active host-stack counter.
-                let execution_result =
-                    sub.exec_import_program_with_linenos(&program, &linenos, &src);
-                let child_int_max_str_digits = get_int_max_str_digits(&sub);
-                set_int_max_str_digits(self, child_int_max_str_digits);
-                if let Err(e) = execution_result {
-                    // CPython removes a half-initialised module from sys.modules
-                    // (and thus the import cache) when its body raises, so a
-                    // later import retries from scratch instead of yielding a
-                    // partially-populated object.
-                    self.unregister_failed_module(name);
-                    return Err(e);
-                }
-                return Ok(module);
+
+        // User filesystem packages (`<pkg>/__init__.py`) and modules (`<mod>.py`).
+        // Dotted names load parent packages first and search each child inside
+        // its parent package's `__path__` (never falling back to `sys.path`).
+        let (parent_name, leaf_name) = match name.rsplit_once('.') {
+            Some((parent, leaf)) if !parent.is_empty() && !leaf.is_empty() => (Some(parent), leaf),
+            _ => (None, name),
+        };
+        let (parent_module_value, search_dirs) = if let Some(parent) = parent_name {
+            let loaded_parent = if let Some(cached) =
+                validate_import_cache_entry(parent, self.lookup_internal_import_registry(parent))?
+            {
+                cached
+            } else if let Some(cached) = self.lookup_sys_modules(parent)? {
+                cached
+            } else {
+                self.load_module(parent)?
+            };
+            // Executing `parent/__init__.py` may have imported `name` as a side
+            // effect; re-probe `sys.modules` before searching the filesystem.
+            if let Some(cached) =
+                validate_import_cache_entry(name, self.lookup_internal_import_registry(name))?
+            {
+                return Ok(cached);
             }
+            if let Some(cached) = self.lookup_sys_modules(name)? {
+                return Ok(cached);
+            }
+            // Re-read the active parent from `sys.modules` in case the parent's
+            // `__init__.py` replaced its own entry.
+            let active_parent =
+                validate_import_cache_entry(parent, self.lookup_internal_import_registry(parent))?
+                    .or(self.lookup_sys_modules(parent)?)
+                    .unwrap_or(loaded_parent);
+            let Some(dirs) = self.extract_package_search_dirs(&active_parent)? else {
+                return Err(PyError::import_error(
+                    "ModuleNotFoundError",
+                    format!("No module named '{name}'; '{parent}' is not a package"),
+                    Some(name.to_string()),
+                ));
+            };
+            (Some(active_parent), dirs)
+        } else {
+            (None, self.user_module_search_dirs())
+        };
+
+        if let Some(target) = find_filesystem_module(&search_dirs, leaf_name) {
+            let full_path = target.file_path;
+            let src = std::fs::read_to_string(&full_path).map_err(|e| {
+                PyError::Runtime(format!("failed to read '{}': {e}", full_path.display()))
+            })?;
+            // The module's own path: tags its code objects' `co_filename` and
+            // the traceback `File "..."` line for frames raised inside it,
+            // instead of inheriting the importing script's path (#2438).
+            let module_filename = full_path.to_string_lossy().into_owned();
+            // Parse with per-statement line numbers and per-token positions so
+            // frames raised inside the imported module carry the correct
+            // `tb_lineno` and PEP 657 caret anchors (#2438); the import path
+            // previously parsed without line info, so module frames printed no
+            // line number / source line.
+            let (program, linenos) = Self::parse_source_to_stmts_with_linenos(&src)?;
+            // Subinterpreter shares the same module_cache so results are visible to parent
+            let mut sub = Interpreter {
+                script_dir: self.script_dir.clone(),
+                script_filename: Some(std::sync::Arc::from(module_filename.as_str())),
+                // Imported modules run in the top-level script's process
+                // context, so a later `import sys` must see the original
+                // command-line arguments rather than an empty vector.
+                script_argv: self.script_argv.clone(),
+                module_cache: Rc::clone(&self.module_cache),
+                bootstrap_module_registry: self.bootstrap_module_registry.clone(),
+                // Filesystem imports execute through a child object but
+                // remain inside the parent's Python interpreter. Sharing
+                // warnings state mirrors the singleton `warnings` module
+                // already shared through `module_cache`/`sys.modules`.
+                warnings_state: Rc::clone(&self.warnings_state),
+                sys_state: Rc::clone(&self.sys_state),
+                // This child is an implementation detail of importing a
+                // module into the same Python interpreter. Start with the
+                // parent's integer conversion policy; changes are copied
+                // back below even if module execution raises.
+                int_max_str_digits: get_int_max_str_digits(self),
+                // Imported Python modules execute in a child Interpreter
+                // but share the parent's recursion policy.
+                recursion_limit: self.recursion_limit,
+                ..Default::default()
+            };
+            // CPython 3.12 `__package__` rules:
+            // - Packages (`__init__.py`): equal to the full package name.
+            // - Submodules: equal to the parent package name.
+            // - Top-level modules: empty string `""`.
+            let package_name = if target.package_dir.is_some() {
+                name
+            } else {
+                parent_name.unwrap_or("")
+            };
+            // Source modules and functions must observe one namespace
+            // owner, not a post-execution `env.values -> PyModule.attrs`
+            // snapshot. The module keeps the root globals dict strongly
+            // and only a weak environment link; captured functions keep
+            // their own root alive, while circular imports do not gain a
+            // direct strong PyModule/Environment ownership cycle.
+            let module_rc = Rc::new(RefCell::new(PyModule::new(
+                name.to_string(),
+                crate::value::ModuleAttrs::default(),
+            )));
+            {
+                let mut module = module_rc.borrow_mut();
+                module.attach_filesystem_namespace(&sub.env);
+                // Seed import metadata in CPython 3.12's exact key order
+                // (`__name__`, `__doc__`, `__package__`, `__loader__`,
+                // `__spec__`, [`__path__`], `__file__`) before registering in
+                // `sys.modules` and before executing the body so circular
+                // imports and child imports inside `__init__.py` immediately
+                // observe `__package__` and `__path__`. The script dunder
+                // initializer uses get-or-insert and appends only the
+                // remaining slots (`__cached__`, `__builtins__`, etc.).
+                module.insert_attr("__name__".to_string(), Value::string(name));
+                module.insert_attr("__doc__".to_string(), Value::none());
+                module.insert_attr("__package__".to_string(), Value::string(package_name));
+                module.insert_attr("__loader__".to_string(), Value::none());
+                module.insert_attr("__spec__".to_string(), Value::none());
+                if let Some(ref pkg_dir) = target.package_dir {
+                    module.insert_attr(
+                        "__path__".to_string(),
+                        Value::list(vec![Value::string(pkg_dir.to_string_lossy())]),
+                    );
+                }
+                module.insert_attr("__file__".to_string(), Value::string(&module_filename));
+            }
+            let module = Value::py_module(Rc::clone(&module_rc));
+            // Register before executing the body so a circular import sees
+            // this partial object. Script writes are mirrored into its live
+            // backing immediately, making already-executed bindings visible.
+            self.module_cache
+                .borrow_mut()
+                .insert(name.to_string(), module.clone());
+            if let Err(error) = self.register_in_sys_modules(name, &module) {
+                self.unregister_failed_module(name);
+                return Err(error);
+            }
+            // call_depth is thread_local — the child automatically shares
+            // the active host-stack counter.
+            let execution_result = sub.exec_import_program_with_linenos(&program, &linenos, &src);
+            let child_int_max_str_digits = get_int_max_str_digits(&sub);
+            set_int_max_str_digits(self, child_int_max_str_digits);
+            if let Err(e) = execution_result {
+                // CPython removes a half-initialised module from sys.modules
+                // (and thus the import cache) when its body raises, so a
+                // later import retries from scratch instead of yielding a
+                // partially-populated object.
+                self.unregister_failed_module(name);
+                return Err(e);
+            }
+            let final_module = self
+                .lookup_internal_import_registry(name)
+                .or_else(|| self.lookup_sys_modules(name).ok().flatten())
+                .unwrap_or(module);
+            if let Some(parent) = parent_name {
+                let current_parent = self
+                    .lookup_internal_import_registry(parent)
+                    .or_else(|| self.lookup_sys_modules(parent).ok().flatten())
+                    .or(parent_module_value);
+                if let Some(parent_mod) = current_parent {
+                    let _ = self.assign_attr(parent_mod, leaf_name, final_module.clone());
+                }
+            }
+            return Ok(final_module);
         }
-        // Relative imports (module name starts with '.') cannot be resolved in
-        // pyrust's package-less runtime.  CPython 3.12 raises ImportError (not
-        // ModuleNotFoundError) with a specific message in this case.
-        if name.starts_with('.') {
-            return Err(PyError::import_error(
-                "ImportError",
-                "attempted relative import with no known parent package".to_string(),
-                None,
-            ));
-        }
+
         Err(PyError::import_error(
             "ModuleNotFoundError",
             format!("No module named '{name}'"),

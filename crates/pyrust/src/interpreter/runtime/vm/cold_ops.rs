@@ -605,7 +605,7 @@ impl Interpreter {
         name_idx: u16,
     ) -> Result<Value> {
         let name = vm_pool_get(&code.names, name_idx, "name")?;
-        self.load_module(name)
+        self.load_import_module(name)
     }
 
     fn exec_print_expr(

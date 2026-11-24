@@ -39,19 +39,40 @@ impl Interpreter {
         })
     }
 
-    /// Resolve one name for `from module import name`, translating a missing
-    /// module attribute to `ImportError` at the namespace boundary.
+    /// Resolve one name for `from module import name`, loading submodules on
+    /// packages when the attribute is not yet bound and translating a missing
+    /// name to `ImportError` at the namespace boundary.
     pub(crate) fn import_from_attribute(&mut self, module: &Value, name: &str) -> Result<Value> {
         match self.get_attr(module, name) {
             Ok(value) => Ok(value),
             Err(error) if error.class_name_is("AttributeError") => {
-                let module_name = match module.kind() {
-                    ValueKind::PyModule(module) => module.borrow().name.clone(),
-                    _ => "<unknown>".to_string(),
+                let module_name = match self.get_attr(module, "__name__") {
+                    Ok(val) if val.as_str().is_some() => val.as_str().unwrap().to_string(),
+                    _ => match module.kind() {
+                        ValueKind::PyModule(module) => module.borrow().name.clone(),
+                        _ => "<unknown>".to_string(),
+                    },
+                };
+                if self.module_has_package_path(module)? {
+                    let sub_name = format!("{module_name}.{name}");
+                    match self.load_module(&sub_name) {
+                        Ok(sub_module) => return Ok(sub_module),
+                        Err(load_err) if self.is_missing_module_error(&load_err, &sub_name) => {}
+                        Err(load_err) => return Err(load_err),
+                    }
+                }
+                let location = match module.kind() {
+                    ValueKind::PyModule(module) => module
+                        .borrow()
+                        .get_attr_value("__file__")
+                        .filter(|v| !v.is_unset())
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_else(|| "unknown location".to_string()),
+                    _ => "unknown location".to_string(),
                 };
                 Err(PyError::import_error(
                     "ImportError",
-                    format!("cannot import name '{name}' from '{module_name}' (unknown location)"),
+                    format!("cannot import name '{name}' from '{module_name}' ({location})"),
                     Some(module_name),
                 ))
             }
