@@ -486,16 +486,18 @@ impl Environment {
         self.root_namespace.active_mirror_count.get() > 1
     }
 
-    /// Prepare one module fast-local write and return the dictionary that must
-    /// mirror it, if any.
-    ///
-    /// This is the hot `SyncModuleGlobal` operation: conditionally advancing
-    /// cache generations and deciding whether a Python-visible globals/locals
-    /// provider needs a write must share one root-state access. In the common
-    /// ordinary script case the provider has never escaped, so return before
-    /// borrowing or lazily allocating its dictionary.
+    /// Bitflags returned by [`Self::prepare_namespace_module_write_flags`] so
+    /// the hot `SyncModuleGlobal` inline path avoids constructing/dropping an
+    /// `Option<Value>` or borrowing `globals_provider` in the common case.
+    pub const MODULE_WRITE_SYNC_GLOBALS: u8 = 1 << 0;
+    pub const MODULE_WRITE_SYNC_SIBLINGS: u8 = 1 << 1;
+    pub const MODULE_WRITE_SYNC_ENV: u8 = 1 << 2;
+
+    /// Hot-path preparation for `SyncModuleGlobal`: advance interested cache
+    /// generations and report which slow synchronization actions (if any) are
+    /// needed via a compact bitmask.
     #[inline]
-    pub fn prepare_namespace_module_write(&self, name_mask: u64) -> Option<Value> {
+    pub fn prepare_namespace_module_write_flags(&self, name_mask: u64) -> u8 {
         let fallback_cache_interested =
             self.root_namespace.fallback_cache_interest.get() & name_mask == name_mask;
         let value_cache_interested =
@@ -508,6 +510,25 @@ impl Environment {
         } else if value_cache_interested {
             self.root_namespace.bump_environment_version();
         }
+        let filesystem_module_backing = self.root_namespace.filesystem_module_backing.get();
+        let cache_disabled = self.root_namespace.cache_disabled.get();
+        let mut flags = 0u8;
+        if filesystem_module_backing || cache_disabled {
+            flags |= Self::MODULE_WRITE_SYNC_GLOBALS;
+        }
+        if !cache_disabled && self.root_namespace.active_mirror_count.get() > 1 {
+            flags |= Self::MODULE_WRITE_SYNC_SIBLINGS;
+        }
+        if self.root_namespace.env_binding_interest.get() & name_mask == name_mask {
+            flags |= Self::MODULE_WRITE_SYNC_ENV;
+        }
+        flags
+    }
+
+    /// Cold half of `SyncModuleGlobal` globals-provider mirroring: bump the
+    /// attached filesystem module mutation token (if any) and return the
+    /// Python-visible target mapping.
+    pub fn namespace_module_write_target(&self) -> Option<Value> {
         let filesystem_module_backing = self.root_namespace.filesystem_module_backing.get();
         if filesystem_module_backing
             && let Some(module_mutation) = self
@@ -536,6 +557,23 @@ impl Environment {
                 None
             }
         }
+    }
+
+    /// Prepare one module fast-local write and return the dictionary that must
+    /// mirror it, if any.
+    ///
+    /// This is the hot `SyncModuleGlobal` operation: conditionally advancing
+    /// cache generations and deciding whether a Python-visible globals/locals
+    /// provider needs a write must share one root-state access. In the common
+    /// ordinary script case the provider has never escaped, so return before
+    /// borrowing or lazily allocating its dictionary.
+    #[inline]
+    pub fn prepare_namespace_module_write(&self, name_mask: u64) -> Option<Value> {
+        let flags = self.prepare_namespace_module_write_flags(name_mask);
+        if flags & Self::MODULE_WRITE_SYNC_GLOBALS == 0 {
+            return None;
+        }
+        self.namespace_module_write_target()
     }
 
     #[inline]

@@ -449,6 +449,95 @@ mod tests {
     }
 
     #[test]
+    fn env_values_update_if_present_never_inserts_or_reorders() {
+        // Issue #2925: inline and promoted EnvValues must update existing keys
+        // in place without inserting absent keys or perturbing insertion order.
+        let mut values = super::EnvValues::new();
+        assert!(!values.update_if_present("missing", Value::int(0)));
+        assert!(values.is_empty());
+
+        values.insert("first", Value::int(1));
+        values.insert("second", Value::int(2));
+        assert!(!values.update_if_present("absent_inline", Value::int(99)));
+        assert!(values.update_if_present("first", Value::int(11)));
+        assert_eq!(values.keys().collect::<Vec<_>>(), vec!["first", "second"]);
+        assert_eq!(values.get("first").and_then(Value::as_int), Some(11));
+
+        // Promote to hashed IndexMap storage past ENV_INLINE_CAP.
+        values.insert("third", Value::int(3));
+        assert!(!values.update_if_present("absent_map", Value::int(100)));
+        assert!(values.get("absent_map").is_none());
+        assert!(values.update_if_present("second", Value::int(22)));
+        assert_eq!(
+            values.keys().collect::<Vec<_>>(),
+            vec!["first", "second", "third"]
+        );
+        assert_eq!(values.get("second").and_then(Value::as_int), Some(22));
+    }
+
+    #[test]
+    fn interest_mask_false_positive_does_not_insert_or_perturb_snapshot_order() {
+        // Issue #2925: `delta` collides with the combined Bloom interest mask
+        // of the seeded module dunders (`__loader__` and `__spec__`).
+        let root = Environment::new(None);
+        {
+            let mut root = root.borrow_mut();
+            for dunder in [
+                "__name__",
+                "__doc__",
+                "__package__",
+                "__loader__",
+                "__spec__",
+                "__annotations__",
+                "__builtins__",
+                "__cached__",
+            ] {
+                root.record_namespace_env_binding(dunder);
+                root.values.insert(dunder, Value::none());
+            }
+        }
+        let delta_mask = super::namespace_name_interest_mask("delta");
+        let alpha_mask = super::namespace_name_interest_mask("alpha");
+        assert!(
+            root.borrow().namespace_env_binding_may_overlap(delta_mask),
+            "test relies on `delta` colliding with the seeded dunder mask"
+        );
+        assert!(
+            !root.borrow().namespace_env_binding_may_overlap(alpha_mask),
+            "test relies on `alpha` not colliding with the seeded dunder mask"
+        );
+        assert!(
+            root.borrow()
+                .prepare_namespace_module_write_flags(delta_mask)
+                & Environment::MODULE_WRITE_SYNC_ENV
+                != 0
+        );
+
+        // Simulating SyncModuleGlobal on `delta` via `update_if_present` must
+        // not insert `delta` into `root.values`.
+        assert!(
+            !root
+                .borrow_mut()
+                .values
+                .update_if_present("delta", Value::int(2))
+        );
+        assert!(root.borrow().values.get("delta").is_none());
+
+        // Subsequent write-back in slot order preserves `alpha` before `delta`.
+        root.borrow_mut().values.insert("alpha", Value::int(1));
+        root.borrow_mut().values.insert("delta", Value::int(2));
+        root.borrow_mut().values.insert("gamma", Value::int(3));
+        let user_names: Vec<String> = root
+            .borrow()
+            .namespace_materialization_snapshot()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| !name.starts_with("__"))
+            .collect();
+        assert_eq!(user_names, vec!["alpha", "delta", "gamma"]);
+    }
+
+    #[test]
     fn root_namespace_generations_saturate() {
         let root = Environment::new(None);
         {

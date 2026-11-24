@@ -150,54 +150,89 @@ impl Interpreter {
         name_index: u16,
     ) -> Result<()> {
         let index = name_index as usize;
-        let name_mask = code
-            .global_cache_interest_masks
-            .get(index)
-            .copied()
-            .ok_or_else(|| {
-                PyError::Runtime(format!(
-                    "bytecode error: name index {name_index} out of range (pool size {})",
-                    code.names.len()
-                ))
-            })?;
+        let Some(&name_mask) = code.global_cache_interest_masks.get(index) else {
+            return Self::invalid_name_index_error(name_index, code.names.len());
+        };
         // Advance cache generations only when a published value or canonical
         // fallback cache registered a matching name mask. Ordinary scripts
-        // then return `None` without materializing their lazy globals
-        // dictionary.
-        let (write_target, synchronize_siblings, synchronize_env) = {
-            let environment = self.env.borrow();
-            let target = environment.prepare_namespace_module_write(name_mask);
-            let synchronize_siblings = !environment.namespace_cache_disabled()
-                && environment.namespace_has_sibling_fastlocal_mirror();
-            let synchronize_env = environment.namespace_env_binding_may_overlap(name_mask);
-            (target, synchronize_siblings, synchronize_env)
+        // return `0` without materializing their lazy globals dictionary or
+        // touching the out-of-line slow path.
+        let sync_flags = self
+            .env
+            .borrow()
+            .prepare_namespace_module_write_flags(name_mask);
+        if sync_flags != 0 {
+            return self
+                .sync_module_global_binding_slow(code, regs, register, name_index, sync_flags);
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn invalid_name_index_error(name_index: u16, pool_len: usize) -> Result<()> {
+        Err(PyError::Runtime(format!(
+            "bytecode error: name index {name_index} out of range (pool size {pool_len})"
+        )))
+    }
+
+    /// Out-of-line slow path for [`Self::sync_module_global_binding`].
+    ///
+    /// Keeping dict/env/mirror synchronization out of the `#[inline]` VM
+    /// dispatch arm prevents hot-loop code-size and register-pressure
+    /// regressions while using `EnvValues::update_if_present` so a
+    /// `env_binding_interest` Bloom false positive never inserts an absent key
+    /// or perturbs namespace ordering (issue #2925).
+    #[cold]
+    #[inline(never)]
+    fn sync_module_global_binding_slow(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &RegSlice,
+        register: crate::bytecode::Reg,
+        name_index: u16,
+        sync_flags: u8,
+    ) -> Result<()> {
+        let Some(name) = code.names.get(name_index as usize) else {
+            return Self::invalid_name_index_error(name_index, code.names.len());
         };
-        if write_target.is_some() || synchronize_siblings || synchronize_env {
-            let name = code.names.get(index).ok_or_else(|| {
-                PyError::Runtime(format!(
-                    "bytecode error: name index {name_index} out of range (pool size {})",
-                    code.names.len()
-                ))
-            })?;
-            let value = regs[register as usize].clone();
-            if !value.is_unset() {
-                if synchronize_env {
+        let value = regs[register as usize].clone();
+        if value.is_unset() {
+            return Ok(());
+        }
+        let write_target = if sync_flags & Environment::MODULE_WRITE_SYNC_GLOBALS != 0 {
+            self.env.borrow().namespace_module_write_target()
+        } else {
+            None
+        };
+        let synchronize_siblings = sync_flags & Environment::MODULE_WRITE_SYNC_SIBLINGS != 0;
+        let synchronize_env = sync_flags & Environment::MODULE_WRITE_SYNC_ENV != 0;
+        if synchronize_env {
+            let env_value = if write_target.is_none() && !synchronize_siblings {
+                return {
                     module_env(&self.env)
                         .borrow_mut()
                         .values
-                        .insert(name, value.clone());
-                }
-                if let Some(target) = write_target {
-                    let _ = target.dict_insert(PyKey::str_from(name), value.clone());
-                }
-                if synchronize_siblings {
-                    self.env.borrow().synchronize_namespace_fastlocal_binding(
-                        name,
-                        &value,
-                        Some(regs.non_null_ptr()),
-                    );
-                }
-            }
+                        .update_if_present(name, value);
+                    Ok(())
+                };
+            } else {
+                value.clone()
+            };
+            module_env(&self.env)
+                .borrow_mut()
+                .values
+                .update_if_present(name, env_value);
+        }
+        if let Some(target) = write_target {
+            let _ = target.dict_insert(PyKey::str_from(name), value.clone());
+        }
+        if synchronize_siblings {
+            self.env.borrow().synchronize_namespace_fastlocal_binding(
+                name,
+                &value,
+                Some(regs.non_null_ptr()),
+            );
         }
         Ok(())
     }
