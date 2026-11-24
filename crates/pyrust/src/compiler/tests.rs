@@ -376,9 +376,27 @@ fn analysis_helpers_keep_explicit_source_ownership() {
     let facade = read("compiler.rs");
     let free_var_reads = read("compiler/free_var_reads.rs");
     let class_scope = read("compiler/class_scope_analysis.rs");
-    let comprehension_analysis = read("compiler/comprehension_analysis.rs");
-    let comprehensions = read("compiler/comprehensions.rs");
-    let ast = read("ast.rs");
+    let comprehension_analysis = [
+        read("compiler/comprehension_analysis.rs"),
+        read("compiler/comprehension_analysis/captures.rs"),
+        read("compiler/comprehension_analysis/validation.rs"),
+    ]
+    .join("\n");
+    let comprehensions = [
+        read("compiler/comprehensions.rs"),
+        read("compiler/comprehensions/scope.rs"),
+        read("compiler/comprehensions/inlined.rs"),
+        read("compiler/comprehensions/genexpr.rs"),
+    ]
+    .join("\n");
+    let ast = [
+        read("ast/mod.rs"),
+        read("ast/span.rs"),
+        read("ast/expr.rs"),
+        read("ast/stmt.rs"),
+        read("ast/pattern.rs"),
+    ]
+    .join("\n");
 
     assert!(
         facade.contains("include!(\"compiler/free_var_reads.rs\");"),
@@ -405,11 +423,11 @@ fn analysis_helpers_keep_explicit_source_ownership() {
     ] {
         assert!(
             comprehension_analysis.contains(function),
-            "comprehension_analysis.rs must own {function}"
+            "comprehension_analysis must own {function}"
         );
         assert!(
             !comprehensions.contains(function),
-            "comprehensions.rs must remain compilation-only and not own {function}"
+            "comprehensions must remain compilation-only and not own {function}"
         );
     }
 
@@ -430,7 +448,8 @@ fn analysis_helpers_keep_explicit_source_ownership() {
     for owner in [
         "compiler/free_var_reads.rs",
         "compiler/free_variables.rs",
-        "compiler/comprehension_analysis.rs",
+        "compiler/comprehension_analysis/captures.rs",
+        "compiler/comprehension_analysis/validation.rs",
         "compiler/class_scope_analysis.rs",
         "compiler/model/yield_scan.rs",
         "interpreter/helpers/scope_analysis/bindings.rs",
