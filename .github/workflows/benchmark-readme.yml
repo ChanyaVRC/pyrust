@@ -12,14 +12,11 @@ permissions:
 
 concurrency:
   group: benchmark-pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
 
     steps:
       - uses: actions/checkout@v4
@@ -74,9 +71,19 @@ jobs:
       - name: Build docs
         run: mkdocs build --site-dir ./_site
 
-      - uses: actions/upload-pages-artifact@v3
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
-      - id: deploy
-        uses: actions/deploy-pages@v4
+  deploy:
+    needs: benchmark
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v5
