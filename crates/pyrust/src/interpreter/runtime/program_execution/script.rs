@@ -333,6 +333,30 @@ impl Interpreter {
         }
     }
 
+    /// Ensure the running top-level `__main__` module is registered in
+    /// `module_cache` and `sys.modules` backed by this interpreter's live
+    /// root globals dictionary (issue #2957).
+    ///
+    /// Reuses an existing `__main__` registration across REPL statements so
+    /// module identity remains stable, and is never called for imported
+    /// filesystem modules (`ScriptErrorMode::PropagateImport`).
+    fn ensure_main_module_registered(&mut self) {
+        if self.module_cache.borrow().contains_key("__main__") {
+            return;
+        }
+        let me_ref = module_env(&self.env);
+        let module_rc = Rc::new(std::cell::RefCell::new(crate::value::PyModule::new(
+            "__main__".to_string(),
+            crate::value::ModuleAttrs::default(),
+        )));
+        module_rc.borrow_mut().attach_main_namespace(&me_ref);
+        let main_module = Value::py_module(module_rc);
+        self.module_cache
+            .borrow_mut()
+            .insert("__main__".to_string(), main_module.clone());
+        let _ = self.insert_import_registry("__main__", main_module);
+    }
+
     /// Make the script invocation context observable before the first user
     /// instruction. Loading `sys` here also ensures imported modules share the
     /// top-level script's argument vector, even when they import `sys` first.
@@ -400,6 +424,9 @@ impl Interpreter {
         // (they either update the fastlocal register which shadows the env
         // entry, or call `assign_name` which overwrites the env entry directly).
         self.seed_module_dunders(is_imported_module, stmts_have_module_annotations(program));
+        if error_mode == ScriptErrorMode::FormatUncaught {
+            self.ensure_main_module_registered();
+        }
         if let Err(err) = self.initialize_script_argv() {
             return Some(Err(err));
         }

@@ -105,3 +105,34 @@ fn imported_modules_inherit_the_main_script_argv() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "True\n");
 }
+
+#[test]
+fn main_module_is_registered_in_sys_modules_with_live_globals() {
+    let dir = TempDir::new();
+    let script = dir.join("main.py");
+    std::fs::write(
+        &script,
+        "import sys\n\
+         import __main__\n\
+         marker = 10\n\
+         print('__main__' in sys.modules)\n\
+         print(sys.modules['__main__'] is __main__)\n\
+         print(__main__.__dict__ is globals())\n\
+         print(__main__.__file__ == __file__)\n\
+         print(__main__.marker == 10)\n\
+         __main__.from_mod = 77\n\
+         print(from_mod == 77)\n",
+    )
+    .expect("write test script");
+
+    let output = run_pyrust(&script, &[]);
+    assert!(
+        output.status.success(),
+        "script failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "True\nTrue\nTrue\nTrue\nTrue\nTrue\n"
+    );
+}

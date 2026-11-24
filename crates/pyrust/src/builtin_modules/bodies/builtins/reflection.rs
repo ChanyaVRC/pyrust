@@ -705,6 +705,9 @@ pyrust_module! {
                 return Ok(Value::list(items));
             }
         }
+        if let ValueKind::PyModule(module) = args[0].value.kind() {
+            _interp.ensure_module_namespace_synced(module);
+        }
         let mut names: Vec<String> = dir_names(&args[0].value);
         names.sort();
         names.dedup();

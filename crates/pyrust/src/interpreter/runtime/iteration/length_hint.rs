@@ -136,6 +136,7 @@ fn native_frame_remaining(frame: &NativeIterFrame) -> i64 {
             proxy,
             recorded_len,
             size_changed,
+            ..
         } => {
             if *size_changed
                 || pyrust_builtins::instance_dict::iter_visible_len(proxy) != Some(*recorded_len)

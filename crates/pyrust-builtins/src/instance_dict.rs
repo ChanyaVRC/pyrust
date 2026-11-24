@@ -263,6 +263,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                 | "__setitem__"
                 | "__delitem__"
                 | "__iter__"
+                | "__reversed__"
         )
     }
 

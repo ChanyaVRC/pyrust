@@ -304,7 +304,13 @@ fn primitive_tag_isinstance(obj: &Value, tag: PrimitiveClassKind) -> bool {
         pyrust_core::CanonicalClassTag::Float => matches!(obj.kind(), ValueKind::Float(_)),
         pyrust_core::CanonicalClassTag::List => matches!(obj.kind(), ValueKind::List(_)),
         pyrust_core::CanonicalClassTag::Tuple => matches!(obj.kind(), ValueKind::Tuple(_)),
-        pyrust_core::CanonicalClassTag::Dict => matches!(obj.kind(), ValueKind::Dict(_)),
+        pyrust_core::CanonicalClassTag::Dict => match obj.kind() {
+            ValueKind::Dict(_) => true,
+            ValueKind::BuiltinObject { ops, .. } => {
+                ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Dict)
+            }
+            _ => false,
+        },
         pyrust_core::CanonicalClassTag::Set => matches!(obj.kind(), ValueKind::Set(_)),
         pyrust_core::CanonicalClassTag::Bytes => matches!(obj.kind(), ValueKind::Bytes(_)),
         pyrust_core::CanonicalClassTag::Bytearray => matches!(

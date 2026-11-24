@@ -475,6 +475,12 @@ pyrust_module! {
             let frame = make_reversed_dict_iter(seq.0.clone(), 0, "dict_reversekeyiterator");
             return Ok(Value::generator(Box::new(frame)));
         }
+        if pyrust_builtins::instance_dict::is_instance_dict(&seq.0) {
+            // Live mutable `obj.__dict__` / `vars(obj)` proxy: reverse keys
+            // with the same size-change latch as forward iteration (#2957).
+            let frame = crate::interpreter::NativeIterFrame::reverse_instance_dict(seq.0.clone());
+            return Ok(Value::generator(Box::new(frame)));
+        }
         if let Some(kind) = pyrust_builtins::dict_views::view_kind(&seq.0)
             && pyrust_builtins::dict_views::as_dict_rc(&seq.0).is_some() {
                 // CPython names the reverse iterator by view kind (#2702).

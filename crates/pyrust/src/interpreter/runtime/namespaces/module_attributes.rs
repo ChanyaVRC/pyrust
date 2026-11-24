@@ -4,6 +4,23 @@ const MODULE_TYPE_DOC: &str = "Create a module object.\n\nThe name must be a str
 
 // Module attribute semantics.
 impl Interpreter {
+    /// Flush live script fastlocals into the shared globals dictionary before
+    /// reading/mutating a lazily-attached `__main__` module (#2957).
+    ///
+    /// Imported filesystem modules already mirror eagerly
+    /// (`namespace_globals_require_mirroring() == true`), so this is a cheap
+    /// single-flag check for them and leaves their `LoadGlobal` caches intact.
+    pub(crate) fn ensure_module_namespace_synced(&self, module: &Rc<RefCell<PyModule>>) {
+        let Some(namespace) = module.borrow().filesystem_namespace() else {
+            return;
+        };
+        if let Some(environment) = namespace.environment()
+            && !environment.borrow().namespace_globals_require_mirroring()
+        {
+            let _ = self.globals_for_environment(&environment);
+        }
+    }
+
     /// Expose the one live dictionary owned by a filesystem-backed module.
     ///
     /// While the loader's child environment is alive, route through the root
@@ -69,6 +86,10 @@ impl Interpreter {
             && let Some(globals) = self.filesystem_module_globals(&module)
         {
             return Ok(globals);
+        }
+
+        if filesystem_namespace.is_some() {
+            self.ensure_module_namespace_synced(&module);
         }
 
         // CPython 3.12 module_getattro builds the error message by
