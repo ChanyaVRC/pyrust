@@ -496,7 +496,7 @@ impl Interpreter {
             }
             "__add__" => {
                 let other = args.pop().unwrap();
-                self.eval_binary(receiver, crate::ast::BinaryOp::Add, other)
+                self.add(receiver, other)
             }
             "__mul__" => {
                 // CPython's `sq_repeat` slot wrapper (`list.__mul__`,
@@ -516,7 +516,13 @@ impl Interpreter {
                         pyrust_core::builtin_type_name(v)
                     )
                 })?;
-                self.eval_binary(receiver, crate::ast::BinaryOp::Mul, count)
+                if matches!(count.kind(), ValueKind::BigInt(_)) {
+                    return Err(pyrust_core::overflow_err!(
+                        "cannot fit '{}' into an index-sized integer",
+                        crate::interpreter::error_type_name_str(&other)
+                    ));
+                }
+                self.mul(receiver, count)
             }
             "__setitem__" => {
                 let value = args.pop().unwrap();
@@ -580,20 +586,23 @@ impl Interpreter {
                     None => Ok(Value::not_implemented()),
                 }
             }
-            // list/bytearray in-place dunders (#2119): identical semantics to
-            // the `+=`/`*=` operators — mutate the receiver in place and return
-            // it.  `try_inplace_op(..., is_augmented_assign = true)` routes
-            // through the same machinery the operators use, including the
-            // operator-form TypeErrors (`'int' object is not iterable`,
-            // `'float' object cannot be interpreted as an integer`, …).
+            // list/bytearray in-place dunders (#2119, #2989): direct calls to
+            // `sq_inplace_concat` / `sq_inplace_repeat` mutate the receiver in
+            // place and return it without consulting RHS `__radd__`/`__rmul__`.
             "__iadd__" if matches!(&*type_name, "list" | "bytearray") => {
                 let other = args.pop().unwrap();
-                match self.try_inplace_op(&receiver, crate::ast::BinaryOp::Add, &other, true)? {
-                    Some(v) => Ok(v),
-                    // The fast paths in `try_inplace_op` always handle list /
-                    // bytearray `+=`, so this fallback is defensive only — it
-                    // surfaces the operator's TypeError for a bad operand.
-                    None => self.eval_binary(receiver, crate::ast::BinaryOp::Add, other),
+                if matches!(receiver.kind(), ValueKind::List(_)) {
+                    self.extend_list_from_iterable(&receiver, &other)?;
+                    Ok(receiver)
+                } else if let Some(data_rc) = pyrust_builtins::bytearray::as_bytearray_rc(&receiver)
+                {
+                    super::expressions::bytearray_iadd_in_place(&data_rc, &receiver, &other)?;
+                    Ok(receiver)
+                } else {
+                    match self.try_inplace_op(&receiver, crate::ast::BinaryOp::Add, &other, true)? {
+                        Some(v) => Ok(v),
+                        None => self.eval_binary(receiver, crate::ast::BinaryOp::Add, other),
+                    }
                 }
             }
             "__imul__" if matches!(&*type_name, "list" | "bytearray") => {
@@ -609,12 +618,26 @@ impl Interpreter {
                         pyrust_core::builtin_type_name(v)
                     )
                 })?;
-                match self.try_inplace_op(&receiver, crate::ast::BinaryOp::Mul, &count, true)? {
-                    Some(v) => Ok(v),
-                    // None only for an out-of-range count (e.g. a BigInt that
-                    // can't fit an index): delegate so the canonical
-                    // OverflowError is raised, matching CPython.
-                    None => self.eval_binary(receiver, crate::ast::BinaryOp::Mul, count),
+                if matches!(count.kind(), ValueKind::BigInt(_)) {
+                    return Err(pyrust_core::overflow_err!(
+                        "cannot fit '{}' into an index-sized integer",
+                        crate::interpreter::error_type_name_str(&other)
+                    ));
+                }
+                let n = super::expressions::int_repeat_count(&count)
+                    .expect("value_to_index non-BigInt is Int/Bool");
+                if matches!(receiver.kind(), ValueKind::List(_)) {
+                    super::expressions::list_repeat_in_place(&receiver, n)?;
+                    Ok(receiver)
+                } else if let Some(data_rc) = pyrust_builtins::bytearray::as_bytearray_rc(&receiver)
+                {
+                    super::expressions::bytearray_repeat_in_place(&data_rc, n)?;
+                    Ok(receiver)
+                } else {
+                    match self.try_inplace_op(&receiver, crate::ast::BinaryOp::Mul, &count, true)? {
+                        Some(v) => Ok(v),
+                        None => self.eval_binary(receiver, crate::ast::BinaryOp::Mul, count),
+                    }
                 }
             }
             // set/frozenset/dict forward algebra & merge dunders (#2122).

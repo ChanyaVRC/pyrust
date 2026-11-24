@@ -22,6 +22,57 @@ fn inherited_primitive_builtin_slot_kind(
     owns_resolved_method.then_some(owner_kind)
 }
 
+/// Whether `method` on `class` is an inherited slot owned by the canonical
+/// `collections.deque` class (not a user override or explicit reassignment).
+fn is_inherited_deque_slot(
+    class: &Rc<std::cell::RefCell<pyrust_core::PyClass>>,
+    slot: &str,
+    method: &Value,
+) -> bool {
+    if !matches!(method.kind(), ValueKind::BuiltinFunction(_)) {
+        return false;
+    }
+    let Some(owner) = crate::interpreter::lookup_class_attr_owner(class, slot) else {
+        return false;
+    };
+    if !crate::interpreter::is_canonical_deque_class(&owner) {
+        return false;
+    }
+    owner
+        .borrow()
+        .attrs
+        .get(slot)
+        .is_some_and(|owned| values_are_identical(owned, method))
+}
+
+/// Whether `method` on `class` is an inherited sequence `sq_concat` /
+/// `sq_repeat` slot (`__add__` / `__mul__` / `__rmul__`) on a built-in
+/// sequence (`list`, `tuple`, `str`, `bytes`, `bytearray`, `collections.deque`).
+///
+/// In CPython these types populate `tp_as_sequence`, NOT `tp_as_number`, so
+/// `PyNumber_Add` / `PyNumber_Multiply` must give the peer operand's
+/// `nb_add`/`nb_multiply` (`__radd__`/`__rmul__`) priority before falling back
+/// to sequence concatenation or repetition (issue #2989).
+pub(super) fn is_inherited_sequence_binary_slot(
+    class: &Rc<std::cell::RefCell<pyrust_core::PyClass>>,
+    slot: &str,
+    method: &Value,
+) -> bool {
+    if !matches!(slot, "__add__" | "__mul__" | "__rmul__") {
+        return false;
+    }
+    matches!(
+        inherited_primitive_builtin_slot_kind(class, slot, method),
+        Some(
+            pyrust_core::CanonicalClassTag::List
+                | pyrust_core::CanonicalClassTag::Tuple
+                | pyrust_core::CanonicalClassTag::Str
+                | pyrust_core::CanonicalClassTag::Bytes
+                | pyrust_core::CanonicalClassTag::Bytearray
+        )
+    ) || is_inherited_deque_slot(class, slot, method)
+}
+
 impl Interpreter {
     pub(crate) fn eval_index(&mut self, target: &Value, index: Value) -> Result<Value> {
         // If the index is a `slice` object (built by `eval_slice` and passed

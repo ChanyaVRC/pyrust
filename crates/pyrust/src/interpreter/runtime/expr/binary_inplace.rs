@@ -54,18 +54,33 @@ impl Interpreter {
         if is_list {
             match op {
                 BinaryOp::Add => {
-                    // list += iterable  =>  list.extend(iterable)
-                    let items = self.collect_iterable(right)?;
-                    left.list_extend(items)?;
+                    // CPython's PyNumber_InPlaceAdd tries nb_add (including
+                    // RHS `__radd__`) before list's sq_inplace_concat, because
+                    // exact `list` has no `nb_inplace_add` slot (issue #2989).
+                    // Non-PyInstance RHS cannot define `__radd__`, so skip the
+                    // probe on the hot path.
+                    if matches!(right.kind(), ValueKind::PyInstance(_))
+                        && let Some(reflected) = self.try_inplace_radd_slow(left, right)?
+                    {
+                        return Ok(Some(reflected));
+                    }
+                    self.extend_list_from_iterable(left, right)?;
                     return Ok(Some(left.clone()));
                 }
                 BinaryOp::Mul => {
                     // list *= n  =>  repeat in-place
-                    let Some(n) = int_repeat_count(right) else {
-                        return Ok(None); // fall through to TypeError
+                    if let Some(n) = int_repeat_count(right) {
+                        list_repeat_in_place(left, n)?;
+                        return Ok(Some(left.clone()));
+                    }
+                    return match self.resolve_inplace_repeat_slow(left, right)? {
+                        InPlaceRepeat::Count(n) => {
+                            list_repeat_in_place(left, n)?;
+                            Ok(Some(left.clone()))
+                        }
+                        InPlaceRepeat::Reflected(v) => Ok(Some(v)),
+                        InPlaceRepeat::NotIndex => Ok(None),
                     };
-                    list_repeat_in_place(left, n)?;
-                    return Ok(Some(left.clone()));
                 }
                 _ => {}
             }
@@ -249,39 +264,29 @@ impl Interpreter {
             // also see the change.
             match op {
                 BinaryOp::Add => {
-                    return Ok(Some(bytearray_iadd_in_place(
-                        &data_rc,
-                        left,
-                        right,
-                        "bytearray",
-                    )?));
+                    // Exact `bytearray` has sq_inplace_concat (no nb_inplace_add),
+                    // so PyNumber_InPlaceAdd tries RHS `__radd__` first (issue #2989).
+                    if matches!(right.kind(), ValueKind::PyInstance(_))
+                        && let Some(reflected) = self.try_inplace_radd_slow(left, right)?
+                    {
+                        return Ok(Some(reflected));
+                    }
+                    bytearray_iadd_in_place(&data_rc, left, right)?;
+                    return Ok(Some(left.clone()));
                 }
                 BinaryOp::Mul => {
-                    let n = match right.kind() {
-                        ValueKind::Int(n) => n,
-                        ValueKind::Bool(b) => b as i64,
-                        ValueKind::BigInt(_) => {
-                            return Err(pyrust_core::overflow_err!(
-                                "cannot fit 'int' into an index-sized integer"
-                            ));
-                        }
-                        _ => {
-                            let type_name = crate::interpreter::error_type_name_str(right);
-                            return Err(pyrust_core::type_err!(
-                                "can't multiply sequence by non-int of type '{type_name}'"
-                            ));
-                        }
-                    };
-                    let mut data = data_rc.borrow_mut();
-                    if n <= 0 {
-                        data.clear();
-                    } else {
-                        let orig = data.clone();
-                        for _ in 1..n {
-                            data.extend_from_slice(&orig);
-                        }
+                    if let Some(n) = int_repeat_count(right) {
+                        bytearray_repeat_in_place(&data_rc, n)?;
+                        return Ok(Some(left.clone()));
                     }
-                    return Ok(Some(left.clone()));
+                    return match self.resolve_inplace_repeat_slow(left, right)? {
+                        InPlaceRepeat::Count(n) => {
+                            bytearray_repeat_in_place(&data_rc, n)?;
+                            Ok(Some(left.clone()))
+                        }
+                        InPlaceRepeat::Reflected(v) => Ok(Some(v)),
+                        InPlaceRepeat::NotIndex => Ok(None),
+                    };
                 }
                 _ => {}
             }
@@ -498,9 +503,21 @@ impl Interpreter {
             && matches!(op, BinaryOp::Add | BinaryOp::Mul)
             && let Some(backing) = builtin_data_backing(left)
             && matches!(backing.kind(), ValueKind::List(_))
-            && self.list_backing_inplace_op(&backing, op, right)?
+            && let Some(out) = self.list_backing_inplace_op(left, &backing, op, right)?
         {
-            return Ok(Some(left.clone()));
+            return Ok(Some(out));
+        }
+        // Issue #2989: `collections.deque` and its subclasses `+=` / `*=` —
+        // when no user-defined `__iadd__` / `__imul__` override ran, mutate the
+        // deque in place so aliases and subclass type survive. Exact `deque`
+        // (like exact `list` / `bytearray`) consults RHS `__radd__` before
+        // `sq_inplace_concat`, whereas a subclass inherits `slot_nb_inplace_add`
+        // and extends directly.
+        if result.is_none()
+            && matches!(op, BinaryOp::Add | BinaryOp::Mul)
+            && crate::interpreter::is_deque_value(left)
+        {
+            return self.deque_inplace_op(left, op, right);
         }
         // Issue #2386: PyInstance bytearray subclass `+=` / `*=` — when no
         // user-defined `__iadd__` / `__imul__` was found (the inherited
@@ -521,38 +538,22 @@ impl Interpreter {
         {
             match op {
                 BinaryOp::Add => {
-                    // CPython names the LHS by its actual (subclass) type.
-                    let lhs_name = value_type_name_str(left);
-                    return Ok(Some(bytearray_iadd_in_place(
-                        &data_rc, left, right, &lhs_name,
-                    )?));
+                    bytearray_iadd_in_place(&data_rc, left, right)?;
+                    return Ok(Some(left.clone()));
                 }
                 BinaryOp::Mul => {
-                    let n = match right.kind() {
-                        ValueKind::Int(n) => n,
-                        ValueKind::Bool(b) => b as i64,
-                        ValueKind::BigInt(_) => {
-                            return Err(pyrust_core::overflow_err!(
-                                "cannot fit 'int' into an index-sized integer"
-                            ));
-                        }
-                        _ => {
-                            let type_name = crate::interpreter::error_type_name_str(right);
-                            return Err(pyrust_core::type_err!(
-                                "can't multiply sequence by non-int of type '{type_name}'"
-                            ));
-                        }
-                    };
-                    let mut data = data_rc.borrow_mut();
-                    if n <= 0 {
-                        data.clear();
-                    } else {
-                        let orig = data.clone();
-                        for _ in 1..n {
-                            data.extend_from_slice(&orig);
-                        }
+                    if let Some(n) = int_repeat_count(right) {
+                        bytearray_repeat_in_place(&data_rc, n)?;
+                        return Ok(Some(left.clone()));
                     }
-                    return Ok(Some(left.clone()));
+                    return match self.resolve_inplace_repeat_slow(left, right)? {
+                        InPlaceRepeat::Count(n) => {
+                            bytearray_repeat_in_place(&data_rc, n)?;
+                            Ok(Some(left.clone()))
+                        }
+                        InPlaceRepeat::Reflected(v) => Ok(Some(v)),
+                        InPlaceRepeat::NotIndex => Ok(None),
+                    };
                 }
                 _ => unreachable!(),
             }
@@ -560,19 +561,97 @@ impl Interpreter {
         Ok(None)
     }
 
+    /// Cold-path RHS `__radd__` probe for exact built-in sequence `+=`
+    /// (`list`, `bytearray`, `collections.deque`), mirroring CPython's
+    /// `PyNumber_InPlaceAdd` order where `nb_add` runs before
+    /// `sq_inplace_concat` when `nb_inplace_add` is absent (issue #2989).
+    #[inline(never)]
+    fn try_inplace_radd_slow(&mut self, left: &Value, right: &Value) -> Result<Option<Value>> {
+        if let Some(v) = self.try_call_binary_method(right, "__radd__", left.clone())?
+            && !is_not_implemented(&v)
+        {
+            return Ok(Some(v));
+        }
+        Ok(None)
+    }
+
+    /// Cold-path count resolution for sequence `*=` (`list`, `LSub`,
+    /// `bytearray`, `BASub`, `deque`, `DSub`) when `right` is not an immediate
+    /// `Int` / `Bool` (issue #2989).
+    ///
+    /// Mirrors CPython's `PyNumber_InPlaceMultiply`:
+    /// 1. Consult RHS `__rmul__` (excluding inherited sequence `sq_repeat`
+    ///    slots) so objects with `__rmul__` — even those also defining
+    ///    `__index__` — win before `sq_inplace_repeat`.
+    /// 2. Otherwise resolve through `__index__`: fit counts mutate in place;
+    ///    `BigInt` counts raise `OverflowError` naming the original operand
+    ///    type; non-index objects return `NotIndex` so `eval_binary_aug`
+    ///    produces the standard sequence multiplication `TypeError`.
+    #[inline(never)]
+    fn resolve_inplace_repeat_slow(
+        &mut self,
+        left: &Value,
+        right: &Value,
+    ) -> Result<InPlaceRepeat> {
+        if matches!(right.kind(), ValueKind::PyInstance(_))
+            && let Some(v) = self.try_call_binary_method(right, "__rmul__", left.clone())?
+            && !is_not_implemented(&v)
+        {
+            return Ok(InPlaceRepeat::Reflected(v));
+        }
+        let Some(count) = self.try_value_to_index(right)? else {
+            return Ok(InPlaceRepeat::NotIndex);
+        };
+        match int_repeat_count(&count) {
+            Some(n) => Ok(InPlaceRepeat::Count(n)),
+            None => Err(pyrust_core::overflow_err!(
+                "cannot fit '{}' into an index-sized integer",
+                crate::interpreter::error_type_name_str(right)
+            )),
+        }
+    }
+
+    /// Apply `+=` / `*=` to a `collections.deque` or subclass instance in
+    /// place (issue #2989).
+    #[inline(never)]
+    fn deque_inplace_op(
+        &mut self,
+        left: &Value,
+        op: BinaryOp,
+        right: &Value,
+    ) -> Result<Option<Value>> {
+        match op {
+            BinaryOp::Add => {
+                if crate::interpreter::is_exact_deque_value(left)
+                    && matches!(right.kind(), ValueKind::PyInstance(_))
+                    && let Some(reflected) = self.try_inplace_radd_slow(left, right)?
+                {
+                    return Ok(Some(reflected));
+                }
+                crate::interpreter::deque_extend_in_place(self, left, right)?;
+                Ok(Some(left.clone()))
+            }
+            BinaryOp::Mul => {
+                if let Some(n) = int_repeat_count(right) {
+                    crate::interpreter::deque_imul_by_i64(left, n)?;
+                    return Ok(Some(left.clone()));
+                }
+                match self.resolve_inplace_repeat_slow(left, right)? {
+                    InPlaceRepeat::Count(n) => {
+                        crate::interpreter::deque_imul_by_i64(left, n)?;
+                        Ok(Some(left.clone()))
+                    }
+                    InPlaceRepeat::Reflected(v) => Ok(Some(v)),
+                    InPlaceRepeat::NotIndex => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Apply `+=` / `*=` to the backing list of a `list` subclass instance,
     /// mutating that storage so every alias of the instance observes the update
-    /// and the subclass type survives (issue #2986).
-    ///
-    /// This is the inherited `list.__iadd__` / `list.__imul__`, so it does the
-    /// same storage work as the plain-list arm of [`Self::try_inplace_op`] —
-    /// including reading the right operand to completion *before* the receiver
-    /// is touched, which is what makes `p += p` terminate.
-    ///
-    /// Returns `Ok(true)` when the operator was applied, `Ok(false)` when it
-    /// does not apply and the caller must fall through to the binary path (a
-    /// `*=` count with no `__index__`, which the right operand's `__rmul__` may
-    /// still handle, or one too large for an index-sized integer).
+    /// and the subclass type survives (issue #2986, #2989).
     ///
     /// `#[inline(never)]`: `try_inplace_op` is long and its codegen is layout-
     /// sensitive (the plain `list` / `set` / `dict` / `bytearray` in-place loops
@@ -580,40 +659,31 @@ impl Interpreter {
     #[inline(never)]
     fn list_backing_inplace_op(
         &mut self,
+        left: &Value,
         backing: &Value,
         op: BinaryOp,
         right: &Value,
-    ) -> Result<bool> {
+    ) -> Result<Option<Value>> {
         match op {
             BinaryOp::Add => {
-                let items = self.collect_iterable(right)?;
-                backing.list_extend(items)?;
-                Ok(true)
+                self.extend_list_from_iterable(backing, right)?;
+                Ok(Some(left.clone()))
             }
             BinaryOp::Mul => {
-                // Off the hot path, so the count may take the full `__index__`
-                // protocol — CPython's sequence repetition does. A count with
-                // no `__index__` at all falls through rather than raising, so
-                // the right operand's `__rmul__` still gets its turn.
-                let n = match int_repeat_count(right) {
-                    Some(n) => n,
-                    None => {
-                        let Some(count) = self.try_value_to_index(right)? else {
-                            return Ok(false);
-                        };
-                        // A `BigInt` count cannot fit an index-sized integer;
-                        // `eval_binary` raises that `OverflowError` with the
-                        // operand names CPython uses, so leave it to do so.
-                        let Some(n) = int_repeat_count(&count) else {
-                            return Ok(false);
-                        };
-                        n
+                if let Some(n) = int_repeat_count(right) {
+                    list_repeat_in_place(backing, n)?;
+                    return Ok(Some(left.clone()));
+                }
+                match self.resolve_inplace_repeat_slow(left, right)? {
+                    InPlaceRepeat::Count(n) => {
+                        list_repeat_in_place(backing, n)?;
+                        Ok(Some(left.clone()))
                     }
-                };
-                list_repeat_in_place(backing, n)?;
-                Ok(true)
+                    InPlaceRepeat::Reflected(v) => Ok(Some(v)),
+                    InPlaceRepeat::NotIndex => Ok(None),
+                }
             }
-            _ => Ok(false),
+            _ => Ok(None),
         }
     }
 
@@ -642,16 +712,21 @@ impl Interpreter {
     }
 }
 
-/// Perform in-place `bytearray += rhs`, enforcing CPython's self-resize
-/// `BufferError` when `right` aliases `data_rc` and the buffer is non-empty
-/// (issue #2973).  When the buffer is empty, no resize occurs and the operation
-/// is a no-op returning `left`.
-fn bytearray_iadd_in_place(
+enum InPlaceRepeat {
+    Count(i64),
+    Reflected(Value),
+    NotIndex,
+}
+
+/// Concat `right` (bytes, bytearray, or subclass) into `data_rc` in place,
+/// enforcing CPython's self-resize `BufferError` when `right` aliases `data_rc`
+/// and the buffer is non-empty (issue #2973).  Names `left` by its actual
+/// (possibly subclass) type in the `TypeError` (issue #2989).
+pub(super) fn bytearray_iadd_in_place(
     data_rc: &Rc<std::cell::RefCell<Vec<u8>>>,
     left: &Value,
     right: &Value,
-    lhs_type_name: &str,
-) -> Result<Value> {
+) -> Result<()> {
     // The RHS may itself be a bytes/bytearray subclass instance, so unwrap its
     // backing before inspecting buffer identity or extracting bytes.
     let rhs_val = coerce_operand_backing(right);
@@ -663,20 +738,47 @@ fn bytearray_iadd_in_place(
                     "Existing exports of data: object cannot be re-sized"
                 ));
             }
-            return Ok(left.clone());
+            return Ok(());
         }
         let rhs = rhs_rc.borrow().clone();
         data_rc.borrow_mut().extend_from_slice(&rhs);
-        return Ok(left.clone());
+        return Ok(());
     }
     if let ValueKind::Bytes(rc) = rhs_val.kind() {
         data_rc.borrow_mut().extend_from_slice(rc.as_slice());
-        return Ok(left.clone());
+        return Ok(());
     }
+    let lhs_name = value_type_name_str(left);
     let type_name = value_type_name_str(right);
     Err(pyrust_core::type_err!(
-        "can't concat {type_name} to {lhs_type_name}"
+        "can't concat {type_name} to {lhs_name}"
     ))
+}
+
+/// Repeat a `bytearray`'s bytes in place, with `checked_mul` + `try_reserve`
+/// so huge counts raise `MemoryError` instead of aborting (issue #2989).
+#[inline]
+pub(super) fn bytearray_repeat_in_place(
+    data_rc: &Rc<std::cell::RefCell<Vec<u8>>>,
+    n: i64,
+) -> Result<()> {
+    let mut data = data_rc.borrow_mut();
+    if n <= 0 {
+        data.clear();
+        return Ok(());
+    }
+    let len = data.len();
+    let Some(total) = len.checked_mul(n as usize) else {
+        return Err(pyrust_core::py_err!("MemoryError", String::new()));
+    };
+    if data.try_reserve(total - len).is_err() {
+        return Err(pyrust_core::py_err!("MemoryError", String::new()));
+    }
+    let orig = data.clone();
+    for _ in 1..n {
+        data.extend_from_slice(&orig);
+    }
+    Ok(())
 }
 
 /// The already-integral repetition count in `v`, if it has one.
@@ -684,7 +786,7 @@ fn bytearray_iadd_in_place(
 /// A `BigInt` is deliberately excluded: it cannot fit an index-sized integer,
 /// so sequence repetition rejects it rather than truncating.
 #[inline]
-fn int_repeat_count(v: &Value) -> Option<i64> {
+pub(super) fn int_repeat_count(v: &Value) -> Option<i64> {
     match v.kind() {
         ValueKind::Int(n) => Some(n),
         ValueKind::Bool(b) => Some(b as i64),
@@ -701,7 +803,7 @@ fn int_repeat_count(v: &Value) -> Option<i64> {
 /// abort the whole process (`[1] *= 2**62`).  This is the same guard the
 /// non-mutating `seq_repeat_list` applies for `list * n`.
 #[inline]
-fn list_repeat_in_place(target: &Value, n: i64) -> Result<()> {
+pub(super) fn list_repeat_in_place(target: &Value, n: i64) -> Result<()> {
     target
         .list_with_mut(|items| {
             if n <= 0 {

@@ -16,34 +16,30 @@ impl Interpreter {
             .map_err(|e| rewrite_aug_operand_error(op, e))
     }
 
-    fn add(&self, left: Value, right: Value) -> Result<Value> {
+    pub(super) fn add(&self, left: Value, right: Value) -> Result<Value> {
         if let Some((a, b)) = both_as_complex(&left, &right)? {
             return Ok(Value::complex(a.0 + b.0, a.1 + b.1));
         }
-        // Representation-substitutability boundary (#2386): a bytearray-subclass
-        // operand acts as its inherited bytearray for concatenation.  Unwrap
-        // ONLY for the bytearray-snapshot probe below — `as_bytearray_snapshot`
-        // does not see through a `PyInstance`, so without this `BA(b'a') +
-        // BA(b'b')` would fall through to a TypeError.  A user `__add__`/
-        // `__radd__` was already dispatched at `BinaryOp::Add`, so no override
-        // gate is needed.  The original `left`/`right` are kept for the error
-        // arms below so CPython's subclass-named messages (`can only
-        // concatenate list (not "StrSub") to list`) are preserved.
-        let ba_left = effective_builtin_receiver(&left, &[])
-            .filter(|b| pyrust_builtins::bytearray::as_bytearray_snapshot(b).is_some());
-        let ba_right = effective_builtin_receiver(&right, &[])
-            .filter(|b| pyrust_builtins::bytearray::as_bytearray_snapshot(b).is_some());
-        if ba_left.is_some() || ba_right.is_some() {
-            let l = ba_left.unwrap_or_else(|| left.clone());
-            let r = ba_right.unwrap_or_else(|| right.clone());
-            return self.add(l, r);
+        // collections.deque concatenation (`sq_concat`): reached after
+        // `try_dunder_binary` has already given any user `__add__`/`__radd__`
+        // priority (issue #2989).
+        if crate::interpreter::is_deque_value(&left) {
+            return crate::interpreter::deque_concat_values(&left, &right);
         }
-        // bytearray concatenation: handle before coerce_numeric since bytearray
-        // is a BuiltinObject and would fall through the numeric match arms.
+        // bytearray / bytearray-subclass concatenation: handle before
+        // coerce_numeric since bytearray is a BuiltinObject and would fall
+        // through the numeric match arms. Keep original `left`/`right` for
+        // error messages so subclass names (e.g. `BASub`) are preserved.
         // CPython 3.12: bytearray + bytearray → bytearray, bytearray + bytes →
         // bytearray, bytes + bytearray → bytes.
-        let lhs_ba = pyrust_builtins::bytearray::as_bytearray_snapshot(&left);
-        let rhs_ba = pyrust_builtins::bytearray::as_bytearray_snapshot(&right);
+        let bytearray_snapshot = |v: &Value| {
+            pyrust_builtins::bytearray::as_bytearray_snapshot(v).or_else(|| {
+                effective_builtin_receiver(v, &[])
+                    .and_then(|b| pyrust_builtins::bytearray::as_bytearray_snapshot(&b))
+            })
+        };
+        let lhs_ba = bytearray_snapshot(&left);
+        let rhs_ba = bytearray_snapshot(&right);
         if lhs_ba.is_some() || rhs_ba.is_some() {
             match (lhs_ba, rhs_ba) {
                 (Some(a), Some(b)) => {
@@ -53,32 +49,39 @@ impl Interpreter {
                     return Ok(pyrust_builtins::bytearray::bytearray(out));
                 }
                 (Some(a), None) => {
-                    // bytearray + bytes → bytearray
-                    if let ValueKind::Bytes(rc) = right.kind() {
+                    // bytearray + bytes (or bytes subclass) → bytearray
+                    let rhs_coerced = coerce_operand_backing(&right);
+                    if let ValueKind::Bytes(rc) = rhs_coerced.kind() {
                         let mut out = a;
                         out.extend_from_slice(rc);
                         return Ok(pyrust_builtins::bytearray::bytearray(out));
                     }
                     return Err(pyrust_core::type_err!(
-                        "can't concat {} to bytearray",
-                        pyrust_core::builtin_type_name(&right)
+                        "can't concat {} to {}",
+                        value_type_name_str(&right),
+                        value_type_name_str(&left),
                     ));
                 }
                 (None, Some(b)) => {
-                    // bytes + bytearray → bytes (CPython 3.12 parity)
-                    if let ValueKind::Bytes(rc) = left.kind() {
+                    // bytes (or bytes subclass) + bytearray → bytes (CPython 3.12 parity)
+                    let lhs_coerced = coerce_operand_backing(&left);
+                    if let ValueKind::Bytes(rc) = lhs_coerced.kind() {
                         let mut out = rc.as_ref().clone();
                         out.extend_from_slice(&b);
                         return Ok(Value::bytes(out));
                     }
-                    // Non-bytes LHS with bytearray RHS: mirror CPython's
-                    // per-type error messages.
-                    let lt = value_type_name_str(&left);
-                    let err_msg = match left.kind() {
+                    // Non-bytes LHS with bytearray/BASub RHS: mirror CPython's
+                    // per-type error messages using the original RHS type name.
+                    let rt = value_type_name_str(&right);
+                    let err_msg = match lhs_coerced.kind() {
                         ValueKind::Str(_) | ValueKind::List(_) | ValueKind::Tuple(_) => {
-                            format!("can only concatenate {lt} (not \"bytearray\") to {lt}")
+                            let lt = value_type_name_str(&lhs_coerced);
+                            format!("can only concatenate {lt} (not \"{rt}\") to {lt}")
                         }
-                        _ => format!("unsupported operand type(s) for +: '{lt}' and 'bytearray'"),
+                        _ => {
+                            let lt = value_type_name_str(&left);
+                            format!("unsupported operand type(s) for +: '{lt}' and '{rt}'")
+                        }
                     };
                     return Err(pyrust_core::type_err!(err_msg));
                 }
@@ -178,14 +181,58 @@ impl Interpreter {
         Ok(resolved)
     }
 
-    fn mul(&self, left: Value, right: Value) -> Result<Value> {
+    pub(super) fn mul(&self, left: Value, right: Value) -> Result<Value> {
         if let Some((a, b)) = both_as_complex(&left, &right)? {
             // (ar+ai*j) * (br+bi*j) = (ar*br - ai*bi) + (ar*bi + ai*br)j
             return Ok(Value::complex(a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0));
         }
-        // bytearray * int / int * bytearray — handled before coerce_numeric
-        // because bytearray is a BuiltinObject and won't match any explicit arm.
-        if let Some(data) = pyrust_builtins::bytearray::as_bytearray_snapshot(&left) {
+        // collections.deque repetition (`sq_repeat`): reached after
+        // `try_dunder_binary` and `try_index_for_seq_repeat` (issue #2989).
+        if crate::interpreter::is_deque_value(&left) {
+            let n = match right.kind() {
+                ValueKind::Int(n) => n,
+                ValueKind::Bool(b) => b as i64,
+                ValueKind::BigInt(_) => {
+                    return Err(pyrust_core::overflow_err!(
+                        "cannot fit 'int' into an index-sized integer"
+                    ));
+                }
+                _ => {
+                    let type_name = crate::interpreter::error_type_name_str(&right);
+                    return Err(pyrust_core::type_err!(
+                        "can't multiply sequence by non-int of type '{type_name}'"
+                    ));
+                }
+            };
+            return crate::interpreter::deque_mul_by_i64(&left, n);
+        }
+        if crate::interpreter::is_deque_value(&right) {
+            let n = match left.kind() {
+                ValueKind::Int(n) => n,
+                ValueKind::Bool(b) => b as i64,
+                ValueKind::BigInt(_) => {
+                    return Err(pyrust_core::overflow_err!(
+                        "cannot fit 'int' into an index-sized integer"
+                    ));
+                }
+                _ => {
+                    let type_name = crate::interpreter::error_type_name_str(&left);
+                    return Err(pyrust_core::type_err!(
+                        "can't multiply sequence by non-int of type '{type_name}'"
+                    ));
+                }
+            };
+            return crate::interpreter::deque_mul_by_i64(&right, n);
+        }
+        // bytearray / bytearray-subclass * int and int * bytearray — handled
+        // before coerce_numeric because bytearray is a BuiltinObject.
+        let bytearray_snapshot = |v: &Value| {
+            pyrust_builtins::bytearray::as_bytearray_snapshot(v).or_else(|| {
+                effective_builtin_receiver(v, &[])
+                    .and_then(|b| pyrust_builtins::bytearray::as_bytearray_snapshot(&b))
+            })
+        };
+        if let Some(data) = bytearray_snapshot(&left) {
             let n = match right.kind() {
                 ValueKind::Int(n) => n,
                 ValueKind::Bool(b) => b as i64,
@@ -203,7 +250,7 @@ impl Interpreter {
             };
             return seq_repeat_bytearray(&data, n);
         }
-        if let Some(data) = pyrust_builtins::bytearray::as_bytearray_snapshot(&right) {
+        if let Some(data) = bytearray_snapshot(&right) {
             let n = match left.kind() {
                 ValueKind::Int(n) => n,
                 ValueKind::Bool(b) => b as i64,
@@ -277,13 +324,13 @@ impl Interpreter {
                 let is_int_like =
                     |v: &Value| matches!(v.kind(), ValueKind::Int(_) | ValueKind::BigInt(_));
                 if is_sequence(&l) && !is_int_like(&r) {
-                    let type_name = crate::interpreter::error_type_name_str(&r);
+                    let type_name = crate::interpreter::error_type_name_str(&right);
                     return Err(pyrust_core::type_err!(
                         "can't multiply sequence by non-int of type '{type_name}'"
                     ));
                 }
                 if is_sequence(&r) && !is_int_like(&l) {
-                    let type_name = crate::interpreter::error_type_name_str(&l);
+                    let type_name = crate::interpreter::error_type_name_str(&left);
                     return Err(pyrust_core::type_err!(
                         "can't multiply sequence by non-int of type '{type_name}'"
                     ));
@@ -354,7 +401,9 @@ impl Interpreter {
                 matches!(method, "__iadd__" | "__imul__")
             }
             _ => false,
-        };
+        } || (matches!(method, "__iadd__" | "__imul__")
+            && is_inherited_deque_slot(&class, method, &method_value))
+            || is_inherited_sequence_binary_slot(&class, method, &method_value);
         if inherited_backing_fallback {
             return Ok(None);
         }

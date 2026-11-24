@@ -1,36 +1,26 @@
 // Interpreter-aware adapters for built-in methods that consume iterables.
 impl Interpreter {
-    /// Interpreter-aware `list.extend(iterable)` (#2522).
+    /// Extend a `ValueKind::List` (`target_list`) from `iterable`, matching
+    /// CPython 3.12's `list_extend` / `list_inplace_concat` semantics:
     ///
-    /// The receiver-only `pyrust_builtins::mutable_sequence::extend` materialises
-    /// its argument through `iter_values_via_registry` → the free `iter_values`,
-    /// which can only drain a `NativeIterFrame` and rejects every other generator
-    /// state (`map`/`filter`/genexpr/user generators) with a `TypeError`. Driving
-    /// those requires the interpreter, so route `extend` through `collect_iterable`
-    /// — the same path `list(iterable)` uses — before touching the receiver.
-    ///
-    /// Materialising the snapshot before mutating the receiver preserves the
-    /// aliasing fix from #414/#427 (`a.extend(a)` cannot produce a simultaneous
-    /// borrow): `collect_iterable` reads the argument to completion first.
-    fn call_list_extend(&mut self, receiver: &Value, mut args: Vec<Value>) -> Result<Value> {
-        if args.len() != 1 {
-            return Err(pyrust_core::type_err!(
-                "list.extend() takes exactly one argument ({} given)",
-                args.len()
-            ));
-        }
-        let iterable = args.pop().unwrap();
-        // Fast path for eager built-in containers (list/tuple/str/range/dict/
-        // set/bytes). Iterating these never runs user code, so no exception can
-        // be raised mid-iteration and there is no partial progress to preserve —
-        // CPython's incremental semantics are indistinguishable from a bulk
-        // extend here. `collect_iterable` reads the argument to completion before
-        // the receiver is touched, which also keeps the self-extend aliasing
-        // guarantee (`a.extend(a)`). Skipping the per-element `iter()`/
-        // `call_next` loop avoids a ~6.7x regression on the common
-        // `list.extend(list)` path. (frozenset / bytearray are `BuiltinObject`,
-        // which also backs lazy map/filter/zip iterators, so they take the
-        // incremental path below — still correct, just rarer as an argument.)
+    /// - Eager built-in containers (`list`/`tuple`/`str`/`range`/`dict`/`set`/
+    ///   `bytes`) cannot run user code mid-iteration and take the bulk snapshot
+    ///   fast path (which also keeps plain `a.extend(a)` / `a += a` safe).
+    /// - A `list` subclass feeding itself (`sub.extend(sub)` / `sub += sub` —
+    ///   detected by matching backing `value_id()`) materializes `iterable`
+    ///   into a temporary snapshot first, matching CPython's `self == iterable`
+    ///   guard: custom `__iter__` overrides are honoured, plain subclasses
+    ///   terminate instead of looping forever, and an exception inside a
+    ///   custom `__iter__` leaves `self` untouched.
+    /// - Every other iterable streams element-by-element via `make_iterator` +
+    ///   `call_next` + `list_push`, preserving partial progress when a lazy
+    ///   iterable raises mid-way and allowing live interleaving when the
+    ///   iterable mutates the receiver.
+    pub(super) fn extend_list_from_iterable(
+        &mut self,
+        target_list: &Value,
+        iterable: &Value,
+    ) -> Result<()> {
         if matches!(
             iterable.kind(),
             ValueKind::List(_)
@@ -42,25 +32,46 @@ impl Interpreter {
                 | ValueKind::Set(_)
                 | ValueKind::Bytes(_)
         ) {
-            let snapshot = self.collect_iterable(&iterable)?;
-            receiver.list_extend(snapshot)?;
-            return Ok(Value::none());
+            let snapshot = self.collect_iterable(iterable)?;
+            target_list.list_extend(snapshot)?;
+            return Ok(());
         }
-        // CPython's list.extend appends incrementally and keeps partial
-        // progress when the iterator raises. An object-backed mappingproxy
-        // acquires the owner's iterator and probes the proxy length hint before
-        // the first item; every other lazy iterable uses the ordinary path.
-        let iterator = match self.mapping_proxy_iterator_with_length_hint(&iterable)? {
+        // Self-identity guard for list subclasses (`LSub.extend(self)` /
+        // `LSub += self`): `target_list` is the backing `ValueKind::List`, so a
+        // `PyInstance` whose backing shares `target_list.value_id()` is feeding
+        // itself. Materialize first so we never iterate a live native cursor
+        // over the same Vec we are pushing to.
+        if let Some(target_id) = target_list.value_id()
+            && builtin_data_backing(iterable).is_some_and(|b| b.value_id() == Some(target_id))
+        {
+            let snapshot = self.collect_iterable(iterable)?;
+            target_list.list_extend(snapshot)?;
+            return Ok(());
+        }
+        let iterator = match self.mapping_proxy_iterator_with_length_hint(iterable)? {
             Some(iterator) => iterator,
-            None => make_iterator(self, &iterable)?,
+            None => make_iterator(self, iterable)?,
         };
         loop {
             match self.call_next(&iterator, None) {
-                Ok(item) => receiver.list_push(item)?,
+                Ok(item) => target_list.list_push(item)?,
                 Err(ref e) if is_stop_iteration_error(e) => break,
                 Err(e) => return Err(e),
             }
         }
+        Ok(())
+    }
+
+    /// Interpreter-aware `list.extend(iterable)` (#2522, #2989).
+    fn call_list_extend(&mut self, receiver: &Value, mut args: Vec<Value>) -> Result<Value> {
+        if args.len() != 1 {
+            return Err(pyrust_core::type_err!(
+                "list.extend() takes exactly one argument ({} given)",
+                args.len()
+            ));
+        }
+        let iterable = args.pop().unwrap();
+        self.extend_list_from_iterable(receiver, &iterable)?;
         Ok(Value::none())
     }
 

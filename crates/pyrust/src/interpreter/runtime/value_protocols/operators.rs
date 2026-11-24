@@ -123,8 +123,14 @@ impl Interpreter {
                 let lc = Rc::clone(&li.borrow().class);
                 let rc_class = Rc::clone(&ri.borrow().class);
                 if !Rc::ptr_eq(&lc, &rc_class) && class_is_subclass_of(&rc_class, &lc) {
-                    let right_slot = lookup_class_attr(&rc_class, rmethod);
-                    let left_slot = lookup_class_attr(&lc, rmethod);
+                    let right_slot = lookup_class_attr(&rc_class, rmethod).filter(|m| {
+                        !super::expressions::is_inherited_sequence_binary_slot(
+                            &rc_class, rmethod, m,
+                        )
+                    });
+                    let left_slot = lookup_class_attr(&lc, rmethod).filter(|m| {
+                        !super::expressions::is_inherited_sequence_binary_slot(&lc, rmethod, m)
+                    });
                     right_slot.is_some() && (comparison_reflection || right_slot != left_slot)
                 } else {
                     false
@@ -136,7 +142,9 @@ impl Interpreter {
 
         if right_has_subtype_priority && let ValueKind::PyInstance(inst) = right.kind() {
             let class = Rc::clone(&inst.borrow().class);
-            if let Some(m) = lookup_class_attr(&class, rmethod) {
+            if let Some(m) = lookup_class_attr(&class, rmethod)
+                && !super::expressions::is_inherited_sequence_binary_slot(&class, rmethod, &m)
+            {
                 match self.dispatch_binary_slot(m, right, inst, left, comparison_callback) {
                     Some(Ok(v)) if is_not_implemented(&v) => {}
                     Some(result) => return Some(result),
@@ -147,7 +155,9 @@ impl Interpreter {
 
         if let ValueKind::PyInstance(inst) = left.kind() {
             let class = Rc::clone(&inst.borrow().class);
-            if let Some(m) = lookup_class_attr(&class, method) {
+            if let Some(m) = lookup_class_attr(&class, method)
+                && !super::expressions::is_inherited_sequence_binary_slot(&class, method, &m)
+            {
                 match self.dispatch_binary_slot(m, left, inst, right, comparison_callback) {
                     Some(Ok(v)) if is_not_implemented(&v) => {}
                     Some(result) => return Some(result),
@@ -176,7 +186,9 @@ impl Interpreter {
             && let ValueKind::PyInstance(inst) = right.kind()
         {
             let class = Rc::clone(&inst.borrow().class);
-            if let Some(m) = lookup_class_attr(&class, rmethod) {
+            if let Some(m) = lookup_class_attr(&class, rmethod)
+                && !super::expressions::is_inherited_sequence_binary_slot(&class, rmethod, &m)
+            {
                 match self.dispatch_binary_slot(m, right, inst, left, comparison_callback) {
                     Some(Ok(v)) if is_not_implemented(&v) => {}
                     Some(result) => return Some(result),
