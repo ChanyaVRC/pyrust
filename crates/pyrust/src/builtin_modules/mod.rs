@@ -446,6 +446,20 @@ pyrust_builtin_modules! {
     // skipping/expectedFailure, cleanups, subTest, and `unittest.*` submodules)
     // injected from `unittest_py.py`.
     unittest @inject,
+    // `cmath` (issue #3185): native complex mathematical functions, constants,
+    // and C99 Annex G branch-cut / special-value handling in `cmath.rs`.
+    cmath,
+    // `uuid` (issue #3185): pure-Python RFC 4122 UUID objects and v1/v3/v4/v5
+    // generators injected from `uuid_py.py`.
+    uuid @inject,
+    // `calendar` (issue #3185): pure-Python calendar utilities, `Day`/`Month`
+    // IntEnums, `Calendar`, `TextCalendar`, and `HTMLCalendar` injected from
+    // `calendar_py.py`.
+    calendar @inject,
+    // `configparser` (issue #3185): pure-Python INI parser (`ConfigParser`,
+    // `RawConfigParser`, interpolations, `SectionProxy`, `ConverterMapping`)
+    // injected from `configparser_py.py`.
+    configparser @inject,
 }
 
 include!("finalization.rs");
