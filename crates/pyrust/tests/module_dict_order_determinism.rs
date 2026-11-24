@@ -31,18 +31,23 @@ const PROBE: &str = r#"
 import math
 import os.path
 import collections.abc
+import html.entities
+import html.parser
+import urllib.parse
 import __future__
 names = ["abc", "argparse", "asyncio", "base64", "binascii", "bisect", "builtins", "collections",
          "contextlib", "copy", "csv", "dataclasses", "decimal", "difflib", "enum", "errno",
-         "fnmatch", "fractions", "functools", "glob", "hashlib", "heapq", "hmac", "inspect", "io",
-         "itertools",
-         "json", "math", "numbers", "operator", "os", "pathlib", "pprint", "random", "re",
-         "secrets", "shlex", "shutil", "statistics", "string", "sys", "tempfile", "textwrap",
-         "time", "traceback", "types", "typing", "warnings"]
+         "fnmatch", "fractions", "functools", "glob", "hashlib", "heapq", "hmac", "html",
+         "inspect", "io", "itertools", "json", "math", "numbers", "operator", "os", "pathlib",
+         "pprint", "random", "re", "secrets", "shlex", "shutil", "statistics", "string", "sys",
+         "tempfile", "textwrap", "time", "traceback", "types", "typing", "urllib", "warnings"]
 for name in names:
     print(name, list(vars(__import__(name))))
 for name, module in [("os.path", os.path),
                      ("collections.abc", collections.abc),
+                     ("html.entities", html.entities),
+                     ("html.parser", html.parser),
+                     ("urllib.parse", urllib.parse),
                      ("__future__", __future__)]:
     print(name, list(vars(module)))
 print(list(math.__dict__))
