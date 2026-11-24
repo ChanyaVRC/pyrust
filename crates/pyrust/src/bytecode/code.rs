@@ -11,7 +11,7 @@ use crate::value::Value;
 
 use super::{
     AttrCacheEntry, BinOpCacheEntry, CellSlotMeta, FnProto, GlobalCacheEntry, Insn,
-    KwCallCacheEntry,
+    KwCallCacheEntry, SiteCache, SparsePcCache,
 };
 
 /// Maximum register slots allowed in one executable frame.
@@ -126,32 +126,35 @@ pub struct FnCode {
     /// for every non-comp code object (and for a comp not directly enclosed by a
     /// function, where there are no enclosing locals to distinguish).
     pub(crate) comp_enclosing_locals: Option<Rc<HashSet<Symbol>>>,
-    /// Per-instruction inline cache for `GetAttr` and `CallMethod`.
+    /// Lazily-allocated, site-indexed inline cache for `GetAttr`, `SetAttr`,
+    /// `CallMethod`, and `CallMethodKw`.
     ///
-    /// Indexed by instruction position (`pc`) — same length as `insns`.
-    /// Only entries at `GetAttr` / `CallMethod` positions are ever populated;
-    /// all other entries remain `AttrCacheEntry::Empty`.
+    /// Allocates 0 heap bytes until a matching site actually populates an entry,
+    /// then packs only matching sites into an O(1) array-indexed table.
     ///
     /// `RefCell` provides interior mutability so the cache can be updated
     /// through a shared `Rc<FnCode>` during dispatch without requiring an
     /// exclusive borrow of the enclosing `FnCode`.
-    pub(crate) attr_cache: RefCell<Vec<AttrCacheEntry>>,
+    pub(crate) attr_cache: RefCell<SiteCache<AttrCacheEntry>>,
     /// Per-name inline cache for the final `LoadGlobal` resolution.
     ///
-    /// Indexed by `name_idx` and shared across all invocations of this
-    /// function. Environment and canonical-builtins resolutions are mutually
-    /// exclusive variants in the same slot, so dispatch probes one `RefCell`.
-    /// Both variants validate the root namespace identity; environment entries
-    /// additionally validate its value generation, while builtin-module
-    /// entries validate its structure generation and the provider's shared
-    /// mutation state. Custom `__builtins__` modules/dicts are never cached.
+    /// Lazily allocated on first cache fill (0 heap bytes for unexecuted
+    /// functions), indexed by `name_idx`, and shared across all invocations of
+    /// this function. Environment and canonical-builtins resolutions are
+    /// mutually exclusive variants in the same slot, so dispatch probes one
+    /// `RefCell`. Both variants validate the root namespace identity;
+    /// environment entries additionally validate its value generation, while
+    /// builtin-module entries validate its structure generation and the
+    /// provider's shared mutation state. Custom `__builtins__` modules/dicts
+    /// are never cached.
     pub(crate) global_cache: RefCell<Vec<GlobalCacheEntry>>,
     /// Precomputed per-name Bloom masks used to invalidate only value or
     /// canonical-fallback caches that may exist in this root namespace.
     pub(crate) global_cache_interest_masks: Vec<u64>,
     /// Adaptive inline cache for binary operations (PEP 659 style).
     ///
-    /// Indexed by instruction position (`pc`) — same length as `insns`.
+    /// Lazily allocated on first non-int `BinOp` observation (0 heap bytes for
+    /// unexecuted or int-only functions), then indexed directly by `pc`.
     /// Only entries at `BinOp` positions are ever advanced beyond `Empty`;
     /// `BinOpInPlace`, `BinOpConst`, and `BinOpImm` use only the unconditional
     /// int-int fast path and leave their cache slots `Empty`.
@@ -164,29 +167,33 @@ pub struct FnCode {
     ///   `Specialized(tag)` + same tag → try fast path; mismatch → `Megamorphic`.
     ///   `Megamorphic` → permanently bypass cache, call `eval_binary` directly.
     pub(crate) binop_cache: RefCell<Vec<BinOpCacheEntry>>,
-    /// Per-call-site inline cache for `Insn::CallKw` (issue #2382).
+    /// Sparse per-call-site inline cache for `Insn::CallKw`, `Insn::CallMethodKw`,
+    /// `Insn::CallEx`, and `Insn::CallExArgs` (issue #2382).
     ///
-    /// Indexed by instruction position (`pc`) — same length as `insns`.  Only
-    /// entries at `CallKw` positions are ever advanced past `Empty`.  Records
+    /// Allocates 0 heap bytes until a keyword/splat call site populates an
+    /// entry; stores only populated `(pc, KwCallCacheEntry)` pairs.  Records
     /// the keyword-name → parameter-slot mapping for a monomorphic call site so
     /// the binder skips the per-call linear name scan; see [`KwCallCacheEntry`].
-    pub(crate) kwcall_cache: RefCell<Vec<KwCallCacheEntry>>,
-    /// Per-instruction cache for constant f-string format specs (issues
+    pub(crate) kwcall_cache: RefCell<SparsePcCache<KwCallCacheEntry>>,
+    /// Sparse per-instruction cache for constant f-string format specs (issues
     /// #2357 / #2372).
     ///
-    /// Indexed by instruction position (`pc`) — same length as `insns`.  Only
-    /// entries at `FormatValueSpec` positions are ever populated.  A constant
-    /// spec (`f"{x:.2f}"`) is parsed once and cached here; a dynamic spec
-    /// (`f"{x:{w}f}"`) keeps missing (its spec string is freshly allocated each
-    /// iteration) and is never cached.  Pc-keyed, so it is immune to the const
-    /// remapping `pass_compact_consts` performs.  See [`FmtSpecCacheEntry`].
-    pub(crate) fmt_spec_cache: RefCell<Vec<crate::interpreter::FmtSpecCacheEntry>>,
-    /// Per-call-site inline cache for plain built-in callees (`len`, `ord`,
-    /// `abs`, …).  Parallel to `insns` (indexed by the `Call` instruction's pc);
-    /// a hit dispatches straight through the cached registry `fn` pointer,
-    /// skipping the `call_function_expanded` cascade and registry binary search.
-    /// See [`crate::interpreter::CallBuiltinCacheEntry`].
-    pub(crate) call_builtin_cache: RefCell<Vec<crate::interpreter::CallBuiltinCacheEntry>>,
+    /// Allocates 0 heap bytes until a `FormatValueSpec` site populates an
+    /// entry; stores only populated `(pc, FmtSpecCacheEntry)` pairs.  A
+    /// constant spec (`f"{x:.2f}"`) is parsed once and cached here; a dynamic
+    /// spec (`f"{x:{w}f}"`) keeps missing (its spec string is freshly allocated
+    /// each iteration) and is never cached.  Pc-keyed, so it is immune to the
+    /// const remapping `pass_compact_consts` performs.  See
+    /// [`FmtSpecCacheEntry`].
+    pub(crate) fmt_spec_cache: RefCell<SparsePcCache<crate::interpreter::FmtSpecCacheEntry>>,
+    /// Lazily-allocated, site-indexed inline cache for plain built-in callees
+    /// (`len`, `ord`, `abs`, …) at `Insn::Call` / `Insn::CallMemo` sites.
+    /// Allocates 0 heap bytes until a cacheable builtin/class call populates an
+    /// entry, then packs only call sites into an O(1) array-indexed table; a
+    /// hit dispatches straight through the cached registry `fn` pointer,
+    /// skipping the `call_function_expanded` cascade and registry binary
+    /// search. See [`crate::interpreter::CallBuiltinCacheEntry`].
+    pub(crate) call_builtin_cache: RefCell<SiteCache<crate::interpreter::CallBuiltinCacheEntry>>,
     /// Weakly cached `types.CodeType` object for this compiled body so
     /// repeated `f.__code__`, `g.gi_code`, and `frame.f_code` reads share one
     /// Python object identity without introducing strong ownership cycles.

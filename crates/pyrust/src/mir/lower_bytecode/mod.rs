@@ -23,11 +23,11 @@ mod regalloc;
 #[allow(unused_imports)]
 pub(crate) use de_ssa::emit_parallel_copies;
 
-use crate::bytecode::{
-    AttrCacheEntry, BinOpCacheEntry, FnCode, GlobalCacheEntry, KwCallCacheEntry, MAX_FRAME_REGS,
-};
+use std::cell::RefCell;
 
-use super::ir::{MirFn, empty_cache_vec};
+use crate::bytecode::{FnCode, MAX_FRAME_REGS, SiteCache, SparsePcCache};
+
+use super::ir::MirFn;
 use super::verify::DominatorTree;
 
 use emit::emit_mir_bytecode;
@@ -42,7 +42,6 @@ pub fn lower_mir_to_fncode(func: &MirFn) -> FnCode {
     let num_regs = (emitted.max_reg_used + 1)
         .max(func.num_locals)
         .min(MAX_FRAME_REGS);
-    let insns_len = emitted.insns.len();
     let global_cache_interest_masks = func
         .names
         .iter()
@@ -71,17 +70,14 @@ pub fn lower_mir_to_fncode(func: &MirFn) -> FnCode {
         is_function_scope: func.is_function_scope,
         is_inlined_comp: func.is_inlined_comp,
         comp_enclosing_locals: func.comp_enclosing_locals.clone(),
-        attr_cache: empty_cache_vec(insns_len, AttrCacheEntry::Empty),
-        global_cache: empty_cache_vec(func.names.len(), GlobalCacheEntry::Empty),
+        attr_cache: RefCell::new(SiteCache::new()),
+        global_cache: RefCell::new(Vec::new()),
         global_cache_interest_masks,
-        binop_cache: empty_cache_vec(insns_len, BinOpCacheEntry::Empty),
-        kwcall_cache: empty_cache_vec(insns_len, KwCallCacheEntry::Empty),
-        fmt_spec_cache: empty_cache_vec(insns_len, crate::interpreter::FmtSpecCacheEntry::Empty),
-        call_builtin_cache: empty_cache_vec(
-            insns_len,
-            crate::interpreter::CallBuiltinCacheEntry::Empty,
-        ),
-        cached_code_object: std::cell::RefCell::new(None),
+        binop_cache: RefCell::new(Vec::new()),
+        kwcall_cache: RefCell::new(SparsePcCache::new()),
+        fmt_spec_cache: RefCell::new(SparsePcCache::new()),
+        call_builtin_cache: RefCell::new(SiteCache::new()),
+        cached_code_object: RefCell::new(None),
         exc_table: Vec::new(),
         has_exc_handlers: true,
     }

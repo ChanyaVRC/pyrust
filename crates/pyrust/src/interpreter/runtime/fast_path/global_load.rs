@@ -1,3 +1,14 @@
+#[inline]
+fn set_global_cache(code: &crate::bytecode::FnCode, slot: usize, entry: GlobalCacheEntry) {
+    let mut cache = code.global_cache.borrow_mut();
+    if cache.is_empty() {
+        cache.resize(code.names.len(), GlobalCacheEntry::Empty);
+    }
+    if let Some(cell) = cache.get_mut(slot) {
+        *cell = entry;
+    }
+}
+
 impl Interpreter {
     /// Probe and fill the unified `LoadGlobal` resolution cache around the
     /// namespace-owned slow path.
@@ -65,8 +76,11 @@ impl Interpreter {
                 self.env
                     .borrow()
                     .register_namespace_value_cache_interest(cache_interest_mask);
-                code.global_cache.borrow_mut()[slot] =
-                    GlobalCacheEntry::environment(current_namespace_id, version, &resolution.value);
+                set_global_cache(
+                    code,
+                    slot,
+                    GlobalCacheEntry::environment(current_namespace_id, version, &resolution.value),
+                );
             }
             GlobalResolutionCache::ScriptFastLocal {
                 environment_version,
@@ -77,13 +91,17 @@ impl Interpreter {
                 self.env
                     .borrow()
                     .register_namespace_value_cache_interest(cache_interest_mask);
-                code.global_cache.borrow_mut()[slot] = GlobalCacheEntry::script_fastlocal(
-                    current_namespace_id,
-                    environment_version,
-                    mirror_epoch,
-                    local_index,
-                    register,
-                    &resolution.value,
+                set_global_cache(
+                    code,
+                    slot,
+                    GlobalCacheEntry::script_fastlocal(
+                        current_namespace_id,
+                        environment_version,
+                        mirror_epoch,
+                        local_index,
+                        register,
+                        &resolution.value,
+                    ),
                 );
             }
             GlobalResolutionCache::Builtin(provider_state)
@@ -92,11 +110,15 @@ impl Interpreter {
                 self.env
                     .borrow()
                     .register_namespace_fallback_cache_interest(cache_interest_mask);
-                code.global_cache.borrow_mut()[slot] = GlobalCacheEntry::builtin_module(
-                    current_namespace_id,
-                    current_structure_version,
-                    provider_state,
-                    &resolution.value,
+                set_global_cache(
+                    code,
+                    slot,
+                    GlobalCacheEntry::builtin_module(
+                        current_namespace_id,
+                        current_structure_version,
+                        provider_state,
+                        &resolution.value,
+                    ),
                 );
             }
             GlobalResolutionCache::Environment(_)

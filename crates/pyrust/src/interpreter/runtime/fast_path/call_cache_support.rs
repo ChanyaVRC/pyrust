@@ -222,12 +222,18 @@ impl Interpreter {
             ValueKind::BuiltinFunction(name) => {
                 let cache = code.call_builtin_cache.borrow();
                 match cache.get(call_site) {
-                    Some(CallBuiltinCacheEntry::Cached {
-                        key: super::formatting::CallBuiltinCacheKey::RegistryName(cached_name),
-                        dispatch,
-                        fast,
-                    }) if *cached_name == name => {
-                        Self::cached_builtin_call_probe(*dispatch, *fast, vector_arguments)
+                    Some(CallBuiltinCacheEntry::Cached(entry))
+                        if matches!(
+                            entry.key,
+                            super::formatting::CallBuiltinCacheKey::RegistryName(cached_name)
+                                if cached_name == name
+                        ) =>
+                    {
+                        Self::cached_builtin_call_probe(
+                            entry.dispatch,
+                            entry.fast,
+                            vector_arguments,
+                        )
                     }
                     _ => BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::Registry),
                 }
@@ -235,12 +241,18 @@ impl Interpreter {
             ValueKind::PyClass(class) => {
                 let cache = code.call_builtin_cache.borrow();
                 match cache.get(call_site) {
-                    Some(CallBuiltinCacheEntry::Cached {
-                        key: super::formatting::CallBuiltinCacheKey::PrimitiveClass(cached_class),
-                        dispatch,
-                        fast,
-                    }) if cached_class.as_ptr() == std::rc::Rc::as_ptr(class) => {
-                        Self::cached_builtin_call_probe(*dispatch, *fast, vector_arguments)
+                    Some(CallBuiltinCacheEntry::Cached(entry))
+                        if matches!(
+                            &entry.key,
+                            super::formatting::CallBuiltinCacheKey::PrimitiveClass(cached_class)
+                                if cached_class.as_ptr() == std::rc::Rc::as_ptr(class)
+                        ) =>
+                    {
+                        Self::cached_builtin_call_probe(
+                            entry.dispatch,
+                            entry.fast,
+                            vector_arguments,
+                        )
                     }
                     Some(CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(cached_class))
                         if cached_class.as_ptr() == std::rc::Rc::as_ptr(class) =>
@@ -286,11 +298,19 @@ impl Interpreter {
                 let fast = registration
                     .fast
                     .map(|fast| (fast, registration.min_arity, registration.max_arity));
-                code.call_builtin_cache.borrow_mut()[call_site] = CallBuiltinCacheEntry::Cached {
-                    key: super::formatting::CallBuiltinCacheKey::RegistryName(name),
-                    dispatch: registration.dispatch,
-                    fast,
-                };
+                code.call_builtin_cache.borrow_mut().set_or_init(
+                    &code.insns,
+                    call_site,
+                    crate::bytecode::is_call_builtin_cache_site,
+                    || CallBuiltinCacheEntry::Empty,
+                    CallBuiltinCacheEntry::Cached(Box::new(
+                        super::formatting::CallBuiltinCachedEntry {
+                            key: super::formatting::CallBuiltinCacheKey::RegistryName(name),
+                            dispatch: registration.dispatch,
+                            fast,
+                        },
+                    )),
+                );
                 (registration.dispatch)(self, arguments)
             }
             BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::Class) => {
@@ -301,10 +321,15 @@ impl Interpreter {
 
                 // This is the sole primitive-map probe on a cold class miss.
                 let Some(dispatch) = super::primitive_class_dispatch(&class) else {
-                    code.call_builtin_cache.borrow_mut()[call_site] =
+                    code.call_builtin_cache.borrow_mut().set_or_init(
+                        &code.insns,
+                        call_site,
+                        crate::bytecode::is_call_builtin_cache_site,
+                        || CallBuiltinCacheEntry::Empty,
                         CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(std::rc::Rc::downgrade(
                             &class,
-                        ));
+                        )),
+                    );
                     return self.call_class_after_primitive_miss(class, arguments);
                 };
 
@@ -323,13 +348,21 @@ impl Interpreter {
                             .map(|fast| (fast, registration.min_arity, registration.max_arity))
                     })
                 });
-                code.call_builtin_cache.borrow_mut()[call_site] = CallBuiltinCacheEntry::Cached {
-                    key: super::formatting::CallBuiltinCacheKey::PrimitiveClass(
-                        std::rc::Rc::downgrade(&class),
-                    ),
-                    dispatch,
-                    fast,
-                };
+                code.call_builtin_cache.borrow_mut().set_or_init(
+                    &code.insns,
+                    call_site,
+                    crate::bytecode::is_call_builtin_cache_site,
+                    || CallBuiltinCacheEntry::Empty,
+                    CallBuiltinCacheEntry::Cached(Box::new(
+                        super::formatting::CallBuiltinCachedEntry {
+                            key: super::formatting::CallBuiltinCacheKey::PrimitiveClass(
+                                std::rc::Rc::downgrade(&class),
+                            ),
+                            dispatch,
+                            fast,
+                        },
+                    )),
+                );
                 dispatch(self, arguments)
             }
         }

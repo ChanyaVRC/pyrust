@@ -28,14 +28,15 @@ impl Interpreter {
         // descriptor on the MRO, no __slots__ restriction, not __class__/__dict__)
         // writes straight into inst.attrs, skipping the MRO walk in
         // assign_attr_instance.
+        let site_pc = pc - 1;
         let mut handled = false;
         {
             let cache = code.attr_cache.borrow();
-            if let AttrCacheEntry::SetInstanceAttr {
+            if let Some(AttrCacheEntry::SetInstanceAttr {
                 class_ptr,
                 class_version,
                 epoch,
-            } = &cache[pc - 1]
+            }) = cache.get(site_pc)
                 && let Some(inst_rc) = obj_val.as_py_instance_rc()
             {
                 let (same_class, current_class_version) = {
@@ -61,38 +62,47 @@ impl Interpreter {
             self.assign_attr(obj_val.clone(), name, val_val)?;
             // Fill / update the cache after the slow path.
             let mut cache = code.attr_cache.borrow_mut();
-            match &cache[pc - 1] {
-                AttrCacheEntry::Megamorphic => {}
-                AttrCacheEntry::SetInstanceAttr {
+            let new_entry = match cache.get(site_pc) {
+                Some(AttrCacheEntry::Megamorphic) => None,
+                Some(AttrCacheEntry::SetInstanceAttr {
                     class_ptr: existing_ptr,
                     ..
-                } => {
-                    if let Some(inst_rc) = obj_val.as_py_instance_rc() {
-                        let new_ptr = Rc::as_ptr(&inst_rc.borrow().class);
-                        if new_ptr != existing_ptr.as_ptr() {
-                            cache[pc - 1] = AttrCacheEntry::Megamorphic;
-                        } else {
-                            cache[pc - 1] = AttrCacheEntry::Empty;
-                        }
+                }) => obj_val.as_py_instance_rc().map(|inst_rc| {
+                    let new_ptr = Rc::as_ptr(&inst_rc.borrow().class);
+                    if new_ptr != existing_ptr.as_ptr() {
+                        AttrCacheEntry::Megamorphic
+                    } else {
+                        AttrCacheEntry::Empty
                     }
-                }
-                AttrCacheEntry::Empty => {
+                }),
+                None | Some(AttrCacheEntry::Empty) => {
                     if let Some(class) = write_attribute_cache_class(&obj_val, name) {
                         let Some((class_version, epoch)) =
                             pyrust_core::class_cache_stamp(class.borrow().mutation_version.get())
                         else {
                             return Ok(());
                         };
-                        cache[pc - 1] = AttrCacheEntry::SetInstanceAttr {
+                        Some(AttrCacheEntry::SetInstanceAttr {
                             class_ptr: Rc::downgrade(&class),
                             class_version,
                             epoch,
-                        };
+                        })
+                    } else {
+                        None
                     }
                 }
                 // ClassAttr / InstanceAttr are GetAttr-only entries; a
                 // SetAttr site never produces them.
-                _ => {}
+                _ => None,
+            };
+            if let Some(entry) = new_entry {
+                cache.set_or_init(
+                    &code.insns,
+                    site_pc,
+                    crate::bytecode::is_attr_cache_site,
+                    || AttrCacheEntry::Empty,
+                    entry,
+                );
             }
         }
         Ok(())

@@ -16,7 +16,7 @@ pub use eval::{
 };
 pub use type_inference::{MirType, infer_mir_types};
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -503,10 +503,4 @@ impl MirFn {
             comp_enclosing_locals: None,
         }
     }
-}
-
-/// Build an empty `RefCell`-initialized inline cache vector of length `len`.
-#[inline]
-pub(crate) fn empty_cache_vec<T: Clone>(len: usize, val: T) -> RefCell<Vec<T>> {
-    RefCell::new(vec![val; len])
 }

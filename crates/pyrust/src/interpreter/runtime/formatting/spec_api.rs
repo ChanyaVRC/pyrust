@@ -101,24 +101,21 @@ pub(crate) fn apply_format_spec_named(
 /// The cache lives in a side table indexed by pc, so it is immune to the const
 /// remapping `pass_compact_consts` performs (the landmine called out in #2372).
 #[derive(Clone, Debug)]
-pub(crate) enum FmtSpecCacheEntry {
-    Empty,
-    Cached {
-        /// Byte length of the spec string that produced `parsed` — a cheap
-        /// fast-reject before the content compare.
-        spec_len: usize,
-        /// The parsed spec.  Parsing is value-independent (it depends only on
-        /// the spec text), so the same parse is reused for every value rendered
-        /// through this site; only `render_format_spec` re-runs per value.
-        parsed: Rc<FormatSpec>,
-        /// The spec string that produced `parsed`.  The cache hit is decided by
-        /// comparing its *content* against the current spec — NOT by backing
-        /// pointer: a small (inline / SSO) spec string carries its bytes in the
-        /// NaN-box, so `as_ptr()` points at the transient stack/register slot
-        /// the value currently occupies, which is reused across iterations and
-        /// would false-hit when the spec changes (e.g. `.1f` → `.2f`, #2832).
-        spec: Value,
-    },
+pub(crate) struct FmtSpecCacheEntry {
+    /// Byte length of the spec string that produced `parsed` — a cheap
+    /// fast-reject before the content compare.
+    spec_len: usize,
+    /// The parsed spec.  Parsing is value-independent (it depends only on
+    /// the spec text), so the same parse is reused for every value rendered
+    /// through this site; only `render_format_spec` re-runs per value.
+    parsed: Rc<FormatSpec>,
+    /// The spec string that produced `parsed`.  The cache hit is decided by
+    /// comparing its *content* against the current spec — NOT by backing
+    /// pointer: a small (inline / SSO) spec string carries its bytes in the
+    /// NaN-box, so `as_ptr()` points at the transient stack/register slot
+    /// the value currently occupies, which is reused across iterations and
+    /// would false-hit when the spec changes (e.g. `.1f` → `.2f`, #2832).
+    spec: Value,
 }
 
 /// Typed identity of a callable handled by the registered-builtin call cache.
@@ -137,27 +134,31 @@ pub(crate) enum CallBuiltinCacheKey {
     ),
 }
 
+/// Boxed payload for [`CallBuiltinCacheEntry::Cached`] so the enum stays at
+/// 16 bytes (down from 48 bytes).
+#[derive(Clone, Debug)]
+pub(crate) struct CallBuiltinCachedEntry {
+    /// Immutable identity that resolved to `dispatch`; polymorphic sites
+    /// re-resolve and overwrite the entry when this key changes.
+    pub(crate) key: CallBuiltinCacheKey,
+    pub(crate) dispatch: crate::builtin_registry::BuiltinDispatchFn,
+    /// Optional "vectorcall" fast entry + inclusive positional-arity bounds
+    /// `(min, max)`.  When present and the call's `argc` is in range, the VM
+    /// passes the argument values as a register subslice and skips the
+    /// `ExpandedCallArg` buffer + kwarg/arity validation entirely.
+    pub(crate) fast: Option<(crate::builtin_registry::BuiltinFastDispatchFn, u8, u8)>,
+}
+
 /// Per-call-site inline cache for a registered built-in callee, so hot calls
 /// such as `len(x)`, `math.sqrt(x)`, and `zip(a, b)` skip generic call routing
 /// and the registry binary search on every iteration. Cacheability follows
 /// immutable registry membership or a canonical built-in-class identity.
-/// `Clone` lets the `Vec` initialise with `vec![Empty; n]`; class entries are
-/// deliberately not `Copy` because their weak allocation identity owns a
-/// control-block reference.
+/// Class entries are deliberately not `Copy` because their weak allocation
+/// identity owns a control-block reference.
 #[derive(Clone, Debug)]
 pub(crate) enum CallBuiltinCacheEntry {
     Empty,
-    Cached {
-        /// Immutable identity that resolved to `dispatch`; polymorphic sites
-        /// re-resolve and overwrite the entry when this key changes.
-        key: CallBuiltinCacheKey,
-        dispatch: crate::builtin_registry::BuiltinDispatchFn,
-        /// Optional "vectorcall" fast entry + inclusive positional-arity bounds
-        /// `(min, max)`.  When present and the call's `argc` is in range, the VM
-        /// passes the argument values as a register subslice and skips the
-        /// `ExpandedCallArg` buffer + kwarg/arity validation entirely.
-        fast: Option<(crate::builtin_registry::BuiltinFastDispatchFn, u8, u8)>,
-    },
+    Cached(Box<CallBuiltinCachedEntry>),
     /// Exact class identity already proved absent from
     /// `PRIMITIVE_CLASS_DISPATCH`. A warm hit skips only that identity-map
     /// lookup and still enters the shared typing/adapter/generic-class tail.
@@ -168,7 +169,7 @@ pub(crate) enum CallBuiltinCacheEntry {
 }
 
 /// Apply a (usually constant) f-string format spec to `value`, consulting a
-/// per-pc parse cache so a constant spec is parsed only once.  Mirrors
+/// sparse per-pc parse cache so a constant spec is parsed only once.  Mirrors
 /// [`apply_format_spec`] for non-`PyInstance` values; `PyInstance` values must
 /// still go through `dispatch_dunder_format` (user `__format__`) and never reach
 /// here.  `cache` is the caller's `FnCode::fmt_spec_cache`; `idx` is the `pc` of
@@ -176,7 +177,7 @@ pub(crate) enum CallBuiltinCacheEntry {
 pub(crate) fn apply_format_spec_cached(
     value: &Value,
     spec_val: &Value,
-    cache: &RefCell<Vec<FmtSpecCacheEntry>>,
+    cache: &RefCell<crate::bytecode::SparsePcCache<FmtSpecCacheEntry>>,
     idx: usize,
 ) -> Result<Value> {
     let spec = spec_val.as_str().unwrap_or("");
@@ -206,12 +207,12 @@ pub(crate) fn apply_format_spec_cached(
     // `Rc` out under a short borrow so the cache `RefCell` is released before
     // `render_format_spec` runs.
     let spec_len = spec.len();
-    let cached_parsed = match &cache.borrow()[idx] {
-        FmtSpecCacheEntry::Cached {
+    let cached_parsed = match cache.borrow().get(idx) {
+        Some(FmtSpecCacheEntry {
             spec_len: cl,
             parsed,
             spec: cached_spec,
-        } if *cl == spec_len && cached_spec.as_str() == Some(spec) => Some(Rc::clone(parsed)),
+        }) if *cl == spec_len && cached_spec.as_str() == Some(spec) => Some(Rc::clone(parsed)),
         _ => None,
     };
     if let Some(parsed) = cached_parsed {
@@ -222,11 +223,14 @@ pub(crate) fn apply_format_spec_cached(
     // Miss: parse once, render, and cache against this spec's content.
     let parsed = Rc::new(parse_format_spec(spec, &type_name)?);
     let formatted = render_format_spec(value, &parsed, &type_name)?;
-    cache.borrow_mut()[idx] = FmtSpecCacheEntry::Cached {
-        spec_len,
-        parsed,
-        spec: spec_val.clone(),
-    };
+    cache.borrow_mut().insert(
+        idx,
+        FmtSpecCacheEntry {
+            spec_len,
+            parsed,
+            spec: spec_val.clone(),
+        },
+    );
     Ok(Value::string(formatted))
 }
 

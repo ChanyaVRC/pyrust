@@ -6,7 +6,6 @@ mod vm_tests {
     use crate::interpreter::fast_path::BuiltinCallCacheMiss;
 
     fn empty_code(insns: Vec<Insn>) -> FnCode {
-        use crate::bytecode::{AttrCacheEntry, BinOpCacheEntry, KwCallCacheEntry};
         let n = insns.len();
         FnCode {
             insns,
@@ -30,19 +29,13 @@ mod vm_tests {
             is_function_scope: false,
             is_inlined_comp: false,
             comp_enclosing_locals: None,
-            attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
+            attr_cache: std::cell::RefCell::new(crate::bytecode::SiteCache::new()),
             global_cache: std::cell::RefCell::new(Vec::new()),
             global_cache_interest_masks: Vec::new(),
-            binop_cache: std::cell::RefCell::new(vec![BinOpCacheEntry::Empty; n]),
-            kwcall_cache: std::cell::RefCell::new(vec![KwCallCacheEntry::Empty; n]),
-            fmt_spec_cache: std::cell::RefCell::new(vec![
-                crate::interpreter::FmtSpecCacheEntry::Empty;
-                n
-            ]),
-            call_builtin_cache: std::cell::RefCell::new(vec![
-                crate::interpreter::CallBuiltinCacheEntry::Empty;
-                n
-            ]),
+            binop_cache: std::cell::RefCell::new(Vec::new()),
+            kwcall_cache: std::cell::RefCell::new(crate::bytecode::SparsePcCache::new()),
+            fmt_spec_cache: std::cell::RefCell::new(crate::bytecode::SparsePcCache::new()),
+            call_builtin_cache: std::cell::RefCell::new(crate::bytecode::SiteCache::new()),
             cached_code_object: std::cell::RefCell::new(None),
             // Empty: these hand-built test fixtures run unoptimized, so the VM
             // uses the dynamic SetupExcept/PopExcept handler stack.
@@ -240,8 +233,8 @@ mod vm_tests {
         execute_call(&code, function.clone(), Vec::new())
             .expect("ordinary class construction must execute");
         assert!(matches!(
-            &code.call_builtin_cache.borrow()[0],
-            crate::interpreter::CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(cached)
+            code.call_builtin_cache.borrow().get(0),
+            Some(crate::interpreter::CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(cached))
                 if cached.as_ptr() == Rc::as_ptr(&class)
         ));
         let warm_probe = Interpreter::probe_builtin_vectorcall(&code, 0, &function, &[]);
@@ -272,10 +265,15 @@ mod vm_tests {
         };
         let code = call_code(1);
         let old_class = template();
-        code.call_builtin_cache.borrow_mut()[0] =
+        code.call_builtin_cache.borrow_mut().set_or_init(
+            &code.insns,
+            0,
+            crate::bytecode::is_call_builtin_cache_site,
+            || crate::interpreter::CallBuiltinCacheEntry::Empty,
             crate::interpreter::CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(Rc::downgrade(
                 &old_class,
-            ));
+            )),
+        );
         drop(old_class);
 
         let replacement = template();
@@ -301,11 +299,12 @@ mod vm_tests {
         )
         .expect("a registry callable must replace a negative class key");
         assert!(matches!(
-            &code.call_builtin_cache.borrow()[0],
-            crate::interpreter::CallBuiltinCacheEntry::Cached {
-                key: crate::interpreter::formatting::CallBuiltinCacheKey::RegistryName("len"),
-                ..
-            }
+            code.call_builtin_cache.borrow().get(0),
+            Some(crate::interpreter::CallBuiltinCacheEntry::Cached(entry))
+                if matches!(
+                    entry.key,
+                    crate::interpreter::formatting::CallBuiltinCacheKey::RegistryName("len")
+                )
         ));
     }
 
@@ -327,8 +326,8 @@ mod vm_tests {
         execute_call(&code, Value::py_class(Rc::clone(&class)), Vec::new())
             .expect("CallMemo bypass must execute ordinary construction");
         assert!(matches!(
-            &code.call_builtin_cache.borrow()[0],
-            crate::interpreter::CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(cached)
+            code.call_builtin_cache.borrow().get(0),
+            Some(crate::interpreter::CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(cached))
                 if cached.as_ptr() == Rc::as_ptr(&class)
         ));
         execute_call(&code, Value::py_class(class), Vec::new())
@@ -387,14 +386,15 @@ mod vm_tests {
 
             let registration = crate::builtin_registry::lookup_registration(name)
                 .expect("the canonical class constructor must be registered");
-            match &code.call_builtin_cache.borrow()[0] {
-                crate::interpreter::CallBuiltinCacheEntry::Cached {
-                    key: CallBuiltinCacheKey::PrimitiveClass(actual_class),
-                    fast,
-                    ..
-                } => {
+            match code.call_builtin_cache.borrow().get(0) {
+                Some(crate::interpreter::CallBuiltinCacheEntry::Cached(entry))
+                    if matches!(entry.key, CallBuiltinCacheKey::PrimitiveClass(_)) =>
+                {
+                    let CallBuiltinCacheKey::PrimitiveClass(actual_class) = &entry.key else {
+                        unreachable!()
+                    };
                     assert_eq!(actual_class.as_ptr(), std::rc::Rc::as_ptr(&class));
-                    match (*fast, registration.fast) {
+                    match (entry.fast, registration.fast) {
                         (Some((_, minimum, maximum)), Some(_)) => {
                             assert_eq!(minimum, registration.min_arity);
                             assert_eq!(maximum, registration.max_arity);
@@ -423,11 +423,13 @@ mod vm_tests {
         )
         .expect("enumerate(()) must execute");
         assert!(matches!(
-            &code.call_builtin_cache.borrow()[0],
-            crate::interpreter::CallBuiltinCacheEntry::Cached {
-                key: CallBuiltinCacheKey::PrimitiveClass(class),
-                ..
-            } if class.as_ptr() == std::rc::Rc::as_ptr(&enumerate_class)
+            code.call_builtin_cache.borrow().get(0),
+            Some(crate::interpreter::CallBuiltinCacheEntry::Cached(entry))
+                if matches!(
+                    &entry.key,
+                    CallBuiltinCacheKey::PrimitiveClass(class)
+                        if class.as_ptr() == std::rc::Rc::as_ptr(&enumerate_class)
+                )
         ));
 
         execute_call(
@@ -437,11 +439,9 @@ mod vm_tests {
         )
         .expect("the registry-function form must overwrite the class key");
         assert!(matches!(
-            &code.call_builtin_cache.borrow()[0],
-            crate::interpreter::CallBuiltinCacheEntry::Cached {
-                key: CallBuiltinCacheKey::RegistryName("enumerate"),
-                ..
-            }
+            code.call_builtin_cache.borrow().get(0),
+            Some(crate::interpreter::CallBuiltinCacheEntry::Cached(entry))
+                if matches!(entry.key, CallBuiltinCacheKey::RegistryName("enumerate"))
         ));
 
         assert!(
@@ -449,11 +449,9 @@ mod vm_tests {
             "an uncacheable non-callable must fall through"
         );
         assert!(matches!(
-            &code.call_builtin_cache.borrow()[0],
-            crate::interpreter::CallBuiltinCacheEntry::Cached {
-                key: CallBuiltinCacheKey::RegistryName("enumerate"),
-                ..
-            }
+            code.call_builtin_cache.borrow().get(0),
+            Some(crate::interpreter::CallBuiltinCacheEntry::Cached(entry))
+                if matches!(entry.key, CallBuiltinCacheKey::RegistryName("enumerate"))
         ));
 
         let reversed_class = crate::interpreter::builtin_type_class_by_name("reversed")
@@ -465,11 +463,13 @@ mod vm_tests {
         )
         .expect("a class-tag mismatch must overwrite the registry key");
         assert!(matches!(
-            &code.call_builtin_cache.borrow()[0],
-            crate::interpreter::CallBuiltinCacheEntry::Cached {
-                key: CallBuiltinCacheKey::PrimitiveClass(class),
-                ..
-            } if class.as_ptr() == std::rc::Rc::as_ptr(&reversed_class)
+            code.call_builtin_cache.borrow().get(0),
+            Some(crate::interpreter::CallBuiltinCacheEntry::Cached(entry))
+                if matches!(
+                    &entry.key,
+                    CallBuiltinCacheKey::PrimitiveClass(class)
+                        if class.as_ptr() == std::rc::Rc::as_ptr(&reversed_class)
+                )
         ));
 
         let function = Value::py_class(reversed_class);
@@ -590,17 +590,21 @@ mod vm_tests {
                 Value::py_class(std::rc::Rc::clone(&class)),
                 Vec::new(),
             );
-            match &code.call_builtin_cache.borrow()[0] {
-                crate::interpreter::CallBuiltinCacheEntry::Cached {
-                    key:
-                        crate::interpreter::formatting::CallBuiltinCacheKey::PrimitiveClass(
-                            cached_class,
-                        ),
-                    fast,
-                    ..
-                } => {
+            match code.call_builtin_cache.borrow().get(0) {
+                Some(crate::interpreter::CallBuiltinCacheEntry::Cached(entry))
+                    if matches!(
+                        entry.key,
+                        crate::interpreter::formatting::CallBuiltinCacheKey::PrimitiveClass(_)
+                    ) =>
+                {
+                    let crate::interpreter::formatting::CallBuiltinCacheKey::PrimitiveClass(
+                        cached_class,
+                    ) = &entry.key
+                    else {
+                        unreachable!()
+                    };
                     assert_eq!(cached_class.as_ptr(), std::rc::Rc::as_ptr(&class));
-                    match (*fast, expected_fast) {
+                    match (entry.fast, expected_fast) {
                         (Some((_, minimum, maximum)), Some((expected_min, expected_max))) => {
                             assert_eq!((minimum, maximum), (expected_min, expected_max));
                         }
@@ -640,8 +644,8 @@ mod vm_tests {
             .expect("a cold borrow conflict must fall back to generic class dispatch");
         assert!(
             matches!(
-                &cold_code.call_builtin_cache.borrow()[0],
-                crate::interpreter::CallBuiltinCacheEntry::Empty
+                cold_code.call_builtin_cache.borrow().get(0),
+                None | Some(crate::interpreter::CallBuiltinCacheEntry::Empty)
             ),
             "a cold borrow conflict must decline to fill the class cache"
         );
@@ -651,8 +655,8 @@ mod vm_tests {
             .expect("the next unborrowed call must populate the cache");
         assert!(
             !matches!(
-                &cold_code.call_builtin_cache.borrow()[0],
-                crate::interpreter::CallBuiltinCacheEntry::Empty
+                cold_code.call_builtin_cache.borrow().get(0),
+                None | Some(crate::interpreter::CallBuiltinCacheEntry::Empty)
             ),
             "the cold miss must remain adaptive after the conflict ends"
         );
@@ -714,6 +718,175 @@ mod vm_tests {
             size_of::<GenDriveFrame>() <= 256,
             "GenDriveFrame grew to {} B (guard <= 256 B)",
             size_of::<GenDriveFrame>()
+        );
+    }
+
+    #[test]
+    fn fncode_heap_bytes_per_insn_budget_and_report() {
+        use std::collections::HashSet;
+        use std::mem::size_of;
+        use std::rc::Rc;
+
+        use crate::bytecode::{
+            AttrCacheEntry, BinOpCacheEntry, GlobalCacheEntry, KwCallCacheEntry,
+        };
+
+        fn sum_fncode_stats(code: &FnCode) -> (usize, usize, usize, usize) {
+            let mut insns = code.insns.len();
+            let mut base_heap = code.insns.capacity() * size_of::<Insn>()
+                + code.lineno_table.capacity() * size_of::<u32>()
+                + code.col_table.capacity() * size_of::<crate::ast::CaretSpan>()
+                + code.consts.capacity() * size_of::<Value>()
+                + code.names.capacity() * size_of::<pyrust_core::Symbol>()
+                + code.global_cache_interest_masks.capacity() * size_of::<u64>();
+            let mut cache_heap = code.attr_cache.borrow().heap_bytes()
+                + code.global_cache.borrow().capacity() * size_of::<GlobalCacheEntry>()
+                + code.binop_cache.borrow().capacity() * size_of::<BinOpCacheEntry>()
+                + code.kwcall_cache.borrow().heap_bytes()
+                + code.fmt_spec_cache.borrow().heap_bytes()
+                + code.call_builtin_cache.borrow().heap_bytes();
+            let mut exc_heap = code.exc_table.capacity() * size_of::<u32>();
+
+            for proto in &code.fn_protos {
+                let (i, b, c, e) = sum_fncode_stats(&proto.code);
+                insns += i;
+                base_heap += b;
+                cache_heap += c;
+                exc_heap += e;
+            }
+            (insns, base_heap, cache_heap, exc_heap)
+        }
+
+        fn sum_names(code: &FnCode) -> usize {
+            code.names.len()
+                + code
+                    .fn_protos
+                    .iter()
+                    .map(|p| sum_names(&p.code))
+                    .sum::<usize>()
+        }
+
+        let src = r#"
+class Point:
+    __slots__ = ("x", "y")
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+    def norm2(self):
+        return self.x * self.x + self.y * self.y
+
+class Accumulator:
+    def __init__(self, init=0.0):
+        self.total = init
+    def add(self, value, scale=1.0):
+        self.total = self.total + value * scale
+        return self.total
+    def report(self):
+        return f"total={self.total:.2f}"
+
+def helper_unused_a(items):
+    out = []
+    for item in items:
+        if item > 0:
+            out.append(item * 2)
+    return len(out)
+
+def helper_unused_b(a, b, c=1):
+    return (a + b) * c
+
+def driver():
+    acc = Accumulator(init=1.0)
+    pts = [Point(i, i + 1) for i in range(10)]
+    for p in pts:
+        acc.add(float(p.norm2()), scale=0.5)
+    return len(acc.report())
+
+out = driver()
+assert out > 0
+"#;
+
+        let tokens = crate::lexer::Lexer::new(src).unwrap().into_tokens();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let stmts = parser.parse_program().unwrap();
+        let empty = HashSet::new();
+        let names = crate::interpreter::collect_local_names(&[], &stmts, &empty, &empty);
+        let local_index = Rc::new(
+            (0u32..)
+                .zip(names)
+                .map(|(slot, name)| (name, slot))
+                .collect(),
+        );
+        let raw =
+            crate::compiler::compile_script_with_linenos(&stmts, local_index, false, &[], "<test>")
+                .unwrap();
+        let optimized = crate::optimizer::optimize(raw);
+
+        let (insns, base_heap, cold_cache_heap, cold_exc_heap) = sum_fncode_stats(&optimized);
+        assert!(insns > 0);
+        assert_eq!(
+            cold_cache_heap, 0,
+            "cold compiled FnCode must allocate 0 bytes of inline caches"
+        );
+        assert_eq!(
+            cold_exc_heap, 0,
+            "handler-free compiled FnCode must allocate 0 bytes for exc_table"
+        );
+        let cold_total_per_insn =
+            (base_heap + cold_cache_heap + cold_exc_heap) as f64 / insns as f64;
+        assert!(
+            cold_total_per_insn < 80.0,
+            "cold FnCode heap bytes/insn regressed to {cold_total_per_insn:.1} B/insn"
+        );
+
+        let mut interp = Interpreter::default();
+        let mut regs = vec![Value::unset(); optimized.num_regs as usize];
+        let regs_slice = unsafe { RegSlice::from_raw(regs.as_mut_ptr(), regs.len()) };
+        interp
+            .run_bytecode(&optimized, regs_slice)
+            .expect("driver workload must execute");
+
+        let (_, _, warm_cache_heap, warm_exc_heap) = sum_fncode_stats(&optimized);
+        assert!(
+            warm_cache_heap > 0,
+            "executing the workload must populate at least one inline cache"
+        );
+        assert_eq!(warm_exc_heap, 0);
+        let warm_cache_per_insn = warm_cache_heap as f64 / insns as f64;
+        let warm_total_per_insn =
+            (base_heap + warm_cache_heap + warm_exc_heap) as f64 / insns as f64;
+        assert!(
+            warm_total_per_insn < 85.0,
+            "warm FnCode heap bytes/insn regressed to {warm_total_per_insn:.1} B/insn"
+        );
+
+        for proto in &optimized.fn_protos {
+            if proto.name.starts_with("helper_unused") {
+                let (_, _, helper_cache, helper_exc) = sum_fncode_stats(&proto.code);
+                assert_eq!(
+                    helper_cache, 0,
+                    "uncalled function {} must allocate 0 cache bytes",
+                    proto.name
+                );
+                assert_eq!(helper_exc, 0);
+            }
+        }
+
+        let total_names = sum_names(&optimized);
+        let legacy_cache_and_exc = insns * (120 + 64 + 48 + 24 + 2 + 4) + total_names * 72;
+        let legacy_total_per_insn = (base_heap + legacy_cache_and_exc) as f64 / insns as f64;
+
+        eprintln!(
+            "ENTRY SIZES: Insn={} KwCall={} Attr={} CallBuiltin={} FmtSpec={} BinOp={} Global={}",
+            size_of::<Insn>(),
+            size_of::<KwCallCacheEntry>(),
+            size_of::<AttrCacheEntry>(),
+            size_of::<crate::interpreter::CallBuiltinCacheEntry>(),
+            size_of::<crate::interpreter::FmtSpecCacheEntry>(),
+            size_of::<BinOpCacheEntry>(),
+            size_of::<GlobalCacheEntry>(),
+        );
+        eprintln!(
+            "FNCODE MEM (insns={insns}, names={total_names}): legacy={legacy_total_per_insn:.1} B/insn | cold={cold_total_per_insn:.1} B/insn (cache=0.0 B/insn) | warm={warm_total_per_insn:.1} B/insn (cache={warm_cache_per_insn:.1} B/insn)",
         );
     }
 }

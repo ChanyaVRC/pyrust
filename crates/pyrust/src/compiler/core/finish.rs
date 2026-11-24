@@ -89,8 +89,6 @@ impl Compiler {
                 || self.has_dead_yield
         };
         let insns = self.insns;
-        let insns_len = insns.len();
-        let names_len = self.names.len();
         let global_cache_interest_masks = self
             .names
             .iter()
@@ -118,19 +116,13 @@ impl Compiler {
             is_function_scope: self.is_function_scope,
             is_inlined_comp: self.is_inlined_comp,
             comp_enclosing_locals: self.comp_enclosing_locals.clone(),
-            attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
-            global_cache: RefCell::new(vec![GlobalCacheEntry::Empty; names_len]),
+            attr_cache: RefCell::new(crate::bytecode::SiteCache::new()),
+            global_cache: RefCell::new(Vec::new()),
             global_cache_interest_masks,
-            binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
-            kwcall_cache: RefCell::new(vec![KwCallCacheEntry::Empty; insns_len]),
-            fmt_spec_cache: RefCell::new(vec![
-                crate::interpreter::FmtSpecCacheEntry::Empty;
-                insns_len
-            ]),
-            call_builtin_cache: RefCell::new(vec![
-                crate::interpreter::CallBuiltinCacheEntry::Empty;
-                insns_len
-            ]),
+            binop_cache: RefCell::new(Vec::new()),
+            kwcall_cache: RefCell::new(crate::bytecode::SparsePcCache::new()),
+            fmt_spec_cache: RefCell::new(crate::bytecode::SparsePcCache::new()),
+            call_builtin_cache: RefCell::new(crate::bytecode::SiteCache::new()),
             cached_code_object: RefCell::new(None),
             // Empty until the optimizer's `build_exc_table` pass runs; while
             // empty the VM uses the dynamic SetupExcept/PopExcept handler stack.

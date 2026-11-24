@@ -44,9 +44,11 @@ fn build_exc_table_with_source_prefix(
     );
     let source_prefix_len = source_prefix_len.min(n);
 
-    // Fast out: no exception handlers at all → empty table, nothing to strip.
+    // Fast out: no exception handlers at all → zero-allocation empty table,
+    // nothing to strip.  The VM treats an empty `exc_table` with no
+    // `SetupExcept` instructions identically to all-`EXC_NO_HANDLER`.
     if !insns.iter().any(|i| matches!(i, Insn::SetupExcept(_))) {
-        return (insns, vec![EXC_NO_HANDLER; n], source_prefix_len);
+        return (insns, Vec::new(), source_prefix_len);
     }
 
     // Safety net: a statically inconsistent handler stack means the per-pc table
@@ -90,6 +92,7 @@ fn build_exc_table_with_source_prefix(
     debug_assert_eq!(new_len, cnt);
 
     let mut exc_table = vec![EXC_NO_HANDLER; new_len];
+    let mut has_any_handler = false;
     for old_pc in 0..n {
         if !keep[old_pc] {
             continue;
@@ -99,11 +102,16 @@ fn build_exc_table_with_source_prefix(
         exc_table[new_pc] = if h == usize::MAX {
             EXC_NO_HANDLER
         } else {
+            has_any_handler = true;
             // A handler target is always a SetupExcept jump target, i.e. the
             // first kept instruction at-or-after the removed SetupExcept's
             // destination — exactly compact's redirect rule.
             to_new[h] as u32
         };
+    }
+
+    if !has_any_handler {
+        exc_table = Vec::new();
     }
 
     let new_source_prefix_len = to_new[source_prefix_len];
