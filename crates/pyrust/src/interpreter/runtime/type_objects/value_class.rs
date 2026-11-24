@@ -26,7 +26,7 @@ pub(crate) fn value_class(value: &Value) -> Value {
         ValueKind::BuiltinFunction(name) => {
             Value::builtin_function(pyrust_core::builtin_callable_presentation(name).type_name())
         }
-        ValueKind::PyModule(_) => Value::builtin_function("module"),
+        ValueKind::PyModule(_) => Value::py_class(module_type_singleton()),
         ValueKind::SuperProxy { .. }
         | ValueKind::SuperProxyClass { .. }
         | ValueKind::SuperProxyUnbound { .. } => Value::builtin_function("super"),

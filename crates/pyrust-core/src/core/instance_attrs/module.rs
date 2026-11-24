@@ -45,14 +45,16 @@ pub struct PyModule {
     /// order and is identical run to run (issue #2918).
     pub attrs: ModuleAttrs,
     mutation_state: ModuleMutationState,
-    /// Exact Python dictionary exposed by built-in modules whose namespace
-    /// must remain writable through `module.__dict__`.
+    /// Exact Python dictionary exposed by built-in and `types.ModuleType`
+    /// modules once their namespace is accessed via `module.__dict__` /
+    /// `vars(module)` (or eagerly for `sys` and `types.ModuleType` instances,
+    /// issue #2970).
     ///
-    /// Most built-in modules retain the compact direct `attrs` storage.  The
-    /// canonical `sys` module opts into this backing because rebinding
-    /// `sys.__dict__["modules"]` must affect the import registry immediately.
-    /// Keeping this separate from `filesystem_namespace` avoids inventing an
-    /// Environment owner for a native module.
+    /// Built-in modules that never expose `__dict__` retain the compact direct
+    /// `attrs` fast path and keep equality-based caches enabled.  First access
+    /// to `__dict__` lazily upgrades to this live dictionary and saturates
+    /// `mutation_state`, so direct dictionary writes and attribute access share
+    /// one authoritative backing without slowing down hot unexposed modules.
     live_namespace: Option<Value>,
     /// Boxed so the built-in-module common case pays only one nullable pointer
     /// and continues to use its existing direct `attrs` fast path.
@@ -90,6 +92,77 @@ impl PyModule {
     #[inline]
     pub fn live_namespace(&self) -> Option<Value> {
         self.live_namespace.clone()
+    }
+
+    /// Lazily upgrade a built-in module from compact `attrs` storage into one
+    /// stable, live Python dictionary exposed as `module.__dict__` /
+    /// `vars(module)` (issue #2970).
+    ///
+    /// Seeds CPython's five module-object dunder slots (`__name__`, `__doc__`,
+    /// `__package__`, `__loader__`, `__spec__`) at the head in CPython's order,
+    /// omitting any slot previously tombstoned via `del`, then extends with all
+    /// live attributes in declaration order so rebound slots keep their head
+    /// position (issue #2918 / PR #2969).  Permanently disables equality-based
+    /// caches on `mutation_state` because arbitrary Python aliases to the
+    /// returned dict can now mutate the namespace directly.
+    pub fn attach_live_namespace_with_dunders(&mut self) -> Value {
+        debug_assert!(self.filesystem_namespace.is_none());
+        if let Some(namespace) = self.live_namespace.as_ref() {
+            self.mutation_state.disable_cache();
+            return namespace.clone();
+        }
+        let existing = std::mem::take(&mut self.attrs);
+        let is_live = |key: &str| !existing.get(key).is_some_and(Value::is_unset);
+        let mut dict: PyDict =
+            PyDict::with_capacity_and_hasher(existing.len() + 5, Default::default());
+        if is_live("__name__") {
+            dict.insert(PyKey::str_from("__name__"), Value::string(&self.name));
+        }
+        if is_live("__doc__") {
+            dict.insert(PyKey::str_from("__doc__"), Value::none());
+        }
+        if is_live("__package__") {
+            dict.insert(PyKey::str_from("__package__"), Value::string(String::new()));
+        }
+        if is_live("__loader__") {
+            dict.insert(PyKey::str_from("__loader__"), Value::none());
+        }
+        if is_live("__spec__") {
+            dict.insert(PyKey::str_from("__spec__"), Value::none());
+        }
+        dict.extend(
+            existing
+                .into_iter()
+                .filter(|(_, value)| !value.is_unset())
+                .map(|(name, value)| (PyKey::str_from(&name), value)),
+        );
+        let namespace = Value::dict(dict);
+        self.live_namespace = Some(namespace.clone());
+        self.mutation_state.disable_cache();
+        namespace
+    }
+
+    /// Permanently disable equality-based caches for this module provider when
+    /// a live `__dict__` alias is handed to Python code.
+    #[inline]
+    pub fn disable_cache(&self) {
+        self.mutation_state.disable_cache();
+    }
+
+    /// Format `repr(module)`, mirroring CPython's `module_repr` (`<module %R>`
+    /// from `__name__`, or `<module '?'>` when `__name__` is absent/deleted,
+    /// falling back to the built-in module's initial `name` only while its
+    /// namespace has not been materialized and `__name__` has not been
+    /// modified or tombstoned).
+    pub fn repr_string(&self) -> String {
+        let has_explicit_namespace =
+            self.live_namespace.is_some() || self.filesystem_namespace.is_some();
+        match self.get_attr_value("__name__") {
+            Some(v) if !v.is_unset() => format!("<module {}>", v.repr_raw()),
+            Some(_) => "<module '?'>".to_string(),
+            None if has_explicit_namespace => "<module '?'>".to_string(),
+            None => format!("<module {}>", Value::string(&self.name).repr_raw()),
+        }
     }
 
     /// Attach this source-backed module to the environment executing its body.

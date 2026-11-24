@@ -105,7 +105,7 @@ pub(crate) fn inject_python_members(
     // itertools is later removed from sys.modules and imported again.
     let itertools = interp.load_module("itertools")?;
     let chain = match itertools.kind() {
-        ValueKind::PyModule(module) => module.borrow().attrs.get("chain").cloned(),
+        ValueKind::PyModule(module) => module.borrow().get_attr_value("chain"),
         _ => None,
     };
     let chain_class = match chain.as_ref().map(Value::kind) {

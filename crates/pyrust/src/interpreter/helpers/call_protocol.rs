@@ -516,6 +516,19 @@ pub(crate) fn invoke_class_method(
                     _ => interp.exception_group_subgroup_or_split(&combined, true),
                 };
             }
+            if matches!(name, "module.__init__" | "module.__repr__") {
+                let mut combined: Vec<ExpandedCallArg> = Vec::with_capacity(args.len() + 1);
+                combined.push(ExpandedCallArg {
+                    name: None,
+                    value: instance.clone(),
+                });
+                combined.extend(args.iter().cloned());
+                return match name {
+                    "module.__init__" => call_module_init(&combined),
+                    "module.__repr__" => call_module_repr(&combined),
+                    _ => unreachable!(),
+                };
+            }
             // Representation-substitutability boundary (#2386): an inherited
             // builtin method `"<type>.<method>"` that has no registry body and
             // is resolved on a builtin-subclass instance dispatches on the

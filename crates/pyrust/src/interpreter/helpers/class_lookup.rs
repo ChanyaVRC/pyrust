@@ -358,6 +358,30 @@ thread_local! {
         IndexMap::new(),
     )));
 
+    /// Per-thread `PyClass` singleton for the `module` type (`types.ModuleType`
+    /// / `type(sys)` — issue #2970).  Constructible via `types.ModuleType(name,
+    /// doc=None)` and subclassable (`class Sub(types.ModuleType): ...`).
+    static MODULE_TYPE: Rc<RefCell<PyClass>> = {
+        let obj = OBJECT_CLASS.with(Rc::clone);
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__init__".to_string(),
+            Value::builtin_function("module.__init__"),
+        );
+        attrs.insert(
+            "__repr__".to_string(),
+            Value::builtin_function("module.__repr__"),
+        );
+        let cls = Rc::new(RefCell::new(PyClass::new(
+            "module",
+            "module",
+            Some(Rc::clone(&obj)),
+            attrs,
+        )));
+        obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
+        cls
+    };
+
     /// Per-thread `PyClass` singleton for the `range` type.  In CPython,
     /// `range` is a proper class (`type(range(5)) is range`), not a builtin
     /// function.  This singleton lets `type(range(5))` return a real `PyClass`
@@ -674,6 +698,14 @@ thread_local! {
             if let Some(dispatch) = crate::builtin_registry::lookup("range") {
                 cell.borrow_mut().insert(Rc::as_ptr(r), dispatch);
             }
+        });
+        // Issue #2970: `types.ModuleType` (`module`) is a constructible built-in
+        // class whose direct call allocates a real `PyModule` with a live dict.
+        MODULE_TYPE.with(|m| {
+            cell.borrow_mut().insert(
+                Rc::as_ptr(m),
+                module_ctor as crate::builtin_registry::BuiltinDispatchFn,
+            );
         });
         // Issue #3000: `zip` / `map` / `filter` / `enumerate` / `slice` /
         // `reversed` are classes too, so `zip(a, b)` is a constructor call.

@@ -82,9 +82,9 @@ pub(crate) fn inject_python_members(
 fn collections_namedtuple(interp: &mut Interpreter) -> Result<Value> {
     let module = interp.load_module("collections")?;
     if let ValueKind::PyModule(m) = module.kind()
-        && let Some(v) = m.borrow().attrs.get("namedtuple")
+        && let Some(v) = m.borrow().get_attr_value("namedtuple")
     {
-        return Ok(v.clone());
+        return Ok(v);
     }
     Err(PyError::Runtime(
         "time: collections.namedtuple not available".into(),
@@ -530,9 +530,9 @@ fn tm_to_fields(tm: &Tm) -> [i64; 9] {
 fn struct_time_class(interp: &mut Interpreter) -> Result<Value> {
     let module = interp.load_module("time")?;
     if let ValueKind::PyModule(m) = module.kind()
-        && let Some(v) = m.borrow().attrs.get("struct_time")
+        && let Some(v) = m.borrow().get_attr_value("struct_time")
     {
-        return Ok(v.clone());
+        return Ok(v);
     }
     Err(PyError::Runtime("time: struct_time not loaded".into()))
 }

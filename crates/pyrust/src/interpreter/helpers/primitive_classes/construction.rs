@@ -138,6 +138,191 @@ fn deque_reverse_iterator_ctor(
     crate::builtin_modules::collections::deque_iterator_constructor(interp, args, true)
 }
 
+/// Parse `(name, doc=None)` arguments for `types.ModuleType(...)` /
+/// `module.__init__(...)` with exact CPython 3.12 error messages (issue #2970).
+fn parse_module_init_args(args: &[ExpandedCallArg]) -> Result<(String, Value)> {
+    if args.len() > 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("module() takes at most 2 arguments ({} given)", args.len()),
+        ));
+    }
+    let mut name_arg: Option<Value> = None;
+    let mut doc_arg: Option<Value> = None;
+    let mut unknown_kw: Option<String> = None;
+    let mut pos_idx = 0usize;
+    for arg in args {
+        match arg.name.as_deref() {
+            None => {
+                match pos_idx {
+                    0 => name_arg = Some(arg.value.clone()),
+                    1 => doc_arg = Some(arg.value.clone()),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("module() takes at most 2 arguments ({} given)", args.len()),
+                        ));
+                    }
+                }
+                pos_idx += 1;
+            }
+            Some("name") => {
+                if name_arg.is_some() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "argument for module() given by name ('name') and position (1)".to_string(),
+                    ));
+                }
+                name_arg = Some(arg.value.clone());
+            }
+            Some("doc") => {
+                if doc_arg.is_some() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "argument for module() given by name ('doc') and position (2)".to_string(),
+                    ));
+                }
+                doc_arg = Some(arg.value.clone());
+            }
+            Some(other) => {
+                if unknown_kw.is_none() {
+                    unknown_kw = Some(other.to_string());
+                }
+            }
+        }
+    }
+    // CPython validates required `name` before reporting an invalid keyword
+    // argument (`ModuleType(foo=1)` -> missing required argument 'name').
+    let Some(name_val) = name_arg else {
+        return Err(PyError::named(
+            "TypeError",
+            "module() missing required argument 'name' (pos 1)".to_string(),
+        ));
+    };
+    if let Some(bad_kw) = unknown_kw {
+        return Err(PyError::named(
+            "TypeError",
+            format!("'{bad_kw}' is an invalid keyword argument for module()"),
+        ));
+    }
+    let Some(name_str) = name_val.as_str().map(str::to_string) else {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "module() argument 'name' must be str, not {}",
+                value_type_name_str(&name_val)
+            ),
+        ));
+    };
+    Ok((name_str, doc_arg.unwrap_or_else(Value::none)))
+}
+
+/// Constructor for `types.ModuleType(name, doc=None)` (issue #2970).
+///
+/// Allocates a real `PyModule` with CPython's five module-object dunder slots
+/// in exact order (`__name__`, `__doc__`, `__package__`, `__loader__`,
+/// `__spec__`) backed by a live Python dictionary.
+fn module_ctor(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
+    let (name_str, doc_val) = parse_module_init_args(args)?;
+    let mut attrs = crate::value::ModuleAttrs::default();
+    attrs.insert("__name__".to_string(), Value::string(&name_str));
+    attrs.insert("__doc__".to_string(), doc_val);
+    attrs.insert("__package__".to_string(), Value::none());
+    attrs.insert("__loader__".to_string(), Value::none());
+    attrs.insert("__spec__".to_string(), Value::none());
+    let mut module = crate::value::PyModule::new(name_str, attrs);
+    module.attach_live_namespace();
+    Ok(Value::py_module(Rc::new(RefCell::new(module))))
+}
+
+/// `module.__init__(self, name, doc=None)` for both direct `PyModule` objects
+/// and Python subclasses of `types.ModuleType` (issue #2970).
+pub(crate) fn call_module_init(args: &[ExpandedCallArg]) -> Result<Value> {
+    let Some(first) = args.first().filter(|arg| arg.name.is_none()) else {
+        return Err(PyError::named(
+            "TypeError",
+            "descriptor '__init__' of 'module' object needs an argument".to_string(),
+        ));
+    };
+    let receiver = &first.value;
+    let rest = &args[1..];
+    match receiver.kind() {
+        ValueKind::PyModule(module) => {
+            let (name_str, doc_val) = parse_module_init_args(rest)?;
+            let mut m = module.borrow_mut();
+            m.name = name_str.clone();
+            m.insert_attr("__name__".to_string(), Value::string(&name_str));
+            m.insert_attr("__doc__".to_string(), doc_val);
+            m.insert_attr("__package__".to_string(), Value::none());
+            m.insert_attr("__loader__".to_string(), Value::none());
+            m.insert_attr("__spec__".to_string(), Value::none());
+            Ok(Value::none())
+        }
+        ValueKind::PyInstance(instance)
+            if class_is_subclass_of(&instance.borrow().class, &module_type_singleton()) =>
+        {
+            let (name_str, doc_val) = parse_module_init_args(rest)?;
+            let mut inst = instance.borrow_mut();
+            inst.attrs.insert("__name__", Value::string(&name_str));
+            inst.attrs.insert("__doc__", doc_val);
+            inst.attrs.insert("__package__", Value::none());
+            inst.attrs.insert("__loader__", Value::none());
+            inst.attrs.insert("__spec__", Value::none());
+            Ok(Value::none())
+        }
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "descriptor '__init__' requires a 'module' object but received a '{}'",
+                value_type_name_str(receiver)
+            ),
+        )),
+    }
+}
+
+/// `module.__repr__(self)` for both direct `PyModule` objects and Python
+/// subclasses of `types.ModuleType` (issue #2970).
+pub(crate) fn call_module_repr(args: &[ExpandedCallArg]) -> Result<Value> {
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return Err(PyError::named(
+            "TypeError",
+            "module.__repr__() takes no keyword arguments".to_string(),
+        ));
+    }
+    let Some(first) = args.first() else {
+        return Err(PyError::named(
+            "TypeError",
+            "descriptor '__repr__' of 'module' object needs an argument".to_string(),
+        ));
+    };
+    if args.len() > 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("expected 0 arguments, got {}", args.len().saturating_sub(1)),
+        ));
+    }
+    let receiver = &first.value;
+    match receiver.kind() {
+        ValueKind::PyModule(module) => Ok(Value::string(module.borrow().repr_string())),
+        ValueKind::PyInstance(instance)
+            if class_is_subclass_of(&instance.borrow().class, &module_type_singleton()) =>
+        {
+            let repr = match instance.borrow().attrs.get("__name__") {
+                Some(v) if !v.is_unset() => format!("<module {}>", v.repr_raw()),
+                _ => "<module '?'>".to_string(),
+            };
+            Ok(Value::string(repr))
+        }
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "descriptor '__repr__' requires a 'module' object but received a '{}'",
+                value_type_name_str(receiver)
+            ),
+        )),
+    }
+}
+
 /// Whether `class` is an exact canonical collections.deque class.
 ///
 /// The built-in module owns the reload-aware identity registry; runtime

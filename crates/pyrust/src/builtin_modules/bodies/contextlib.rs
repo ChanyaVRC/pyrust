@@ -285,10 +285,10 @@ fn seed_dependency(
         )));
     };
     for name in names {
-        let val =
-            m.borrow().attrs.get(*name).cloned().ok_or_else(|| {
-                PyError::Runtime(format!("contextlib: {module_name}.{name} missing"))
-            })?;
+        let val = m
+            .borrow()
+            .get_attr_value(name)
+            .ok_or_else(|| PyError::Runtime(format!("contextlib: {module_name}.{name} missing")))?;
         ns.dict_insert(PyKey::str_from(name), val)?;
     }
     Ok(())
