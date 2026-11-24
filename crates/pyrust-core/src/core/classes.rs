@@ -161,7 +161,7 @@ pub struct PyClass {
     /// mutations. `Cell<u64>` avoids the `borrow_mut()` overhead on the hot
     /// re-validation path.
     pub mutation_version: Cell<u64>,
-    pub subclasses: RefCell<Vec<Weak<RefCell<PyClass>>>>,
+    pub subclasses: WeakrefNotifyingField<RefCell<Vec<Weak<RefCell<PyClass>>>>>,
     /// The metaclass (metatype) of this class.  `None` for classes whose
     /// metatype is the built-in `type` (the common case).  Set to `Some(mcs)`
     /// when the class is created via a custom metaclass (e.g.
@@ -251,7 +251,7 @@ impl Default for PyClass {
             extra_bases: Vec::new(),
             attrs: IndexMap::new(),
             mutation_version: Cell::new(0),
-            subclasses: RefCell::new(Vec::new()),
+            subclasses: WeakrefNotifyingField(RefCell::new(Vec::new())),
             metatype: None,
             slots: None,
             construction_cache: RefCell::new(None),

@@ -92,6 +92,10 @@ impl Value {
         })))
     }
 
+    pub fn set_shared(s: Rc<SetInner>) -> Self {
+        Value::opaque(Opaque::Set(s))
+    }
+
     pub fn bytes(b: Vec<u8>) -> Self {
         Value::opaque(Opaque::Bytes(Rc::new(b)))
     }
@@ -394,6 +398,10 @@ impl Value {
             frame_ptr,
             state: RefCell::new(state),
         })))
+    }
+
+    pub fn generator_shared(cell: Rc<GeneratorCell>) -> Self {
+        Value::opaque(Opaque::Generator(cell))
     }
 
     fn opaque(o: Opaque) -> Self {

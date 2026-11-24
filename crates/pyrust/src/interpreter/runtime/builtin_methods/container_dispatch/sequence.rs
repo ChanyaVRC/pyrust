@@ -169,6 +169,7 @@ impl Interpreter {
                         value: item.clone(),
                     });
                     let r = self.call_function_expanded(key_fn_val.clone(), &buf);
+                    buf.clear();
                     self.call_arg_buf = buf;
                     r
                 };

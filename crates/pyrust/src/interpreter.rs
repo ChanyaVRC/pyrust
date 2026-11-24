@@ -428,6 +428,11 @@ pub struct Interpreter {
     /// An explicit `raise e` / `raise e.with_traceback(...)` clears it, so the
     /// prepend path (issue #2367's actual scope) runs for those.
     pub(crate) reraise_is_bare: bool,
+    /// Compact hot-loop bitmask for active VM hooks (`VM_HOOK_TRACE`,
+    /// `VM_HOOK_PROFILE`, `VM_HOOK_WEAKREF`). Packed into existing struct
+    /// padding next to `reraise_is_bare` so `size_of::<Interpreter>()` stays
+    /// unchanged; normal execution with all hooks disabled pays one byte test.
+    pub(crate) vm_hooks_flags: u8,
 }
 
 /// Per-interpreter mutable state backing `sys` runtime getters/setters and
@@ -438,6 +443,9 @@ pub(crate) struct SysRuntimeState {
     pub(crate) coroutine_origin_tracking_depth: usize,
     pub(crate) profile_func: Value,
     pub(crate) trace_func: Value,
+    /// Re-entrancy guard: suppresses nested trace/profile dispatch while a
+    /// trace or profile callback is executing (matching CPython 3.12).
+    pub(crate) tracing_in_progress: bool,
     pub(crate) asyncgen_firstiter: Value,
     pub(crate) asyncgen_finalizer: Value,
     pub(crate) audit_hooks: Vec<Value>,
@@ -450,6 +458,7 @@ impl Default for SysRuntimeState {
             coroutine_origin_tracking_depth: 0,
             profile_func: Value::none(),
             trace_func: Value::none(),
+            tracing_in_progress: false,
             asyncgen_firstiter: Value::none(),
             asyncgen_finalizer: Value::none(),
             audit_hooks: Vec::new(),
@@ -700,6 +709,14 @@ impl VmFrameView {
 
 pub(crate) struct VmFrameCache {
     pub(crate) object: Option<pyrust_core::WeakValueCache>,
+    /// Strong handle retaining a live frame object while it carries a local
+    /// `f_trace` callback so `f_trace` / `f_trace_lines` survive between lines
+    /// even when the trace callback does not store `frame` externally.
+    pub(crate) traced_frame: Option<Value>,
+    /// Last line number and bytecode PC emitted by `sys.settrace` for this
+    /// activation (cold; zero stack footprint in the VM hot loop).
+    pub(crate) trace_last_line: u32,
+    pub(crate) trace_last_pc: usize,
     /// Weak handle to this activation's function-locals mapping. Retaining
     /// only `frame.f_locals` must make later frame lookups reuse and refresh
     /// that dict without making the activation cache a new owner itself.
@@ -768,6 +785,7 @@ impl Default for Interpreter {
             sys_state: Rc::new(RefCell::new(SysRuntimeState::default())),
             cold: Box::default(),
             reraise_is_bare: false,
+            vm_hooks_flags: 0,
         }
     }
 }

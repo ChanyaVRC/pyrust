@@ -574,6 +574,7 @@ pub(crate) fn invoke_class_method(
             });
             combined.extend(args.iter().cloned());
             let result = dispatch(interp, &combined);
+            combined.clear();
             interp.cold.invoke_arg_buf = combined;
             return result;
         }

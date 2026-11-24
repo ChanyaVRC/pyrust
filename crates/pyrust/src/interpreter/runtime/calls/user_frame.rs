@@ -133,7 +133,23 @@ impl Interpreter {
         // runs; RegSlice (raw pointer + len) is used instead, removing
         // the LLVM noalias constraint (issue #547).
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
-        let vm_result = self.run_bytecode_with_cells(code, regs_slice, cells_slice);
+        let call_hook_res = if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) != 0 {
+            self.vm_hook_function_call(code)
+        } else {
+            Ok(())
+        };
+        let vm_result = match call_hook_res {
+            Ok(()) => self.run_bytecode_with_cells(code, regs_slice, cells_slice),
+            Err(e) => Err(e),
+        };
+        let vm_result = if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) != 0 {
+            match self.vm_hook_function_return(code, vm_result.as_ref().ok()) {
+                Ok(()) => vm_result,
+                Err(e) => Err(e),
+            }
+        } else {
+            vm_result
+        };
         // Lazy traceback: only build + record this frame's `FrameInfo`
         // when the body actually errored.  The no-exception common path
         // does no allocation and touches no traceback thread-local.
@@ -145,6 +161,11 @@ impl Interpreter {
         cells.clear();
         self.env = previous_env;
         self.finish_pop_vm_frame_view();
+        if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0
+            && pyrust_core::has_pending_weakref_callbacks()
+        {
+            self.drain_pending_weakref_callbacks();
+        }
         let value = vm_result?;
         Ok(value)
     }

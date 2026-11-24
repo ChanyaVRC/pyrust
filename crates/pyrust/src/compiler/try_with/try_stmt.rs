@@ -124,6 +124,17 @@ impl Compiler {
 
             for handler in handlers {
                 let skip_patch: Option<usize> = if let Some(kind_expr) = &handler.kind {
+                    let handler_line = match kind_expr {
+                        Expr::Var(_, Some((_, _, ln))) => *ln,
+                        Expr::Tuple(items) => match items.first() {
+                            Some(Expr::Var(_, Some((_, _, ln)))) => *ln,
+                            _ => 0,
+                        },
+                        _ => 0,
+                    };
+                    if handler_line != 0 {
+                        self.set_lineno(handler_line);
+                    }
                     let type_reg = self.compile_expr(kind_expr);
                     let p = self.emit(Insn::MatchExcept(type_reg, 0));
                     self.free_temp(type_reg);

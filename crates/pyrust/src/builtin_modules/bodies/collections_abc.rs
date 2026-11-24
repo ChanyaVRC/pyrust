@@ -22,6 +22,7 @@ mod registration;
 use self::definitions::Abc;
 pub(crate) use self::registration::{
     inject_python_members, register_virtual_mapping, register_virtual_mutable_sequence,
+    register_virtual_mutable_set,
 };
 
 pyrust_module! {

@@ -204,6 +204,7 @@ impl Interpreter {
                 .map(|value| ExpandedCallArg { name: None, value }),
         );
         let result = self.call_builtin_function_value(&wrapped, &combined);
+        combined.clear();
         self.cold.invoke_arg_buf = combined;
         Some(result)
     }
@@ -262,6 +263,7 @@ impl Interpreter {
                 } else {
                     self.call_function_expanded(call.wrapped, &combined)
                 };
+                combined.clear();
                 self.cold.invoke_arg_buf = combined;
                 return result.map(Some);
             }
@@ -562,6 +564,12 @@ impl Interpreter {
         }
 
         if let Some(dispatch) = crate::builtin_registry::lookup(name) {
+            if self.vm_hooks_flags & VM_HOOK_PROFILE != 0 {
+                self.vm_hook_c_call(function)?;
+                let res = dispatch(self, args);
+                self.vm_hook_c_return_or_exc(function, res.is_ok())?;
+                return res;
+            }
             return dispatch(self, args);
         }
         self.call_unregistered_builtin_function(function, args)

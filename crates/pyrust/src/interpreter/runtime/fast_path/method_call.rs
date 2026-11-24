@@ -127,6 +127,7 @@ impl Interpreter {
             if pushed_line {
                 self.cold.call_site_lines.pop();
             }
+            buf.clear();
             self.call_arg_buf = buf;
 
             // Fill or update the inline cache for this user-object call site.
@@ -299,6 +300,7 @@ impl Interpreter {
             if pushed_line {
                 self.cold.call_site_lines.pop();
             }
+            buf.clear();
             self.call_arg_buf = buf;
             r
         }

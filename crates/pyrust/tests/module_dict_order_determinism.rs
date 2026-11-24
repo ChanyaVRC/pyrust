@@ -44,7 +44,7 @@ names = ["abc", "argparse", "asyncio", "base64", "binascii", "bisect", "builtins
          "itertools", "json", "logging", "math", "numbers", "operator", "os", "pathlib", "pickle",
          "pprint", "random", "re", "secrets", "shlex", "shutil", "statistics", "string",
          "subprocess", "sys", "tarfile", "tempfile", "textwrap", "time", "tomllib", "traceback",
-         "types", "typing", "unittest", "urllib", "uuid", "warnings", "zipfile", "zlib"]
+         "types", "typing", "unittest", "urllib", "uuid", "warnings", "weakref", "zipfile", "zlib"]
 for name in names:
     print(name, list(vars(__import__(name))))
 for name, module in [("os.path", os.path),

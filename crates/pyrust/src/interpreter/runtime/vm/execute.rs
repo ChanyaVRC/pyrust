@@ -2,6 +2,7 @@ include!("trampoline.rs");
 include!("control_ops.rs");
 include!("match_ops.rs");
 include!("cold_ops.rs");
+include!("hooks.rs");
 
 impl Interpreter {
     #[allow(clippy::too_many_arguments)]
@@ -255,6 +256,15 @@ impl Interpreter {
                 }
                 return Err(err);
             };
+            if self.vm_hooks_flags != 0 {
+                vm_try!(self.vm_dispatch_step_hooks(
+                    code,
+                    pc,
+                    regs.non_null_ptr(),
+                    regs.len(),
+                    num_locals,
+                ));
+            }
             pc += 1;
 
             match insn {
@@ -403,16 +413,18 @@ impl Interpreter {
                 }
                 Insn::CallInlineBinOp(desc_idx, skip) => {
                     let desc = code.descs[*desc_idx as usize].as_call_inline_binop();
-                    if self.exec_call_inline_binop(
-                        &mut regs,
-                        code,
-                        desc.callee,
-                        desc.dst,
-                        desc.a,
-                        desc.op,
-                        desc.b,
-                        desc.proto,
-                    ) {
+                    if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) == 0
+                        && self.exec_call_inline_binop(
+                            &mut regs,
+                            code,
+                            desc.callee,
+                            desc.dst,
+                            desc.a,
+                            desc.op,
+                            desc.b,
+                            desc.proto,
+                        )
+                    {
                         pc = jump_pc!(*skip);
                     }
                 }
@@ -454,7 +466,9 @@ impl Interpreter {
                     }
                     let probe = {
                         let function = &regs[*func_reg as usize];
-                        if *argc == 1
+                        let profile_disabled = self.vm_hooks_flags & VM_HOOK_PROFILE == 0;
+                        if profile_disabled
+                            && *argc == 1
                             && let Some(argument) = regs.get((*func_reg + 1) as usize)
                             && let Some(identity) =
                                 Self::try_identity_builtin_call(function, argument)
@@ -469,12 +483,16 @@ impl Interpreter {
                                 function,
                                 &(*regs)[argument_base..argument_end],
                             ) {
-                                BuiltinCallProbe::Vector(dispatch) => {
+                                BuiltinCallProbe::Vector(dispatch) if profile_disabled => {
                                     PlainCallProbe::Fast(dispatch)
                                 }
                                 cache_probe => PlainCallProbe::Slow {
                                     function: function.clone(),
-                                    cache_probe,
+                                    cache_probe: if profile_disabled {
+                                        cache_probe
+                                    } else {
+                                        BuiltinCallProbe::Uncacheable
+                                    },
                                 },
                             }
                         }

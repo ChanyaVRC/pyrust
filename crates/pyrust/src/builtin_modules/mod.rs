@@ -535,6 +535,11 @@ pyrust_builtin_modules! {
     "importlib.machinery" as importlib_machinery @inject,
     "importlib.util" as importlib_util @inject,
     importlib @inject,
+    // `weakref` (issue #3190): weak references (`ref`/`ReferenceType`),
+    // `proxy`/`ProxyType`/`CallableProxyType`/`ProxyTypes`, `getweakrefcount`,
+    // `getweakrefs`, `WeakMethod`, `WeakKeyDictionary`, `WeakValueDictionary`,
+    // `WeakSet`, and `finalize` backed by native weak handles in `weakref.rs`.
+    weakref @inject,
 }
 
 include!("finalization.rs");

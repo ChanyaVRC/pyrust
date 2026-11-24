@@ -220,6 +220,45 @@ impl Interpreter {
             {
                 pyrust_builtins::cell::set_cell_contents(&target, value)
             }
+            ValueKind::BuiltinObject { .. } if pyrust_builtins::frame::is_frame(&target) => {
+                match name {
+                    "f_trace" => {
+                        let pin = !value.is_none();
+                        pyrust_builtins::frame::set_trace(&target, value);
+                        self.update_live_frame_trace_pin(&target, pin);
+                        Ok(())
+                    }
+                    "f_trace_lines" => {
+                        let ValueKind::Bool(b) = value.kind() else {
+                            return Err(pyrust_core::type_err!(
+                                "attribute value type must be bool"
+                            ));
+                        };
+                        pyrust_builtins::frame::set_trace_lines(&target, b);
+                        Ok(())
+                    }
+                    "f_trace_opcodes" => {
+                        let ValueKind::Bool(b) = value.kind() else {
+                            return Err(pyrust_core::type_err!(
+                                "attribute value type must be bool"
+                            ));
+                        };
+                        pyrust_builtins::frame::set_trace_opcodes(&target, b);
+                        Ok(())
+                    }
+                    "f_code" | "f_back" | "f_globals" | "f_locals" | "f_builtins" | "f_lasti" => {
+                        Err(pyrust_core::py_err!("AttributeError", "readonly attribute"))
+                    }
+                    "f_lineno" => Err(pyrust_core::py_err!(
+                        "ValueError",
+                        "can't jump out of this frame"
+                    )),
+                    _ => Err(pyrust_core::py_err!(
+                        "AttributeError",
+                        "'frame' object has no attribute '{name}'"
+                    )),
+                }
+            }
             _ => {
                 let type_name = pyrust_core::builtin_type_name(&target);
                 let data_descriptor_owner = dict_view_mapping_descriptor_owner(&target, name);

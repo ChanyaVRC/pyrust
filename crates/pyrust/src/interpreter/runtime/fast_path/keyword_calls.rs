@@ -213,6 +213,7 @@ impl Interpreter {
         if pushed_line {
             self.cold.call_site_lines.pop();
         }
+        buf.clear();
         self.call_arg_buf = buf;
         call_result
     }

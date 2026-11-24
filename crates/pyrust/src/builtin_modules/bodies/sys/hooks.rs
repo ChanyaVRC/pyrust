@@ -70,6 +70,7 @@ pub(super) fn setprofile(
 ) -> Result<Value> {
     let func = require_exact_one_arg(args, fn_name, "setprofile")?;
     interp.sys_state.borrow_mut().profile_func = func.clone();
+    interp.sync_vm_hooks_flags();
     Ok(Value::none())
 }
 
@@ -89,6 +90,7 @@ pub(super) fn settrace(
 ) -> Result<Value> {
     let func = require_exact_one_arg(args, fn_name, "settrace")?;
     interp.sys_state.borrow_mut().trace_func = func.clone();
+    interp.sync_vm_hooks_flags();
     Ok(Value::none())
 }
 
@@ -365,5 +367,15 @@ pub(super) fn call_tracing(
             value: v.clone(),
         })
         .collect();
-    interp.call_function_expanded(func, &call_args)
+    let prev_in_progress = {
+        let mut state = interp.sys_state.borrow_mut();
+        let prev = state.tracing_in_progress;
+        state.tracing_in_progress = false;
+        prev
+    };
+    interp.sync_vm_hooks_flags();
+    let result = interp.call_function_expanded(func, &call_args);
+    interp.sys_state.borrow_mut().tracing_in_progress = prev_in_progress;
+    interp.sync_vm_hooks_flags();
+    result
 }
