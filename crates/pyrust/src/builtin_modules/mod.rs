@@ -479,6 +479,10 @@ pyrust_builtin_modules! {
     // `SubprocessError`/`CalledProcessError`/`TimeoutExpired`) injected from
     // `subprocess_py.py` backed by `std::process::Command` in `subprocess.rs`.
     subprocess @inject,
+    // `pickle` (issue #3188): pure-Python binary object serialization
+    // (`Pickler`, `Unpickler`, `dump`/`dumps`, `load`/`loads`, `PickleBuffer`,
+    // protocols 0-5) injected from `pickle_py.py`.
+    pickle @inject,
 }
 
 include!("finalization.rs");
