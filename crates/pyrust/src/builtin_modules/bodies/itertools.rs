@@ -46,68 +46,61 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
             reject_keyword_args_expanded("chain", user)?;
-            // Keep the original sources untouched.  `__next__` calls `iter()`
-            // only when it reaches that source, matching CPython's observable
-            // timing: constructing a chain must not run `__iter__` on sources
-            // that may never be consumed.
+            // Mirror CPython's `chainobject`: store an iterator over the tuple
+            // of input iterables (`_source`) plus the currently active sub-
+            // iterator (`_active`).  Constructing the tuple iterator does not
+            // call `iter()` on any source until `__next__` reaches it, and
+            // shallow-copying the chain shares both `_source` and `_active`
+            // just like CPython's `chain.__reduce__` (issue #2967).
             let sources: Vec<Value> = user.iter().map(|a| a.value.clone()).collect();
+            let source_iter = make_iter(_interp, &Value::tuple(sources))?;
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_sources", Value::list(sources));
-            a.attrs.insert("_src_idx", Value::int(0));
-            // `_cur_iter` holds the iterator for the source at `_src_idx`,
-            // or None when none has been created yet for that index.
-            a.attrs.insert("_cur_iter", Value::none());
+            a.attrs.insert("_source", source_iter);
+            a.attrs.insert("_active", Value::none());
             Ok(Value::none())
         }
 
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             loop {
-                let (cur_iter, idx, n_sources) = {
-                    let a = inst.borrow();
-                    let cur_iter = a
-                        .attrs
-                        .get("_cur_iter")
-                        .cloned()
-                        .ok_or_else(|| internal(FN_NAME))?;
-                    let idx = match a.attrs.get("_src_idx").map(|v| v.kind()) {
-                        Some(ValueKind::Int(n)) => n as usize,
-                        _ => return Err(internal(FN_NAME)),
-                    };
-                    let n_sources = match a.attrs.get("_sources").map(|v| v.kind()) {
-                        Some(ValueKind::List(items)) => items.len(),
-                        _ => return Err(internal(FN_NAME)),
-                    };
-                    (cur_iter, idx, n_sources)
-                };
-                if cur_iter.is_none() {
-                    // No live iterator for the current source slot.
-                    if idx >= n_sources {
-                        return Err(PyError::named("StopIteration", String::new()));
-                    }
-                    // Lazily `iter()` the source at `idx` (matches CPython's
-                    // per-source `GetIter` timing).
-                    let source = {
-                        let a = inst.borrow();
-                        match a.attrs.get("_sources").map(|v| v.kind()) {
-                            Some(ValueKind::List(items)) => items[idx].clone(),
-                            _ => return Err(internal(FN_NAME)),
+                let active = inst
+                    .borrow()
+                    .attrs
+                    .get("_active")
+                    .cloned()
+                    .ok_or_else(|| internal(FN_NAME))?;
+                if !active.is_none() {
+                    match _interp.call_next(&active, None) {
+                        Ok(v) => return Ok(v),
+                        Err(e) if is_stop_iteration(&e) => {
+                            inst.borrow_mut().attrs.insert("_active", Value::none());
                         }
-                    };
-                    let iter = make_iter(_interp, &source)?;
-                    inst.borrow_mut().attrs.insert("_cur_iter", iter);
-                    continue;
-                }
-                match _interp.call_next(&cur_iter, None) {
-                    Ok(v) => return Ok(v),
-                    Err(e) if is_stop_iteration(&e) => {
-                        // Advance to the next source; clear the live iterator.
-                        let mut a = inst.borrow_mut();
-                        a.attrs.insert("_src_idx", Value::int(idx as i64 + 1));
-                        a.attrs.insert("_cur_iter", Value::none());
+                        Err(e) => return Err(e),
                     }
-                    Err(e) => return Err(e),
                 }
+                let source = inst
+                    .borrow()
+                    .attrs
+                    .get("_source")
+                    .cloned()
+                    .ok_or_else(|| internal(FN_NAME))?;
+                if source.is_none() {
+                    return Err(PyError::named("StopIteration", String::new()));
+                }
+                let next_iterable = match _interp.call_next(&source, None) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // Release `_source` on exhaustion/error, matching
+                        // CPython's `Py_CLEAR(lz->source)` so deepcopying an
+                        // exhausted `chain(gen)` succeeds.
+                        let mut a = inst.borrow_mut();
+                        a.attrs.insert("_source", Value::none());
+                        a.attrs.insert("_active", Value::none());
+                        return Err(e);
+                    }
+                };
+                let iter = make_iter(_interp, &next_iterable)?;
+                inst.borrow_mut().attrs.insert("_active", iter);
             }
         }
 
@@ -258,10 +251,11 @@ pyrust_module! {
                         // CPython clears islice's source pointer on any
                         // iterator failure, including a non-StopIteration
                         // exception.  The original error is reported once;
-                        // subsequent next() calls are exhausted.
-                        inst.borrow_mut()
-                            .attrs
-                            .insert("_exhausted", Value::bool_(true));
+                        // subsequent next() calls are exhausted and deepcopy
+                        // sees no live source iterator.
+                        let mut attrs = inst.borrow_mut();
+                        attrs.attrs.insert("_exhausted", Value::bool_(true));
+                        attrs.attrs.insert("_iter", Value::none());
                         return Err(e);
                     }
                 }
@@ -274,17 +268,17 @@ pyrust_module! {
             if let Some(r) = remaining
                 && r <= 0
             {
-                inst.borrow_mut()
-                    .attrs
-                    .insert("_exhausted", Value::bool_(true));
+                let mut attrs = inst.borrow_mut();
+                attrs.attrs.insert("_exhausted", Value::bool_(true));
+                attrs.attrs.insert("_iter", Value::none());
                 return Err(PyError::named("StopIteration", String::new()));
             }
             let item = match _interp.call_next(&iter, None) {
                 Ok(item) => item,
                 Err(error) => {
-                    inst.borrow_mut()
-                        .attrs
-                        .insert("_exhausted", Value::bool_(true));
+                    let mut attrs = inst.borrow_mut();
+                    attrs.attrs.insert("_exhausted", Value::bool_(true));
+                    attrs.attrs.insert("_iter", Value::none());
                     return Err(error);
                 }
             };
@@ -519,10 +513,12 @@ pyrust_module! {
                         return Ok(v);
                     }
                     Err(e) if is_stop_iteration(&e) => {
-                        // First pass ended; switch over to walking _cache.
-                        inst.borrow_mut()
-                            .attrs
-                            .insert("_first_pass", Value::bool_(false));
+                        // First pass ended; release `_iter` (matching CPython's
+                        // `Py_CLEAR(lz->it)` so deepcopying a `cycle(gen)`
+                        // after the first pass succeeds) and walk `_cache`.
+                        let mut attrs = inst.borrow_mut();
+                        attrs.attrs.insert("_first_pass", Value::bool_(false));
+                        attrs.attrs.insert("_iter", Value::none());
                         // Fall through to the cached-walk path below.
                     }
                     Err(e) => return Err(e),
@@ -1377,6 +1373,7 @@ pyrust_module! {
             if new_done.len() != n {
                 return Err(internal(FN_NAME));
             }
+            let mut cleared_indices: Vec<usize> = Vec::new();
             for (i, done) in new_done.iter_mut().enumerate() {
                 let already_done = matches!(done.kind(), ValueKind::Bool(true));
                 if already_done {
@@ -1395,11 +1392,30 @@ pyrust_module! {
                         Err(e) if is_stop_iteration(&e) => {
                             tuple.push(fillvalue.clone());
                             *done = Value::bool_(true);
+                            cleared_indices.push(i);
                             new_active -= 1;
                         }
                         Err(e) => return Err(e),
                     }
                 }
+            }
+            if !cleared_indices.is_empty() {
+                // Replace `_iters` with a fresh list clearing exhausted slots
+                // to `None` (matching CPython's `zip_longest` releasing spent
+                // iterators so deepcopy succeeds after a generator slot
+                // exhausts, without mutating a shallow copy's `_iters` list).
+                let mut new_iters = match iters.kind() {
+                    ValueKind::List(lst) => lst.to_vec(),
+                    _ => return Err(internal(FN_NAME)),
+                };
+                for idx in cleared_indices {
+                    if let Some(slot) = new_iters.get_mut(idx) {
+                        *slot = Value::none();
+                    }
+                }
+                inst.borrow_mut()
+                    .attrs
+                    .insert("_iters", Value::list(new_iters));
             }
             inst.borrow_mut()
                 .attrs

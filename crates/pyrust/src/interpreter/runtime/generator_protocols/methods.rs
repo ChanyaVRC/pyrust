@@ -84,6 +84,33 @@ impl Interpreter {
                 }
                 self.call_next(&receiver, None)
             }
+            "__copy__"
+                if matches!(receiver.kind(), ValueKind::Generator(cell)
+                if cell.try_borrow().is_ok_and(|state| {
+                    state
+                        .downcast_ref::<crate::interpreter::ProviderIterator>()
+                        .is_some_and(crate::interpreter::ProviderIterator::exposes_copy_method)
+                })) =>
+            {
+                if !args.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "__copy__() takes no arguments ({} given)",
+                        args.len()
+                    ));
+                }
+                let mut id_copy = |v: Value| Ok(v);
+                let mut no_memo_get = |_: i64| None;
+                let mut no_memo_insert = |_: i64, _: Value| {};
+                crate::interpreter::copy_provider_iterator(
+                    &receiver,
+                    false,
+                    &mut id_copy,
+                    &mut no_memo_get,
+                    &mut no_memo_insert,
+                    None,
+                )?
+                .ok_or_else(|| PyError::Runtime("provider __copy__ unavailable".to_string()))
+            }
             // Issue #2920: the built-in iterators' remaining-element count.
             // The iteration domain owns the per-cursor arithmetic; this arm
             // only presents it under CPython's method name and arity.

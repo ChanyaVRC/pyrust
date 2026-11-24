@@ -35,6 +35,19 @@ impl Interpreter {
         // sequence-iterator reduction/state surface. Restrict the typed state
         // probe to those cold attribute names so ordinary `next()` lookup is
         // unchanged.
+        if name == "__copy__"
+            && cell.try_borrow().is_ok_and(|state| {
+                state
+                    .downcast_ref::<crate::interpreter::ProviderIterator>()
+                    .is_some_and(crate::interpreter::ProviderIterator::exposes_copy_method)
+            })
+        {
+            return Ok(pyrust_builtins::bound_method::bound_method(
+                name.to_string(),
+                target.clone(),
+            ));
+        }
+
         if matches!(
             name,
             "__getattribute__" | "__reduce__" | "__reduce_ex__" | "__setstate__"

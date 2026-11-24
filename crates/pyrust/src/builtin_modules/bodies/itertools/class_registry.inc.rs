@@ -7,7 +7,7 @@ struct GroupByClassGeneration {
     grouper: Rc<RefCell<PyClass>>,
 }
 
-const ITERTOOLS_ERROR_NAMES: [(&str, &str); 18] = [
+const ITERTOOLS_ERROR_NAMES: [(&str, &str); 19] = [
     ("count", "itertools.count"),
     ("cycle", "itertools.cycle"),
     ("repeat", "itertools.repeat"),
@@ -29,6 +29,7 @@ const ITERTOOLS_ERROR_NAMES: [(&str, &str); 18] = [
     ("filterfalse", "itertools.filterfalse"),
     ("compress", "itertools.compress"),
     ("pairwise", "itertools.pairwise"),
+    ("batched", "itertools.batched"),
 ];
 
 thread_local! {
@@ -39,6 +40,277 @@ thread_local! {
     /// while its owning `groupby` class (or an instance/subclass) remains live.
     static GROUPBY_CLASS_GENERATIONS: RefCell<Vec<GroupByClassGeneration>> =
         const { RefCell::new(Vec::new()) };
+
+    /// Weak registry of canonical `itertools.pairwise` and `itertools.batched`
+    /// classes across module import generations. Neither supports pickling or
+    /// copying in CPython 3.12 (issue #2967).
+    static UNPICKLABLE_ITERTOOLS_CLASSES: RefCell<Vec<Weak<RefCell<PyClass>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn register_unpicklable_itertools_class(class: &Rc<RefCell<PyClass>>) {
+    UNPICKLABLE_ITERTOOLS_CLASSES.with(|classes| {
+        let mut classes = classes.borrow_mut();
+        classes.retain(|registered| registered.strong_count() > 0);
+        if !classes
+            .iter()
+            .any(|registered| registered.as_ptr() == Rc::as_ptr(class))
+        {
+            classes.push(Rc::downgrade(class));
+        }
+    });
+}
+
+/// Whether `class` is `itertools.pairwise`, `itertools.batched`, or a subclass
+/// thereof (all of which refuse `copy.copy` / `copy.deepcopy` in CPython 3.12).
+pub(crate) fn is_unpicklable_itertools_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    UNPICKLABLE_ITERTOOLS_CLASSES.with(|classes| {
+        let mut classes = classes.borrow_mut();
+        classes.retain(|registered| registered.strong_count() > 0);
+        classes
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|registered| crate::interpreter::class_is_subclass_of(class, &registered))
+    })
+}
+
+fn is_groupby_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    GROUPBY_CLASS_GENERATIONS.with(|generations| {
+        let mut generations = generations.borrow_mut();
+        generations.retain(|generation| generation.groupby.strong_count() > 0);
+        generations.iter().any(|generation| {
+            generation
+                .groupby
+                .upgrade()
+                .is_some_and(|gb| crate::interpreter::class_is_subclass_of(class, &gb))
+        })
+    })
+}
+
+fn is_grouper_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    GROUPBY_CLASS_GENERATIONS.with(|generations| {
+        let mut generations = generations.borrow_mut();
+        generations.retain(|generation| generation.groupby.strong_count() > 0);
+        generations
+            .iter()
+            .any(|generation| crate::interpreter::class_is_subclass_of(class, &generation.grouper))
+    })
+}
+
+/// Copy or deep-copy an `itertools.groupby` or `itertools._grouper` instance
+/// using CPython 3.12's exact `__reduce__` semantics (issue #2967):
+///
+/// - `groupby` omits its `(currvalue, currkey, tgtkey)` state whenever
+///   `_has_curr` is `false` (fresh or after `_grouper.__next__` consumed the
+///   lookahead), so the copy starts with `_has_tgt = false` and yields any
+///   remaining elements of the current key as a new group.
+/// - `_grouper` reduces to `iter(())` when stale (`_id != parent._id`), and
+///   when live reconstructs `(_grouper, (parent, tgtkey))`, bumping
+///   `new_parent._id` so on shallow copy the original grouper becomes stale
+///   and the copy becomes the sole live grouper, while on deep copy the copied
+///   parent gets its own fresh id.
+pub(crate) fn copy_groupby_or_grouper(
+    rc: &Rc<RefCell<PyInstance>>,
+    interp: &mut crate::interpreter::Interpreter,
+    copy_child: &mut dyn FnMut(Value, &mut crate::interpreter::Interpreter) -> Result<Value>,
+    memo_insert: &mut dyn FnMut(i64, Value),
+    outer_obj_id: Option<i64>,
+) -> Option<Result<Value>> {
+    let class = Rc::clone(&rc.borrow().class);
+    if is_groupby_class(&class) {
+        return Some(copy_groupby_instance(
+            rc,
+            class,
+            interp,
+            copy_child,
+            memo_insert,
+            outer_obj_id,
+        ));
+    }
+    if is_grouper_class(&class) {
+        return Some(copy_grouper_instance(
+            rc,
+            class,
+            interp,
+            copy_child,
+            memo_insert,
+            outer_obj_id,
+        ));
+    }
+    None
+}
+
+fn copy_groupby_instance(
+    rc: &Rc<RefCell<PyInstance>>,
+    class: Rc<RefCell<PyClass>>,
+    interp: &mut crate::interpreter::Interpreter,
+    copy_child: &mut dyn FnMut(Value, &mut crate::interpreter::Interpreter) -> Result<Value>,
+    memo_insert: &mut dyn FnMut(i64, Value),
+    outer_obj_id: Option<i64>,
+) -> Result<Value> {
+    const INTERNAL_ATTRS: [&str; 9] = [
+        "_iter",
+        "_keyfn",
+        "_currkey",
+        "_currvalue",
+        "_has_curr",
+        "_tgtkey",
+        "_has_tgt",
+        "_id",
+        "_exhausted",
+    ];
+    let (iter_val, keyfn_val, has_curr, currvalue, currkey, has_tgt, tgtkey, extras) = {
+        let borrow = rc.borrow();
+        let iter_val = borrow
+            .attrs
+            .get("_iter")
+            .cloned()
+            .ok_or_else(|| internal("groupby"))?;
+        let keyfn_val = borrow
+            .attrs
+            .get("_keyfn")
+            .cloned()
+            .unwrap_or_else(Value::none);
+        let has_curr = matches!(
+            borrow.attrs.get("_has_curr").map(|v| v.kind()),
+            Some(ValueKind::Bool(true))
+        );
+        let currvalue = borrow
+            .attrs
+            .get("_currvalue")
+            .cloned()
+            .unwrap_or_else(Value::none);
+        let currkey = borrow
+            .attrs
+            .get("_currkey")
+            .cloned()
+            .unwrap_or_else(Value::none);
+        let has_tgt = matches!(
+            borrow.attrs.get("_has_tgt").map(|v| v.kind()),
+            Some(ValueKind::Bool(true))
+        );
+        let tgtkey = borrow
+            .attrs
+            .get("_tgtkey")
+            .cloned()
+            .unwrap_or_else(Value::none);
+        let extras: Vec<(String, Value)> = borrow
+            .attrs
+            .items_snapshot()
+            .into_iter()
+            .filter(|(name, _)| !INTERNAL_ATTRS.contains(&name.as_ref()))
+            .map(|(name, value)| (name.to_string(), value))
+            .collect();
+        (
+            iter_val, keyfn_val, has_curr, currvalue, currkey, has_tgt, tgtkey, extras,
+        )
+    };
+    let new_rc = Rc::new(RefCell::new(PyInstance {
+        class,
+        attrs: InstanceAttrs::new(),
+    }));
+    let new_val = Value::py_instance(Rc::clone(&new_rc));
+    if let Some(id) = outer_obj_id {
+        memo_insert(id, new_val.clone());
+    }
+    let copied_iter = copy_child(iter_val, interp)?;
+    let copied_keyfn = copy_child(keyfn_val, interp)?;
+    let (copied_currval, copied_currkey, copied_tgtkey, restored_has_tgt) = if has_curr {
+        (
+            copy_child(currvalue, interp)?,
+            copy_child(currkey, interp)?,
+            copy_child(tgtkey, interp)?,
+            has_tgt,
+        )
+    } else {
+        (Value::none(), Value::none(), Value::none(), false)
+    };
+    {
+        let mut attrs = new_rc.borrow_mut();
+        attrs.attrs.insert("_iter", copied_iter);
+        attrs.attrs.insert("_keyfn", copied_keyfn);
+        attrs.attrs.insert("_currvalue", copied_currval);
+        attrs.attrs.insert("_currkey", copied_currkey);
+        attrs.attrs.insert("_has_curr", Value::bool_(has_curr));
+        attrs.attrs.insert("_tgtkey", copied_tgtkey);
+        attrs
+            .attrs
+            .insert("_has_tgt", Value::bool_(restored_has_tgt));
+        attrs.attrs.insert("_id", Value::int(0));
+        attrs.attrs.insert("_exhausted", Value::bool_(false));
+    }
+    for (name, val) in extras {
+        let copied = copy_child(val, interp)?;
+        new_rc.borrow_mut().attrs.insert(&name, copied);
+    }
+    Ok(new_val)
+}
+
+fn copy_grouper_instance(
+    rc: &Rc<RefCell<PyInstance>>,
+    class: Rc<RefCell<PyClass>>,
+    interp: &mut crate::interpreter::Interpreter,
+    copy_child: &mut dyn FnMut(Value, &mut crate::interpreter::Interpreter) -> Result<Value>,
+    memo_insert: &mut dyn FnMut(i64, Value),
+    outer_obj_id: Option<i64>,
+) -> Result<Value> {
+    let (parent_val, my_tgtkey, my_id) = {
+        let borrow = rc.borrow();
+        (
+            borrow
+                .attrs
+                .get("_parent")
+                .cloned()
+                .ok_or_else(|| internal("_grouper"))?,
+            borrow
+                .attrs
+                .get("_tgtkey")
+                .cloned()
+                .ok_or_else(|| internal("_grouper"))?,
+            match borrow.attrs.get("_id").map(|v| v.kind()) {
+                Some(ValueKind::Int(n)) => n,
+                _ => return Err(internal("_grouper")),
+            },
+        )
+    };
+    let is_live = match parent_val.kind() {
+        ValueKind::PyInstance(parent_rc) => matches!(
+            parent_rc.borrow().attrs.get("_id").map(|v| v.kind()),
+            Some(ValueKind::Int(pid)) if pid == my_id
+        ),
+        _ => false,
+    };
+    if !is_live {
+        let empty = crate::interpreter::make_iterator(interp, &Value::tuple(Vec::new()))?;
+        if let Some(id) = outer_obj_id {
+            memo_insert(id, empty.clone());
+        }
+        return Ok(empty);
+    }
+    let copied_parent = copy_child(parent_val, interp)?;
+    let copied_tgtkey = copy_child(my_tgtkey, interp)?;
+    let new_id = match copied_parent.kind() {
+        ValueKind::PyInstance(parent_rc) => {
+            let mut borrow = parent_rc.borrow_mut();
+            let cur = match borrow.attrs.get("_id").map(|v| v.kind()) {
+                Some(ValueKind::Int(n)) => n,
+                _ => 0,
+            };
+            let next = cur + 1;
+            borrow.attrs.insert("_id", Value::int(next));
+            next
+        }
+        _ => return Err(internal("_grouper")),
+    };
+    let mut attrs = InstanceAttrs::new();
+    attrs.insert("_parent", copied_parent);
+    attrs.insert("_tgtkey", copied_tgtkey);
+    attrs.insert("_id", Value::int(new_id));
+    let rebuilt = Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })));
+    if let Some(id) = outer_obj_id {
+        memo_insert(id, rebuilt.clone());
+    }
+    Ok(rebuilt)
 }
 
 fn register_groupby_generation(groupby: &Rc<RefCell<PyClass>>, grouper: &Rc<RefCell<PyClass>>) {
@@ -134,6 +406,14 @@ pub(crate) fn prepare_module_classes(module_value: &Value) {
     {
         grouper.borrow_mut().error_name = Some("itertools._grouper");
         register_groupby_generation(groupby, grouper);
+    }
+    for name in ["pairwise", "batched"] {
+        let cls_val = module.borrow().attrs.get(name).cloned();
+        if let Some(cls_val) = cls_val
+            && let ValueKind::PyClass(cls) = cls_val.kind()
+        {
+            register_unpicklable_itertools_class(cls);
+        }
     }
 }
 
