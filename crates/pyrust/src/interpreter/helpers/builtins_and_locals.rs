@@ -316,7 +316,7 @@ pub(crate) fn class_frame_identity(
     view: &VmFrameView,
 ) -> Option<(std::sync::Arc<str>, std::sync::Arc<str>)> {
     let class_index = active_class_index_for_view(interp, view)?;
-    let active = interp.class_annotation_scopes.get(class_index)?;
+    let active = interp.cold.class_annotation_scopes.get(class_index)?;
     Some((active.class_name.clone(), active.filename.clone()))
 }
 
@@ -327,6 +327,7 @@ pub(crate) fn class_frame_locals_value(interp: &Interpreter, view: &VmFrameView)
     let class_index = active_class_index_for_view(interp, view)
         .expect("Class VmFrameView missing from the active frame stack");
     let active = interp
+        .cold
         .class_annotation_scopes
         .get(class_index)
         .expect("class frame/state stacks out of sync");
@@ -336,6 +337,7 @@ pub(crate) fn class_frame_locals_value(interp: &Interpreter, view: &VmFrameView)
         let slot_names = merge_class_frame_view_into_dict(
             view,
             interp
+                .cold
                 .class_store_order
                 .get(class_index)
                 .expect("class frame/store-order stacks out of sync"),
@@ -375,6 +377,7 @@ pub(crate) fn active_live_class_namespace(interp: &Interpreter) -> Option<Value>
         return None;
     }
     interp
+        .cold
         .class_annotation_scopes
         .last()?
         .live_namespace
@@ -546,31 +549,30 @@ fn merge_frame_cells_into_dict_slow(view: &VmFrameView, dict: &mut PyDict) {
                 if parent.is_none() {
                     break;
                 }
-                if let Some(values) = bindings.try_namespace_values() {
-                    for name in candidates {
-                        if frees.iter().any(|(seen, _)| *seen == name.as_str())
-                            || code
-                                .own_cell_slots()
-                                .iter()
-                                .any(|m| m.name.as_str() == name.as_str())
-                        {
-                            continue;
-                        }
-                        let Some(value) = values.get(name.as_str()) else {
-                            continue;
-                        };
-                        if value.is_unset() {
-                            continue;
-                        }
-                        if local_index.contains_key(name.as_str())
-                            || declared_global
-                                .as_ref()
-                                .is_some_and(|g| g.contains(name.as_str()))
-                        {
-                            continue;
-                        }
-                        frees.push((name.as_str(), value.clone()));
+                let values = bindings.namespace_values();
+                for name in candidates {
+                    if frees.iter().any(|(seen, _)| *seen == name.as_str())
+                        || code
+                            .own_cell_slots()
+                            .iter()
+                            .any(|m| m.name.as_str() == name.as_str())
+                    {
+                        continue;
                     }
+                    let Some(value) = values.get(name.as_str()) else {
+                        continue;
+                    };
+                    if value.is_unset() {
+                        continue;
+                    }
+                    if local_index.contains_key(name.as_str())
+                        || declared_global
+                            .as_ref()
+                            .is_some_and(|g| g.contains(name.as_str()))
+                    {
+                        continue;
+                    }
+                    frees.push((name.as_str(), value.clone()));
                 }
                 drop(bindings);
                 current = parent;
@@ -594,10 +596,8 @@ pub(crate) fn snapshot_current_locals(interp: &Interpreter) -> PyDict {
         None => {
             // No active VM frame: fall back to the current namespace bindings.
             let mut dict: PyDict = PyDict::default();
-            if let Some(values) = interp.env.borrow().try_namespace_values() {
-                for (k, v) in values.iter() {
-                    dict.insert(PyKey::str_from(k), v.clone());
-                }
+            for (k, v) in interp.env.borrow().namespace_values().iter() {
+                dict.insert(PyKey::str_from(k), v.clone());
             }
             dict
         }

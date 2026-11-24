@@ -507,7 +507,8 @@ impl Interpreter {
         let mut gd = self.gen_drive_stack.pop().unwrap();
         gd.gframe.pc = resume_pc;
         gd.gframe.iters = std::mem::take(st.iters);
-        gd.gframe.exc_handlers = std::mem::take(st.exc_handlers);
+        gd.gframe
+            .store_exc_handlers(std::mem::take(st.exc_handlers));
         gd.gframe.yield_dst = yield_dst;
         // Issue #2445: persist the yield / yield-from line so a later
         // `generator.throw()` reports it.

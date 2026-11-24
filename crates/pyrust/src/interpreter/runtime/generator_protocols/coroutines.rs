@@ -323,11 +323,10 @@ impl Interpreter {
         ) {
             if clear_any_owner
                 || frame
-                    .async_gen_running_owner
-                    .as_ref()
+                    .async_gen_running_owner()
                     .is_some_and(|owner| owner.as_ptr() == Rc::as_ptr(asend_rc))
             {
-                frame.async_gen_running_owner = None;
+                frame.clear_async_gen_running_owner();
             }
         }
 
@@ -375,14 +374,14 @@ impl Interpreter {
             .ok_or_else(|| PyError::runtime("invalid async-generator state".to_string()))?;
 
         if enforce_running_owner {
-            match frame.async_gen_running_owner.as_ref() {
+            match frame.async_gen_running_owner() {
                 Some(owner) if owner.as_ptr() != Rc::as_ptr(asend_rc) => {
                     drop(borrow);
                     return Err(reject_running(asend_rc, is_close_or_throw, is_aclose));
                 }
                 Some(_) => {}
                 None => {
-                    frame.async_gen_running_owner = Some(Rc::downgrade(asend_rc));
+                    frame.set_async_gen_running_owner(Rc::downgrade(asend_rc));
                 }
             }
         }
@@ -528,7 +527,7 @@ impl Interpreter {
 
     /// Build a `StopAsyncIteration` error (async-generator exhaustion, #2280).
     fn make_stop_async_iteration(&self) -> PyError {
-        if let Some(cls) = self.exc_classes.get("StopAsyncIteration") {
+        if let Some(cls) = self.cold.exc_classes.get("StopAsyncIteration") {
             PyError::raised(instantiate_exception(cls, vec![]))
         } else {
             pyrust_core::py_err!("StopAsyncIteration", String::new())
@@ -537,7 +536,7 @@ impl Interpreter {
 
     /// Build the argument-less `StopIteration` used when `aclose()` completes.
     fn make_stop_iteration(&self) -> PyError {
-        if let Some(cls) = self.exc_classes.get("StopIteration") {
+        if let Some(cls) = self.cold.exc_classes.get("StopIteration") {
             PyError::raised(instantiate_exception(cls, vec![]))
         } else {
             pyrust_core::py_err!("StopIteration", String::new())
@@ -547,7 +546,7 @@ impl Interpreter {
     /// Build a `StopIteration(value)` error carrying a produced async-gen item
     /// (#2280).  The consumer's `YieldFrom` reads `.value` to obtain the item.
     fn make_stop_iteration_with_value(&self, value: Value) -> PyError {
-        if let Some(cls) = self.exc_classes.get("StopIteration") {
+        if let Some(cls) = self.cold.exc_classes.get("StopIteration") {
             PyError::raised(instantiate_exception(cls, vec![value]))
         } else {
             pyrust_core::py_err!("StopIteration", String::new())

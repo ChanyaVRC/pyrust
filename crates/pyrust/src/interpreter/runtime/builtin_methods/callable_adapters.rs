@@ -192,7 +192,7 @@ impl Interpreter {
     ) -> Option<Result<Value>> {
         let (wrapped, receiver) =
             pyrust_builtins::classmethod::cached_native_class_method_call(plan, class)?;
-        let mut combined = std::mem::take(&mut self.invoke_arg_buf);
+        let mut combined = std::mem::take(&mut self.cold.invoke_arg_buf);
         combined.clear();
         combined.push(ExpandedCallArg {
             name: None,
@@ -204,7 +204,7 @@ impl Interpreter {
                 .map(|value| ExpandedCallArg { name: None, value }),
         );
         let result = self.call_builtin_function_value(&wrapped, &combined);
-        self.invoke_arg_buf = combined;
+        self.cold.invoke_arg_buf = combined;
         Some(result)
     }
 
@@ -250,7 +250,7 @@ impl Interpreter {
                 // wrappers contain a BuiltinFunction. Dispatch that payload at
                 // this adapter boundary instead of recursively entering the
                 // generic callable classifier and probing every adapter again.
-                let mut combined = std::mem::take(&mut self.invoke_arg_buf);
+                let mut combined = std::mem::take(&mut self.cold.invoke_arg_buf);
                 combined.clear();
                 combined.push(ExpandedCallArg {
                     name: None,
@@ -262,7 +262,7 @@ impl Interpreter {
                 } else {
                     self.call_function_expanded(call.wrapped, &combined)
                 };
-                self.invoke_arg_buf = combined;
+                self.cold.invoke_arg_buf = combined;
                 return result.map(Some);
             }
             if matches!(call.wrapped.kind(), ValueKind::BuiltinFunction(_)) {

@@ -177,9 +177,7 @@ fn classify_generator_loop_state(state: &Rc<GeneratorCell>) -> Option<LoopIterat
             if let Some(frame) = borrowed.downcast_ref::<GeneratorFrame>() {
                 let drivable = !frame.done
                     && !frame.code.has_exc_handlers
-                    && frame.handled_exc_slice.is_empty()
-                    && frame.active_exception.is_none()
-                    && frame.exc_saved_active_slice.is_empty()
+                    && !frame.has_exc_state()
                     && !matches!(
                         frame.code.insns.get(frame.pc),
                         Some(crate::bytecode::Insn::YieldFrom { .. })

@@ -81,7 +81,7 @@ impl Interpreter {
                 // PEP 709 (#2993): list/set/dict comprehensions are inlined into
                 // their enclosing frame — omit the synthetic `<listcomp>` frame
                 // and forward the inner PEP 657 caret anchor to the caller.
-                self.inlined_comp_escaped_span = Some(pyrust_core::get_current_vm_col_span());
+                self.cold.inlined_comp_escaped_span = Some(pyrust_core::get_current_vm_col_span());
             } else {
                 // Use the callee's own code-object filename (#2438): an imported
                 // module's function reports the module's source file, not the running

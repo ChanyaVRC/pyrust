@@ -577,13 +577,11 @@ pub(crate) fn call_del_if_last_binding(
         }
     }
     // Scan env namespace bindings and active frame cells for another binding.
-    if let Some(values) = interp.env.borrow().try_namespace_values() {
-        for v in values.values() {
-            if let Some(other_rc) = v.as_py_instance_rc()
-                && Rc::ptr_eq(other_rc, del_rc)
-            {
-                return; // a global/namespace binding still holds the instance
-            }
+    for v in interp.env.borrow().namespace_values().values() {
+        if let Some(other_rc) = v.as_py_instance_rc()
+            && Rc::ptr_eq(other_rc, del_rc)
+        {
+            return; // a global/namespace binding still holds the instance
         }
     }
     if let Some(top_view) = interp.vm_frame_views.last() {
@@ -728,33 +726,15 @@ pub(crate) fn call_del_if_last_binding_in_env(
                 break;
             }
             let bindings = env.borrow();
-            if let Some(values) = bindings.try_namespace_values() {
-                for value in values.values() {
-                    observe_direct_binding(
-                        value,
-                        del_rc,
-                        target_alias_is_visible,
-                        visible_owner_worklist,
-                        discovered_owner_ids,
-                        visited_functions,
-                    );
-                }
-            }
-            if let Some(cells) = bindings.cells() {
-                for slot in cells {
-                    slot.with_value(|opt| {
-                        if let Some(value) = opt {
-                            observe_direct_binding(
-                                value,
-                                del_rc,
-                                target_alias_is_visible,
-                                visible_owner_worklist,
-                                discovered_owner_ids,
-                                visited_functions,
-                            );
-                        }
-                    });
-                }
+            for value in bindings.namespace_values().values() {
+                observe_direct_binding(
+                    value,
+                    del_rc,
+                    target_alias_is_visible,
+                    visible_owner_worklist,
+                    discovered_owner_ids,
+                    visited_functions,
+                );
             }
             current = bindings.parent.clone();
         }

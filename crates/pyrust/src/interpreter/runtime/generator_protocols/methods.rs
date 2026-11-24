@@ -631,7 +631,7 @@ impl Interpreter {
                 && let Some(frame) = agen_state.downcast_mut::<GeneratorFrame>()
             {
                 let _ = self.close_generator_frame(frame);
-                frame.async_gen_running_owner = None;
+                frame.clear_async_gen_running_owner();
             }
             return;
         }
@@ -810,7 +810,7 @@ impl Interpreter {
                 ));
             }
             // Exhausted generator: StopIteration() with no args → .value is None.
-            let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
+            let exc = if let Some(cls) = self.cold.exc_classes.get("StopIteration") {
                 PyError::raised(instantiate_exception(cls, vec![]))
             } else {
                 pyrust_core::py_err!("StopIteration", String::new())

@@ -76,19 +76,17 @@ impl CellSlot {
     }
 }
 
-/// Explicit per-scope storage variant for [`Environment`] (issue #452).
+/// Per-scope namespace storage for [`Environment`] (issues #452 / #3162).
 ///
-/// Every `Environment` owns *either* a name-keyed namespace dictionary (module,
-/// class body, PEP 695 type-parameter scope, or explicit `exec`/`eval`
-/// namespace) *or* a flat indexed cell array — never both. Function frames
-/// themselves no longer allocate an `Environment` at all; their cells live
-/// directly on the active VM frame / `GeneratorFrame` and `UserFunction::closure_cells`.
+/// Every `Environment` owns a name-keyed namespace dictionary (module, class
+/// body, PEP 695 type-parameter scope, or explicit `exec`/`eval` namespace).
+/// Function frames do not allocate an `Environment` at all; their cells live
+/// directly on the active VM frame / `GeneratorFrame` and
+/// `UserFunction::closure_cells`.
 #[derive(Debug, Clone)]
 pub enum EnvironmentStorage {
     /// Name-keyed bindings for module, class, type-param, and `exec`/`eval` scopes.
     Namespace(EnvValues),
-    /// Indexed cell slots when a scope must expose cells behind an `EnvRef`.
-    Cells(smallvec::SmallVec<[CellSlot; 4]>),
 }
 
 impl Default for EnvironmentStorage {

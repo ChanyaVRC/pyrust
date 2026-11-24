@@ -74,7 +74,7 @@ impl Interpreter {
         if u16::from(argument_count) != positional_parameter_count {
             return Ok(MemoCallProbe::Bypass);
         }
-        if matches!(self.memo_stats.get(&function_id), Some((_, _, false))) {
+        if matches!(self.cold.memo_stats.get(&function_id), Some((_, _, false))) {
             return Ok(MemoCallProbe::Bypass);
         }
 
@@ -89,9 +89,13 @@ impl Interpreter {
         }
 
         let key = (function_id, key_arguments);
-        if let Some(cached) = self.memo_cache.get(&key) {
+        if let Some(cached) = self.cold.memo_cache.get(&key) {
             let value = cached.clone();
-            let stats = self.memo_stats.entry(function_id).or_insert((0, 0, true));
+            let stats = self
+                .cold
+                .memo_stats
+                .entry(function_id)
+                .or_insert((0, 0, true));
             stats.0 = stats.0.saturating_add(1);
             stats.1 = stats.1.saturating_add(1);
             return Ok(MemoCallProbe::Hit(value));
@@ -105,36 +109,40 @@ impl Interpreter {
     /// nested call may still execute, but must not publish a second entry.
     #[inline]
     pub(super) fn claim_memoized_call(&mut self, key: MemoKey) -> Option<MemoKey> {
-        self.memo_in_flight.insert(key.clone()).then_some(key)
+        self.cold.memo_in_flight.insert(key.clone()).then_some(key)
     }
 
     /// Commit a successfully completed cache-miss owner.
     #[inline]
     pub(super) fn finish_memoized_call(&mut self, key: MemoKey, result: &Value) {
-        let removed = self.memo_in_flight.remove(&key);
+        let removed = self.cold.memo_in_flight.remove(&key);
         debug_assert!(
             removed,
             "a completed memoized call must own an in-flight key"
         );
 
         let function_id = key.0;
-        let stats = self.memo_stats.entry(function_id).or_insert((0, 0, true));
+        let stats = self
+            .cold
+            .memo_stats
+            .entry(function_id)
+            .or_insert((0, 0, true));
         stats.0 = stats.0.saturating_add(1);
         if stats.0 >= 128 && stats.1.saturating_mul(4) < stats.0 {
             stats.2 = false;
         }
         if stats.2
-            && self.memo_cache.len() < (1usize << 16)
+            && self.cold.memo_cache.len() < (1usize << 16)
             && (matches!(result.kind(), ValueKind::Int(_) | ValueKind::Bool(_)) || result.is_none())
         {
-            self.memo_cache.insert(key, result.clone());
+            self.cold.memo_cache.insert(key, result.clone());
         }
     }
 
     /// Cancel a cache-miss owner whose callee raised.
     #[inline]
     pub(super) fn cancel_memoized_call(&mut self, key: &MemoKey) {
-        let removed = self.memo_in_flight.remove(key);
+        let removed = self.cold.memo_in_flight.remove(key);
         debug_assert!(
             removed,
             "an aborted memoized call must own an in-flight key"

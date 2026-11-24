@@ -540,6 +540,7 @@ fn deleting_sys_from_original_registry_creates_a_new_import_identity() {
     let mut interpreter = Interpreter::default();
     let original = interpreter.load_module("sys").unwrap();
     interpreter
+        .cold
         .bootstrap_module_registry
         .dict_shift_remove(&PyKey::str_from("sys"))
         .unwrap();
@@ -547,6 +548,7 @@ fn deleting_sys_from_original_registry_creates_a_new_import_identity() {
     let imported_again = interpreter.load_module("sys").unwrap();
     assert_ne!(imported_again.value_id(), original.value_id());
     let registered = interpreter
+        .cold
         .bootstrap_module_registry
         .dict_with(|modules| modules.get(&PyKey::str_from("sys")).cloned())
         .flatten()
@@ -572,6 +574,7 @@ fn replacement_registry_only_controls_names_missing_from_internal_cache() {
     assert_eq!(still_internal.value_id(), original_math.value_id());
 
     interpreter
+        .cold
         .bootstrap_module_registry
         .dict_shift_remove(&PyKey::str_from("math"))
         .unwrap();
@@ -639,6 +642,7 @@ fn replacement_registry_disables_module_class_cache_and_respects_internal_priori
         .unwrap();
     assert!(
         interpreter
+            .cold
             .module_class_cache
             .as_ref()
             .and_then(|cache| cache.entries[cache_slot.0].as_ref())
@@ -685,6 +689,7 @@ fn replacement_registry_disables_module_class_cache_and_respects_internal_priori
     ));
     assert!(
         interpreter
+            .cold
             .module_class_cache
             .as_ref()
             .and_then(|cache| cache.entries[cache_slot.0].as_ref())
@@ -693,6 +698,7 @@ fn replacement_registry_disables_module_class_cache_and_respects_internal_priori
     );
 
     interpreter
+        .cold
         .bootstrap_module_registry
         .dict_shift_remove(&PyKey::str_from("typing"))
         .unwrap();
@@ -705,6 +711,7 @@ fn replacement_registry_disables_module_class_cache_and_respects_internal_priori
     ));
     assert!(
         interpreter
+            .cold
             .module_class_cache
             .as_ref()
             .and_then(|cache| cache.entries[cache_slot.0].as_ref())
@@ -723,6 +730,7 @@ fn invalid_visible_registry_does_not_break_cached_module_class_internal_hits() {
         .unwrap();
     assert!(
         interpreter
+            .cold
             .module_class_cache
             .as_ref()
             .and_then(|cache| cache.entries[cache_slot.0].as_ref())
@@ -741,6 +749,7 @@ fn invalid_visible_registry_does_not_break_cached_module_class_internal_hits() {
     ));
     assert!(
         interpreter
+            .cold
             .module_class_cache
             .as_ref()
             .and_then(|cache| cache.entries[cache_slot.0].as_ref())
@@ -760,6 +769,7 @@ fn invalid_visible_registry_does_not_break_cached_module_class_internal_hits() {
     ));
     assert!(
         interpreter
+            .cold
             .module_class_cache
             .as_ref()
             .and_then(|cache| cache.entries[cache_slot.0].as_ref())

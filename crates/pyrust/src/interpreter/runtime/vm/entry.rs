@@ -193,9 +193,8 @@ impl Interpreter {
         // The matching split-off on a subsequent yield, plus the
         // wrapper's truncate-on-exit, then keep the caller's view of
         // `handled_exc_stack` untouched throughout.
-        let gen_handled = std::mem::take(&mut frame.handled_exc_slice);
-        let gen_active = frame.active_exception.take();
-        let gen_exc_saved_active = std::mem::take(&mut frame.exc_saved_active_slice);
+        let (gen_exc_handlers, gen_handled, gen_active, gen_exc_saved_active) =
+            frame.take_resume_exc_state();
 
         // Issue #483/#486/#547: publish this generator's `VmFrameView` before
         // constructing `RegSlice`.
@@ -219,7 +218,7 @@ impl Interpreter {
             regs_slice,
             cells_slice,
             std::mem::take(&mut frame.iters),
-            std::mem::take(&mut frame.exc_handlers),
+            gen_exc_handlers,
             frame.pc,
             inject_exc,
             gen_handled,
@@ -233,7 +232,7 @@ impl Interpreter {
             if frame.code.is_inlined_comp {
                 // PEP 709 (#2993): async collection comprehensions are inlined
                 // into their enclosing async function frame.
-                self.inlined_comp_escaped_span = Some(pyrust_core::get_current_vm_col_span());
+                self.cold.inlined_comp_escaped_span = Some(pyrust_core::get_current_vm_col_span());
             } else {
                 // Generator's own code-object filename (#2438): a generator defined
                 // in an imported module reports its module's source file.
@@ -275,11 +274,13 @@ impl Interpreter {
                 // Generator suspended: restore frame state from the outcome.
                 let saved = *saved;
                 frame.iters = saved.iters;
-                frame.exc_handlers = saved.exc_handlers;
                 frame.pc = saved.pc;
-                frame.handled_exc_slice = saved.handled_exc_slice;
-                frame.active_exception = saved.active_exception;
-                frame.exc_saved_active_slice = saved.exc_saved_active_slice;
+                frame.store_yield_exc_state(
+                    saved.exc_handlers,
+                    saved.handled_exc_slice,
+                    saved.active_exception,
+                    saved.exc_saved_active_slice,
+                );
                 frame.yield_dst = saved.yield_dst;
                 frame.suspended_line = saved.suspended_line;
                 Ok(value)
@@ -290,7 +291,7 @@ impl Interpreter {
                 // StopIteration.value (PEP 380 §3 step 4).
                 frame.last_return_value = Some(ret_val.clone());
                 frame.done = true;
-                if frame.frame_cache.borrow().is_some() {
+                if frame.has_frame_cache() {
                     self.link_finished_generator_frame_back(frame);
                 }
                 // CPython synthesises `StopIteration()` with *empty* args when a
@@ -368,7 +369,7 @@ impl Interpreter {
         // always emitted as matched pairs within a single function body, but if
         // the block raises out of the frame, PopExcContext is never executed.
         // Scoping the marks vector to this frame keeps outer frames intact.
-        let saved_push_exc_ctx_marks = std::mem::take(&mut self.push_exc_ctx_marks);
+        let saved_push_exc_ctx_marks = std::mem::take(&mut self.cold.push_exc_ctx_marks);
 
         let result = self.run_bytecode_inner_impl(
             code,
@@ -409,7 +410,7 @@ impl Interpreter {
         self.handled_exc_stack.truncate(exc_ctx_entry_depth);
         self.exc_saved_active.truncate(exc_saved_active_entry_depth);
         self.active_exception = saved_active;
-        self.push_exc_ctx_marks = saved_push_exc_ctx_marks;
+        self.cold.push_exc_ctx_marks = saved_push_exc_ctx_marks;
         result
     }
 
@@ -478,7 +479,7 @@ impl Interpreter {
         let gen_num_locals = gframe.code.num_locals;
         let gen_pc = gframe.pc;
         let gen_iters = std::mem::take(&mut gframe.iters);
-        let gen_exc_handlers = std::mem::take(&mut gframe.exc_handlers);
+        let gen_exc_handlers = gframe.take_exc_handlers();
         let gen_env = Rc::clone(&gframe.function.env);
         let gen_iters_len = gen_iters.len();
         let gen_iter_cache = if gen_iters_len == 0 {
@@ -796,6 +797,7 @@ impl Interpreter {
         // outer handler entry immediately beneath it; PopExcContext restores
         // the stack cleanly once the inner handler finishes.
         let protected_by_push_ctx = self
+            .cold
             .push_exc_ctx_marks
             .last()
             .is_some_and(|&(saved_len, _)| self.handled_exc_stack.len() <= saved_len + 1);

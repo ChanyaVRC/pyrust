@@ -104,8 +104,7 @@ impl Environment {
                     declared.insert(name.clone(), value.clone());
                 } else if env_fallback
                     && !declared.contains_key(name.as_str())
-                    && let Some(values) = self.try_namespace_values()
-                    && let Some(value) = values.get(name)
+                    && let Some(value) = self.namespace_values().get(name)
                 {
                     declared.insert(name.clone(), value.clone());
                 }
@@ -135,14 +134,10 @@ impl Environment {
             && let Some(order) = self.root_namespace.binding_order.borrow().as_deref()
         {
             let mut live: IndexMap<String, Value> = self
-                .try_namespace_values()
-                .map(|values| {
-                    values
-                        .iter()
-                        .map(|(name, value)| (name.to_string(), value.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
+                .namespace_values()
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.clone()))
+                .collect();
             for (name, value) in self.declared_bindings_in_binding_order(false) {
                 live.insert(name, value);
             }
@@ -157,15 +152,11 @@ impl Environment {
         }
         let declared = self.declared_bindings_in_binding_order(true);
         let mut ordered: Vec<(String, Value)> = self
-            .try_namespace_values()
-            .map(|values| {
-                values
-                    .iter()
-                    .filter(|(name, _)| !declared.contains_key(*name))
-                    .map(|(name, value)| (name.to_string(), value.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .namespace_values()
+            .iter()
+            .filter(|(name, _)| !declared.contains_key(*name))
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect();
         ordered.extend(declared);
         ordered
     }
@@ -282,9 +273,7 @@ impl Environment {
         if order.is_empty() {
             return;
         }
-        let Some(values) = self.try_namespace_values_mut() else {
-            return;
-        };
+        let values = self.namespace_values_mut();
         let mut remaining: IndexMap<String, Value> = values
             .iter()
             .map(|(name, value)| (name.to_string(), value.clone()))

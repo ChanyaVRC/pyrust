@@ -1,13 +1,12 @@
-/// A single lexical scope's binding storage (issue #452).
+/// A single lexical scope's binding storage (issues #452 / #3162).
 ///
-/// Each `Environment` stores *either* a name-keyed [`EnvValues`] namespace
-/// (module, class body, PEP 695 type-parameter scope, or explicit `exec`/`eval`
-/// namespace) *or* a flat indexed [`CellSlot`] vector via [`EnvironmentStorage`]
-/// — never dual storage. Ordinary function calls do not allocate an
-/// `Environment` at all: their locals live in frame registers, their captured
-/// cells live in the frame's `CellSlot` slice / `UserFunction::closure_cells`,
-/// and their `env` points straight at the enclosing module/class/type-param
-/// namespace.
+/// Each `Environment` stores a name-keyed [`EnvValues`] namespace (module,
+/// class body, PEP 695 type-parameter scope, or explicit `exec`/`eval`
+/// namespace) via [`EnvironmentStorage`]. Ordinary function calls do not
+/// allocate an `Environment` at all: their locals live in frame registers,
+/// their captured cells live in the frame's `CellSlot` slice /
+/// `UserFunction::closure_cells`, and their `env` points straight at the
+/// enclosing module/class/type-param namespace.
 ///
 /// The authoritative description of namespace lookup rules lives in
 /// `crates/pyrust/src/interpreter/helpers/name_resolution.rs` (search for
@@ -24,7 +23,7 @@ pub struct Environment {
     /// Identity, mutation generations, and globals provider shared by every
     /// lexical scope below the same root namespace.
     root_namespace: Rc<RootNamespaceState>,
-    /// Explicit single-representation binding storage (issue #452).
+    /// Name-keyed binding storage (issues #452 / #3162).
     pub storage: EnvironmentStorage,
     pub local_names: NameSet,
     pub global_names: NameSet,
@@ -65,77 +64,19 @@ impl Environment {
         }))
     }
 
-    /// Create an `Environment` backed solely by indexed [`CellSlot`] storage.
-    pub fn new_cells(parent: Option<EnvRef>, cells: smallvec::SmallVec<[CellSlot; 4]>) -> EnvRef {
-        let root_namespace = Self::root_namespace_for_parent(parent.as_ref());
-        Rc::new(RefCell::new(Self {
-            root_namespace,
-            storage: EnvironmentStorage::Cells(cells),
-            local_names: Rc::new(HashSet::new()),
-            global_names: Rc::new(HashSet::new()),
-            nonlocal_names: Rc::new(HashSet::new()),
-            parent,
-            class_annotation: None,
-        }))
-    }
-
-    /// Borrow the name-keyed namespace bindings, panicking if this environment
-    /// holds cell-only storage.
+    /// Borrow the name-keyed namespace bindings.
     #[inline]
     pub fn namespace_values(&self) -> &EnvValues {
         match &self.storage {
             EnvironmentStorage::Namespace(values) => values,
-            EnvironmentStorage::Cells(_) => {
-                panic!("namespace_values() called on a Cells-backed Environment")
-            }
         }
     }
 
-    /// Mutably borrow the name-keyed namespace bindings, panicking if this
-    /// environment holds cell-only storage.
+    /// Mutably borrow the name-keyed namespace bindings.
     #[inline]
     pub fn namespace_values_mut(&mut self) -> &mut EnvValues {
         match &mut self.storage {
             EnvironmentStorage::Namespace(values) => values,
-            EnvironmentStorage::Cells(_) => {
-                panic!("namespace_values_mut() called on a Cells-backed Environment")
-            }
-        }
-    }
-
-    /// Borrow the name-keyed namespace bindings when this is a `Namespace` env.
-    #[inline]
-    pub fn try_namespace_values(&self) -> Option<&EnvValues> {
-        match &self.storage {
-            EnvironmentStorage::Namespace(values) => Some(values),
-            EnvironmentStorage::Cells(_) => None,
-        }
-    }
-
-    /// Mutably borrow the name-keyed namespace bindings when this is a `Namespace` env.
-    #[inline]
-    pub fn try_namespace_values_mut(&mut self) -> Option<&mut EnvValues> {
-        match &mut self.storage {
-            EnvironmentStorage::Namespace(values) => Some(values),
-            EnvironmentStorage::Cells(_) => None,
-        }
-    }
-
-    /// Borrow the indexed cell slots when this is a `Cells`-backed env.
-    #[inline]
-    pub fn cells(&self) -> Option<&[CellSlot]> {
-        match &self.storage {
-            EnvironmentStorage::Cells(cells) => Some(cells),
-            EnvironmentStorage::Namespace(_) => None,
-        }
-    }
-
-    /// Mutably borrow the indexed cell slots when this is a `Cells`-backed env.
-    #[inline]
-    pub fn cells_mut(&mut self) -> Option<&mut smallvec::SmallVec<[CellSlot; 4]>> {
-        match &mut self.storage {
-            EnvironmentStorage::Cells(cells) => Some(cells),
-            EnvironmentStorage::Namespace(_) => None,
         }
     }
 
@@ -144,12 +85,7 @@ impl Environment {
     /// may previously have belonged to a different module namespace.
     pub fn reset_for_reuse(&mut self, parent: Option<EnvRef>) {
         self.root_namespace = Self::root_namespace_for_parent(parent.as_ref());
-        match &mut self.storage {
-            EnvironmentStorage::Namespace(values) => values.clear(),
-            EnvironmentStorage::Cells(_) => {
-                self.storage = EnvironmentStorage::Namespace(EnvValues::new());
-            }
-        }
+        self.namespace_values_mut().clear();
         self.parent = parent;
         self.local_names = Rc::new(HashSet::new());
         self.global_names = Rc::new(HashSet::new());

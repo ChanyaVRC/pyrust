@@ -320,7 +320,8 @@ impl Interpreter {
             // when the body actually errored (see the simple-call path above).
             if vm_result.is_err() {
                 if code.is_inlined_comp {
-                    self.inlined_comp_escaped_span = Some(pyrust_core::get_current_vm_col_span());
+                    self.cold.inlined_comp_escaped_span =
+                        Some(pyrust_core::get_current_vm_col_span());
                 } else {
                     // Callee's own code-object filename (#2438): an imported module's
                     // function reports its module's source file.

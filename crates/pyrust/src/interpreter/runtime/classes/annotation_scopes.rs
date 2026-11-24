@@ -13,7 +13,8 @@ impl Interpreter {
         filename: std::sync::Arc<str>,
     ) {
         if !has_type_alias {
-            self.class_annotation_scopes
+            self.cold
+                .class_annotation_scopes
                 .push(ActiveClassAnnotationScopes {
                     slot_names: Vec::new(),
                     scopes: Vec::new(),
@@ -31,7 +32,8 @@ impl Interpreter {
                 *target = Some(name.clone());
             }
         }
-        self.class_annotation_scopes
+        self.cold
+            .class_annotation_scopes
             .push(ActiveClassAnnotationScopes {
                 slot_names,
                 scopes: Vec::new(),
@@ -63,7 +65,7 @@ impl Interpreter {
         let env = Rc::clone(&function.env);
         env.borrow_mut().initialize_class_annotation_scope();
 
-        let Some(active) = self.class_annotation_scopes.last_mut() else {
+        let Some(active) = self.cold.class_annotation_scopes.last_mut() else {
             return;
         };
         for (slot, name) in active.slot_names.iter().enumerate() {
@@ -94,12 +96,12 @@ impl Interpreter {
         regs: &RegSlice,
         slot: crate::bytecode::Reg,
     ) {
-        if let Some(order) = self.class_store_order.last_mut()
+        if let Some(order) = self.cold.class_store_order.last_mut()
             && !order.contains(&slot)
         {
             order.push(slot);
         }
-        let Some(active) = self.class_annotation_scopes.last_mut() else {
+        let Some(active) = self.cold.class_annotation_scopes.last_mut() else {
             return;
         };
         if let Some(namespace) = active.live_namespace.get_mut().as_ref()
@@ -138,10 +140,10 @@ impl Interpreter {
     /// Record one class-body deletion in ordering/type-alias state. DeleteLocal
     /// already removed an exposed binding from the live class dict.
     pub(crate) fn record_class_namespace_delete(&mut self, slot: crate::bytecode::Reg) {
-        if let Some(order) = self.class_store_order.last_mut() {
+        if let Some(order) = self.cold.class_store_order.last_mut() {
             order.retain(|stored| *stored != slot);
         }
-        let Some(active) = self.class_annotation_scopes.last_mut() else {
+        let Some(active) = self.cold.class_annotation_scopes.last_mut() else {
             return;
         };
         if active.qualname_slot == Some(slot) {
@@ -165,6 +167,7 @@ impl Interpreter {
 
     fn pop_class_annotation_scopes(&mut self) -> (Vec<Weak<RefCell<Environment>>>, Option<Value>) {
         let active = self
+            .cold
             .class_annotation_scopes
             .pop()
             .expect("class annotation-scope stack popped to empty");

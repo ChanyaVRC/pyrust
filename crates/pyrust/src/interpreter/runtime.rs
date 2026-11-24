@@ -81,11 +81,11 @@ pub(crate) use call_state::{
 mod calls {
     use super::classes::{PrimitiveLayout, classify_primitive_layout, primitive_layout_for_class};
     use super::{
-        CallDepthGuard, CellSlice, CellsBuf, ExcHandlersBuf, ExpandedArgBuf, ExpandedCallArg,
-        FnCode, GeneratorFrame, GeneratorKind, HandledExcBuf, InstanceAttrs, Interpreter, PyClass,
-        PyDict, PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result, UserFunction,
-        Value, ValueKind, VmFrameView, allocate_frame_cells, bind_class_level_method_wrapper,
-        call_depth, call_descriptor_get, call_slot_value_unbound, class_chain_new_slot_wrapped,
+        CallDepthGuard, CellSlice, CellsBuf, ExpandedArgBuf, ExpandedCallArg, FnCode,
+        GeneratorFrame, GeneratorKind, InstanceAttrs, Interpreter, PyClass, PyDict, PyError,
+        PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result, UserFunction, Value, ValueKind,
+        VmFrameView, allocate_frame_cells, bind_class_level_method_wrapper, call_depth,
+        call_descriptor_get, call_slot_value_unbound, class_chain_new_slot_wrapped,
         class_is_subclass_of, invoke_class_method, is_exception_class, is_primitive_class,
         lookup_class_attr, mapping_entries_for_expansion, max_call_depth, object_class_singleton,
         slot_is_descriptor, smallvec, type_class_singleton, value_type_name_str,
@@ -268,15 +268,15 @@ mod namespaces {
     use super::{
         CachedImportModuleRegistry, CachedModuleClass, CellSlice, CollectionMutationState,
         ENV_POOL_MAX, EnvRef, Environment, ExpandedCallArg, FrameKind, HashMap, InstanceAttrs,
-        Interpreter, MODULE_CLASS_CACHE_SLOT_COUNT, ModuleClassCache, ModuleClassCacheSlot,
-        ModuleMutationState, PathBuf, PyClass, PyDict, PyError, PyInstance, PyKey, PyModule, Rc,
-        RefCell, RegSlice, Result, StrKey, Value, ValueKind, active_live_class_namespace,
-        cached_builtins_module, call_del_if_last_binding, call_del_if_last_binding_in_env,
-        env_assign_local, get_int_max_str_digits, invoke_class_method, is_cached_builtins_module,
-        lookup_class_attr, lookup_name_in_env, lookup_name_in_env_as_free, lookup_name_in_module,
-        lookup_value_special_method, module_env, module_type_singleton, object_class_singleton,
-        set_int_max_str_digits, unbound_binding_error, value_type_name_str, values_are_identical,
-        vm_read,
+        Interpreter, InterpreterColdState, MODULE_CLASS_CACHE_SLOT_COUNT, ModuleClassCache,
+        ModuleClassCacheSlot, ModuleMutationState, PathBuf, PyClass, PyDict, PyError, PyInstance,
+        PyKey, PyModule, Rc, RefCell, RegSlice, Result, StrKey, Value, ValueKind,
+        active_live_class_namespace, cached_builtins_module, call_del_if_last_binding,
+        call_del_if_last_binding_in_env, env_assign_local, get_int_max_str_digits,
+        invoke_class_method, is_cached_builtins_module, lookup_class_attr, lookup_name_in_env,
+        lookup_name_in_env_as_free, lookup_name_in_module, lookup_value_special_method, module_env,
+        module_type_singleton, object_class_singleton, set_int_max_str_digits,
+        unbound_binding_error, value_type_name_str, values_are_identical, vm_read,
     };
     include!("runtime/namespaces.rs");
 }
@@ -395,8 +395,7 @@ mod execution {
     include!("runtime/vm/tests.rs");
 }
 pub(crate) use execution::{
-    AnextAwaitable, AsyncGenASend, CoroStep, ExcHandlersBuf, GenDriveFrame, GeneratorFrame,
-    HandledExcBuf, RegsBuf, TrampFrame,
+    AnextAwaitable, AsyncGenASend, CoroStep, GenDriveFrame, GeneratorFrame, RegsBuf, TrampFrame,
 };
 use execution::{GenDriving, vm_read};
 

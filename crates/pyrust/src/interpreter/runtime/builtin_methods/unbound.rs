@@ -8,7 +8,12 @@ impl Interpreter {
     /// already-imported module. This supports type-qualified builtin
     /// descriptors whose sentinel stores only the class name.
     fn collections_class_by_name(&self, name: &str) -> Option<Rc<RefCell<PyClass>>> {
-        let module_val = self.module_cache.borrow().get("collections").cloned()?;
+        let module_val = self
+            .cold
+            .module_cache
+            .borrow()
+            .get("collections")
+            .cloned()?;
         let ValueKind::PyModule(module) = module_val.kind() else {
             return None;
         };

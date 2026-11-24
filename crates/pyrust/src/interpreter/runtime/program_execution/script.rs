@@ -83,14 +83,13 @@ impl Interpreter {
         let mut script_argv = Vec::with_capacity(args.len() + 1);
         script_argv.push(path.to_string());
         script_argv.extend(args.iter().cloned());
-        Self {
-            script_dir: Some(dir),
-            script_filename: Some(std::sync::Arc::from(path)),
-            script_define_file_dunder: true,
-            script_package: None,
-            script_argv,
-            ..Default::default()
-        }
+        let mut interp = Self::default();
+        interp.cold.script_dir = Some(dir);
+        interp.cold.script_filename = Some(std::sync::Arc::from(path));
+        interp.cold.script_define_file_dunder = true;
+        interp.cold.script_package = None;
+        interp.cold.script_argv = script_argv;
+        interp
     }
 
     /// Create an interpreter for `-c <command> [args...]`.
@@ -102,14 +101,13 @@ impl Interpreter {
         let mut script_argv = Vec::with_capacity(args.len() + 1);
         script_argv.push("-c".to_string());
         script_argv.extend(args.iter().cloned());
-        Self {
-            script_dir: Some(std::path::PathBuf::from("")),
-            script_filename: Some(std::sync::Arc::from("<string>")),
-            script_define_file_dunder: false,
-            script_package: None,
-            script_argv,
-            ..Default::default()
-        }
+        let mut interp = Self::default();
+        interp.cold.script_dir = Some(std::path::PathBuf::from(""));
+        interp.cold.script_filename = Some(std::sync::Arc::from("<string>"));
+        interp.cold.script_define_file_dunder = false;
+        interp.cold.script_package = None;
+        interp.cold.script_argv = script_argv;
+        interp
     }
 
     /// Create an interpreter for `-` (stdin execution) with `[args...]`.
@@ -120,14 +118,13 @@ impl Interpreter {
         let mut script_argv = Vec::with_capacity(args.len() + 1);
         script_argv.push("-".to_string());
         script_argv.extend(args.iter().cloned());
-        Self {
-            script_dir: Some(std::path::PathBuf::from("")),
-            script_filename: Some(std::sync::Arc::from("<stdin>")),
-            script_define_file_dunder: false,
-            script_package: None,
-            script_argv,
-            ..Default::default()
-        }
+        let mut interp = Self::default();
+        interp.cold.script_dir = Some(std::path::PathBuf::from(""));
+        interp.cold.script_filename = Some(std::sync::Arc::from("<stdin>"));
+        interp.cold.script_define_file_dunder = false;
+        interp.cold.script_package = None;
+        interp.cold.script_argv = script_argv;
+        interp
     }
 
     /// Create an interpreter configured for `-m <module> [args...]`.
@@ -141,14 +138,13 @@ impl Interpreter {
         let mut script_argv = Vec::with_capacity(args.len() + 1);
         script_argv.push("-m".to_string());
         script_argv.extend(args.iter().cloned());
-        Self {
-            script_dir: Some(cwd),
-            script_filename: None,
-            script_define_file_dunder: true,
-            script_package: None,
-            script_argv,
-            ..Default::default()
-        }
+        let mut interp = Self::default();
+        interp.cold.script_dir = Some(cwd);
+        interp.cold.script_filename = None;
+        interp.cold.script_define_file_dunder = true;
+        interp.cold.script_package = None;
+        interp.cold.script_argv = script_argv;
+        interp
     }
 
     /// Exit the current process if `err` is an uncaught `SystemExit` instance,
@@ -218,13 +214,13 @@ impl Interpreter {
         let (program, linenos) = Self::parse_source_to_stmts_with_linenos(&src)?;
 
         let resolved_path = target.file_path.to_string_lossy().into_owned();
-        self.script_filename = Some(std::sync::Arc::from(resolved_path.as_str()));
-        self.script_define_file_dunder = true;
-        self.script_package = Some(target.package_name);
-        if let Some(arg0) = self.script_argv.first_mut() {
+        self.cold.script_filename = Some(std::sync::Arc::from(resolved_path.as_str()));
+        self.cold.script_define_file_dunder = true;
+        self.cold.script_package = Some(target.package_name);
+        if let Some(arg0) = self.cold.script_argv.first_mut() {
             *arg0 = resolved_path.clone();
         } else {
-            self.script_argv.push(resolved_path.clone());
+            self.cold.script_argv.push(resolved_path.clone());
         }
         self.update_sys_argv0(&resolved_path)?;
 
@@ -371,7 +367,8 @@ impl Interpreter {
         // builtins module's ~136-entry HashMap on every script invocation.
         let builtins_val = cached_builtins_module();
         // Warm module_cache so `import builtins` is a free cache hit.
-        self.module_cache
+        self.cold
+            .module_cache
             .borrow_mut()
             .entry("builtins".to_string())
             .or_insert_with(|| builtins_val.clone());
@@ -402,6 +399,7 @@ impl Interpreter {
         seed_env!("__name__", intern_string("__main__"));
         seed_env!("__doc__", Value::none());
         let package_val = self
+            .cold
             .script_package
             .as_deref()
             .map(Value::string)
@@ -409,8 +407,8 @@ impl Interpreter {
         seed_env!("__package__", package_val);
         seed_env!("__loader__", Value::none());
         seed_env!("__spec__", Value::none());
-        let script_file = if self.script_define_file_dunder {
-            self.script_filename.as_deref().map(Value::string)
+        let script_file = if self.cold.script_define_file_dunder {
+            self.cold.script_filename.as_deref().map(Value::string)
         } else {
             None
         };
@@ -472,7 +470,7 @@ impl Interpreter {
     /// module identity remains stable, and is never called for imported
     /// filesystem modules (`ScriptErrorMode::PropagateImport`).
     fn ensure_main_module_registered(&mut self) {
-        if self.module_cache.borrow().contains_key("__main__") {
+        if self.cold.module_cache.borrow().contains_key("__main__") {
             return;
         }
         let me_ref = module_env(&self.env);
@@ -482,7 +480,8 @@ impl Interpreter {
         )));
         module_rc.borrow_mut().attach_main_namespace(&me_ref);
         let main_module = Value::py_module(module_rc);
-        self.module_cache
+        self.cold
+            .module_cache
             .borrow_mut()
             .insert("__main__".to_string(), main_module.clone());
         let _ = self.insert_import_registry("__main__", main_module);
@@ -492,8 +491,8 @@ impl Interpreter {
     /// instruction. Loading `sys` here also ensures imported modules share the
     /// top-level script's argument vector, even when they import `sys` first.
     fn initialize_script_argv(&mut self) -> Result<()> {
-        if self.script_argv_initialized
-            || (self.script_filename.is_none() && self.script_argv.is_empty())
+        if self.cold.script_argv_initialized
+            || (self.cold.script_filename.is_none() && self.cold.script_argv.is_empty())
         {
             return Ok(());
         }
@@ -503,9 +502,9 @@ impl Interpreter {
         };
         module.borrow_mut().insert_attr(
             "argv".to_string(),
-            Value::list(self.script_argv.iter().map(Value::string).collect()),
+            Value::list(self.cold.script_argv.iter().map(Value::string).collect()),
         );
-        self.script_argv_initialized = true;
+        self.cold.script_argv_initialized = true;
         Ok(())
     }
 
@@ -530,7 +529,7 @@ impl Interpreter {
         }
         module.borrow_mut().insert_attr(
             "argv".to_string(),
-            Value::list(self.script_argv.iter().map(Value::string).collect()),
+            Value::list(self.cold.script_argv.iter().map(Value::string).collect()),
         );
         Ok(())
     }
@@ -676,7 +675,7 @@ impl Interpreter {
         // Tag every code object with this script's path so traceback frames and
         // `__code__.co_filename` report the file the code came from, even when an
         // imported module's function is called from a different script (#2438).
-        let script_path = self.script_filename.as_deref().unwrap_or("<unknown>");
+        let script_path = self.cold.script_filename.as_deref().unwrap_or("<unknown>");
         let is_imported_module = matches!(namespace_storage, ModuleNamespaceStorage::SharedGlobals);
         let (local_index, compiled) = match namespace_storage {
             ModuleNamespaceStorage::FastLocals(local_index) => {
@@ -795,7 +794,7 @@ impl Interpreter {
         // (they were popped before returning the error).  The call-site frames
         // were captured into the CAPTURED_ERROR_FRAMES thread-local by calls.rs.
         let maybe_tb: Option<String> = if error_mode == ScriptErrorMode::FormatUncaught {
-            if let (Err(e), Some(filename)) = (&vm_result, &self.script_filename) {
+            if let (Err(e), Some(filename)) = (&vm_result, &self.cold.script_filename) {
                 // CPython does not emit a traceback for SystemExit (the process
                 // exits cleanly).  Skip traceback formatting when the error is a
                 // SystemExit so that `exec_program`'s SystemExit handler still

@@ -14,6 +14,43 @@ pub(crate) type RegsBuf = smallvec::SmallVec<[Value; VM_REGS_INLINE]>;
 pub(crate) type ExcHandlersBuf = smallvec::SmallVec<[usize; 2]>;
 pub(crate) type HandledExcBuf = smallvec::SmallVec<[Value; 2]>;
 
+/// Cold exception, async-generator ownership, and frame-introspection state
+/// for a [`GeneratorFrame`] (issue #3162).
+///
+/// Allocated lazily behind `RefCell<Option<Box<GenColdState>>>` only when a
+/// generator enters an exception handler, holds an active exception, runs
+/// async-generator ownership tracking, or materializes a `VmFrameCache`.
+/// Common happy-path yield/resume generators never allocate this struct.
+#[derive(Default)]
+pub(crate) struct GenColdState {
+    pub(crate) exc_handlers: ExcHandlersBuf,
+    /// PEP 3134 per-frame exception state snapshot, persisted across a
+    /// `yield` and re-installed on resume.  Stores the slice of
+    /// `Interpreter::handled_exc_stack` that belongs to *this* generator
+    /// frame (entries pushed above the caller's base depth at yield time).
+    /// Without this, a generator that yields while inside an
+    /// `except` / `finally` body would leak its handled-exception context
+    /// onto the caller's `Interpreter` between `next()` calls.
+    pub(crate) handled_exc_slice: HandledExcBuf,
+    /// The interpreter's `active_exception` at the moment of yield.
+    /// Saved and restored alongside `handled_exc_slice` so that resume
+    /// can re-establish the suspended frame's exception view without
+    /// disturbing the caller's.
+    pub(crate) active_exception: Option<Value>,
+    /// Parallel save-stack for `active_exception` across nested `except`
+    /// blocks within this generator frame.  Split off at yield time
+    /// (alongside `handled_exc_slice`) and re-extended on resume.
+    pub(crate) exc_saved_active_slice: Vec<Option<Value>>,
+    /// The one async-generator awaitable allowed to resume this frame while it
+    /// is parked inside an inner `await`. `Some` remains occupied even after
+    /// the weak pointer expires: CPython does not release running ownership
+    /// when that awaitable is closed or dropped.
+    pub(crate) async_gen_running_owner: Option<std::rc::Weak<GeneratorCell>>,
+    /// Frame identity belongs to the generator activation, not to one resume.
+    /// Kept absent until code inside the generator introspects its frame.
+    pub(crate) frame_cache: Option<Box<VmFrameCache>>,
+}
+
 /// Heap-allocated execution state for a suspended generator.
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`.
 pub(crate) struct GeneratorFrame {
@@ -33,32 +70,8 @@ pub(crate) struct GeneratorFrame {
     /// empty) rather than an inline `SmallVec` so `GeneratorFrame` stays compact.
     pub(crate) cells: Box<[pyrust_core::CellSlot]>,
     pub(crate) iters: ItersBuf,
-    pub(crate) exc_handlers: ExcHandlersBuf,
     /// Program counter for the NEXT instruction to execute on resumption.
     pub(crate) pc: usize,
-    pub(crate) done: bool,
-    /// PEP 3134 per-frame exception state snapshot, persisted across a
-    /// `yield` and re-installed on resume.  Stores the slice of
-    /// `Interpreter::handled_exc_stack` that belongs to *this* generator
-    /// frame (entries pushed above the caller's base depth at yield time).
-    /// Without this, a generator that yields while inside an
-    /// `except` / `finally` body would leak its handled-exception context
-    /// onto the caller's `Interpreter` between `next()` calls.
-    pub(crate) handled_exc_slice: HandledExcBuf,
-    /// The interpreter's `active_exception` at the moment of yield.
-    /// Saved and restored alongside `handled_exc_slice` so that resume
-    /// can re-establish the suspended frame's exception view without
-    /// disturbing the caller's.
-    pub(crate) active_exception: Option<Value>,
-    /// Parallel save-stack for `active_exception` across nested `except`
-    /// blocks within this generator frame.  Split off at yield time
-    /// (alongside `handled_exc_slice`) and re-extended on resume.
-    pub(crate) exc_saved_active_slice: Vec<Option<Value>>,
-    /// The destination register of the most recent `Yield` instruction.
-    /// On the next resumption this register receives the sent value
-    /// (`Value::none()` for `next()`, the caller's argument for `send()`).
-    /// Meaningless until the generator has yielded at least once (`pc != 0`).
-    pub(crate) yield_dst: crate::bytecode::Reg,
     /// The value from an explicit `return val` inside this generator.
     /// Set by `resume_generator_with_exc` when `FrameOutcome::Returned(val)`
     /// is received, so that `YieldFrom` can capture `StopIteration.value`
@@ -80,29 +93,32 @@ pub(crate) struct GeneratorFrame {
     /// `GeneratorCell`.  Read on `Drop` so CPython's never-awaited coroutine
     /// warning reports the coroutine's current `__qualname__` (issue #2981).
     pub(crate) display_names: Rc<std::cell::RefCell<pyrust_core::GeneratorNames>>,
+    /// Lazily allocated cold exception, async-generator ownership, and
+    /// introspection state (issue #3162).
+    ///
+    /// Interior mutability lets an active `VmFrameView` reach the persistent
+    /// `frame_cache` through its shared generator pointer without creating a
+    /// raw-derived `&mut GeneratorFrame` or moving the cache through the hot
+    /// resume/yield path. Callers with `&mut GeneratorFrame` use
+    /// `self.cold.get_mut()` with zero runtime borrow-check overhead.
+    pub(crate) cold: std::cell::RefCell<Option<Box<GenColdState>>>,
+    /// The destination register of the most recent `Yield` instruction.
+    /// On the next resumption this register receives the sent value
+    /// (`Value::none()` for `next()`, the caller's argument for `send()`).
+    /// Meaningless until the generator has yielded at least once (`pc != 0`).
+    pub(crate) yield_dst: crate::bytecode::Reg,
     /// Source line of the `yield` the generator is currently suspended at
     /// (`0` before the first yield).  Restored into the dispatch loop's
     /// `cur_line` on resume so that an exception caught inside the body after a
     /// `generator.throw()` reports the yield line — not the throw call site —
     /// in its traceback (issue #2445).
     pub(crate) suspended_line: u32,
+    pub(crate) done: bool,
     /// True when this frame backs a *coroutine* (an `async def` body, issue
     /// #1039) rather than a plain generator.  Coroutines reuse the entire
     /// suspend/resume machinery but report `type(coro).__name__ == "coroutine"`,
     /// render a `<coroutine object …>` repr, and are NOT iterable with `for`.
     pub(crate) is_coroutine: bool,
-    /// The one async-generator awaitable allowed to resume this frame while it
-    /// is parked inside an inner `await`. `Some` remains occupied even after
-    /// the weak pointer expires: CPython does not release running ownership
-    /// when that awaitable is closed or dropped.
-    pub(crate) async_gen_running_owner: Option<std::rc::Weak<GeneratorCell>>,
-    /// Frame identity belongs to the generator activation, not to one resume.
-    /// The box remains absent until code inside the generator introspects its
-    /// frame, so generators that never do so allocate nothing for this cache.
-    /// Interior mutability lets an active `VmFrameView` reach the persistent
-    /// cache through its shared generator pointer without moving it through
-    /// the ordinary resume/yield hot path.
-    pub(crate) frame_cache: std::cell::RefCell<Option<Box<VmFrameCache>>>,
 }
 
 impl GeneratorFrame {
@@ -115,6 +131,163 @@ impl GeneratorFrame {
     /// suspension (→ propagate to the event loop).
     pub(crate) fn is_async_generator(&self) -> bool {
         self.is_coroutine && self.code.is_generator
+    }
+
+    /// True if this suspended generator carries any persisted PEP 3134
+    /// exception context (`handled_exc_slice`, `active_exception`, or
+    /// `exc_saved_active_slice`).
+    #[inline]
+    pub(crate) fn has_exc_state(&self) -> bool {
+        self.cold.borrow().as_ref().is_some_and(|cold| {
+            !cold.handled_exc_slice.is_empty()
+                || cold.active_exception.is_some()
+                || !cold.exc_saved_active_slice.is_empty()
+        })
+    }
+
+    /// True if this generator has materialized a persistent `VmFrameCache`.
+    #[inline]
+    pub(crate) fn has_frame_cache(&self) -> bool {
+        self.cold
+            .borrow()
+            .as_ref()
+            .is_some_and(|cold| cold.frame_cache.is_some())
+    }
+
+    /// Read this generator's persistent `VmFrameCache`, if present, without
+    /// allocating `GenColdState`.
+    #[inline]
+    pub(crate) fn with_frame_cache<R>(&self, read: impl FnOnce(Option<&VmFrameCache>) -> R) -> R {
+        let cold = self.cold.borrow();
+        let cache = cold.as_deref().and_then(|c| c.frame_cache.as_deref());
+        read(cache)
+    }
+
+    /// Mutably update this generator's persistent `VmFrameCache`, lazily
+    /// allocating `GenColdState` if needed.
+    #[inline]
+    pub(crate) fn with_frame_cache_mut<R>(
+        &self,
+        update: impl FnOnce(&mut Option<Box<VmFrameCache>>) -> R,
+    ) -> R {
+        let mut cold = self.cold.borrow_mut();
+        let state = cold.get_or_insert_with(|| Box::new(GenColdState::default()));
+        update(&mut state.frame_cache)
+    }
+
+    /// Take the generator's persisted `exc_handlers` without allocating cold
+    /// state on the common handler-free path.
+    #[inline]
+    pub(crate) fn take_exc_handlers(&mut self) -> ExcHandlersBuf {
+        match self.cold.get_mut().as_deref_mut() {
+            Some(cold) => std::mem::take(&mut cold.exc_handlers),
+            None => ExcHandlersBuf::new(),
+        }
+    }
+
+    /// Persist `exc_handlers` on suspension without allocating `GenColdState`
+    /// when `exc_handlers` is empty.
+    #[inline]
+    pub(crate) fn store_exc_handlers(&mut self, exc_handlers: ExcHandlersBuf) {
+        if exc_handlers.is_empty() {
+            if let Some(cold) = self.cold.get_mut().as_deref_mut() {
+                cold.exc_handlers.clear();
+            }
+        } else {
+            let cold = self
+                .cold
+                .get_mut()
+                .get_or_insert_with(|| Box::new(GenColdState::default()));
+            cold.exc_handlers = exc_handlers;
+        }
+    }
+
+    /// Take all persisted exception state needed to resume this generator,
+    /// without allocating `GenColdState` when none is present.
+    #[inline]
+    pub(crate) fn take_resume_exc_state(
+        &mut self,
+    ) -> (
+        ExcHandlersBuf,
+        HandledExcBuf,
+        Option<Value>,
+        Vec<Option<Value>>,
+    ) {
+        match self.cold.get_mut().as_deref_mut() {
+            Some(cold) => (
+                std::mem::take(&mut cold.exc_handlers),
+                std::mem::take(&mut cold.handled_exc_slice),
+                cold.active_exception.take(),
+                std::mem::take(&mut cold.exc_saved_active_slice),
+            ),
+            None => (
+                ExcHandlersBuf::new(),
+                HandledExcBuf::new(),
+                None,
+                Vec::new(),
+            ),
+        }
+    }
+
+    /// Persist exception state captured at yield time without allocating
+    /// `GenColdState` when the generator yielded outside any exception handler.
+    #[inline]
+    pub(crate) fn store_yield_exc_state(
+        &mut self,
+        exc_handlers: ExcHandlersBuf,
+        handled_exc_slice: HandledExcBuf,
+        active_exception: Option<Value>,
+        exc_saved_active_slice: Vec<Option<Value>>,
+    ) {
+        let is_empty = exc_handlers.is_empty()
+            && handled_exc_slice.is_empty()
+            && active_exception.is_none()
+            && exc_saved_active_slice.is_empty();
+        if is_empty {
+            if let Some(cold) = self.cold.get_mut().as_deref_mut() {
+                cold.exc_handlers.clear();
+                cold.handled_exc_slice.clear();
+                cold.active_exception = None;
+                cold.exc_saved_active_slice.clear();
+            }
+        } else {
+            let cold = self
+                .cold
+                .get_mut()
+                .get_or_insert_with(|| Box::new(GenColdState::default()));
+            cold.exc_handlers = exc_handlers;
+            cold.handled_exc_slice = handled_exc_slice;
+            cold.active_exception = active_exception;
+            cold.exc_saved_active_slice = exc_saved_active_slice;
+        }
+    }
+
+    /// Inspect the current async-generator running owner without allocating.
+    #[inline]
+    pub(crate) fn async_gen_running_owner(&mut self) -> Option<&std::rc::Weak<GeneratorCell>> {
+        self.cold
+            .get_mut()
+            .as_deref()
+            .and_then(|cold| cold.async_gen_running_owner.as_ref())
+    }
+
+    /// Install the async-generator running owner, lazily allocating
+    /// `GenColdState`.
+    #[inline]
+    pub(crate) fn set_async_gen_running_owner(&mut self, owner: std::rc::Weak<GeneratorCell>) {
+        let cold = self
+            .cold
+            .get_mut()
+            .get_or_insert_with(|| Box::new(GenColdState::default()));
+        cold.async_gen_running_owner = Some(owner);
+    }
+
+    /// Clear the async-generator running owner without allocating.
+    #[inline]
+    pub(crate) fn clear_async_gen_running_owner(&mut self) {
+        if let Some(cold) = self.cold.get_mut().as_deref_mut() {
+            cold.async_gen_running_owner = None;
+        }
     }
 }
 

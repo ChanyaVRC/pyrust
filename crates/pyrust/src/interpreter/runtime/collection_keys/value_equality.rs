@@ -470,7 +470,7 @@ impl Interpreter {
                 (ValueKind::Tuple(left), ValueKind::Tuple(_)) => left.len(),
                 _ => unreachable!("needs_seq_dispatch implies a sequence pair"),
             };
-            let structural_bias = usize::from(self.comparison_recursion_cost == 0);
+            let structural_bias = usize::from(self.cold.comparison_recursion_cost == 0);
             return self.with_comparison_pair_cost(a, b, 1, structural_bias, |interp| {
                 for index in 0..expected_len {
                     let Some(x) = sequence_item_at(a, index) else {
@@ -577,7 +577,7 @@ impl Interpreter {
 
         match container_snapshot {
             ContainerSnapshot::Dict { expected_len } => {
-                let structural_bias = usize::from(self.comparison_recursion_cost == 0);
+                let structural_bias = usize::from(self.cold.comparison_recursion_cost == 0);
                 let result =
                     self.with_comparison_pair_cost(a, b, 1, structural_bias, |interp| {
                         for index in 0..expected_len {
@@ -768,6 +768,7 @@ impl Interpreter {
     /// frames have consumed CPython's remaining callback-entry headroom.
     pub(crate) fn guard_comparison_user_call(&self, additional_cost: usize) -> Result<()> {
         if self
+            .cold
             .comparison_recursion_cost
             .saturating_add(additional_cost)
             >= MAX_COMPARISON_COST_BEFORE_USER_EQ
@@ -781,8 +782,9 @@ impl Interpreter {
     /// may return to the same Python depth after replacing a later recursive
     /// edge, so the marker is monotonic for the lifetime of the interpreter.
     pub(crate) fn note_comparison_dispatch(&mut self) {
-        if !self.comparison_pair_stack.is_empty() {
-            self.comparison_dispatch_epoch = self.comparison_dispatch_epoch.wrapping_add(1);
+        if !self.cold.comparison_pair_stack.is_empty() {
+            self.cold.comparison_dispatch_epoch =
+                self.cold.comparison_dispatch_epoch.wrapping_add(1);
         }
     }
 
@@ -811,7 +813,7 @@ impl Interpreter {
     }
 
     pub(crate) fn has_active_comparison(&self) -> bool {
-        self.comparison_recursion_cost != 0
+        self.cold.comparison_recursion_cost != 0
     }
 
     fn with_comparison_pair_cost<T>(
@@ -823,8 +825,9 @@ impl Interpreter {
         compare: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
         let active_structural_cost = self
+            .cold
             .comparison_recursion_cost
-            .saturating_add(self.comparison_structural_cost_bias);
+            .saturating_add(self.cold.comparison_structural_cost_bias);
         if cost.saturating_add(structural_bias)
             > MAX_ACTIVE_COMPARISON_COST.saturating_sub(active_structural_cost)
         {
@@ -836,9 +839,10 @@ impl Interpreter {
             _ => None,
         };
         let call_depth = super::get_call_depth();
-        let context = (call_depth, self.comparison_dispatch_epoch);
+        let context = (call_depth, self.cold.comparison_dispatch_epoch);
         if pair.is_some_and(|pair| {
-            self.comparison_active_contexts
+            self.cold
+                .comparison_active_contexts
                 .get(&pair)
                 .is_some_and(|contexts| contexts.contains(&context))
         }) {
@@ -846,16 +850,18 @@ impl Interpreter {
         }
 
         if let Some(pair) = pair {
-            self.comparison_pair_stack
+            self.cold
+                .comparison_pair_stack
                 .push((pair.0, pair.1, context.0, context.1));
-            self.comparison_active_contexts
+            self.cold
+                .comparison_active_contexts
                 .entry(pair)
                 .or_default()
                 .push(context);
         }
         let grow_stack = active_structural_cost >= COMPARISON_STACK_GROW_START_COST;
-        self.comparison_recursion_cost += cost;
-        self.comparison_structural_cost_bias += structural_bias;
+        self.cold.comparison_recursion_cost += cost;
+        self.cold.comparison_structural_cost_bias += structural_bias;
         let result = if grow_stack {
             stacker::maybe_grow(COMPARISON_STACK_RED_ZONE, COMPARISON_STACK_SEGMENT, || {
                 compare(self)
@@ -863,17 +869,19 @@ impl Interpreter {
         } else {
             compare(self)
         };
-        self.comparison_recursion_cost -= cost;
-        self.comparison_structural_cost_bias -= structural_bias;
+        self.cold.comparison_recursion_cost -= cost;
+        self.cold.comparison_structural_cost_bias -= structural_bias;
 
         if let Some(pair) = pair {
             let popped = self
+                .cold
                 .comparison_pair_stack
                 .pop()
                 .expect("comparison pair stack must contain the active pair");
             debug_assert_eq!(popped, (pair.0, pair.1, context.0, context.1));
             let remove_pair = {
                 let contexts = self
+                    .cold
                     .comparison_active_contexts
                     .get_mut(&pair)
                     .expect("comparison pair index must contain the active pair");
@@ -884,7 +892,7 @@ impl Interpreter {
                 contexts.is_empty()
             };
             if remove_pair {
-                self.comparison_active_contexts.remove(&pair);
+                self.cold.comparison_active_contexts.remove(&pair);
             }
         }
         result
@@ -937,10 +945,10 @@ impl Interpreter {
             return false;
         };
         let pair = (a_id, b_id);
-        if self.eq_in_progress.contains(&pair) {
+        if self.cold.eq_in_progress.contains(&pair) {
             return true;
         }
-        self.eq_in_progress.push(pair);
+        self.cold.eq_in_progress.push(pair);
         false
     }
 
@@ -951,8 +959,13 @@ impl Interpreter {
         let (Some(a_id), Some(b_id)) = (a.value_id(), b.value_id()) else {
             return;
         };
-        if let Some(pos) = self.eq_in_progress.iter().rposition(|p| *p == (a_id, b_id)) {
-            self.eq_in_progress.remove(pos);
+        if let Some(pos) = self
+            .cold
+            .eq_in_progress
+            .iter()
+            .rposition(|p| *p == (a_id, b_id))
+        {
+            self.cold.eq_in_progress.remove(pos);
         }
     }
 }

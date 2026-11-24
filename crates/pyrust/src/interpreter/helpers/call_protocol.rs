@@ -562,11 +562,11 @@ pub(crate) fn invoke_class_method(
             };
             // Reuse the interpreter-level buffer to eliminate a per-invocation
             // heap allocation on the hot dunder dispatch path.  `std::mem::take`
-            // leaves an empty SmallVec in `interp.invoke_arg_buf`; on recursive
+            // leaves an empty SmallVec in `interp.cold.invoke_arg_buf`; on recursive
             // re-entry the field is already empty so a fresh SmallVec is used
             // only for the nested call.  The buffer is always restored after
             // dispatch (both Ok and Err paths).
-            let mut combined = std::mem::take(&mut interp.invoke_arg_buf);
+            let mut combined = std::mem::take(&mut interp.cold.invoke_arg_buf);
             combined.clear();
             combined.push(ExpandedCallArg {
                 name: None,
@@ -574,7 +574,7 @@ pub(crate) fn invoke_class_method(
             });
             combined.extend(args.iter().cloned());
             let result = dispatch(interp, &combined);
-            interp.invoke_arg_buf = combined;
+            interp.cold.invoke_arg_buf = combined;
             return result;
         }
         // The non-function arm is handled after the match so `method_val` can be
