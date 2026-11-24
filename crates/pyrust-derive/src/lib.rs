@@ -226,6 +226,20 @@ enum ArityStyle {
     /// variants).  Note: bare name, no trailing `()`.  METH_VARARGS
     /// builtins (`isinstance`, `issubclass`, `divmod`, `hasattr`, …).
     ExpectedGot,
+    /// `NAME() expected N arguments, got M` (and `at least` / `at most`
+    /// variants) — same as [`ExpectedGot`] with trailing `()` (e.g. `super`).
+    ExpectedGotParens,
+    /// `NAME() takes no arguments (M given)` for any count `!= 0`
+    /// (METH_NOARGS builtins — `globals`, `locals`).
+    /// Only valid on zero-parameter signatures.
+    TakesNoArgs,
+    /// CPython Argument Clinic (`_PyArg_UnpackKeywords`) wording:
+    /// - `NAME() takes at most N [keyword ]arguments (M given)`
+    /// - `NAME() takes at least N positional arguments (M given)`
+    /// - `NAME() missing required argument 'x' (pos I)`
+    /// - `'k' is an invalid keyword argument for NAME()`
+    /// - `argument for NAME() given by name ('k') and position (I)`
+    Clinic,
 }
 
 /// Argument-list dialect — legacy `(args: &[ExpandedCallArg])` or typed.
@@ -407,13 +421,17 @@ impl ModuleInput {
                 arity_style = match kind.to_string().as_str() {
                     "standard" => ArityStyle::Standard,
                     "takes_exactly_one" => ArityStyle::TakesExactlyOne,
+                    "takes_no_args" => ArityStyle::TakesNoArgs,
                     "expected_got" => ArityStyle::ExpectedGot,
+                    "expected_got_parens" => ArityStyle::ExpectedGotParens,
+                    "clinic" => ArityStyle::Clinic,
                     other => {
                         return Err(syn::Error::new(
                             kind.span(),
                             format!(
                                 "unknown `#[arity_style]` value `{other}` — expected one of \
-                                 `standard`, `takes_exactly_one`, `expected_got`",
+                                 `standard`, `takes_exactly_one`, `takes_no_args`, \
+                                 `expected_got`, `expected_got_parens`, `clinic`",
                             ),
                         ));
                     }
@@ -544,6 +562,16 @@ impl ModuleInput {
                      positional parameter with no default",
                 ));
             }
+        }
+        // `takes_no_args` only makes sense for a zero-parameter signature.
+        if arity_style == ArityStyle::TakesNoArgs
+            && let ModuleFnArgs::Typed { params } = &args
+            && !params.is_empty()
+        {
+            return Err(syn::Error::new(
+                short_name.span(),
+                "`#[arity_style(takes_no_args)]` requires zero parameters",
+            ));
         }
 
         Ok(ModuleFn {
@@ -994,6 +1022,13 @@ fn emit_msg_name_binding(bare_name: bool, bare_lit: &LitStr) -> proc_macro2::Tok
     }
 }
 
+/// Strip a leading `r#` raw-identifier prefix so Python parameter names
+/// (e.g. `r#mod` -> `"mod"`) match Python's keyword/error wording.
+fn unraw_ident(ident: &Ident) -> String {
+    let s = ident.to_string();
+    s.strip_prefix("r#").map(str::to_owned).unwrap_or(s)
+}
+
 /// Emit the positional-count guard call for `arity_style` over
 /// `__pyrust_msg_name`.  `count_expr` is the token producing the
 /// observed positional length (e.g. `__positional.len()` or
@@ -1005,7 +1040,7 @@ fn emit_arity_check(
     max_pos: usize,
 ) -> proc_macro2::TokenStream {
     match arity_style {
-        ArityStyle::Standard => quote! {
+        ArityStyle::Standard | ArityStyle::Clinic => quote! {
             crate::interpreter::builtin_args::check_positional_count(
                 __pyrust_msg_name,
                 #count_expr,
@@ -1019,6 +1054,12 @@ fn emit_arity_check(
                 #count_expr,
             )?;
         },
+        ArityStyle::TakesNoArgs => quote! {
+            crate::interpreter::builtin_args::check_no_arguments(
+                __pyrust_msg_name,
+                #count_expr,
+            )?;
+        },
         ArityStyle::ExpectedGot => quote! {
             crate::interpreter::builtin_args::check_arity_expected_got(
                 __pyrust_msg_name,
@@ -1027,6 +1068,78 @@ fn emit_arity_check(
                 #max_pos,
             )?;
         },
+        ArityStyle::ExpectedGotParens => quote! {
+            crate::interpreter::builtin_args::check_arity_expected_got_parens(
+                __pyrust_msg_name,
+                #count_expr,
+                #min_pos,
+                #max_pos,
+            )?;
+        },
+    }
+}
+
+/// Emit the Argument Clinic (`#[arity_style(clinic)]`) typed prelude.
+fn emit_typed_prelude_clinic(
+    params: &[TypedParam],
+    bare_name: bool,
+    bare_lit: &LitStr,
+) -> proc_macro2::TokenStream {
+    let param_specs: Vec<proc_macro2::TokenStream> = params
+        .iter()
+        .map(|p| {
+            let name_lit = LitStr::new(&unraw_ident(&p.name), p.name.span());
+            let positional_only = p.positional_only;
+            let keyword_only = p.keyword_only;
+            let required = p.default.is_none();
+            quote! {
+                crate::interpreter::builtin_args::ClinicParam {
+                    name: #name_lit,
+                    positional_only: #positional_only,
+                    keyword_only: #keyword_only,
+                    required: #required,
+                }
+            }
+        })
+        .collect();
+
+    let mut per_param: Vec<proc_macro2::TokenStream> = Vec::with_capacity(params.len());
+    for (idx, p) in params.iter().enumerate() {
+        let name_ident = &p.name;
+        let name_lit = LitStr::new(&unraw_ident(&p.name), p.name.span());
+        let ty = &p.ty;
+        let default_branch = match &p.default {
+            Some(expr) => quote! { Ok::<#ty, crate::error::PyError>(#expr) },
+            None => {
+                quote! { crate::interpreter::builtin_args::missing_arg::<#ty>(__pyrust_msg_name, #name_lit) }
+            }
+        };
+        per_param.push(quote! {
+            let #name_ident: #ty = {
+                match __clinic_slots[#idx] {
+                    Some(__v) => <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value(
+                        __v, __pyrust_msg_name, #name_lit,
+                    )?,
+                    None => (#default_branch)?,
+                }
+            };
+        });
+    }
+
+    let msg_name_binding = emit_msg_name_binding(bare_name, bare_lit);
+    quote! {
+        #[allow(unused_imports)]
+        use crate::interpreter::builtin_args::FromValue as _;
+        #msg_name_binding
+        const __CLINIC_PARAMS: &[crate::interpreter::builtin_args::ClinicParam] = &[
+            #(#param_specs),*
+        ];
+        let __clinic_slots = crate::interpreter::builtin_args::bind_clinic_args(
+            __pyrust_args,
+            __pyrust_msg_name,
+            __CLINIC_PARAMS,
+        )?;
+        #(#per_param)*
     }
 }
 
@@ -1056,13 +1169,17 @@ fn emit_typed_prelude(
     bare_name: bool,
     bare_lit: &LitStr,
 ) -> proc_macro2::TokenStream {
+    if arity_style == ArityStyle::Clinic {
+        return emit_typed_prelude_clinic(params, bare_name, bare_lit);
+    }
+
     // Names of every parameter that may be passed as a keyword argument.
     // Positional-only params are excluded so the kwarg-validation step
     // produces "got an unexpected keyword argument 'x'" for them.
     let allowed_kwargs: Vec<LitStr> = params
         .iter()
         .filter(|p| !p.positional_only)
-        .map(|p| LitStr::new(&p.name.to_string(), p.name.span()))
+        .map(|p| LitStr::new(&unraw_ident(&p.name), p.name.span()))
         .collect();
 
     // Min positional = count of params with no default that aren't keyword-only.
@@ -1073,16 +1190,14 @@ fn emit_typed_prelude(
         .count();
     let max_pos = params.iter().filter(|p| !p.keyword_only).count();
 
-    // Fast path: every parameter is `#[positional_only]` (the
-    // CPython-builtin shape — `abs`, `repr`, `len`, …).  No
-    // SmallVec collection of positionals (the raw args slice IS the
-    // positional list), no per-param kwarg lookup branch in
-    // `locate_arg`.  Microbench (#403 perf-fix follow-up) showed the
-    // collection + lookup ate ~5-10 ns/call on these one-shot Tier 1
-    // builtins; the fast path closes most of that gap.
-    let all_positional_only = !params.is_empty()
-        && params.iter().all(|p| p.positional_only)
-        && params.iter().all(|p| !p.keyword_only);
+    // Fast path: every parameter is `#[positional_only]` (or a zero-param
+    // `#[arity_style(takes_no_args)]` signature).  No SmallVec collection of
+    // positionals (the raw args slice IS the positional list), no per-param
+    // kwarg lookup branch in `locate_arg`.
+    let all_positional_only = (params.is_empty() && arity_style == ArityStyle::TakesNoArgs)
+        || (!params.is_empty()
+            && params.iter().all(|p| p.positional_only)
+            && params.iter().all(|p| !p.keyword_only));
 
     if all_positional_only {
         return emit_typed_prelude_positional_only(
@@ -1104,7 +1219,7 @@ fn emit_typed_prelude(
     let mut pos_index: usize = 0;
     for p in params {
         let name_ident = &p.name;
-        let name_lit = LitStr::new(&p.name.to_string(), p.name.span());
+        let name_lit = LitStr::new(&unraw_ident(&p.name), p.name.span());
         let ty = &p.ty;
         let kw_allowed = !p.positional_only;
         let this_pos: usize = if p.keyword_only {
@@ -1173,7 +1288,7 @@ fn emit_typed_prelude_positional_only(
     let mut per_param: Vec<proc_macro2::TokenStream> = Vec::new();
     for (idx, p) in params.iter().enumerate() {
         let name_ident = &p.name;
-        let name_lit = LitStr::new(&p.name.to_string(), p.name.span());
+        let name_lit = LitStr::new(&unraw_ident(&p.name), p.name.span());
         let ty = &p.ty;
 
         let default_branch = match &p.default {
@@ -1223,7 +1338,7 @@ fn emit_typed_fast_prelude(
     let mut per_param: Vec<proc_macro2::TokenStream> = Vec::new();
     for (idx, p) in params.iter().enumerate() {
         let name_ident = &p.name;
-        let name_lit = LitStr::new(&p.name.to_string(), p.name.span());
+        let name_lit = LitStr::new(&unraw_ident(&p.name), p.name.span());
         let ty = &p.ty;
         let default_branch = match &p.default {
             Some(expr) => quote! { Ok::<#ty, crate::error::PyError>(#expr) },
@@ -1891,9 +2006,17 @@ fn is_unconditional_matcher_ty(ty: &syn::Type) -> bool {
     // qualified form is supported defensively.
     s == "PyValue"
         || s.ends_with("::PyValue")
+        || s == "PyValueRef"
+        || s.ends_with("::PyValueRef")
+        || s == "OptValueRef"
+        || s.ends_with("::OptValueRef")
         || s == "Option<PyValue>"
-        || s.ends_with("<PyValue>") && s.starts_with("Option<")
-        || s.ends_with("::PyValue>") && s.starts_with("Option<")
+        || s.ends_with("<PyValue>") && (s.starts_with("Option<") || s.starts_with("OptionalArg<"))
+        || s.ends_with("::PyValue>") && (s.starts_with("Option<") || s.starts_with("OptionalArg<"))
+        || s.ends_with("<PyValueRef>")
+            && (s.starts_with("Option<") || s.starts_with("OptionalArg<"))
+        || s.ends_with("::PyValueRef>")
+            && (s.starts_with("Option<") || s.starts_with("OptionalArg<"))
 }
 
 /// File-scoped module declaration: see crate-level docs for the full

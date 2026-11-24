@@ -158,48 +158,37 @@ fn float_parse_bytes_like(bytes: &[u8], repr: &str) -> Result<Value> {
     cleaned.parse::<f64>().map(Value::float).map_err(|_| err())
 }
 
-/// Bind `bytes()` / `bytearray()` call args into the equivalent positional
-/// slice the bodies' `match args.len()` logic expects, accepting the CPython
-/// 3.12 keyword names `source` / `encoding` / `errors`.
+/// Normalise already-bound `bytes()` / `bytearray()` clinic slots into the
+/// positional slice the bodies' `match args.len()` logic expects.
 ///
 /// The encode form is selected by the presence of `encoding`; when only
 /// `errors` is supplied, CPython raises a dedicated message rather than
 /// treating it as an encode — replicated here for parity.
-fn bind_bytes_like_args(
-    function_name: &str,
-    args: &[ExpandedCallArg],
-) -> Result<Vec<ExpandedCallArg>> {
-    let slots = bind_constructor_kwargs(
-        function_name,
-        args,
-        &["source", "encoding", "errors"],
-        &[true, true, true],
-        3,
-    )?;
-    let source = &slots[0];
-    let encoding = &slots[1];
-    let errors = &slots[2];
-
+fn bind_bytes_like_slots(
+    source: Option<&Value>,
+    encoding: Option<&Value>,
+    errors: Option<&Value>,
+) -> Result<smallvec::SmallVec<[ExpandedCallArg; 3]>> {
     let make = |v: Value| ExpandedCallArg {
         name: None,
         value: v,
     };
 
-    if encoding.is_some() {
+    if let Some(enc) = encoding {
         // Encode form: source defaults to a non-str placeholder so the
         // encode path reports "encoding without a string argument" when the
         // source is omitted, matching CPython.
-        let mut out = Vec::with_capacity(3);
-        out.push(make(source.clone().unwrap_or_else(Value::none)));
-        out.push(make(encoding.clone().unwrap()));
-        if let Some(e) = errors.clone() {
-            out.push(make(e));
+        let mut out = smallvec::SmallVec::new();
+        out.push(make(source.cloned().unwrap_or_else(Value::none)));
+        out.push(make(enc.clone()));
+        if let Some(err) = errors {
+            out.push(make(err.clone()));
         }
         Ok(out)
     } else if errors.is_some() {
         // `errors` given without `encoding`: CPython reports a string-specific
         // message when source is a str, else the generic errors message.
-        if matches!(source.as_ref().map(|v| v.kind()), Some(ValueKind::Str(_))) {
+        if matches!(source.map(|v| v.kind()), Some(ValueKind::Str(_))) {
             Err(PyError::named(
                 "TypeError",
                 "string argument without an encoding".to_string(),
@@ -212,10 +201,11 @@ fn bind_bytes_like_args(
         }
     } else {
         // Buffer-protocol form: 0-arg (no source) or 1-arg.
-        match source.clone() {
-            Some(v) => Ok(vec![make(v)]),
-            None => Ok(Vec::new()),
+        let mut out = smallvec::SmallVec::new();
+        if let Some(src) = source {
+            out.push(make(src.clone()));
         }
+        Ok(out)
     }
 }
 

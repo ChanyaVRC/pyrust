@@ -4,18 +4,21 @@ pyrust_module! {
     /// CPython: __import__(name, globals=None, locals=None, fromlist=(), level=0)
     /// <https://docs.python.org/3/library/functions.html#import__>
     ///
-    /// The hook behind the import statement. Empty or absent fromlist returns
-    /// the top-level package (e.g. os for "os.path"); non-empty fromlist
-    /// returns the leaf module directly. globals, locals, and level are
-    /// accepted but ignored.
-    fn __import__(args) -> Result<Value> {
-        if args.is_empty() {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() missing required argument 'name' (pos 1)"),
-            ));
-        }
-        let name = match args[0].value.as_str() {
+    /// Migrated to the typed-signature dialect (#400): `#[arity_style(clinic)]`
+    /// binds all five parameters positionally or by keyword with CPython 3.12's
+    /// exact error wording. Empty or absent fromlist returns the top-level
+    /// package (e.g. os for "os.path"); non-empty fromlist returns the leaf
+    /// module directly. globals, locals, and level are accepted but ignored.
+    #[arity_style(clinic)]
+    fn __import__(
+        name: PyValueRef,
+        #[default(OptionalArg::Omitted)] globals: OptValueRef,
+        #[default(OptionalArg::Omitted)] locals: OptValueRef,
+        #[default(OptionalArg::Omitted)] fromlist: OptValueRef,
+        #[default(OptionalArg::Omitted)] level: OptValueRef,
+    ) -> Result<Value> {
+        let _ = (globals, locals, level);
+        let name = match name.0.as_str() {
             Some(s) => s.to_string(),
             None => {
                 return Err(PyError::named(
@@ -28,13 +31,7 @@ pyrust_module! {
         if name.is_empty() {
             return Err(PyError::named("ValueError", "Empty module name".to_string()));
         }
-        // Arg index 3 is `fromlist`; also accept as a keyword arg.
-        let fromlist: Option<&Value> = args.get(3).map(|a| &a.value).or_else(|| {
-            args.iter()
-                .find(|a| a.name.as_deref() == Some("fromlist"))
-                .map(|a| &a.value)
-        });
-        let fromlist_nonempty = match fromlist {
+        let fromlist_nonempty = match fromlist.as_value() {
             None => false,
             Some(v) => match v.kind() {
                 ValueKind::None => false,

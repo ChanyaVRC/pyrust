@@ -18,11 +18,13 @@ use std::rc::Rc;
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
+use crate::interpreter::builtin_args::{
+    OptValueRef, OptionalArg, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue, PyValueRef,
+};
 use crate::interpreter::{
     BuiltinTypeClass, CallableIter, ConsumerIterator, EnumerateIter, FilterIter, Interpreter,
     IterSrcBuf, MapIter, NativeIteratorClass, ZipIter, apply_format_spec, apply_format_spec_named,
-    ascii_repr_interp, bigint_divmod_floor, bind_constructor_kwargs, builtin_data_backing,
+    ascii_repr_interp, bigint_divmod_floor, builtin_data_backing,
     builtin_type_class_isinstance_fast, class_has_native_builtin_type_ancestor,
     class_is_subclass_of, class_suppresses_instance_dict, classify_exception_class, coerce_numeric,
     coerce_subclass_backing, compare_values, compare_values_with_op, current_locals_value,
@@ -70,11 +72,11 @@ mod identity_and_repr {
 
 mod numeric_functions {
     use super::{
-        BinaryOp, ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyBigInt, PyBool, PyError, PyFloat,
-        PyInt, PyValue, PyZero, Rc, Result, Value, ValueKind, class_is_subclass_of, coerce_numeric,
-        dispatch_numeric_binop, divmod_float_float, divmod_int_int, instance_builtin_data,
-        invoke_class_method, lookup_class_attr, modinv_bigint, modinv_i64, modpow_bigint,
-        modpow_i64, pyint_to_f64, reject_keyword_args_expanded, value_to_float,
+        BinaryOp, ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyBigInt,
+        PyBool, PyError, PyFloat, PyInt, PyValue, PyValueRef, PyZero, Rc, Result, Value, ValueKind,
+        class_is_subclass_of, coerce_numeric, dispatch_numeric_binop, divmod_float_float,
+        divmod_int_int, instance_builtin_data, invoke_class_method, lookup_class_attr,
+        modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, pyint_to_f64, value_to_float,
         value_type_name_str,
     };
     include!("builtins/numeric_functions.rs");
@@ -82,8 +84,8 @@ mod numeric_functions {
 
 mod aggregation {
     use super::{
-        BinaryOp, ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, PyValue, Result, Value,
-        ValueKind,
+        BinaryOp, ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError,
+        PyValue, PyValueRef, Result, Value, ValueKind,
     };
     include!("builtins/aggregation.rs");
 }
@@ -91,25 +93,26 @@ mod aggregation {
 mod iteration {
     use super::{
         BuiltinTypeClass, CallableIter, EnumerateIter, ExpandedCallArg, FN_PREFIX, FilterIter,
-        Interpreter, IterSrcBuf, MODULE_NAME, MapIter, NativeIteratorClass, PyError, PyValue, Rc,
-        Result, Value, ValueKind, ZipIter, builtin_type_class_isinstance_fast, builtin_type_new,
-        class_is_subclass_of, full_type_name_str, instance_builtin_data, invoke_class_method,
-        iter_values, lookup_class_attr, make_iterator, make_reversed_dict_iter,
-        make_reversed_getitem_iterator, make_reversed_mapping_snapshot_iter,
-        make_reversed_range_iterator, make_reversed_sequence_iterator,
-        reject_keyword_args_expanded, reversed_iterator_reduce, value_type_name_str,
+        Interpreter, IterSrcBuf, MODULE_NAME, MapIter, NativeIteratorClass, OptValueRef,
+        OptionalArg, PyError, PyValue, PyValueRef, Rc, Result, Value, ValueKind, ZipIter,
+        builtin_type_class_isinstance_fast, builtin_type_new, class_is_subclass_of,
+        full_type_name_str, instance_builtin_data, invoke_class_method, iter_values,
+        lookup_class_attr, make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
+        make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
+        make_reversed_sequence_iterator, reject_keyword_args_expanded, reversed_iterator_reduce,
+        value_type_name_str,
     };
     include!("builtins/iteration.rs");
 }
 
 mod reflection {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyClass, PyError, PyKey, PyValue, Rc, RefCell,
-        Result, Value, ValueKind, attr_name_arg, class_suppresses_instance_dict, compare_values,
-        current_locals_value, dir_names, inject_builtins_into_globals, invoke_class_method,
-        isinstance_check, issubclass_check, lookup_class_attr, parse_exec_eval_args,
-        reject_keyword_args_expanded, sync_module_env_to_globals_dict, value_class,
-        value_type_name_str,
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyClass, PyError, PyKey,
+        PyValue, PyValueRef, Rc, RefCell, Result, Value, ValueKind, attr_name_arg,
+        class_suppresses_instance_dict, compare_values, current_locals_value, dir_names,
+        inject_builtins_into_globals, invoke_class_method, isinstance_check, issubclass_check,
+        lookup_class_attr, reject_keyword_args_expanded, sync_module_env_to_globals_dict,
+        value_class, value_type_name_str,
     };
     include!("builtins/reflection.rs");
 }
@@ -124,16 +127,16 @@ mod length {
 
 mod ordering {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, Result, SortKind, Value, classify_sort,
-        min_max_impl,
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError, PyValueRef,
+        Result, SortKind, Value, classify_sort, min_max_impl,
     };
     include!("builtins/ordering.rs");
 }
 
 mod rounding {
     use super::{
-        ExpandedCallArg, FN_PREFIX, Interpreter, MODULE_NAME, PyBigInt, PyError, PyValue, Rc,
-        Result, Value, ValueKind, bind_constructor_kwargs, coerce_numeric, invoke_class_method,
+        ExpandedCallArg, FN_PREFIX, Interpreter, MODULE_NAME, OptValueRef, OptionalArg, PyBigInt,
+        PyError, PyValueRef, Rc, Result, Value, ValueKind, coerce_numeric, invoke_class_method,
         lookup_class_attr, py_round_half_even_checked, round_bigint_neg_ndigits,
         round_float_ndigits, value_type_name_str,
     };
@@ -141,18 +144,15 @@ mod rounding {
 }
 
 mod sequence_constructors {
-    use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, Result, Value,
-        reject_keyword_args_expanded,
-    };
+    use super::{ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, Result, Value};
     include!("builtins/sequence_constructors.rs");
 }
 
 mod bytes_constructors {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, Result, Value, ValueKind,
-        bind_bytes_like_args, bytes_count_via_index, bytes_element_to_u8, bytes_from_items,
-        effective_builtin_receiver, encode_str_to_bytes, invoke_class_method,
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError, Result, Value,
+        ValueKind, bind_bytes_like_slots, bytes_count_via_index, bytes_element_to_u8,
+        bytes_from_items, effective_builtin_receiver, encode_str_to_bytes, invoke_class_method,
         lookup_value_special_method, try_fast_bytes_elems, value_type_name_str,
     };
     include!("builtins/bytes_constructors.rs");
@@ -160,8 +160,8 @@ mod bytes_constructors {
 
 mod complex_constructor {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, PyToPrimitive, Result, Value, ValueKind,
-        bind_constructor_kwargs, coerce_subclass_backing, invoke_class_method,
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError, PyToPrimitive,
+        Result, Value, ValueKind, coerce_subclass_backing, invoke_class_method,
         lookup_value_special_method, normalize_complex_slot_result, normalize_float_slot_result,
         parse_complex_str, value_to_float, value_type_name_str,
     };
@@ -170,24 +170,23 @@ mod complex_constructor {
 
 mod collection_constructors {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, PySet, Result, Value,
-        reject_keyword_args_expanded,
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PySet, Result, Value,
     };
     include!("builtins/collection_constructors.rs");
 }
 
 mod text_constructor {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, Result, Value, ValueKind,
-        bind_constructor_kwargs, render_instance_str,
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError, Result, Value,
+        ValueKind, render_instance_str,
     };
     include!("builtins/text_constructor.rs");
 }
 
 mod int_constructor {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, Result, Value, ValueKind,
-        bind_constructor_kwargs, coerce_subclass_backing, float_to_bigint, int_parse_base_zero,
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError, Result, Value,
+        ValueKind, coerce_subclass_backing, float_to_bigint, int_parse_base_zero,
         int_parse_bytes_like, int_strip_explicit_base, invoke_class_method,
         lookup_value_special_method, normalize_int_slot_result, value_type_name_str,
     };
@@ -196,21 +195,21 @@ mod int_constructor {
 
 mod float_constructor {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, PyToPrimitive, Result, Value, ValueKind,
-        coerce_subclass_backing, float_bytes_like, float_parse_bytes_like, invoke_class_method,
-        lookup_value_special_method, normalize_float_slot_result, pep515_strip_float,
-        reject_keyword_args_expanded, value_to_float, value_type_name_str,
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError, PyToPrimitive,
+        Result, Value, ValueKind, coerce_subclass_backing, float_bytes_like,
+        float_parse_bytes_like, invoke_class_method, lookup_value_special_method,
+        normalize_float_slot_result, pep515_strip_float, value_to_float, value_type_name_str,
     };
     include!("builtins/float_constructor.rs");
 }
 
 mod services {
     use super::{
-        BuiltinTypeClass, ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyDict, PyError, PyKey, PyStr,
-        PyValue, Rc, Result, Value, ValueKind, builtin_type_new, class_is_subclass_of,
-        instance_builtin_data, invoke_class_method, is_dict_subclass_instance,
-        is_not_iterable_error, lookup_class_attr, mapping_pairs_via_protocol,
-        reject_keyword_args_expanded, render_instance_str, resolve_zero_arg_super,
+        BuiltinTypeClass, ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg,
+        PyDict, PyError, PyKey, PyStr, PyValue, PyValueRef, Rc, Result, Value, ValueKind,
+        builtin_type_new, class_is_subclass_of, instance_builtin_data, invoke_class_method,
+        is_dict_subclass_instance, is_not_iterable_error, lookup_class_attr,
+        mapping_pairs_via_protocol, render_instance_str, resolve_zero_arg_super,
         type_class_singleton, value_type_name_str,
     };
     include!("builtins/services.rs");
@@ -290,7 +289,10 @@ mod exception_protocols {
 }
 
 mod importing {
-    use super::{ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, Result, Value, ValueKind};
+    use super::{
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError, PyValueRef,
+        Result, Value, ValueKind,
+    };
     include!("builtins/importing.rs");
 }
 

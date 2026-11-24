@@ -4,13 +4,9 @@ pyrust_module! {
     /// CPython: sum(iterable, /, start=0) — sum elements of an iterable.
     /// <https://docs.python.org/3/library/functions.html#sum>
     ///
-    /// Migrated to the typed-signature dialect (#400).  `iterable` is
-    /// `PyValue` so user-defined iterables reach the iterator protocol.
-    /// `start` is `Option<PyValue>` with `#[default(None)]`; the body
-    /// uses 0 when absent.  Known divergence: `sum([], None)` is 0
-    /// (not CPython's `None`) because `Option<PyValue>` maps both
-    /// "absent" and "Python None" to Rust `None`.  Tracked as a
-    /// follow-up fixture under #400.
+    /// Migrated to the typed-signature dialect (#400): `iterable` is
+    /// positional-only `PyValueRef` and `start` is `OptValueRef` so omitted
+    /// `start` (0) stays distinct from explicit `sum([], None)` (`None`).
     ///
     /// Mirrors CPython 3.12 `builtin_sum` (#1975 / #2050):
     ///   * iterates the argument lazily — no full materialisation;
@@ -20,48 +16,16 @@ pyrust_module! {
     ///     the moment a `float` is involved, for bit-exact float sums;
     ///   * falls back to the general `__add__` loop for a non-numeric
     ///     start or the first non-numeric element.
-    fn sum(args) -> Result<Value> {
-        let mut positional: Vec<Value> = Vec::with_capacity(args.len());
-        let mut start_kw: Option<Value> = None;
-        for a in args {
-            match a.name.as_deref() {
-                None => positional.push(a.value.clone()),
-                Some("start") if start_kw.is_none() => start_kw = Some(a.value.clone()),
-                Some(_) => {}
-            }
-        }
-        // CPython 3.12 `builtin_sum` (`sum(iterable, /, start=0)`):
-        //   1. Too many total arguments (`> 2`) -> `sum() takes at most 2 arguments (N given)`
-        //   2. Missing positional `iterable` -> `sum() takes at least 1 positional argument (0 given)`
-        //   3. Any keyword other than `start` -> `'k' is an invalid keyword argument for sum()`
-        if args.len() > 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("sum() takes at most 2 arguments ({} given)", args.len()),
-            ));
-        }
-        if positional.is_empty() {
-            return Err(PyError::named(
-                "TypeError",
-                "sum() takes at least 1 positional argument (0 given)".to_string(),
-            ));
-        }
-        for a in args {
-            if let Some(k) = a.name.as_deref()
-                && k != "start"
-            {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("'{k}' is an invalid keyword argument for sum()"),
-                ));
-            }
-        }
-        let iterable = PyValue(positional[0].clone());
-        let start = positional.get(1).cloned().or(start_kw);
+    #[arity_style(clinic)]
+    fn sum(
+        #[positional_only] iterable: PyValueRef,
+        #[default(OptionalArg::Omitted)] start: OptValueRef,
+    ) -> Result<Value> {
+        let start = start.as_value();
         // CPython rejects str/bytes/bytearray as the *start* (accumulator)
         // before entering the loop; element-level rejection falls out of the
         // normal `int + str` TypeError in the generic path.
-        if let Some(ref s) = start {
+        if let Some(s) = start {
             if s.is_str() {
                 return Err(PyError::named(
                     "TypeError",
@@ -119,7 +83,7 @@ pyrust_module! {
         // path for an *exact* int (`PyLong_CheckExact`): a `bool` start is a
         // subclass, so it (and any non-numeric start) begins in generic mode,
         // which also preserves `sum([], start) == start` unchanged.
-        let mut acc = match &start {
+        let mut acc = match start {
             None => Acc::Int(0),
             Some(v) => match v.kind() {
                 ValueKind::Int(n) => Acc::Int(n),
@@ -130,7 +94,7 @@ pyrust_module! {
 
         let iter = _interp.call_function_expanded(
             Value::builtin_function("iter"),
-            &[ExpandedCallArg { name: None, value: iterable.0 }],
+            &[ExpandedCallArg { name: None, value: iterable.0.clone() }],
         )?;
 
         loop {

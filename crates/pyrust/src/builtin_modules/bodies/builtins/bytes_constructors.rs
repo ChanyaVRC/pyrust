@@ -17,15 +17,22 @@ fn builtin_subclass_immutable_bytes_snapshot(value: &Value) -> Option<Vec<u8>> {
 }
 
 pyrust_module! {
-    /// CPython: bytes() — bytes constructor.
+    /// CPython: bytes(source=..., encoding=..., errors=...) — bytes constructor.
     /// <https://docs.python.org/3/library/functions.html#func-bytes>
+    ///
+    /// Migrated to the typed-signature dialect (#400): `#[arity_style(clinic)]`
+    /// accepts keyword-or-positional `source`, `encoding`, `errors` and enables
+    /// the vectorcall fast entry.
     /// The iterable fallback can run user code by dispatching
     /// `__iter__` and `__next__` when consuming a general iterable (e.g. range,
     /// generator expressions, user-defined iterables).
-    fn bytes(args) -> Result<Value> {
-        // CPython 3.12: bytes(source, encoding, errors) — source/encoding/
-        // errors are keyword-or-positional.
-        let bound = bind_bytes_like_args(FN_NAME, args)?;
+    #[arity_style(clinic)]
+    fn bytes(
+        #[default(OptionalArg::Omitted)] source: OptValueRef,
+        #[default(OptionalArg::Omitted)] encoding: OptValueRef,
+        #[default(OptionalArg::Omitted)] errors: OptValueRef,
+    ) -> Result<Value> {
+        let bound = bind_bytes_like_slots(source.as_value(), encoding.as_value(), errors.as_value())?;
         let args = &bound[..];
         match args.len() {
             0 => Ok(Value::bytes(Vec::new())),
@@ -228,13 +235,17 @@ pyrust_module! {
         }
     }
 
-    /// CPython: bytearray(...) — mutable bytes constructor.
+    /// CPython: bytearray(source=..., encoding=..., errors=...) — mutable bytes constructor.
     /// <https://docs.python.org/3/library/functions.html#func-bytearray>
-    /// Mirrors `bytes()` but returns a mutable `bytearray` value.
-    fn bytearray(args) -> Result<Value> {
-        // CPython 3.12: bytearray(source, encoding, errors) — all three are
-        // keyword-or-positional.
-        let bound = bind_bytes_like_args(FN_NAME, args)?;
+    ///
+    /// Migrated to the typed-signature dialect (#400): mirrors `bytes()`.
+    #[arity_style(clinic)]
+    fn bytearray(
+        #[default(OptionalArg::Omitted)] source: OptValueRef,
+        #[default(OptionalArg::Omitted)] encoding: OptValueRef,
+        #[default(OptionalArg::Omitted)] errors: OptValueRef,
+    ) -> Result<Value> {
+        let bound = bind_bytes_like_slots(source.as_value(), encoding.as_value(), errors.as_value())?;
         let args = &bound[..];
         match args.len() {
             0 => Ok(pyrust_builtins::bytearray::bytearray(Vec::new())),

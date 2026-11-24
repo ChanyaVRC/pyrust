@@ -1,23 +1,23 @@
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
-    /// CPython: str(object='') — string constructor.
+    /// CPython: str(object='') / str(bytes_or_buffer[, encoding[, errors]]) — string constructor.
     /// <https://docs.python.org/3/library/functions.html#func-str>
+    ///
+    /// Migrated to the typed-signature dialect (#400): `#[arity_style(clinic)]`
+    /// reproduces CPython 3.12's keyword-or-positional binding while granting
+    /// positional `str(x)` the vectorcall fast entry.
     /// This can run user code by dispatching `__str__` and
     /// (as fallback) `__repr__` on user-defined objects.
-    fn str(args) -> Result<Value> {
-        // CPython 3.12: str(object='', encoding='utf-8', errors='strict') —
-        // all three parameters are keyword-or-positional.
-        let bound = bind_constructor_kwargs(
-            FN_NAME,
-            args,
-            &["object", "encoding", "errors"],
-            &[true, true, true],
-            3,
-        )?;
-        let object = &bound[0];
-        let encoding = &bound[1];
-        let errors = &bound[2];
+    #[arity_style(clinic)]
+    fn str(
+        #[default(OptionalArg::Omitted)] object: OptValueRef,
+        #[default(OptionalArg::Omitted)] encoding: OptValueRef,
+        #[default(OptionalArg::Omitted)] errors: OptValueRef,
+    ) -> Result<Value> {
+        let object = object.as_value();
+        let encoding = encoding.as_value();
+        let errors = errors.as_value();
 
         // No object → empty string, regardless of encoding/errors (CPython:
         // `str(encoding='utf-8') == ''`).

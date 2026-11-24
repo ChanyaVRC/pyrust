@@ -24,6 +24,35 @@ impl<'a> FromValue<'a> for PyValue {
     }
 }
 
+/// Borrowed `Any` — accepts any value without cloning.
+///
+/// Preferred over [`PyValue`] on hot-path and read-only builtins (`hasattr`,
+/// `getattr`, `issubclass`, `iter`, `range`, …) to avoid a per-argument
+/// `Value::clone` refcount bump.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PyValueRef<'a>(pub &'a Value);
+
+impl<'a> Deref for PyValueRef<'a> {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        self.0
+    }
+}
+
+impl<'a> FromValue<'a> for PyValueRef<'a> {
+    const PY_TYPE_NAME: &'static str = "object";
+
+    #[inline(always)]
+    fn try_from_value(value: &'a Value, _fn_name: &str, _arg_name: &str) -> Result<Self> {
+        Ok(PyValueRef(value))
+    }
+
+    #[inline(always)]
+    fn matches(_value: &'a Value) -> bool {
+        true
+    }
+}
+
 // ─── PyIterable ───────────────────────────────────────────────────────────────
 
 /// `iterable` argument — materialises any iterable source into

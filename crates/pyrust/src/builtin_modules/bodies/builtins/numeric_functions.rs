@@ -314,35 +314,24 @@ pyrust_module! {
         ))
     }
 
-    /// CPython: pow(base, exp[, mod]) — exponentiation, optionally modular.
+    /// CPython: pow(base, exp, mod=None) — exponentiation, optionally modular.
     /// <https://docs.python.org/3/library/functions.html#pow>
     ///
+    /// Migrated to the typed-signature dialect (#400): Argument Clinic
+    /// binding accepts positional or keyword `base`, `exp`, and `mod`, and
+    /// treats `mod=None` identically to the 2-arg form (CPython 3.12 parity).
     /// This can run user code by dispatching `__pow__` / `__rpow__`
     /// for `PyInstance` values, which may invoke arbitrary user code.
-    fn pow(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.is_empty() {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() missing required argument 'base' (pos 1)"),
-            ));
-        }
-        if args.len() == 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() missing required argument 'exp' (pos 2)"),
-            ));
-        }
-        if args.len() > 3 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes at most 3 arguments ({} given)", args.len()),
-            ));
-        }
-        if args.len() == 3 {
-            let base_val = &args[0].value;
-            let exp_val = &args[1].value;
-            let mod_val = &args[2].value;
+    #[arity_style(clinic)]
+    fn pow(
+        base: PyValueRef,
+        exp: PyValueRef,
+        #[default(OptionalArg::Omitted)] r#mod: OptValueRef,
+    ) -> Result<Value> {
+        let base_val = base.0;
+        let exp_val = exp.0;
+        let mod_opt = r#mod.as_value().filter(|v| !v.is_none());
+        if let Some(mod_val) = mod_opt {
 
             // User-defined type as base: dispatch __pow__(exp, mod) first.
             if let ValueKind::PyInstance(inst) = base_val.kind() {
@@ -499,9 +488,6 @@ pyrust_module! {
             let result = modpow_i64(base, exp as u64, modulus);
             Ok(Value::int(result))
         } else {
-            let base_val = &args[0].value;
-            let exp_val = &args[1].value;
-
             // Extract classes for the subtype rule (mirrors CPython `binary_op1`).
             let base_class = if let ValueKind::PyInstance(inst) = base_val.kind() {
                 Some(Rc::clone(&inst.borrow().class))

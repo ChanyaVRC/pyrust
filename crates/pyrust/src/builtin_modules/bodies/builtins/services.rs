@@ -223,24 +223,13 @@ pyrust_module! {
     /// The prompt (any type — converted to `str`) is printed to stdout without
     /// a trailing newline, with stdout flushed before reading.  Raises
     /// `EOFError` when stdin is at EOF.
-    fn input(args) -> Result<Value> {
-        // Reject keyword arguments with CPython's exact message.
-        if args.iter().any(|a| a.name.is_some()) {
-            return Err(PyError::named(
-                "TypeError",
-                "input() takes no keyword arguments".to_string(),
-            ));
-        }
-        // Reject more than 1 positional argument.
-        if args.len() > 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("input expected at most 1 argument, got {}", args.len()),
-            ));
-        }
+    #[arity_style(expected_got)]
+    fn input(
+        #[positional_only] #[default(OptionalArg::Omitted)] prompt: OptValueRef,
+    ) -> Result<Value> {
         // Print the prompt (if any) to stdout without a trailing newline, then flush.
-        if let Some(prompt_arg) = args.first() {
-            let prompt_str = render_instance_str(_interp, &prompt_arg.value)?;
+        if let Some(prompt_val) = prompt.as_value() {
+            let prompt_str = render_instance_str(_interp, prompt_val)?;
             print!("{}", prompt_str);
             use std::io::Write as _;
             std::io::stdout().flush().ok();
@@ -318,8 +307,13 @@ pyrust_module! {
 
     /// CPython: range(stop) / range(start, stop[, step]).
     /// <https://docs.python.org/3/library/functions.html#func-range>
-    fn range(args) -> Result<Value> {
-        _interp.call_range_expanded(args)
+    #[arity_style(expected_got)]
+    fn range(
+        #[positional_only] a: PyValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] b: OptValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] c: OptValueRef,
+    ) -> Result<Value> {
+        _interp.call_range_values(a.0, b.as_value(), c.as_value())
     }
 
     /// CPython: open(file, mode='r', buffering=-1, encoding=None, errors=None,
@@ -406,128 +400,103 @@ pyrust_module! {
 
     /// CPython: classmethod(function) — class-method descriptor.
     /// <https://docs.python.org/3/library/functions.html#classmethod>
-    fn classmethod(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected 1 argument, got {}", args.len()),
-            ));
-        }
+    #[arity_style(expected_got)]
+    fn classmethod(#[positional_only] function: PyValueRef) -> Result<Value> {
         // CPython 3.12 accepts any object as a classmethod descriptor.
         // When the argument is a UserFunction we use the existing tagged-kind
         // path; for any other value we wrap it in a BuiltinObject descriptor.
-        match args[0].value.kind() {
+        match function.0.kind() {
             ValueKind::UserFunction(f) => Ok(Value::class_method(Rc::clone(f))),
             _ => Ok(pyrust_builtins::classmethod::class_method_any(
-                args[0].value.clone(),
+                function.0.clone(),
             )),
         }
     }
 
     /// CPython: staticmethod(function) — static-method descriptor.
     /// <https://docs.python.org/3/library/functions.html#staticmethod>
-    fn staticmethod(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected 1 argument, got {}", args.len()),
-            ));
-        }
+    #[arity_style(expected_got)]
+    fn staticmethod(#[positional_only] function: PyValueRef) -> Result<Value> {
         // CPython 3.12 accepts any object as a staticmethod descriptor.
         // When the argument is a UserFunction we use the existing tagged-kind
         // path; for any other value we wrap it in a BuiltinObject descriptor.
-        match args[0].value.kind() {
+        match function.0.kind() {
             ValueKind::UserFunction(f) => Ok(Value::static_method(Rc::clone(f))),
             _ => Ok(pyrust_builtins::classmethod::static_method_any(
-                args[0].value.clone(),
+                function.0.clone(),
             )),
         }
     }
 
     /// CPython: property(fget=None, fset=None, fdel=None, doc=None).
     /// <https://docs.python.org/3/library/functions.html#property>
-    fn property(args) -> Result<Value> {
-        // Accept up to 4 positional args (fget, fset, fdel, doc) or keyword args.
-        if args.len() > 4 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes at most 4 arguments ({} given)", args.len()),
-            ));
-        }
-        let mut fget = Value::none();
-        let mut fset = Value::none();
-        let mut fdel = Value::none();
-        let mut doc: Option<Value> = None;
-        for (i, arg) in args.iter().enumerate() {
-            let name_ref = arg.name.as_deref();
-            let idx = match name_ref {
-                None => i,
-                Some("fget") => 0,
-                Some("fset") => 1,
-                Some("fdel") => 2,
-                Some("doc") => 3,
-                Some(k) => return Err(PyError::named(
-                    "TypeError",
-                    format!("'{k}' is an invalid keyword argument for {FN_NAME}()"),
-                )),
-            };
-            match idx {
-                0 => fget = arg.value.clone(),
-                1 => fset = arg.value.clone(),
-                2 => fdel = arg.value.clone(),
-                // doc: store an explicit doc unless it is None (CPython treats
-                // `doc=None` as "no explicit doc", falling back to fget's
-                // docstring). Issue #1961.
-                _ => {
-                    if !arg.value.is_none() {
-                        doc = Some(arg.value.clone());
-                    }
-                }
-            }
-        }
+    #[arity_style(clinic)]
+    fn property(
+        #[default(OptionalArg::Omitted)] fget: OptValueRef,
+        #[default(OptionalArg::Omitted)] fset: OptValueRef,
+        #[default(OptionalArg::Omitted)] fdel: OptValueRef,
+        #[default(OptionalArg::Omitted)] doc: OptValueRef,
+    ) -> Result<Value> {
+        let fget = fget.as_value().cloned().unwrap_or_else(Value::none);
+        let fset = fset.as_value().cloned().unwrap_or_else(Value::none);
+        let fdel = fdel.as_value().cloned().unwrap_or_else(Value::none);
+        // doc: store an explicit doc unless it is None (CPython treats
+        // `doc=None` as "no explicit doc", falling back to fget's
+        // docstring). Issue #1961.
+        let doc = doc.as_value().filter(|v| !v.is_none()).cloned();
         Ok(pyrust_builtins::property::property_with_doc(fget, fset, fdel, doc))
     }
 
-    /// CPython: super(class, instance) — two-argument form only.
-    /// Zero-argument `super()` (implicit `__class__` cell) is not supported;
-    /// users must pass both arguments explicitly.
+    /// CPython: super([type[, object-or-type]]) — proxy object delegating
+    /// method calls to a parent or sibling class.
     /// <https://docs.python.org/3/library/functions.html#super>
     ///
     /// The Rust fn is named `super_fn` because `super` is a strict Rust
     /// keyword that is *also* rejected as a raw identifier — `r#super`
     /// won't parse — so the `#[py_name = "super"]` override is the only
     /// way to give this callable its Python-level name.
+    #[arity_style(expected_got_parens)]
     #[py_name = "super"]
-    fn super_fn(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let (cls_val, inst_val) = if args.is_empty() {
-            // Zero-argument super() — resolve __class__ cell and first param.
-            resolve_zero_arg_super(_interp)?
-        } else if args.len() == 1 {
-            // One-argument super(cls) — an *unbound* super object that acts as a
-            // descriptor (#2704).  `__get__(obj, owner)` binds it to a concrete
-            // super(cls, obj).
-            let cls_val = args[0].value.clone();
-            let class = match cls_val.kind() {
-                ValueKind::PyClass(c) => Rc::clone(c),
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "{FN_NAME}() argument 1 must be a type, not {}",
-                        value_type_name_str(&cls_val),
-                    ),
-                )),
-            };
-            return Ok(Value::super_proxy_unbound(class));
-        } else if args.len() == 2 {
-            (args[0].value.clone(), args[1].value.clone())
-        } else {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() expected at most 2 arguments, got {}", args.len()),
-            ));
+    fn super_fn(
+        #[positional_only] #[default(OptionalArg::Omitted)] t: OptValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] obj: OptValueRef,
+    ) -> Result<Value> {
+        let (cls_val, inst_val) = match (t.as_value(), obj.as_value()) {
+            (None, _) => {
+                // Zero-argument super() — resolve __class__ cell and first param.
+                resolve_zero_arg_super(_interp)?
+            }
+            (Some(cls_val), None) => {
+                // One-argument super(cls) — an *unbound* super object that acts as a
+                // descriptor (#2704).  `__get__(obj, owner)` binds it to a concrete
+                // super(cls, obj).
+                let class = match cls_val.kind() {
+                    ValueKind::PyClass(c) => Rc::clone(c),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{FN_NAME}() argument 1 must be a type, not {}",
+                            value_type_name_str(cls_val),
+                        ),
+                    )),
+                };
+                return Ok(Value::super_proxy_unbound(class));
+            }
+            (Some(cls_val), Some(obj_val)) if obj_val.is_none() => {
+                // CPython 3.12: `super(cls, None)` also constructs an unbound super.
+                let class = match cls_val.kind() {
+                    ValueKind::PyClass(c) => Rc::clone(c),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{FN_NAME}() argument 1 must be a type, not {}",
+                            value_type_name_str(cls_val),
+                        ),
+                    )),
+                };
+                return Ok(Value::super_proxy_unbound(class));
+            }
+            (Some(cls_val), Some(obj_val)) => (cls_val.clone(), obj_val.clone()),
         };
         let class = match cls_val.kind() {
             ValueKind::PyClass(c) => Rc::clone(c),
@@ -621,36 +590,25 @@ pyrust_module! {
         builtin_type_new(_interp, args, BuiltinTypeClass::Slice)
     }
 
-    fn slice(args) -> Result<Value> {
-        // CPython 3.12: slice() is positional-only; any keyword argument
-        // raises TypeError with the message "slice() takes no keyword
-        // arguments" regardless of which keyword was supplied (issue #848).
-        if args.iter().any(|a| a.name.is_some()) {
-            return Err(PyError::named(
-                "TypeError",
-                "slice() takes no keyword arguments".to_string(),
-            ));
-        }
-        let (start, stop, step) = match args.len() {
-            0 => {
-                return Err(PyError::named(
-                    "TypeError",
-                    "slice expected at least 1 argument, got 0".to_string(),
-                ));
-            }
-            1 => (None, Some(args[0].value.clone()), None),
-            2 => (Some(args[0].value.clone()), Some(args[1].value.clone()), None),
-            3 => (
-                Some(args[0].value.clone()),
-                Some(args[1].value.clone()),
-                if args[2].value.is_none() { None } else { Some(args[2].value.clone()) },
+    #[arity_style(expected_got)]
+    fn slice(
+        #[positional_only] a: PyValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] b: OptValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] c: OptValueRef,
+    ) -> Result<Value> {
+        let (start, stop, step) = match (b.as_value(), c.as_value()) {
+            (None, None) => (None, Some(a.0.clone()), None),
+            (Some(stop_v), None) => (Some(a.0.clone()), Some(stop_v.clone()), None),
+            (Some(stop_v), Some(step_v)) => (
+                Some(a.0.clone()),
+                Some(stop_v.clone()),
+                if step_v.is_none() {
+                    None
+                } else {
+                    Some(step_v.clone())
+                },
             ),
-            _ => {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("slice expected at most 3 arguments, got {}", args.len()),
-                ));
-            }
+            (None, Some(_)) => unreachable!("positional-only slice args cannot have a gap"),
         };
         Ok(pyrust_builtins::slice::make_slice(start, stop, step))
     }
