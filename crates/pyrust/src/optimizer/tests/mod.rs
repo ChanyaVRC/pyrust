@@ -52,5 +52,6 @@ mod int_loop_versioning;
 mod load_none_merging;
 mod loop_motion;
 mod metadata;
+mod pre;
 mod recursive_calls;
 mod sccp;

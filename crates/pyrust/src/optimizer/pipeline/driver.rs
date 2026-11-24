@@ -56,6 +56,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_exit_inline(insns);
     let insns = pass_licm(insns, num_locals);
     let insns = pass_cse(insns, num_locals);
+    let insns = pass_pre(insns, &consts, num_locals, &mut num_regs);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
     // Second run catches argument-prep moves that became dead after the first
