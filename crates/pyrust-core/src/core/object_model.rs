@@ -53,4 +53,4 @@ include!("value_lifecycle.rs");
 include!("value_equality.rs");
 include!("value_helpers.rs");
 include!("weak_value_cache.rs");
-include!("tests.rs");
+include!("tests/mod.rs");

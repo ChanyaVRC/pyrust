@@ -119,6 +119,14 @@ fn fresh_nanbox_allocations_use_the_checked_helper() {
             "value_constructors.rs",
             include_str!("value_constructors.rs"),
         ),
+        (
+            "value_constructors/primitives.rs",
+            include_str!("value_constructors/primitives.rs"),
+        ),
+        (
+            "value_constructors/objects.rs",
+            include_str!("value_constructors/objects.rs"),
+        ),
     ] {
         for raw_allocation in ["unsafe { alloc(", "let ptr = alloc("] {
             assert!(
@@ -152,6 +160,14 @@ fn nanboxed_value_stays_thread_bound_without_growing() {
         (
             "value_constructors.rs",
             include_str!("value_constructors.rs"),
+        ),
+        (
+            "value_constructors/primitives.rs",
+            include_str!("value_constructors/primitives.rs"),
+        ),
+        (
+            "value_constructors/objects.rs",
+            include_str!("value_constructors/objects.rs"),
         ),
         ("value_lifecycle.rs", include_str!("value_lifecycle.rs")),
         ("nanbox_strings.rs", include_str!("nanbox_strings.rs")),
