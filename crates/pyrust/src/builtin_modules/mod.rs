@@ -415,6 +415,11 @@ pyrust_builtin_modules! {
     // `TemporaryDirectory` injected from `tempfile_py.py` backed by atomic
     // exclusive creation and seekable file streams in `tempfile.rs`.
     tempfile @inject,
+    // `argparse` (issue #3150): pure-Python command-line option and argument
+    // parser (`ArgumentParser`, `Namespace`, `Action`, `BooleanOptionalAction`,
+    // `FileType`, help formatters, groups, subparsers, …) injected from
+    // `argparse_py.py`.
+    argparse @inject,
 }
 
 include!("finalization.rs");
