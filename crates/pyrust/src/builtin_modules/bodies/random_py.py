@@ -35,6 +35,7 @@ from operator import index as _index
 
 __all__ = [
     "Random",
+    "SystemRandom",
     "seed",
     "random",
     "uniform",
@@ -47,6 +48,7 @@ __all__ = [
     "getstate",
     "setstate",
     "getrandbits",
+    "randbytes",
     "gauss",
     "normalvariate",
     "expovariate",
@@ -230,6 +232,11 @@ class Random:
             shift += 32
             bits_left -= 32
         return result
+
+    def randbytes(self, n):
+        """Generate n random bytes."""
+        n = _index(n)
+        return self.getrandbits(n * 8).to_bytes(n, "little")
 
     def random(self):
         """Return a float in [0.0, 1.0)."""
@@ -497,6 +504,40 @@ class Random:
         return alpha * (-_log(u)) ** (1.0 / beta)
 
 
+class SystemRandom(Random):
+    """Alternate random number generator using sources provided
+    by the operating system (such as /dev/urandom on Unix or
+    CryptGenRandom on Windows).
+    """
+
+    def random(self):
+        """Get the next random number in the range 0.0 <= X < 1.0."""
+        return (int.from_bytes(_urandom(7), "big") >> 3) * _RECIP_BPF
+
+    def getrandbits(self, k):
+        """getrandbits(k) -> x.  Generates an int with k random bits."""
+        k = _index(k)
+        if k < 0:
+            raise ValueError("number of bits must be non-negative")
+        numbytes = (k + 7) // 8
+        x = int.from_bytes(_urandom(numbytes), "big")
+        return x >> (numbytes * 8 - k)
+
+    def randbytes(self, n):
+        """Generate n random bytes."""
+        return _urandom(n)
+
+    def seed(self, *args, **kwds):
+        """Stub method.  Not used for a system random number generator."""
+        return None
+
+    def _notimplemented(self, *args, **kwds):
+        """Method should not be called for a system random number generator."""
+        raise NotImplementedError("System entropy source does not have state.")
+
+    getstate = setstate = _notimplemented
+
+
 # -- small helpers (module-private) -------------------------------------
 
 
@@ -577,3 +618,4 @@ weibullvariate = _inst.weibullvariate
 getstate = _inst.getstate
 setstate = _inst.setstate
 getrandbits = _inst.getrandbits
+randbytes = _inst.randbytes
