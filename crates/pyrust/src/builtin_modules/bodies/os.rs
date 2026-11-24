@@ -26,7 +26,7 @@ mod arguments;
 mod environment;
 #[path = "os/filesystem.rs"]
 mod filesystem;
-pub(crate) use filesystem::register_fd;
+pub(crate) use filesystem::{clone_fd, register_fd};
 #[path = "os/path_protocol.rs"]
 mod path_protocol;
 #[path = "os/result_types.rs"]

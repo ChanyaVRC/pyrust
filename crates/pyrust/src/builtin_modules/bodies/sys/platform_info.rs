@@ -48,6 +48,13 @@ pub(super) const fn sys_platlibdir() -> &'static str {
     if cfg!(windows) { "DLLs" } else { "lib" }
 }
 
+/// Path to the currently running executable for `sys.executable`.
+pub(super) fn sys_executable() -> String {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Build a simple named-attribute PyInstance under a fresh anonymous
 /// class with the given class name.  Used for the namespace-like sys
 /// members that only need attribute access.

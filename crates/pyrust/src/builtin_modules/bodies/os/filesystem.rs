@@ -30,6 +30,15 @@ pub(crate) fn register_fd(file: std::fs::File) -> i64 {
     fd
 }
 
+/// Duplicate an open `std::fs::File` registered in the descriptor table.
+pub(crate) fn clone_fd(fd: i64) -> std::io::Result<std::fs::File> {
+    let table = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+    match table.get(&fd) {
+        Some(file) => file.try_clone(),
+        None => Err(ebadf_error()),
+    }
+}
+
 /// Remove and drop an fd from the descriptor table, returning `EBADF` if absent.
 pub(crate) fn close_fd_raw(fd: i64) -> std::io::Result<()> {
     let file = {

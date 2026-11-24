@@ -473,6 +473,12 @@ pyrust_builtin_modules! {
     gzip @inject,
     zipfile @inject,
     tarfile @inject,
+    // `subprocess` (issue #3187): Python 3.12 subprocess management (`Popen`,
+    // `CompletedProcess`, `run`, `call`, `check_call`, `check_output`,
+    // `list2cmdline`, `getstatusoutput`, `getoutput`, `PIPE`/`STDOUT`/`DEVNULL`,
+    // `SubprocessError`/`CalledProcessError`/`TimeoutExpired`) injected from
+    // `subprocess_py.py` backed by `std::process::Command` in `subprocess.rs`.
+    subprocess @inject,
 }
 
 include!("finalization.rs");
