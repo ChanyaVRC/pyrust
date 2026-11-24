@@ -232,8 +232,8 @@ fn tag_public_classes(
                             "maxlen".to_string(),
                             pyrust_builtins::property::property(
                                 Value::builtin_function("collections.deque._get_maxlen"),
-                                Value::none(),
-                                Value::none(),
+                                Value::builtin_function("collections._deque_readonly_maxlen"),
+                                Value::builtin_function("collections._deque_readonly_maxlen"),
                             ),
                         );
                     }
@@ -241,15 +241,27 @@ fn tag_public_classes(
                     super::collections_abc::register_virtual_mutable_sequence(cls_rc);
                 }
                 "defaultdict" => {
-                    let mut class = cls_rc.borrow_mut();
-                    class.slots = Some(indexmap::IndexSet::new());
-                    class.attrs.insert(
-                        "default_factory".to_string(),
-                        pyrust_builtins::property::property(
-                            Value::builtin_function("collections.defaultdict._get_default_factory"),
-                            Value::builtin_function("collections.defaultdict._set_default_factory"),
-                            Value::builtin_function("collections.defaultdict._del_default_factory"),
-                        ),
+                    {
+                        let mut class = cls_rc.borrow_mut();
+                        class.slots = Some(indexmap::IndexSet::new());
+                        class.attrs.insert(
+                            "default_factory".to_string(),
+                            pyrust_builtins::property::property(
+                                Value::builtin_function(
+                                    "collections.defaultdict._get_default_factory",
+                                ),
+                                Value::builtin_function(
+                                    "collections.defaultdict._set_default_factory",
+                                ),
+                                Value::builtin_function(
+                                    "collections.defaultdict._del_default_factory",
+                                ),
+                            ),
+                        );
+                    }
+                    register_canonical_collection_class(
+                        CanonicalCollectionKind::DefaultDict,
+                        cls_rc,
                     );
                 }
                 _ => {}
@@ -475,6 +487,14 @@ pyrust_module! {
             "Python int too large to convert to C ssize_t",
         )?;
         Ok(native_iterators::repeat(element, count.max(0) as usize))
+    }
+
+    /// Native read-only setter/deleter callback for `deque.maxlen` (#2946).
+    fn _deque_readonly_maxlen(_args) -> Result<Value> {
+        Err(PyError::named(
+            "AttributeError",
+            "attribute 'maxlen' of 'collections.deque' objects is not writable".to_string(),
+        ))
     }
 
     /// Native target wrapped as `Counter.fromkeys`' classmethod descriptor by
@@ -1166,6 +1186,63 @@ pyrust_module! {
                 attrs,
             }))))
         }
+
+        fn __copy__(args) -> Result<Value> {
+            let inst = validate_collection_no_arg_method(
+                args,
+                CanonicalCollectionKind::DefaultDict,
+                "__copy__",
+                "defaultdict",
+                "collections.defaultdict",
+            )?;
+            let items = read_items(args, FN_NAME)?;
+            let factory = inst
+                .borrow()
+                .attrs
+                .get_slot("default_factory")
+                .cloned()
+                .unwrap_or_else(Value::none);
+            let class = Rc::clone(&inst.borrow().class);
+            let mut attrs = InstanceAttrs::new();
+            attrs.insert_slot("default_factory", factory);
+            attrs.set_builtin_data(Value::dict(items));
+            Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
+                class,
+                attrs,
+            }))))
+        }
+
+        fn __reduce__(args) -> Result<Value> {
+            let inst = validate_collection_no_arg_method(
+                args,
+                CanonicalCollectionKind::DefaultDict,
+                "__reduce__",
+                "defaultdict",
+                "collections.defaultdict",
+            )?;
+            let factory = inst
+                .borrow()
+                .attrs
+                .get_slot("default_factory")
+                .cloned()
+                .unwrap_or_else(Value::none);
+            let ctor_args = if factory.is_none() {
+                Value::tuple(Vec::new())
+            } else {
+                Value::tuple(vec![factory])
+            };
+            let backing = defaultdict_backing(args, FN_NAME)?;
+            let items_view = crate::Interpreter::dict_view_for_backing(&backing, "items", false)?;
+            let item_iter = crate::interpreter::make_iterator(_interp, &items_view)?;
+            let class = Rc::clone(&inst.borrow().class);
+            Ok(Value::tuple(vec![
+                Value::py_class(class),
+                ctor_args,
+                Value::none(),
+                Value::none(),
+                item_iter,
+            ]))
+        }
     }
 
     class deque {
@@ -1456,24 +1533,55 @@ pyrust_module! {
         /// elements and the same maxlen.
         fn copy(args) -> Result<Value> {
             let inst = expect_self_no_args(args, FN_NAME)?;
-            let items = deque_items_snapshot(&inst)?;
+            deque_shallow_copy_instance(&inst)
+        }
+
+        /// `d.__copy__()` — shallow copy matching CPython's `collections.deque.__copy__`.
+        fn __copy__(args) -> Result<Value> {
+            let inst = validate_collection_no_arg_method(
+                args,
+                CanonicalCollectionKind::Deque,
+                "__copy__",
+                "deque",
+                "collections.deque",
+            )?;
+            deque_shallow_copy_instance(&inst)
+        }
+
+        /// `d.__reduce__()` — pickle/copy reduction `(type(self), args, state, iter(self))`.
+        fn __reduce__(args) -> Result<Value> {
+            let inst = validate_collection_no_arg_method(
+                args,
+                CanonicalCollectionKind::Deque,
+                "__reduce__",
+                "deque",
+                "collections.deque",
+            )?;
+            let class = Rc::clone(&inst.borrow().class);
             let maxlen_val = inst
                 .borrow()
                 .attrs
                 .get_slot("maxlen")
                 .cloned()
                 .unwrap_or_else(Value::none);
-            let class = Rc::clone(&inst.borrow().class);
-            let mut attrs = InstanceAttrs::new();
-            attrs.insert_slot(
-                "_items",
-                pyrust_builtins::deque_storage::deque_storage(items),
-            );
-            attrs.insert_slot("maxlen", maxlen_val);
-            Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
-                class,
-                attrs,
-            }))))
+            let ctor_args = if maxlen_val.is_none() {
+                Value::tuple(Vec::new())
+            } else {
+                Value::tuple(vec![Value::tuple(Vec::new()), maxlen_val])
+            };
+            let self_val = Value::py_instance(Rc::clone(&inst));
+            let state = if let Some(getstate) = lookup_class_attr(&class, "__getstate__") {
+                invoke_class_method(_interp, getstate, self_val, &[])?
+            } else {
+                crate::builtin_modules::copy::default_instance_state(&inst)
+            };
+            let list_iter = deque_iterator(&inst, false)?;
+            Ok(Value::tuple(vec![
+                Value::py_class(class),
+                ctor_args,
+                state,
+                list_iter,
+            ]))
         }
 
         /// `d.count(x)` — count occurrences of `x`, comparing elements with
@@ -1737,61 +1845,6 @@ pyrust_module! {
                 Some(ml) => format!("{class_name}({items_repr}, maxlen={ml})"),
             };
             Ok(Value::string(s))
-        }
-
-        /// `__setattr__` — CPython's deque is a C extension type with no
-        /// `__dict__`, so attribute assignment is blocked for *all* names.
-        /// CPython uses two distinct error messages:
-        ///   - `maxlen`: "attribute 'maxlen' of 'collections.deque' objects is not writable"
-        ///   - anything else: "'collections.deque' object has no attribute '<name>'"
-        /// Internal attrs (`_items`, `maxlen`) are only written by `__init__`
-        /// and `copy`, which bypass `__setattr__` via direct `attrs.insert`.
-        fn __setattr__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if args.len() != 3 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 2 arguments"),
-                ));
-            }
-            // CPython accepts any `str` subclass as an attribute name (an
-            // `isinstance` relationship) and otherwise raises
-            // `attribute name must be string, not '<type>'` — matching the
-            // shared `attr_name_arg` validator the getattr/setattr/hasattr/
-            // delattr builtins use (#2350).
-            let attr_name = if crate::interpreter::is_str_or_str_subclass(&args[1].value) {
-                crate::interpreter::extract_str_value(&args[1].value)
-            } else {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "attribute name must be string, not '{}'",
-                        crate::interpreter::value_type_name_str(&args[1].value)
-                    ),
-                ));
-            };
-            if attr_name == "maxlen" {
-                return Err(PyError::named(
-                    "AttributeError",
-                    "attribute 'maxlen' of 'collections.deque' objects is not writable"
-                        .to_string(),
-                ));
-            }
-            let class = Rc::clone(&inst.borrow().class);
-            if crate::interpreter::class_suppresses_instance_dict(&class) {
-                return Err(PyError::named(
-                    "AttributeError",
-                    format!("'collections.deque' object has no attribute '{attr_name}'"),
-                ));
-            }
-            if attr_name == "__dict__" {
-                crate::interpreter::replace_instance_dict(&inst, &args[2].value)?;
-                return Ok(Value::none());
-            }
-            inst.borrow_mut()
-                .attrs
-                .insert(&attr_name, args[2].value.clone());
-            Ok(Value::none())
         }
 
         /// `d == other` — equal iff `other` is a deque with the same

@@ -232,7 +232,7 @@ mod object_basics {
         find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
         full_type_name_str, getitem_iterator_reduce, hash_value_with_interp, is_getitem_iterator,
         is_reversed_iterator, lookup_class_attr, native_iterator_class, native_iterator_reduce,
-        reject_keyword_args_expanded, render_value_repr, reversed_iterator_reduce, value_class,
+        reject_keyword_args_expanded, render_value_repr, reversed_iterator_reduce,
         value_type_name_str,
     };
     include!("builtins/object_basics.rs");

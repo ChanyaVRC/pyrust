@@ -404,7 +404,9 @@ pub(crate) fn prepare_module_classes(module_value: &Value) {
         && let (ValueKind::PyClass(groupby), ValueKind::PyClass(grouper)) =
             (groupby.kind(), grouper.kind())
     {
+        groupby.borrow_mut().slots = Some(indexmap::IndexSet::new());
         grouper.borrow_mut().error_name = Some("itertools._grouper");
+        grouper.borrow_mut().slots = Some(indexmap::IndexSet::new());
         register_groupby_generation(groupby, grouper);
     }
     for name in ["pairwise", "batched"] {

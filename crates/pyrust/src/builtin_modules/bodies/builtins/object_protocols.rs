@@ -25,16 +25,15 @@ pyrust_module! {
                 format!("expected 1 argument, got {}", args.len() - 1),
             ));
         }
-        let name = match args[1].value.kind() {
-            ValueKind::Str(s) => s.to_string(),
-            _ => {
-                // CPython: "attribute name must be string, not 'TYPE'"
-                let type_name = pyrust_core::error_type_name(&args[1].value);
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("attribute name must be string, not '{type_name}'"),
-                ));
-            }
+        let name = if crate::interpreter::is_str_or_str_subclass(&args[1].value) {
+            crate::interpreter::extract_str_value(&args[1].value)
+        } else {
+            // CPython: "attribute name must be string, not 'TYPE'"
+            let type_name = pyrust_core::error_type_name(&args[1].value);
+            return Err(PyError::named(
+                "TypeError",
+                format!("attribute name must be string, not '{type_name}'"),
+            ));
         };
         let instance_rc = match args[0].value.kind() {
             ValueKind::PyInstance(rc) => Rc::clone(rc),
@@ -64,15 +63,14 @@ pyrust_module! {
                 format!(" expected 2 arguments, got {}", args.len() - 1),
             ));
         }
-        let name = match args[1].value.kind() {
-            ValueKind::Str(s) => s.to_string(),
-            _ => {
-                let type_name = value_type_name_str(&args[1].value);
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("attribute name must be string, not '{type_name}'"),
-                ));
-            }
+        let name = if crate::interpreter::is_str_or_str_subclass(&args[1].value) {
+            crate::interpreter::extract_str_value(&args[1].value)
+        } else {
+            let type_name = value_type_name_str(&args[1].value);
+            return Err(PyError::named(
+                "TypeError",
+                format!("attribute name must be string, not '{type_name}'"),
+            ));
         };
         let value = args[2].value.clone();
         match args[0].value.kind() {
@@ -112,15 +110,14 @@ pyrust_module! {
                 format!("expected 1 argument, got {}", args.len() - 1),
             ));
         }
-        let name = match args[1].value.kind() {
-            ValueKind::Str(s) => s.to_string(),
-            _ => {
-                let type_name = pyrust_core::error_type_name(&args[1].value);
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("attribute name must be string, not '{type_name}'"),
-                ));
-            }
+        let name = if crate::interpreter::is_str_or_str_subclass(&args[1].value) {
+            crate::interpreter::extract_str_value(&args[1].value)
+        } else {
+            let type_name = pyrust_core::error_type_name(&args[1].value);
+            return Err(PyError::named(
+                "TypeError",
+                format!("attribute name must be string, not '{type_name}'"),
+            ));
         };
         match args[0].value.kind() {
             ValueKind::PyInstance(rc) => {

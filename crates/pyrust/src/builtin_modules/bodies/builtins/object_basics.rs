@@ -270,43 +270,48 @@ pyrust_module! {
         let self_val = args.first().map(|arg| arg.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__getstate__", "object", method)
         })?;
-        if args.len() != 1 || args.iter().any(|arg| arg.name.is_some()) {
+        if args.iter().skip(1).any(|arg| arg.name.is_some()) {
+            return Err(pyrust_core::type_err!(
+                "object.__getstate__() takes no keyword arguments"
+            ));
+        }
+        if args.len() != 1 {
             return Err(pyrust_core::type_err!(
                 "object.__getstate__() takes no arguments ({} given)",
                 args.len().saturating_sub(1)
             ));
         }
         match self_val.kind() {
-            ValueKind::PyInstance(rc) => Ok(
-                crate::builtin_modules::copy::default_instance_state(rc),
-            ),
+            ValueKind::PyInstance(rc) => Ok(crate::interpreter::default_instance_state(rc)),
             _ => Ok(Value::none()),
         }
     }
 
-    /// Issue #2151: `object.__reduce_ex__(self, protocol)` — the pickle-protocol
-    /// reduction.  CPython returns the `copyreg.__newobj__` tuple; pyrust does
-    /// not model copyreg, so we return a tuple of the correct *shape*
-    /// (`(class, ())`).  Tests assert only the return type (tuple).
+    /// `object.__reduce_ex__(self, protocol)` — pickle/copy reduction protocol (#2151 / #2946).
     #[py_name = "object.__reduce_ex__"]
     fn object_reduce_ex_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__reduce_ex__", "object", method)
         })?;
+        if args.iter().skip(1).any(|arg| arg.name.is_some()) {
+            return Err(pyrust_core::type_err!(
+                "object.__reduce_ex__() takes no keyword arguments"
+            ));
+        }
+        if args.len() != 2 {
+            return Err(pyrust_core::type_err!(
+                "object.__reduce_ex__() takes exactly one argument ({} given)",
+                args.len().saturating_sub(1)
+            ));
+        }
+        let protocol = _interp.value_to_isize(
+            &args[1].value,
+            "Python int too large to convert to C int",
+        )?;
+        let protocol = i32::try_from(protocol).map_err(|_| {
+            pyrust_core::overflow_err!("Python int too large to convert to C int")
+        })?;
         if is_reversed_iterator(&self_val) || is_getitem_iterator(&self_val) {
-            if args.len() != 2 || args.iter().any(|arg| arg.name.is_some()) {
-                return Err(pyrust_core::type_err!(
-                    "object.__reduce_ex__() takes exactly one argument ({} given)",
-                    args.len().saturating_sub(1)
-                ));
-            }
-            let protocol = _interp.value_to_isize(
-                &args[1].value,
-                "Python int too large to convert to C int",
-            )?;
-            i32::try_from(protocol).map_err(|_| {
-                pyrust_core::overflow_err!("Python int too large to convert to C int")
-            })?;
             return if is_reversed_iterator(&self_val) {
                 // A `reversed` subclass may replace `__reduce__`.  Resolve it
                 // normally so object.__reduce_ex__ preserves that protocol;
@@ -322,66 +327,146 @@ pyrust_module! {
             };
         }
         if let Some(kind) = native_iterator_class(&self_val) {
-            if args.len() != 2 || args.iter().any(|arg| arg.name.is_some()) {
-                return Err(pyrust_core::type_err!(
-                    "object.__reduce_ex__() takes exactly one argument ({} given)",
-                    args.len().saturating_sub(1)
-                ));
-            }
-            let protocol = _interp.value_to_isize(
-                &args[1].value,
-                "Python int too large to convert to C int",
-            )?;
-            i32::try_from(protocol).map_err(|_| {
-                pyrust_core::overflow_err!("Python int too large to convert to C int")
-            })?;
             return native_iterator_reduce(&self_val, kind);
         }
-        if let ValueKind::PyInstance(rc) = self_val.kind() {
-            let class = Rc::clone(&rc.borrow().class);
-            if lookup_class_attr(&class, "__reduce__").is_some_and(|method| {
-                !crate::interpreter::value_is_canonical_slot(
-                    &method,
-                    crate::interpreter::CanonicalSlot::ObjectReduce,
-                )
-            }) {
-                let reducer = _interp.get_attr(&self_val, "__reduce__")?;
-                return _interp.call_function_expanded(reducer, &[]);
-            }
-        }
-        if pyrust_builtins::mapping_proxy::is_mapping_proxy(&self_val) {
-            return Err(pyrust_core::type_err!(
-                "cannot pickle 'mappingproxy' object"
-            ));
-        }
-        Ok(Value::tuple(vec![
-            value_class(&self_val),
-            Value::tuple(Vec::new()),
-        ]))
+        _interp.eval_object_reduce(&self_val, Some(protocol))
     }
 
-    /// Issue #2151: `object.__reduce__(self)` — the default reduction, which
-    /// CPython implements as `self.__reduce_ex__(2)`.  Returns a tuple.
+    /// `object.__reduce__(self)` — pickle/copy default reduction (#2151 / #2946).
     #[py_name = "object.__reduce__"]
     fn object_reduce_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__reduce__", "object", method)
         })?;
+        if args.iter().skip(1).any(|arg| arg.name.is_some()) {
+            return Err(pyrust_core::type_err!(
+                "object.__reduce__() takes no keyword arguments"
+            ));
+        }
+        if args.len() != 1 {
+            return Err(pyrust_core::type_err!(
+                "object.__reduce__() takes no arguments ({} given)",
+                args.len().saturating_sub(1)
+            ));
+        }
         if let Some(kind) = native_iterator_class(&self_val) {
             return Err(pyrust_core::type_err!(
                 "cannot pickle '{}' object",
                 kind.class_name()
             ));
         }
-        if pyrust_builtins::mapping_proxy::is_mapping_proxy(&self_val) {
+        _interp.eval_object_reduce(&self_val, None)
+    }
+
+    /// `copyreg.__newobj__(cls, *args)` — reconstruction helper returned by
+    /// `object.__reduce_ex__(protocol >= 2)` (#2946).
+    #[py_name = "copyreg.__newobj__"]
+    fn copyreg_newobj(args) -> Result<Value> {
+        let cls_arg = args.first().ok_or_else(|| {
+            pyrust_core::type_err!("__newobj__() missing 1 required positional argument: 'cls'")
+        })?;
+        let class_rc = match cls_arg.value.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(pyrust_core::type_err!(
+                    "__newobj__() first argument must be a type"
+                ));
+            }
+        };
+        let rest = &args[1..];
+        if class_rc.borrow().canonical_tag == Some(pyrust_core::CanonicalClassTag::NoneType) {
+            return Ok(Value::none());
+        }
+        if crate::interpreter::is_primitive_class(&class_rc) {
+            return _interp.call_class_expanded(class_rc, rest);
+        }
+        if let Some(base_kind) = find_mutable_primitive_base(&class_rc)
+            .or_else(|| find_immutable_primitive_base(&class_rc))
+            .or_else(|| find_scalar_primitive_base(&class_rc))
+            && let Some(tag) = pyrust_core::CanonicalClassTag::from_primitive_name(base_kind)
+        {
+            let backing = crate::interpreter::construct_primitive_backing(_interp, tag, rest)?;
+            let mut attrs = InstanceAttrs::new();
+            attrs.set_builtin_data(backing);
+            return Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+                crate::value::PyInstance {
+                    class: class_rc,
+                    attrs,
+                },
+            ))));
+        }
+        if let Some(new_fn) = lookup_class_attr(&class_rc, "__new__") {
+            let mut new_args = Vec::with_capacity(args.len());
+            new_args.push(ExpandedCallArg {
+                name: None,
+                value: Value::py_class(class_rc),
+            });
+            new_args.extend_from_slice(rest);
+            return _interp.call_function_expanded(new_fn, &new_args);
+        }
+        Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+            crate::value::PyInstance {
+                class: class_rc,
+                attrs: InstanceAttrs::new(),
+            },
+        ))))
+    }
+
+    /// `copyreg._reconstructor(cls, base, state)` — reconstruction helper
+    /// returned by `object.__reduce__()` / `__reduce_ex__(proto < 2)` (#2946).
+    #[py_name = "copyreg._reconstructor"]
+    fn copyreg_reconstructor(args) -> Result<Value> {
+        if args.len() != 3 || args.iter().any(|a| a.name.is_some()) {
             return Err(pyrust_core::type_err!(
-                "cannot pickle 'mappingproxy' object"
+                "_reconstructor() takes exactly 3 positional arguments"
             ));
         }
-        Ok(Value::tuple(vec![
-            value_class(&self_val),
-            Value::tuple(Vec::new()),
-        ]))
+        let class_rc = match args[0].value.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(pyrust_core::type_err!(
+                    "_reconstructor() first argument must be a type"
+                ));
+            }
+        };
+        let base_rc = match args[1].value.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(pyrust_core::type_err!(
+                    "_reconstructor() second argument must be a type"
+                ));
+            }
+        };
+        let state = &args[2].value;
+        if Rc::ptr_eq(&base_rc, &crate::interpreter::object_class_singleton()) {
+            return Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+                crate::value::PyInstance {
+                    class: class_rc,
+                    attrs: InstanceAttrs::new(),
+                },
+            ))));
+        }
+        if let Some(tag) = base_rc.borrow().canonical_tag {
+            let ctor_args = if state.is_none() {
+                Vec::new()
+            } else {
+                vec![ExpandedCallArg {
+                    name: None,
+                    value: state.clone(),
+                }]
+            };
+            let backing =
+                crate::interpreter::construct_primitive_backing(_interp, tag, &ctor_args)?;
+            let mut attrs = InstanceAttrs::new();
+            attrs.set_builtin_data(backing);
+            return Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+                crate::value::PyInstance {
+                    class: class_rc,
+                    attrs,
+                },
+            ))));
+        }
+        _interp.call_class_expanded(class_rc, &[])
     }
 
     /// Issue #2151: `None.__bool__()` returns `False`.  `__bool__` is
