@@ -219,6 +219,12 @@ struct Compiler {
     /// after `globals()` has been called.  Child compilers for functions and
     /// class bodies set this to false — they write to fastlocals only.
     is_module_scope: bool,
+    /// True when compiling interactive (`compile(..., 'single')` or REPL)
+    /// module-scope code: every `Stmt::Expr` at module scope (including inside
+    /// `if`/`for`/`while`/`try`/`with`/`match`, but not inside child `def`/
+    /// `class`/comprehension compilers) emits `Insn::PrintExpr` to invoke
+    /// `sys.displayhook`.
+    print_exprs: bool,
     /// True when syntax anywhere in the top-level compile unit can retain or
     /// mutate its live namespace mapping. Used to keep discarded, definitely
     /// bound module-name reads free when no such alias can exist.

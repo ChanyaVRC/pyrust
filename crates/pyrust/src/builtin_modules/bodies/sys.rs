@@ -200,7 +200,7 @@ pyrust_module! {
     }
 
     fn breakpointhook(args) -> Result<Value> {
-        hooks::breakpointhook(args)
+        hooks::breakpointhook(_interp, args)
     }
 
     fn call_tracing(args) -> Result<Value> {

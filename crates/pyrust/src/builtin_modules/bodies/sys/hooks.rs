@@ -313,11 +313,24 @@ pub(super) fn unraisablehook(interp: &mut Interpreter, args: &[ExpandedCallArg])
     Ok(Value::none())
 }
 
-pub(super) fn breakpointhook(_args: &[ExpandedCallArg]) -> Result<Value> {
-    if std::env::var("PYTHONBREAKPOINT").ok().as_deref() == Some("0") {
+pub(super) fn breakpointhook(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
+    let hookname = match std::env::var("PYTHONBREAKPOINT") {
+        Ok(v) if v == "0" => return Ok(Value::none()),
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(Value::none()),
+    };
+    let (mod_name, attr_path) = match hookname.rsplit_once('.') {
+        Some((m, a)) if !m.is_empty() && !a.is_empty() => (m, a),
+        Some(_) => return Ok(Value::none()),
+        None => ("builtins", hookname.as_str()),
+    };
+    let Ok(module) = interp.load_module(mod_name) else {
         return Ok(Value::none());
-    }
-    Ok(Value::none())
+    };
+    let Ok(hook) = interp.get_attr(&module, attr_path) else {
+        return Ok(Value::none());
+    };
+    interp.call_function_expanded(hook, args)
 }
 
 pub(super) fn call_tracing(

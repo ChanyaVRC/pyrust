@@ -83,6 +83,12 @@ impl Compiler {
                 self.free_temp(r);
             }
             Stmt::Expr(expr) => {
+                if self.print_exprs {
+                    let r = self.compile_expr(expr);
+                    self.emit(Insn::PrintExpr(r));
+                    self.free_temp(r);
+                    return;
+                }
                 if self.try_emit_set_comp_add(expr) {
                     return;
                 }

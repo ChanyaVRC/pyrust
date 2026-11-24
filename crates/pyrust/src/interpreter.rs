@@ -791,13 +791,16 @@ impl std::ops::IndexMut<usize> for RegSlice {
 // `"code"` and extract the precompiled `FnCode` and mode.  This avoids adding
 // a new `ValueKind` variant to `pyrust-core`.
 
-/// The two modes in which compiled code can be run.
+/// The modes in which compiled code can be run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CodeMode {
     /// Run as a sequence of statements; return `None`.
     Exec,
     /// Run as a single expression; return the expression's value.
     Eval,
+    /// Run as a single interactive statement; expression results pass through
+    /// `sys.displayhook`, returning `None`.
+    Single,
 }
 
 /// State held by a code object `Value`.
@@ -817,12 +820,56 @@ impl pyrust_core::BuiltinTypeOps for CodeObjectOps {
         "code"
     }
 
-    fn repr(&self, _state: &pyrust_core::BuiltinState) -> String {
-        "<code object>".to_string()
+    fn repr(&self, state: &pyrust_core::BuiltinState) -> String {
+        let borrow = state.borrow();
+        match borrow.downcast_ref::<CodeState>() {
+            Some(cs) => {
+                let firstlineno = if cs.code.first_lineno != 0 {
+                    cs.code.first_lineno
+                } else {
+                    1
+                };
+                format!(
+                    "<code object {} at 0x0, file \"{}\", line {}>",
+                    cs.code.qualname, cs.code.filename, firstlineno
+                )
+            }
+            None => "<code object>".to_string(),
+        }
     }
 
     fn truthy(&self, _state: &pyrust_core::BuiltinState) -> bool {
         true
+    }
+
+    fn getattr(&self, state: &pyrust_core::BuiltinState, name: &str) -> Option<Value> {
+        let borrow = state.borrow();
+        let cs = borrow.downcast_ref::<CodeState>()?;
+        let firstlineno = if cs.code.first_lineno != 0 {
+            cs.code.first_lineno as i64
+        } else {
+            1
+        };
+        match name {
+            "co_name" => Some(Value::string(cs.code.qualname.as_ref())),
+            "co_qualname" => Some(Value::string(cs.code.qualname.as_ref())),
+            "co_filename" => Some(Value::string(cs.code.filename.as_ref())),
+            "co_firstlineno" => Some(Value::int(firstlineno)),
+            "co_argcount" | "co_posonlyargcount" | "co_kwonlyargcount" | "co_nlocals"
+            | "co_flags" => Some(Value::int(0)),
+            "co_stacksize" => Some(Value::int(cs.code.num_regs as i64)),
+            "co_varnames" | "co_freevars" | "co_cellvars" => Some(Value::tuple(Vec::new())),
+            "co_consts" => Some(Value::tuple(cs.code.consts.clone())),
+            "co_names" => Some(Value::tuple(
+                cs.code
+                    .names
+                    .iter()
+                    .map(|sym| Value::string(sym.as_str()))
+                    .collect(),
+            )),
+            "co_code" => Some(Value::bytes(Vec::new())),
+            _ => None,
+        }
     }
 }
 

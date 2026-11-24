@@ -19,6 +19,21 @@ impl Interpreter {
             .map_err(lex_parse_to_exc)
     }
 
+    /// Parse a Python source string as a single interactive statement for
+    /// `compile(..., 'single')`.
+    pub(crate) fn parse_single_source_to_stmts_with_linenos(
+        source: &str,
+    ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
+        let (tokens, line_nos, cols, cols_end) = crate::lexer::Lexer::new(source)
+            .map_err(lex_parse_to_exc)?
+            .into_tokens_with_pos();
+        let mut parser = crate::parser::Parser::new_with_pos(tokens, line_nos, cols, cols_end);
+        let ends_with_newline = source.ends_with('\n') || source.ends_with('\r');
+        parser
+            .parse_single_with_linenos(ends_with_newline)
+            .map_err(lex_parse_to_exc)
+    }
+
     /// Execute a source string as statements, optionally in an explicit
     /// namespace.
     ///

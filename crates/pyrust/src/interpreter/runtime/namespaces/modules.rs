@@ -241,6 +241,28 @@ impl Interpreter {
         self.script_dir.iter().cloned().collect()
     }
 
+    /// Notify all registered `sys.addaudithook` callbacks of an audit event.
+    pub(crate) fn emit_audit_event(&mut self, event: &str, event_args: &[Value]) -> Result<()> {
+        let hooks: Vec<Value> = self.sys_state.borrow().audit_hooks.clone();
+        if hooks.is_empty() {
+            return Ok(());
+        }
+        let call_args = [
+            ExpandedCallArg {
+                name: None,
+                value: Value::string(event),
+            },
+            ExpandedCallArg {
+                name: None,
+                value: Value::tuple(event_args.to_vec()),
+            },
+        ];
+        for hook in hooks {
+            self.call_function_expanded(hook, &call_args)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn load_module(&mut self, name: &str) -> Result<Value> {
         // CPython first probes its interpreter-owned original modules dict. The
         // public `sys.modules` attribute initially aliases it, but rebinding the

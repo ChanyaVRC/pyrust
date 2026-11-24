@@ -49,13 +49,13 @@ pub fn compile_script_with_linenos(
     // Issue #820: module-scope stores emit SyncModuleGlobal to keep
     // module_globals_dict live after globals() has been called.
     c.is_module_scope = true;
+    c.print_exprs = repl_mode;
     c.module_namespace_may_be_exposed = module_namespace_may_be_exposed(stmts);
     // Issue #711: if the first statement is a bare string literal and we are
     // compiling a script file (not the REPL), it is the module docstring.
     // Emit a StoreGlobal for `__doc__` (CPython parity) before compiling the
-    // rest.  In REPL mode every string-expression is just a value expression
-    // whose repr is printed; it is NOT a module docstring (CPython's interactive
-    // console does not set __doc__ from string literals typed interactively).
+    // rest.  In REPL / `'single'` mode every string-expression is just a value
+    // expression passed to `sys.displayhook`; it is NOT a module docstring.
     let (body, body_linenos): (&[Stmt], &[u32]) = if !repl_mode {
         match stmts {
             [Stmt::Expr(Expr::Str(s)), rest @ ..] => {
@@ -75,24 +75,7 @@ pub fn compile_script_with_linenos(
     } else {
         (stmts, linenos)
     };
-    if repl_mode {
-        for (idx, stmt) in body.iter().enumerate() {
-            if let Some(&ln) = body_linenos.get(idx)
-                && ln != 0
-            {
-                c.set_lineno(ln);
-            }
-            if let Stmt::Expr(e) = stmt {
-                let r = c.compile_expr(e);
-                c.emit(Insn::PrintExpr(r));
-                c.free_temp(r);
-            } else {
-                c.compile_stmt(stmt);
-            }
-        }
-    } else {
-        c.compile_block_with_linenos(body, body_linenos);
-    }
+    c.compile_block_with_linenos(body, body_linenos);
     c.finish()
 }
 
