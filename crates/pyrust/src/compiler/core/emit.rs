@@ -36,6 +36,10 @@ impl Compiler {
         }
     }
 
+    fn push_desc(&mut self, desc: InsnDesc) -> DescIdx {
+        crate::bytecode::push_desc(&mut self.descs, desc)
+    }
+
     fn emit(&mut self, insn: Insn) -> usize {
         let idx = self.insns.len();
         self.insns.push(insn);
@@ -83,7 +87,7 @@ impl Compiler {
             | Insn::ForIter(_, _, off)
             | Insn::SetupExcept(off)
             | Insn::MatchExcept(_, off)
-            | Insn::MatchExceptStar(_, _, _, off)
+            | Insn::MatchExceptStar(_, off)
             | Insn::CmpJumpIfFalse(_, _, _, off)
             | Insn::CmpJumpIfTrue(_, _, _, off)
             | Insn::CmpJumpIfFalseConst(_, _, _, off)

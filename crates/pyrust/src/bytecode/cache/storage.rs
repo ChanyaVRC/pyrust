@@ -17,7 +17,7 @@ use crate::bytecode::Insn;
 pub(crate) fn is_attr_cache_site(insn: &Insn) -> bool {
     matches!(
         insn,
-        Insn::GetAttr(..) | Insn::SetAttr(..) | Insn::CallMethod { .. } | Insn::CallMethodKw { .. }
+        Insn::GetAttr(..) | Insn::SetAttr(..) | Insn::CallMethod { .. } | Insn::CallMethodKw(..)
     )
 }
 

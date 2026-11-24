@@ -29,6 +29,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let mut num_regs = code.num_regs;
     let mut consts = code.consts;
     let names = code.names;
+    let mut descs = code.descs;
     let original_insns = code.insns.clone();
     let original_linenos = code.lineno_table.to_dense(original_insns.len());
     let original_cols = code.col_table.to_dense(original_insns.len());
@@ -37,31 +38,31 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // guarded optimizer carries binding identity and frame-observability facts.
     let insns = code.insns;
     let insns = pass_thread_jumps(insns);
-    let insns = pass_binop_const_fusion(insns, num_locals);
+    let insns = pass_binop_const_fusion(insns, &descs, num_locals);
     let insns = pass_fold_const_tuple(insns, num_locals, &mut consts);
-    let insns = pass_str_method_const_fold(insns, &mut consts, &names, num_locals);
+    let insns = pass_str_method_const_fold(insns, &descs, &mut consts, &names, num_locals);
     // Keep lightweight pre-fusion branch elimination for constants newly
     // exposed by `pass_str_method_const_fold` (core SCCP, constant folding,
     // unary folding, algebraic simplification, CSE, DCE, and #357 reassociation
     // already ran on SSA MIR above).
     let insns = pass_const_branch_elim(insns, &consts);
-    let insns = pass_cmpjump_fusion(insns, num_locals);
-    let insns = pass_not_invert(insns, num_locals);
+    let insns = pass_cmpjump_fusion(insns, &descs, num_locals);
+    let insns = pass_not_invert(insns, &descs, num_locals);
     // Run cmpjump fusion again: `pass_not_invert` can expose new
     // `BinOp + Cond-Jump` pairs (e.g. when an outer `not` was stripped from
     // `not (a == b)`, leaving `BinOp(Eq) + JumpIfTrue` ready to fuse into
     // `CmpJumpIfTrue`).
-    let insns = pass_cmpjump_fusion(insns, num_locals);
-    let insns = pass_const_reg_prop(insns, num_locals, &consts);
-    let insns = pass_concat_merge(insns, num_locals, &mut num_regs, &consts);
+    let insns = pass_cmpjump_fusion(insns, &descs, num_locals);
+    let insns = pass_const_reg_prop(insns, &descs, num_locals, &consts);
+    let insns = pass_concat_merge(insns, &descs, num_locals, &mut num_regs, &consts);
     let insns = pass_exit_inline(insns);
-    let insns = pass_licm(insns, num_locals);
-    let insns = pass_pre(insns, &consts, num_locals, &mut num_regs);
+    let insns = pass_licm(insns, &descs, num_locals);
+    let insns = pass_pre(insns, &descs, &consts, num_locals, &mut num_regs);
     let insns = pass_dead_code(insns);
-    let insns = pass_dead_store_elim(insns, num_locals);
+    let insns = pass_dead_store_elim(insns, &descs, num_locals);
     // Second run catches argument-prep moves that became dead after the first
     // pass removed their consuming dead store (store-chain cascade).
-    let insns = pass_dead_store_elim(insns, num_locals);
+    let insns = pass_dead_store_elim(insns, &descs, num_locals);
     // Keep every module-global synchronization at its original program point.
     // An opcode does not need to be an explicit Call to re-enter Python:
     // BinOp/Cmp/GetAttr/SetItem and protocol dispatch can invoke user dunders
@@ -76,8 +77,8 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let (pre_cj_linenos, pre_cj_cols) =
         remap_lineno_and_col_tables(&original_insns, &original_linenos, &original_cols, &insns);
     let insns = pass_cross_jump(insns, &pre_cj_linenos, &pre_cj_cols);
-    let insns = pass_copy_prop(insns, num_locals);
-    let insns = pass_dead_store_elim(insns, num_locals);
+    let insns = pass_copy_prop(insns, &mut descs, num_locals);
+    let insns = pass_dead_store_elim(insns, &descs, num_locals);
     let insns = pass_loop_inversion(insns);
     let insns = pass_trivial_nop(insns);
     let insns = pass_loadnone_merge(insns);
@@ -89,8 +90,15 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // Guarded leaf-call inlining precedes loop versioning: its guard opcode
     // is not in the versioning whitelist, so a loop containing a call site
     // simply keeps its original form.
-    let insns = pass_inline_leaf_binop(insns, &fn_protos);
-    let versioned = pass_int_loop_version(insns, &mut consts, &names, num_locals, &mut num_regs);
+    let insns = pass_inline_leaf_binop(insns, &mut descs, &fn_protos);
+    let versioned = pass_int_loop_version(
+        insns,
+        &mut descs,
+        &mut consts,
+        &names,
+        num_locals,
+        &mut num_regs,
+    );
     let insns = versioned.insns;
     let source_prefix_len = versioned.source_prefix_len;
 
@@ -120,8 +128,9 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let has_exc_handlers = has_exception_handlers(&insns, &exc_table);
 
     // Remap line numbers and PEP 657 caret anchors (#2426) in one shared scan.
-    // `pass_compact_consts` below is 1:1 order-preserving, so both tables
-    // computed against the pre-compaction stream apply unchanged after it.
+    // `pass_compact_descs` and `pass_compact_consts` below are 1:1
+    // order-preserving, so both tables computed against the pre-compaction
+    // stream apply unchanged after them.
     let (lineno_table, col_table) = remap_lineno_and_col_tables_with_source_prefix(
         &original_insns,
         &original_linenos,
@@ -129,12 +138,14 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         &insns,
         source_prefix_len,
     );
-    let (insns, mut consts) = pass_compact_consts(insns, consts);
+    let (insns, mut descs) = pass_compact_descs(insns, descs);
+    let (insns, mut consts) = pass_compact_consts(insns, &mut descs, consts);
     crate::bytecode::intern_const_pool(&mut consts);
 
     let global_cache_interest_masks = code.global_cache_interest_masks;
     FnCode {
         insns,
+        descs,
         filename: code.filename,
         qualname: code.qualname,
         lineno_table: crate::bytecode::LinenoTable::from_dense(&lineno_table),

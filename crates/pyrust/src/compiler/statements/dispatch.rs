@@ -174,7 +174,7 @@ impl Compiler {
                     self.emit(Insn::RaiseAssert(msg_reg));
                     self.free_temp(msg_reg);
                 } else {
-                    self.emit(Insn::RaiseAssertNoMsg);
+                    self.emit(Insn::RaiseAssert(NO_ASSERT_MSG));
                 }
                 self.patch_jump(skip);
             }

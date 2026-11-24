@@ -22,6 +22,7 @@ impl Compiler {
             nonlocal_names: HashSet::new(),
             class_direct_env_names: HashSet::new(),
             insns: Vec::new(),
+            descs: Vec::new(),
             lineno_table: Vec::new(),
             col_table: Vec::new(),
             // (0, 0, 0, 0) sentinel = no anchor (#2411).

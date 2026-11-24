@@ -12,7 +12,6 @@ fn jump_target(pc: usize, insn: &Insn) -> Option<usize> {
         | Insn::JumpIfIterNotIntRange(_, offset)
         | Insn::JumpIfIterNotIndexedSeq(_, offset)
         | Insn::JumpIfIterNotIntRangeExact(_, offset)
-        | Insn::GetItemSeqIntOrExit(_, _, _, offset)
         | Insn::JumpIfNotBuiltinLen(_, offset)
         | Insn::LenSeqOrExit(_, _, offset)
         | Insn::CmpJumpIfFalse(_, _, _, offset)
@@ -24,8 +23,9 @@ fn jump_target(pc: usize, insn: &Insn) -> Option<usize> {
         | Insn::ForIter(_, _, offset)
         | Insn::SetupExcept(offset)
         | Insn::MatchExcept(_, offset)
-        | Insn::MatchExceptStar(_, _, _, offset) => *offset,
-        Insn::CallInlineBinOp { skip, .. } => *skip,
+        | Insn::MatchExceptStar(_, offset)
+        | Insn::CallInlineBinOp(_, offset) => *offset,
+        Insn::GetItemSeqIntOrExit(_, _, _, offset) => i32::from(*offset),
         _ => return None,
     };
     Some((pc as i64 + 1 + i64::from(offset)) as usize)
@@ -35,14 +35,24 @@ fn versioned(input: Vec<Insn>, constants: &[Value]) -> IntLoopVersioningResult {
     versioned_with_names(input, constants, &[])
 }
 
+fn versioned_with_names_and_descs(
+    input: Vec<Insn>,
+    constants: &[Value],
+    names: &[pyrust_core::Symbol],
+) -> (IntLoopVersioningResult, Vec<InsnDesc>) {
+    let mut num_regs = 16;
+    let mut constants = constants.to_vec();
+    let mut descs = Vec::new();
+    let res = pass_int_loop_version(input, &mut descs, &mut constants, names, 0, &mut num_regs);
+    (res, descs)
+}
+
 fn versioned_with_names(
     input: Vec<Insn>,
     constants: &[Value],
     names: &[pyrust_core::Symbol],
 ) -> IntLoopVersioningResult {
-    let mut num_regs = 16;
-    let mut constants = constants.to_vec();
-    pass_int_loop_version(input, &mut constants, names, 0, &mut num_regs)
+    versioned_with_names_and_descs(input, constants, names).0
 }
 
 fn version(input: Vec<Insn>, constants: &[Value]) -> Vec<Insn> {
@@ -328,7 +338,8 @@ fn constant_stop_fusion_allocates_one_temporary_and_uses_it() {
     let mut constants = vec![Value::int(10)];
     let mut num_regs = 2;
 
-    let result = pass_int_loop_version(input, &mut constants, &[], 0, &mut num_regs);
+    let mut descs = Vec::new();
+    let result = pass_int_loop_version(input, &mut descs, &mut constants, &[], 0, &mut num_regs);
 
     assert_eq!(num_regs, 3);
     assert!(
@@ -357,7 +368,15 @@ fn constant_stop_fusion_respects_the_frame_register_limit() {
     let mut constants = vec![Value::int(10)];
     let mut num_regs = MAX_FRAME_REGS;
 
-    let result = pass_int_loop_version(input.clone(), &mut constants, &[], 0, &mut num_regs);
+    let mut descs = Vec::new();
+    let result = pass_int_loop_version(
+        input.clone(),
+        &mut descs,
+        &mut constants,
+        &[],
+        0,
+        &mut num_regs,
+    );
 
     assert_eq!(num_regs, MAX_FRAME_REGS);
     assert_eq!(result.insns, input);
@@ -377,7 +396,15 @@ fn interior_landing_rejects_fusion_without_allocating_a_temporary() {
     let mut constants = vec![Value::int(10)];
     let mut num_regs = 2;
 
-    let result = pass_int_loop_version(input.clone(), &mut constants, &[], 0, &mut num_regs);
+    let mut descs = Vec::new();
+    let result = pass_int_loop_version(
+        input.clone(),
+        &mut descs,
+        &mut constants,
+        &[],
+        0,
+        &mut num_regs,
+    );
 
     assert_eq!(num_regs, 2);
     assert_eq!(result.insns, input);
@@ -518,11 +545,11 @@ fn int_loop_opcodes_participate_in_register_analysis_and_compaction() {
     let guard = Insn::JumpIfNotInt(4, 0);
     let counted = Insn::CountCmpJumpFalse(5, BinaryOp::Ge, 6, -1, 0);
 
-    assert!(insn_reads_reg(&guard, 4));
-    assert!(insn_reads_reg(&counted, 5));
-    assert!(insn_reads_reg(&counted, 6));
+    assert!(insn_reads_reg(&guard, &[], 4));
+    assert!(insn_reads_reg(&counted, &[], 5));
+    assert!(insn_reads_reg(&counted, &[], 6));
     let mut writes = HashSet::new();
-    collect_writes(&counted, &mut writes);
+    collect_writes(&counted, &[], &mut writes);
     assert_eq!(writes, HashSet::from([5]));
 
     // Removing old pc 2 shifts both the guard's forward target and the counted
@@ -797,21 +824,21 @@ fn side_exit_opcodes_participate_in_register_analysis_and_compaction() {
     let length = Insn::LenSeqOrExit(7, 8, 0);
     let len_guard = Insn::JumpIfNotBuiltinLen(9, 0);
 
-    assert!(insn_reads_reg(&subscript, 5));
-    assert!(insn_reads_reg(&subscript, 6));
-    assert!(!insn_reads_reg(&subscript, 4));
-    assert!(!insn_reads_reg(&iter_guard, 0));
-    assert!(insn_reads_reg(&length, 8));
-    assert!(!insn_reads_reg(&length, 7));
-    assert!(insn_reads_reg(&len_guard, 9));
+    assert!(insn_reads_reg(&subscript, &[], 5));
+    assert!(insn_reads_reg(&subscript, &[], 6));
+    assert!(!insn_reads_reg(&subscript, &[], 4));
+    assert!(!insn_reads_reg(&iter_guard, &[], 0));
+    assert!(insn_reads_reg(&length, &[], 8));
+    assert!(!insn_reads_reg(&length, &[], 7));
+    assert!(insn_reads_reg(&len_guard, &[], 9));
     let mut writes = HashSet::new();
-    collect_writes(&subscript, &mut writes);
+    collect_writes(&subscript, &[], &mut writes);
     assert_eq!(writes, HashSet::from([4]));
     let mut writes = HashSet::new();
-    collect_writes(&length, &mut writes);
+    collect_writes(&length, &[], &mut writes);
     assert_eq!(writes, HashSet::from([7]));
     let mut writes = HashSet::new();
-    collect_writes(&len_guard, &mut writes);
+    collect_writes(&len_guard, &[], &mut writes);
     assert!(
         writes.is_empty(),
         "a value guard writes nothing: {writes:?}"
@@ -846,7 +873,8 @@ fn early_passes_reject_late_stage_opcodes_in_debug() {
     // register-rewriting pass would miscompile silently (their kill-set
     // helpers use wildcard arms).  The debug guard must fail loudly instead.
     let insns = vec![Insn::JumpIfNotInt(0, 1), Insn::ReturnNone];
-    let _ = pass_copy_prop(insns, 1);
+    let mut descs = Vec::new();
+    let _ = pass_copy_prop(insns, &mut descs, 1);
 }
 
 #[test]
@@ -859,15 +887,7 @@ fn every_guarded_opcode_this_pass_emits_is_classified_late_stage() {
         Insn::JumpIfNotInt(0, 1),
         Insn::JumpIfIterNotIntRange(0, 1),
         Insn::JumpIfIterNotIndexedSeq(0, 1),
-        Insn::JumpIfIterNotIntRangeExact(
-            Box::new(IntRangeExactGuard {
-                slot: 0,
-                start: 0,
-                stop: 10,
-                step: 1,
-            }),
-            1,
-        ),
+        Insn::JumpIfIterNotIntRangeExact(0, 1),
         Insn::GetItemSeqIntOrExit(0, 1, 2, 1),
         Insn::JumpIfNotBuiltinLen(0, 1),
         Insn::LenSeqOrExit(0, 1, 1),
@@ -940,11 +960,13 @@ fn nested_constant_range_inner_loop_reaches_closed_form_after_licm() {
     ));
 
     assert!(
-        optimized.insns.iter().any(|insn| matches!(
-            insn,
-            Insn::JumpIfIterNotIntRangeExact(guard, _)
-                if (guard.start, guard.stop, guard.step) == (0, 5, 1)
-        )),
+        optimized.insns.iter().any(|insn| match insn {
+            Insn::JumpIfIterNotIntRangeExact(desc_idx, _) => {
+                let guard = optimized.descs[*desc_idx as usize].as_int_range_exact_guard();
+                (guard.start, guard.stop, guard.step) == (0, 5, 1)
+            }
+            _ => false,
+        }),
         "LICM-hoisted inner range bound must still reach the closed form: {:?}",
         optimized.insns
     );
@@ -969,13 +991,16 @@ fn closed_form_traces_a_constant_bound_hoisted_before_the_call_setup() {
         Insn::Jump(-5),
     ];
 
-    let result = versioned_with_names(insns, &[Value::int(1000), Value::int(3)], &range_names());
+    let (result, descs) =
+        versioned_with_names_and_descs(insns, &[Value::int(1000), Value::int(3)], &range_names());
 
     let guard = result
         .insns
         .iter()
         .find_map(|insn| match insn {
-            Insn::JumpIfIterNotIntRangeExact(guard, _) => Some(guard),
+            Insn::JumpIfIterNotIntRangeExact(desc_idx, _) => {
+                Some(descs[*desc_idx as usize].as_int_range_exact_guard())
+            }
             _ => None,
         })
         .unwrap_or_else(|| {
@@ -1109,13 +1134,16 @@ fn closed_form_declines_an_overwrite_carried_through_chained_backedges() {
 #[test]
 fn closed_form_folds_a_constant_counted_loop_into_a_straight_line_copy() {
     // `for v in range(1000): total += 1`
-    let result = versioned_with_names(counted_loop(&[0]), &[Value::int(1000)], &range_names());
+    let (result, descs) =
+        versioned_with_names_and_descs(counted_loop(&[0]), &[Value::int(1000)], &range_names());
 
     let guard = result
         .insns
         .iter()
         .find_map(|insn| match insn {
-            Insn::JumpIfIterNotIntRangeExact(guard, _) => Some(guard.clone()),
+            Insn::JumpIfIterNotIntRangeExact(desc_idx, _) => {
+                Some(descs[*desc_idx as usize].as_int_range_exact_guard().clone())
+            }
             _ => None,
         })
         .expect("a constant counted loop must get a closed-form guard");
@@ -1155,8 +1183,10 @@ fn closed_form_constants_hold_the_exact_fold() {
     let mut constants = vec![Value::int(10), Value::int(1000), Value::int(3)];
     let mut num_regs = 16;
 
+    let mut descs = Vec::new();
     let result = pass_int_loop_version(
         const_range_loop(&[0, 1, 2], body),
+        &mut descs,
         &mut constants,
         &range_names(),
         0,
@@ -1357,13 +1387,23 @@ fn closed_form_traces_a_negated_literal_bound() {
     let mut constants = vec![Value::int(100), Value::int(0), Value::int(7)];
     let mut num_regs = 16;
 
-    let result = pass_int_loop_version(insns, &mut constants, &range_names(), 0, &mut num_regs);
+    let mut descs = Vec::new();
+    let result = pass_int_loop_version(
+        insns,
+        &mut descs,
+        &mut constants,
+        &range_names(),
+        0,
+        &mut num_regs,
+    );
 
     let guard = result
         .insns
         .iter()
         .find_map(|insn| match insn {
-            Insn::JumpIfIterNotIntRangeExact(guard, _) => Some(guard.clone()),
+            Insn::JumpIfIterNotIntRangeExact(desc_idx, _) => {
+                Some(descs[*desc_idx as usize].as_int_range_exact_guard().clone())
+            }
             _ => None,
         })
         .expect("a negated constant bound must still fold");
@@ -1405,7 +1445,15 @@ fn closed_form_declines_a_negated_literal_that_leaves_i64() {
     let mut constants = vec![Value::int(i64::MIN)];
     let mut num_regs = 16;
 
-    let result = pass_int_loop_version(insns, &mut constants, &range_names(), 0, &mut num_regs);
+    let mut descs = Vec::new();
+    let result = pass_int_loop_version(
+        insns,
+        &mut descs,
+        &mut constants,
+        &range_names(),
+        0,
+        &mut num_regs,
+    );
 
     assert!(
         !has_closed_form_guard(&result),
@@ -1433,7 +1481,15 @@ fn closed_form_declines_a_computed_bound_in_the_call_setup() {
     let mut constants = vec![Value::int(1000)];
     let mut num_regs = 16;
 
-    let result = pass_int_loop_version(insns, &mut constants, &range_names(), 0, &mut num_regs);
+    let mut descs = Vec::new();
+    let result = pass_int_loop_version(
+        insns,
+        &mut descs,
+        &mut constants,
+        &range_names(),
+        0,
+        &mut num_regs,
+    );
 
     assert!(
         !has_closed_form_guard(&result),
@@ -1978,7 +2034,15 @@ fn len_header_declines_when_the_call_base_aliases_a_fast_local() {
     let mut constants = vec![Value::int(1)];
     let mut num_regs = 16;
     let names = len_names();
-    let result = pass_int_loop_version(input.clone(), &mut constants, &names, 6, &mut num_regs);
+    let mut descs = Vec::new();
+    let result = pass_int_loop_version(
+        input.clone(),
+        &mut descs,
+        &mut constants,
+        &names,
+        6,
+        &mut num_regs,
+    );
     assert_eq!(
         result.insns, input,
         "a fast-local call base must keep the original loop"

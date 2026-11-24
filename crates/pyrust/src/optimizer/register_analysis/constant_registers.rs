@@ -40,7 +40,12 @@
 /// shared namespace dictionary can replace that register through the runtime's
 /// namespace mirror while user code is re-entered.  Temporaries are not exposed
 /// through that mirror, so write-once is a valid immutability proof for them.
-fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> Vec<Insn> {
+fn pass_const_reg_prop(
+    insns: Vec<Insn>,
+    descs: &[InsnDesc],
+    num_locals: u32,
+    consts: &[Value],
+) -> Vec<Insn> {
     debug_assert_no_late_stage_insns(&insns, "pass_const_reg_prop");
     // Pre-scan: count writes and record LoadConst targets.
     //
@@ -57,7 +62,7 @@ fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> V
     let mut written: HashSet<u32> = HashSet::new();
     for insn in &insns {
         written.clear();
-        collect_writes(insn, &mut written);
+        collect_writes(insn, descs, &mut written);
         for &dst in &written {
             *write_count.entry(dst).or_insert(0) += 1;
         }
@@ -161,7 +166,7 @@ fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> V
         // insn_reads_reg once per converted_reg per instruction.
         let mut all_reads: HashSet<u32> = HashSet::new();
         for insn in &out {
-            collect_reads(insn, &mut all_reads);
+            collect_reads(insn, descs, &mut all_reads);
         }
         let dead_regs: HashSet<u32> = converted_regs
             .into_iter()

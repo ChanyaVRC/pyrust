@@ -121,7 +121,8 @@ fn compact_consts_removes_unreferenced_entry() {
         Insn::LoadConst(1, 2), // references pool[2] = 20
         Insn::Return(0),
     ];
-    let (out_insns, out_consts) = pass_compact_consts(insns, consts);
+    let mut descs = Vec::new();
+    let (out_insns, out_consts) = pass_compact_consts(insns, &mut descs, consts);
     assert_eq!(out_consts.len(), 2, "unreferenced entry should be removed");
     assert!(matches!(
         out_consts[0].kind(),
@@ -144,7 +145,8 @@ fn compact_consts_noop_when_all_referenced() {
         Insn::LoadConst(1, 1),
         Insn::Return(0),
     ];
-    let (out_insns, out_consts) = pass_compact_consts(insns, consts);
+    let mut descs = Vec::new();
+    let (out_insns, out_consts) = pass_compact_consts(insns, &mut descs, consts);
     assert_eq!(out_consts.len(), 2, "no change when all referenced");
     assert!(matches!(out_insns[0], Insn::LoadConst(0, 0)));
     assert!(matches!(out_insns[1], Insn::LoadConst(1, 1)));
@@ -184,7 +186,7 @@ fn not_invert_jumpiffalse_becomes_jumpiftrue() {
         Insn::JumpIfFalse(5, 1),
         Insn::Return(0),
     ];
-    let out = pass_not_invert(insns, 2);
+    let out = pass_not_invert(insns, &[], 2);
     assert_eq!(out.len(), 2, "UnaryOp should be removed");
     assert!(
         matches!(out[0], Insn::JumpIfTrue(0, 1)),
@@ -201,7 +203,7 @@ fn not_invert_jumpiftrue_becomes_jumpiffalse() {
         Insn::JumpIfTrue(5, 1),
         Insn::Return(0),
     ];
-    let out = pass_not_invert(insns, 2);
+    let out = pass_not_invert(insns, &[], 2);
     assert_eq!(out.len(), 2, "UnaryOp should be removed");
     assert!(
         matches!(out[0], Insn::JumpIfFalse(0, 1)),
@@ -218,7 +220,7 @@ fn not_invert_skips_when_reg_is_local() {
         Insn::JumpIfFalse(1, 1),
         Insn::Return(0),
     ];
-    let out = pass_not_invert(insns, 3);
+    let out = pass_not_invert(insns, &[], 3);
     assert_eq!(out.len(), 3, "no fusion when r is a local");
 }
 
@@ -231,7 +233,7 @@ fn not_invert_skips_when_reg_read_after() {
         Insn::JumpIfFalse(5, 0),
         Insn::Return(5), // reads r=5 → live
     ];
-    let out = pass_not_invert(insns, 2);
+    let out = pass_not_invert(insns, &[], 2);
     assert_eq!(out.len(), 3, "no fusion when r is live after branch");
 }
 
@@ -251,7 +253,7 @@ fn not_invert_fuses_when_reg_not_reused() {
         Insn::Move(2, 0),
         Insn::Return(2),
     ];
-    let out = pass_not_invert(insns, 2);
+    let out = pass_not_invert(insns, &[], 2);
     // UnaryOp should be removed; JumpIfFalse→JumpIfTrue
     assert_eq!(out.len(), 3, "UnaryOp should be removed");
     assert!(
@@ -289,7 +291,7 @@ fn binop_const_fusion_skips_when_back_edge_present() {
         Insn::ForIter(6, 0, -2),
         Insn::Return(3),
     ];
-    let out = pass_binop_const_fusion(insns, 2);
+    let out = pass_binop_const_fusion(insns, &[], 2);
     // LoadConst must survive — r5 is live on the back-edge
     assert!(
         matches!(out[0], Insn::LoadConst(5, 0)),
@@ -309,7 +311,8 @@ fn copy_prop_eliminates_move() {
         Insn::BinOp(2, 1, BinaryOp::Add, 3),
         Insn::Return(2),
     ];
-    let out = pass_copy_prop(insns, 0);
+    let mut descs = Vec::new();
+    let out = pass_copy_prop(insns, &mut descs, 0);
     assert!(
         matches!(out[2], Insn::BinOp(2, 0, BinaryOp::Add, 3)),
         "r1 should be substituted with r0 in BinOp"
@@ -325,7 +328,8 @@ fn copy_prop_kills_alias_on_move_overwrite() {
         Insn::Move(0, 2),
         Insn::Return(1),
     ];
-    let out = pass_copy_prop(insns, 0);
+    let mut descs = Vec::new();
+    let out = pass_copy_prop(insns, &mut descs, 0);
     assert!(
         matches!(out[4], Insn::Return(1)),
         "r1 alias must be killed when r0 is overwritten"
@@ -342,7 +346,8 @@ fn copy_prop_kills_alias_on_binop_write() {
         Insn::BinOp(0, 0, BinaryOp::Add, 2),
         Insn::Return(1),
     ];
-    let out = pass_copy_prop(insns, 0);
+    let mut descs = Vec::new();
+    let out = pass_copy_prop(insns, &mut descs, 0);
     assert!(
         matches!(out[4], Insn::Return(1)),
         "r1→r0 alias must be killed when BinOp writes r0"
@@ -359,7 +364,8 @@ fn copy_prop_does_not_substitute_dict_update_receiver() {
         Insn::DictUpdate(5, 6),
         Insn::Return(5),
     ];
-    let out = pass_copy_prop(insns, 0);
+    let mut descs = Vec::new();
+    let out = pass_copy_prop(insns, &mut descs, 0);
     assert!(
         matches!(out[4], Insn::DictUpdate(5, 4)),
         "DictUpdate: receiver unchanged, src substituted"
@@ -390,7 +396,8 @@ fn copy_prop_invalidates_named_local_alias_on_call() {
         Insn::Return(3),
     ];
     // num_locals=2: r0 and r1 are named locals; r2+ are temps.
-    let out = pass_copy_prop(insns, 2);
+    let mut descs = Vec::new();
+    let out = pass_copy_prop(insns, &mut descs, 2);
     // After Call, copies[r0 → r5] must be evicted. The BinOpConst at [3]
     // must still use r0, not the aliased r5.
     assert!(
@@ -427,7 +434,8 @@ fn copy_prop_substitutes_yieldfrom_iter_and_sent_regs() {
         },
         Insn::Return(6),
     ];
-    let out = pass_copy_prop(insns, 0);
+    let mut descs = Vec::new();
+    let out = pass_copy_prop(insns, &mut descs, 0);
     assert!(
         matches!(
             out[5],
@@ -440,6 +448,166 @@ fn copy_prop_substitutes_yieldfrom_iter_and_sent_regs() {
         "iter_reg r3→r2 and sent_reg r5→r4 should be substituted; result_reg must stay r6: found {:?}",
         out[5]
     );
+}
+
+// ── descriptor pool passes & tracking ─────────────────────────────────────
+
+#[test]
+fn compact_descs_and_consts_drops_dead_descs_and_remaps_kwnames() {
+    use crate::bytecode::{CallExArgsDesc, CallMethodKwDesc};
+    use crate::value::Value;
+    let consts = vec![
+        Value::string("unused"),
+        Value::tuple(vec![Value::string("key")]),
+        Value::tuple(vec![Value::string("kw2")]),
+    ];
+    let mut descs = Vec::new();
+    let _dead_desc = push_desc(
+        &mut descs,
+        InsnDesc::CallMethodKw(CallMethodKwDesc {
+            dst: 0,
+            obj: 0,
+            name_idx: 0,
+            args_base: 1,
+            total: 1,
+            nkw: 1,
+            kwnames_idx: 0,
+        }),
+    );
+    let live_method_kw = push_desc(
+        &mut descs,
+        InsnDesc::CallMethodKw(CallMethodKwDesc {
+            dst: 1,
+            obj: 1,
+            name_idx: 2,
+            args_base: 2,
+            total: 2,
+            nkw: 1,
+            kwnames_idx: 1,
+        }),
+    );
+    let live_call_ex = push_desc(
+        &mut descs,
+        InsnDesc::CallExArgs(CallExArgsDesc {
+            func: 4,
+            npos: 0,
+            args_splat: NO_ARGS_SPLAT,
+            nkw: 1,
+            kwnames_idx: 2,
+            kwargs: 5,
+        }),
+    );
+    let insns = vec![
+        Insn::CallMethodKw(live_method_kw),
+        Insn::CallExArgs(live_call_ex),
+        Insn::Return(1),
+    ];
+
+    let (insns, mut descs) = pass_compact_descs(insns, descs);
+    assert_eq!(descs.len(), 2, "unreferenced descriptor must be dropped");
+    assert!(matches!(insns[0], Insn::CallMethodKw(0)));
+    assert!(matches!(insns[1], Insn::CallExArgs(1)));
+
+    let (_insns, out_consts) = pass_compact_consts(insns, &mut descs, consts);
+    assert_eq!(
+        out_consts.len(),
+        2,
+        "unused const[0] dropped, kwnames preserved"
+    );
+    assert_eq!(descs[0].as_call_method_kw().kwnames_idx, 0);
+    assert_eq!(descs[1].as_call_ex_args().kwnames_idx, 1);
+}
+
+#[test]
+fn copy_prop_substitutes_descriptor_reads_cow_and_kills_dst() {
+    use crate::bytecode::{KwCallName, MakeClassDesc};
+    let mut descs = Vec::new();
+    let d0 = push_desc(
+        &mut descs,
+        InsnDesc::ListExtendCall(ListExtendCallDesc {
+            list: 2,
+            src: 3,
+            name: KwCallName::Callee(0),
+        }),
+    );
+    let d1 = push_desc(
+        &mut descs,
+        InsnDesc::MakeClass(MakeClassDesc {
+            dst: 1,
+            proto_idx: 0,
+            bases_base: 4,
+            bases_n: 0,
+            name_idx: 0,
+            kwarg_base: 4,
+            kwarg_n: 0,
+            meta_reg: NO_METACLASS,
+        }),
+    );
+    let insns = vec![
+        Insn::LoadConst(1, 0),
+        Insn::Move(3, 1),
+        Insn::ListExtendCall(d0),
+        Insn::MakeClass(d1),
+        Insn::Return(3),
+    ];
+    let out = pass_copy_prop(insns, &mut descs, 0);
+    let Insn::ListExtendCall(new_d0) = out[2] else {
+        panic!("expected ListExtendCall");
+    };
+    assert_ne!(
+        new_d0, d0,
+        "copy-prop must allocate a new descriptor index to preserve original descriptors"
+    );
+    assert_eq!(
+        descs[d0 as usize].as_list_extend_call().src,
+        3,
+        "original descriptor must remain untouched"
+    );
+    assert_eq!(
+        descs[new_d0 as usize].as_list_extend_call().src,
+        1,
+        "new descriptor must have substituted src"
+    );
+    assert!(
+        matches!(out[4], Insn::Return(3)),
+        "MakeClass writing r1 must kill alias r3 -> r1: {:?}",
+        out[4]
+    );
+}
+
+#[test]
+fn dse_preserves_stores_read_by_descriptor_backed_insns() {
+    use crate::bytecode::MakeClassDesc;
+    let mut descs = Vec::new();
+    let d = push_desc(
+        &mut descs,
+        InsnDesc::MakeClass(MakeClassDesc {
+            dst: 2,
+            proto_idx: 0,
+            bases_base: 3,
+            bases_n: 1,
+            name_idx: 0,
+            kwarg_base: 4,
+            kwarg_n: 0,
+            meta_reg: 5,
+        }),
+    );
+    let insns = vec![
+        Insn::LoadConst(3, 0),
+        Insn::LoadConst(5, 1),
+        Insn::LoadConst(6, 2), // truly dead temp
+        Insn::MakeClass(d),
+        Insn::Return(2),
+    ];
+    let out = pass_dead_store_elim(insns, &descs, 2);
+    assert_eq!(
+        out.len(),
+        4,
+        "only truly dead LoadConst(r6) should be removed"
+    );
+    assert!(matches!(out[0], Insn::LoadConst(3, 0)));
+    assert!(matches!(out[1], Insn::LoadConst(5, 1)));
+    assert!(matches!(out[2], Insn::MakeClass(_)));
 }
 
 // ── pass_fold_const_tuple ─────────────────────────────────────────────────

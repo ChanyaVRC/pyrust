@@ -231,14 +231,15 @@ impl Compiler {
         self.shadowed_type_params.truncate(shadowed_before);
 
         let dst = self.alloc_temp();
-        self.emit(Insn::MakeFunction(
+        let desc_idx = self.push_desc(InsnDesc::MakeFunction(MakeFunctionDesc {
             dst,
             proto_idx,
             defs_base,
             defs_n,
             annots_base,
             annots_n,
-        ));
+        }));
+        self.emit(Insn::MakeFunction(desc_idx));
         if defs_n > 0 || annots_n > 0 {
             // Free the temp registers used by defaults and annotations while
             // keeping `dst` alive (issue #1362).

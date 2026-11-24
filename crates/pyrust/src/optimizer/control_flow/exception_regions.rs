@@ -71,7 +71,6 @@ fn analyze_active_handler_stacks(insns: &[Insn]) -> Option<Vec<Option<Vec<usize>
             | Insn::JumpIfIterNotIntRange(_, offset)
             | Insn::JumpIfIterNotIndexedSeq(_, offset)
             | Insn::JumpIfIterNotIntRangeExact(_, offset)
-            | Insn::GetItemSeqIntOrExit(_, _, _, offset)
             | Insn::JumpIfNotBuiltinLen(_, offset)
             | Insn::LenSeqOrExit(_, _, offset)
             | Insn::CmpJumpIfFalse(_, _, _, offset)
@@ -80,16 +79,19 @@ fn analyze_active_handler_stacks(insns: &[Insn]) -> Option<Vec<Option<Vec<usize>
             | Insn::CmpJumpIfTrueConst(_, _, _, offset)
             | Insn::CountCmpJumpTrue(_, _, _, _, offset)
             | Insn::CountCmpJumpFalse(_, _, _, _, offset)
-            | Insn::CallInlineBinOp { skip: offset, .. }
+            | Insn::CallInlineBinOp(_, offset)
             | Insn::ForIter(_, _, offset)
             | Insn::MatchExcept(_, offset)
-            | Insn::MatchExceptStar(_, _, _, offset) => {
+            | Insn::MatchExceptStar(_, offset) => {
                 propagate_to(jump_target(*offset), &current) && propagate_to(pc + 1, &current)
+            }
+            Insn::GetItemSeqIntOrExit(_, _, _, offset) => {
+                propagate_to(jump_target(i32::from(*offset)), &current)
+                    && propagate_to(pc + 1, &current)
             }
             Insn::Return(_)
             | Insn::ReturnNone
             | Insn::RaiseAssert(_)
-            | Insn::RaiseAssertNoMsg
             | Insn::RaiseValue(_)
             | Insn::RaiseExceptStarResidual(_)
             | Insn::RaiseFrom(_, _)

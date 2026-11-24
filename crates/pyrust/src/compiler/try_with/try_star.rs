@@ -100,8 +100,12 @@ impl Compiler {
             if let Some(kind_expr) = &handler.kind {
                 let type_reg = self.compile_expr(kind_expr);
                 let subgroup_reg = self.alloc_temp();
-                let skip_patch =
-                    self.emit(Insn::MatchExceptStar(type_reg, group_reg, subgroup_reg, 0));
+                let desc_idx = self.push_desc(InsnDesc::MatchExceptStar(MatchExceptStarDesc {
+                    type_reg,
+                    src_group: group_reg,
+                    matched_dst: subgroup_reg,
+                }));
+                let skip_patch = self.emit(Insn::MatchExceptStar(desc_idx, 0));
                 self.free_temp(type_reg);
 
                 self.emit(Insn::ListAppend(matched_list_reg, subgroup_reg));

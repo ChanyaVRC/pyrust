@@ -153,6 +153,7 @@ impl Interpreter {
     fn exec_cold_control_insn(
         &mut self,
         insn: &crate::bytecode::Insn,
+        code: &crate::bytecode::FnCode,
         regs: &mut RegSlice,
         num_locals: crate::bytecode::Reg,
         exc_ctx_frame_base: usize,
@@ -175,12 +176,13 @@ impl Interpreter {
                     Ok(Some(ColdInsnOutcome::Jump(*offset)))
                 }
             }
-            Insn::MatchExceptStar(type_reg, src_group, matched_dst, offset) => {
+            Insn::MatchExceptStar(desc_idx, offset) => {
+                let desc = code.descs[*desc_idx as usize].as_match_except_star();
                 if self.exec_match_except_star(
                     regs,
-                    *type_reg,
-                    *src_group,
-                    *matched_dst,
+                    desc.type_reg,
+                    desc.src_group,
+                    desc.matched_dst,
                     num_locals,
                 )? {
                     Ok(Some(ColdInsnOutcome::Continue))
@@ -201,11 +203,8 @@ impl Interpreter {
                 Ok(Some(ColdInsnOutcome::Continue))
             }
             Insn::RaiseAssert(msg_reg) => {
-                self.exec_raise_assert(regs, Some(*msg_reg), num_locals)?;
-                Ok(Some(ColdInsnOutcome::Continue))
-            }
-            Insn::RaiseAssertNoMsg => {
-                self.exec_raise_assert(regs, None, num_locals)?;
+                let msg = (*msg_reg != crate::bytecode::NO_ASSERT_MSG).then_some(*msg_reg);
+                self.exec_raise_assert(regs, msg, num_locals)?;
                 Ok(Some(ColdInsnOutcome::Continue))
             }
             Insn::RaiseValue(src) => {
@@ -531,6 +530,7 @@ impl Interpreter {
     #[inline(always)]
     fn eval_entry_guard_jump(
         insn: &crate::bytecode::Insn,
+        code: &crate::bytecode::FnCode,
         regs: &RegSlice,
         iters: &ItersBuf,
     ) -> Option<i32> {
@@ -543,7 +543,8 @@ impl Interpreter {
             Insn::JumpIfIterNotIntRange(slot, offset) => {
                 (!iter_slot_is_int_range(iters[*slot as usize].as_ref())).then_some(*offset)
             }
-            Insn::JumpIfIterNotIntRangeExact(guard, offset) => {
+            Insn::JumpIfIterNotIntRangeExact(desc_idx, offset) => {
+                let guard = code.descs[*desc_idx as usize].as_int_range_exact_guard();
                 (!iter_slot_is_int_range_exact(iters[guard.slot as usize].as_ref(), guard))
                     .then_some(*offset)
             }

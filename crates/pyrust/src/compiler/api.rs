@@ -9,8 +9,10 @@ use crate::ast::{
     MatchArm, Pattern, Stmt, Symbol, TypeParam, TypeParamBound, TypeParamKind, UnaryOp,
 };
 use crate::bytecode::{
-    CaptureSource, CellSlotMeta, CellVar, DictKeyKindHint, FnCode, FnParamSpec, FnProto, Insn,
-    MAX_FRAME_REGS, Reg,
+    CallExArgsDesc, CallMethodExpandedDesc, CallMethodKwDesc, CaptureSource, CellSlotMeta, CellVar,
+    DescIdx, DictKeyKindHint, DictMergeKwCallDesc, FnCode, FnParamSpec, FnProto, Insn, InsnDesc,
+    ListExtendCallDesc, MAX_FRAME_REGS, MakeClassDesc, MakeFunctionDesc, MatchClassPositionalDesc,
+    MatchExceptStarDesc, NO_ARGS_SPLAT, NO_ASSERT_MSG, NO_METACLASS, Reg, SetItemKwCallDesc,
 };
 use crate::error::PyError;
 use crate::interpreter::dispatch_numeric_binop;

@@ -6,6 +6,7 @@ impl Interpreter {
     fn exec_cold_match_insn(
         &mut self,
         insn: &crate::bytecode::Insn,
+        code: &crate::bytecode::FnCode,
         regs: &mut RegSlice,
         num_locals: crate::bytecode::Reg,
     ) -> Result<bool> {
@@ -19,13 +20,16 @@ impl Interpreter {
                 regs[*dst as usize] = Self::exec_match_mapping(regs, *subj, num_locals)?;
                 Ok(true)
             }
-            Insn::MatchClassPositional {
-                dst_base,
-                subj,
-                cls,
-                n,
-            } => {
-                self.exec_match_class_positional(regs, *dst_base, *subj, *cls, *n, num_locals)?;
+            Insn::MatchClassPositional(desc_idx) => {
+                let desc = code.descs[*desc_idx as usize].as_match_class_positional();
+                self.exec_match_class_positional(
+                    regs,
+                    desc.dst_base,
+                    desc.subj,
+                    desc.cls,
+                    desc.n,
+                    num_locals,
+                )?;
                 Ok(true)
             }
             Insn::Unpack(base, src, n) => {

@@ -70,7 +70,7 @@ fn pass_exit_inline(insns: Vec<Insn>) -> Vec<Insn> {
 /// and removing the `UnaryOp` is semantically equivalent.
 ///
 /// Reference: Lua `lcode.c` `jumponcond()`.
-fn pass_not_invert(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+fn pass_not_invert(insns: Vec<Insn>, descs: &[InsnDesc], num_locals: u32) -> Vec<Insn> {
     use crate::ast::UnaryOp;
 
     let n = insns.len();
@@ -101,14 +101,14 @@ fn pass_not_invert(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             (Insn::UnaryOp(r, UnaryOp::Not, src), Insn::JumpIfFalse(cond, k))
                 if *r == *cond
                     && *r >= num_locals
-                    && !reg_is_read_in(&transformed[i + 2..], *r) =>
+                    && !reg_is_read_in(&transformed[i + 2..], descs, *r) =>
             {
                 Some(Insn::JumpIfTrue(*src, *k))
             }
             (Insn::UnaryOp(r, UnaryOp::Not, src), Insn::JumpIfTrue(cond, k))
                 if *r == *cond
                     && *r >= num_locals
-                    && !reg_is_read_in(&transformed[i + 2..], *r) =>
+                    && !reg_is_read_in(&transformed[i + 2..], descs, *r) =>
             {
                 Some(Insn::JumpIfFalse(*src, *k))
             }

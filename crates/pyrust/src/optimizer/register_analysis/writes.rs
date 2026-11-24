@@ -2,7 +2,7 @@
 
 /// Return the single destination register of `insn`, if any.
 /// Used to precisely invalidate register-fact maps without clearing them entirely.
-fn writable_dst(insn: &Insn) -> Option<u32> {
+fn writable_dst(insn: &Insn, descs: &[InsnDesc]) -> Option<u32> {
     use Insn::*;
     match insn {
         LoadGlobal(r, _)
@@ -34,38 +34,37 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | Call(r, _)
         | CallMemo(r, _)
         | CallKw { func: r, .. }
-        | CallEx { func: r, .. }
-        | CallExArgs { func: r, .. }
         | BuildList(r, _, _)
         | BuildListReserve(r, _)
         | BuildTuple(r, _, _)
         | BuildString(r, _, _)
         | BuildSlice(r, _)
         | BuildDict(r, _, _, _)
-        | MakeFunction(r, _, _, _, _, _)
         | ImportModule(r, _)
         | LoadExc(r)
         | LoadExcTraceback(r, _)
-        | MakeClass(r, _, _, _, _, _, _)
-        | MakeClassMeta(r, _, _, _, _, _, _, _)
         | MakeTypeAlias(r, _, _, _)
         | MakeTypeVar(r, _, _) => Some(*r),
+        CallExArgs(desc_idx) => Some(descs[*desc_idx as usize].as_call_ex_args().func),
+        MakeFunction(desc_idx) => Some(descs[*desc_idx as usize].as_make_function().dst),
+        MakeClass(desc_idx) => Some(descs[*desc_idx as usize].as_make_class().dst),
+        CallMethodKw(desc_idx) => Some(descs[*desc_idx as usize].as_call_method_kw().dst),
+        CallMethodExpanded(desc_idx) => {
+            Some(descs[*desc_idx as usize].as_call_method_expanded().dst)
+        }
         CallMethod { dst, .. }
-        | CallMethodKw { dst, .. }
-        | CallMethodExpanded { dst, .. }
         | Concat { dst, .. }
         // Yield writes the caller's sent value into `dst` on resume; aliases
         // through `dst` are stale after this instruction.
         | Yield { dst, .. } => Some(*dst),
         // ForIter writes its destination on each successful iteration.
         ForIter(dst, _, _) => Some(*dst),
-        CopyReg(r, _) => Some(*r),
         _ => None,
     }
 }
 
 /// Visit every register *written* (defined) by `insn` without allocating.
-fn for_each_write(insn: &Insn, mut f: impl FnMut(u32)) {
+fn for_each_write(insn: &Insn, descs: &[InsnDesc], mut f: impl FnMut(u32)) {
     use Insn::*;
     match insn {
         LoadConst(r, _)
@@ -77,9 +76,6 @@ fn for_each_write(insn: &Insn, mut f: impl FnMut(u32)) {
         | LoadExc(r)
         | LoadExcTraceback(r, _)
         | ImportModule(r, _)
-        | MakeFunction(r, _, _, _, _, _)
-        | MakeClass(r, _, _, _, _, _, _)
-        | MakeClassMeta(r, _, _, _, _, _, _, _)
         | MakeTypeAlias(r, _, _, _)
         | MakeTypeVar(r, _, _)
         | BuildList(r, _, _)
@@ -93,7 +89,6 @@ fn for_each_write(insn: &Insn, mut f: impl FnMut(u32)) {
         | BinOpConst(r, _, _, _, _)
         | CountCmpJumpTrue(r, _, _, _, _)
         | CountCmpJumpFalse(r, _, _, _, _)
-        | CallInlineBinOp { dst: r, .. }
         | BinOpImm(r, _, _, _, _)
         | UnaryOp(r, _, _)
         | FormatValue(r, _)
@@ -111,24 +106,25 @@ fn for_each_write(insn: &Insn, mut f: impl FnMut(u32)) {
         | Call(r, _)
         | CallMemo(r, _)
         | CallKw { func: r, .. }
-        | CallEx { func: r, .. }
-        | CallExArgs { func: r, .. }
         | Move(r, _)
-        | CopyReg(r, _)
         | DeleteLocal(r, _, _) => f(*r),
-        MatchExceptStar(_, src, dst, _) => {
-            f(*src); // src_group is updated to remaining
-            f(*dst); // matched_dst gets the sub-group
+        CallInlineBinOp(desc_idx, _) => f(descs[*desc_idx as usize].as_call_inline_binop().dst),
+        CallExArgs(desc_idx) => f(descs[*desc_idx as usize].as_call_ex_args().func),
+        MakeFunction(desc_idx) => f(descs[*desc_idx as usize].as_make_function().dst),
+        MakeClass(desc_idx) => f(descs[*desc_idx as usize].as_make_class().dst),
+        CallMethodKw(desc_idx) => f(descs[*desc_idx as usize].as_call_method_kw().dst),
+        CallMethodExpanded(desc_idx) => f(descs[*desc_idx as usize].as_call_method_expanded().dst),
+        MatchExceptStar(desc_idx, _) => {
+            let desc = descs[*desc_idx as usize].as_match_except_star();
+            f(desc.src_group); // src_group is updated to remaining
+            f(desc.matched_dst); // matched_dst gets the sub-group
         }
         LoadNoneRange { start, count } => {
             for i in 0..*count as u32 {
                 f(start + i);
             }
         }
-        CallMethod { dst, .. }
-        | CallMethodKw { dst, .. }
-        | CallMethodExpanded { dst, .. }
-        | Yield { dst, .. } => f(*dst),
+        CallMethod { dst, .. } | Yield { dst, .. } => f(*dst),
         YieldFrom {
             result_reg,
             sent_reg,
@@ -190,7 +186,6 @@ fn for_each_write(insn: &Insn, mut f: impl FnMut(u32)) {
         | RaiseFrom(..)
         | RaiseReRaise
         | RaiseAssert(..)
-        | RaiseAssertNoMsg
         | SetupExcept(..)
         | PopExcept
         | EndExcept
@@ -202,26 +197,27 @@ fn for_each_write(insn: &Insn, mut f: impl FnMut(u32)) {
         | SetAdd(..)
         | ListAppend(..)
         | ListExtend(..)
-        | ListExtendCall { .. }
+        | ListExtendCall(..)
         | DictUpdate(..)
-        | DictMergeKwCall { .. }
-        | SetItemKwCall { .. }
+        | DictMergeKwCall(..)
+        | SetItemKwCall(..)
         | RecordClassStore(..)
         | RecordClassDel(..)
         | SyncModuleGlobal(..)
         | DeleteModuleGlobal(..) => {}
         // MatchClassPositional writes dst_base..dst_base+n.
-        MatchClassPositional { dst_base, n, .. } => {
-            for i in 0..*n {
-                f(dst_base + i);
+        MatchClassPositional(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_match_class_positional();
+            for i in 0..desc.n {
+                f(desc.dst_base + i);
             }
         }
     }
 }
 
 /// Collect all registers *written* (defined) by `insn` into `written`.
-fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
-    for_each_write(insn, |r| {
+fn collect_writes(insn: &Insn, descs: &[InsnDesc], written: &mut HashSet<u32>) {
+    for_each_write(insn, descs, |r| {
         written.insert(r);
     });
 }

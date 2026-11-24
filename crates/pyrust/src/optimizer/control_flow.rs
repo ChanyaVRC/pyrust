@@ -14,9 +14,9 @@ fn insn_jump_off(insn: &Insn) -> Option<i32> {
         | Insn::JumpIfIterNotIntRange(_, offset)
         | Insn::JumpIfIterNotIndexedSeq(_, offset)
         | Insn::JumpIfIterNotIntRangeExact(_, offset)
-        | Insn::GetItemSeqIntOrExit(_, _, _, offset)
         | Insn::JumpIfNotBuiltinLen(_, offset)
         | Insn::LenSeqOrExit(_, _, offset) => Some(*offset),
+        Insn::GetItemSeqIntOrExit(_, _, _, offset) => Some(i32::from(*offset)),
         Insn::CmpJumpIfFalse(_, _, _, offset)
         | Insn::CmpJumpIfTrue(_, _, _, offset)
         | Insn::CmpJumpIfFalseConst(_, _, _, offset)
@@ -24,10 +24,10 @@ fn insn_jump_off(insn: &Insn) -> Option<i32> {
         | Insn::CountCmpJumpTrue(_, _, _, _, offset)
         | Insn::CountCmpJumpFalse(_, _, _, _, offset)
         | Insn::ForIter(_, _, offset) => Some(*offset),
-        Insn::CallInlineBinOp { skip, .. } => Some(*skip),
+        Insn::CallInlineBinOp(_, skip) => Some(*skip),
         Insn::SetupExcept(offset)
         | Insn::MatchExcept(_, offset)
-        | Insn::MatchExceptStar(_, _, _, offset) => Some(*offset),
+        | Insn::MatchExceptStar(_, offset) => Some(*offset),
         _ => None,
     }
 }

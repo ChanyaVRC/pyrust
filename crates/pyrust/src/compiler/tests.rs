@@ -306,14 +306,13 @@ sink(*[1], *[2], answer=42)
         "call syntax must not resolve an implementation helper through Python globals"
     );
     assert!(
-        code.insns.iter().any(|insn| matches!(
-            insn,
-            Insn::CallExArgs {
-                npos: 0,
-                nkw: 0,
-                ..
+        code.insns.iter().any(|insn| match insn {
+            Insn::CallExArgs(desc_idx) => {
+                let desc = code.descs[*desc_idx as usize].as_call_ex_args();
+                desc.npos == 0 && desc.nkw == 0
             }
-        )),
+            _ => false,
+        }),
         "the materialized positional list and keyword dict must use CallExArgs directly"
     );
 }

@@ -26,7 +26,6 @@ fn may_invalidate_named_locals(insn: &crate::bytecode::Insn) -> bool {
             | LoadNone(..)
             | LoadNoneRange { .. }
             | Move(..)
-            | CopyReg(..)
             | CheckLocal(..)
             // These builders only clone already-evaluated values into
             // runtime-owned containers. BuildString's operands are
@@ -66,7 +65,7 @@ fn is_late_stage_guard_insn(insn: &crate::bytecode::Insn) -> bool {
             | LenSeqOrExit(..)
             | CountCmpJumpTrue(..)
             | CountCmpJumpFalse(..)
-            | CallInlineBinOp { .. }
+            | CallInlineBinOp(..)
     )
 }
 
@@ -107,7 +106,6 @@ fn insn_ends_basic_block(insn: &Insn) -> bool {
             | Insn::RaiseFrom(..)
             | Insn::RaiseReRaise
             | Insn::RaiseAssert(_)
-            | Insn::RaiseAssertNoMsg
     )
 }
 
@@ -122,7 +120,6 @@ fn insn_may_raise(insn: &Insn) -> bool {
             | Insn::LoadNone(..)
             | Insn::LoadNoneRange { .. }
             | Insn::Move(..)
-            | Insn::CopyReg(..)
             | Insn::Jump(..)
             | Insn::SetupExcept(..)
             | Insn::PopExcept
@@ -150,13 +147,7 @@ fn is_terminator(insn: &Insn) -> bool {
     use Insn::*;
     matches!(
         insn,
-        Return(..)
-            | ReturnNone
-            | RaiseAssert(..)
-            | RaiseAssertNoMsg
-            | RaiseValue(..)
-            | RaiseFrom(..)
-            | RaiseReRaise
+        Return(..) | ReturnNone | RaiseAssert(..) | RaiseValue(..) | RaiseFrom(..) | RaiseReRaise
     )
 }
 
@@ -177,7 +168,7 @@ fn is_control_flow(insn: &Insn) -> bool {
             | LenSeqOrExit(..)
             | CountCmpJumpTrue(..)
             | CountCmpJumpFalse(..)
-            | CallInlineBinOp { .. }
+            | CallInlineBinOp(..)
             | JumpIfFalse(..)
             | JumpIfTrue(..)
             | CmpJumpIfFalse(..)
@@ -188,7 +179,6 @@ fn is_control_flow(insn: &Insn) -> bool {
             | Return(..)
             | ReturnNone
             | RaiseAssert(..)
-            | RaiseAssertNoMsg
             | RaiseValue(..)
             | RaiseFrom(..)
             | RaiseReRaise

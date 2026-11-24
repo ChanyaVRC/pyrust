@@ -27,7 +27,7 @@ fn detect_len_header(
         return None;
     }
     let seq = match insns.get(h + 1)? {
-        Insn::Move(dst, src) | Insn::CopyReg(dst, src) if *dst == callee + 1 => *src,
+        Insn::Move(dst, src) if *dst == callee + 1 => *src,
         _ => return None,
     };
     if seq == callee || seq == callee + 1 {
@@ -44,6 +44,7 @@ fn detect_len_header(
 /// Scan `insns` for eligible innermost int-loop versioning candidates.
 fn find_int_loop_candidates(
     insns: &[Insn],
+    descs: &[InsnDesc],
     consts: &[Value],
     names: &[pyrust_core::Symbol],
     num_locals: u32,
@@ -285,10 +286,10 @@ fn find_int_loop_candidates(
         }
         if let IntLoopCandidateKind::LenHeaderWhile { callee, .. } = kind {
             let touches = |i: usize, r: Reg| {
-                insn_reads_reg(&insns[i], r) || int_loop_writes_reg(&insns[i], r)
+                insn_reads_reg(&insns[i], descs, r) || int_loop_writes_reg(&insns[i], r)
             };
             if (hdr + 1..=back).any(|i| touches(i, callee) || touches(i, callee + 1))
-                || insn_reads_reg(&insns[hdr], callee + 1)
+                || insn_reads_reg(&insns[hdr], descs, callee + 1)
                 || syncs.iter().any(|&(r, _)| r == callee || r == callee + 1)
             {
                 eligible = false;
@@ -299,7 +300,10 @@ fn find_int_loop_candidates(
             let Insn::GetItem(dst, _, _) = &insns[si] else {
                 unreachable!("only GetItem sites are recorded as subscripts");
             };
-            if insns[h..si].iter().any(|insn| insn_reads_reg(insn, *dst)) {
+            if insns[h..si]
+                .iter()
+                .any(|insn| insn_reads_reg(insn, descs, *dst))
+            {
                 eligible = false;
                 break;
             }
@@ -315,7 +319,6 @@ fn find_int_loop_candidates(
                 insn,
                 Insn::LoadConst(dst, _)
                     | Insn::Move(dst, _)
-                    | Insn::CopyReg(dst, _)
                     | Insn::BinOp(dst, ..)
                     | Insn::BinOpInPlace(dst, ..)
                     | Insn::BinOpImm(dst, ..)
@@ -325,7 +328,7 @@ fn find_int_loop_candidates(
         };
         let entry_state_is_dead = |g: Reg| {
             for d in walk_start..=back {
-                if insn_reads_reg(&insns[d], g) {
+                if insn_reads_reg(&insns[d], descs, g) {
                     return false;
                 }
                 if defines_int_family(&insns[d], g) {

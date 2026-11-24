@@ -132,7 +132,7 @@ fn pass_trivial_nop(insns: Vec<Insn>) -> Vec<Insn> {
         .iter()
         .map(|insn| match insn {
             Insn::Jump(0) => false,
-            Insn::Move(dst, src) | Insn::CopyReg(dst, src) => dst != src,
+            Insn::Move(dst, src) => dst != src,
             _ => true,
         })
         .collect();

@@ -131,7 +131,7 @@ fn pass_cross_jump_once(
             | Insn::ForIter(_, _, k)
             | Insn::SetupExcept(k)
             | Insn::MatchExcept(_, k)
-            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
+            | Insn::MatchExceptStar(_, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -174,7 +174,6 @@ fn pass_cross_jump_once(
                 | Insn::RaiseFrom(..)
                 | Insn::RaiseReRaise
                 | Insn::RaiseAssert(_)
-                | Insn::RaiseAssertNoMsg
         )
     };
 

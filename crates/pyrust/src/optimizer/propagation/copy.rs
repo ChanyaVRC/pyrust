@@ -15,7 +15,7 @@
 /// subsequent `pass_trivial_nop`.
 ///
 /// Reference: GCC `-ftree-copy-prop`; Shi/Gregg/Beatty/Ertl *VEE'05*.
-fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+fn pass_copy_prop(insns: Vec<Insn>, descs: &mut Vec<InsnDesc>, num_locals: u32) -> Vec<Insn> {
     debug_assert_no_late_stage_insns(&insns, "pass_copy_prop");
     use std::collections::HashMap;
 
@@ -39,7 +39,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             | Insn::CmpJumpIfTrueConst(_, _, _, k)
             | Insn::SetupExcept(k)
             | Insn::MatchExcept(_, k)
-            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
+            | Insn::MatchExceptStar(_, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = offset {
@@ -64,15 +64,15 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         // Substitute source registers and collect the (possibly modified) instruction.
         let insn = match insn {
             Insn::Move(dst, src) => Insn::Move(dst, s(&copies, src)),
-            // CopyReg: substitute the source register (may itself be an alias) but do
-            // NOT record a new copy-propagation alias — downstream passes should see
-            // CopyReg as an opaque assignment, not a transparent rename.
-            Insn::CopyReg(dst, src) => Insn::CopyReg(dst, s(&copies, src)),
             Insn::Return(src) => Insn::Return(s(&copies, src)),
             Insn::PrintExpr(v) => Insn::PrintExpr(s(&copies, v)),
             Insn::RaiseValue(v) => Insn::RaiseValue(s(&copies, v)),
             Insn::RaiseExceptStarResidual(v) => Insn::RaiseExceptStarResidual(s(&copies, v)),
-            Insn::RaiseAssert(v) => Insn::RaiseAssert(s(&copies, v)),
+            Insn::RaiseAssert(v) => Insn::RaiseAssert(if v == NO_ASSERT_MSG {
+                NO_ASSERT_MSG
+            } else {
+                s(&copies, v)
+            }),
             Insn::RaiseFrom(exc, cause) => Insn::RaiseFrom(s(&copies, exc), s(&copies, cause)),
             Insn::JumpIfFalse(cond, k) => Insn::JumpIfFalse(s(&copies, cond), k),
             Insn::JumpIfTrue(cond, k) => Insn::JumpIfTrue(s(&copies, cond), k),
@@ -115,28 +115,47 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::SetAdd(st, val) => Insn::SetAdd(st, s(&copies, val)),
             Insn::ListAppend(lst, val) => Insn::ListAppend(lst, s(&copies, val)),
             Insn::ListExtend(lst, src) => Insn::ListExtend(lst, s(&copies, src)),
-            Insn::ListExtendCall { list, src, name } => Insn::ListExtendCall {
-                list,
-                src: s(&copies, src),
-                name: kwcall_name_subst(name, |r| s(&copies, r)),
-            },
+            Insn::ListExtendCall(desc_idx) => {
+                let old = *descs[desc_idx as usize].as_list_extend_call();
+                let updated = ListExtendCallDesc {
+                    list: old.list,
+                    src: s(&copies, old.src),
+                    name: kwcall_name_subst(old.name, |r| s(&copies, r)),
+                };
+                if updated == old {
+                    Insn::ListExtendCall(desc_idx)
+                } else {
+                    Insn::ListExtendCall(push_desc(descs, InsnDesc::ListExtendCall(updated)))
+                }
+            }
             Insn::DictUpdate(dct, other) => Insn::DictUpdate(dct, s(&copies, other)),
-            Insn::DictMergeKwCall { dict, src, name } => Insn::DictMergeKwCall {
-                dict,
-                src: s(&copies, src),
-                name: kwcall_name_subst(name, |r| s(&copies, r)),
-            },
-            Insn::SetItemKwCall {
-                dict,
-                key,
-                val,
-                name,
-            } => Insn::SetItemKwCall {
-                dict,
-                key: s(&copies, key),
-                val: s(&copies, val),
-                name: kwcall_name_subst(name, |r| s(&copies, r)),
-            },
+            Insn::DictMergeKwCall(desc_idx) => {
+                let old = *descs[desc_idx as usize].as_dict_merge_kw_call();
+                let updated = DictMergeKwCallDesc {
+                    dict: old.dict,
+                    src: s(&copies, old.src),
+                    name: kwcall_name_subst(old.name, |r| s(&copies, r)),
+                };
+                if updated == old {
+                    Insn::DictMergeKwCall(desc_idx)
+                } else {
+                    Insn::DictMergeKwCall(push_desc(descs, InsnDesc::DictMergeKwCall(updated)))
+                }
+            }
+            Insn::SetItemKwCall(desc_idx) => {
+                let old = *descs[desc_idx as usize].as_set_item_kw_call();
+                let updated = SetItemKwCallDesc {
+                    dict: old.dict,
+                    key: s(&copies, old.key),
+                    val: s(&copies, old.val),
+                    name: kwcall_name_subst(old.name, |r| s(&copies, r)),
+                };
+                if updated == old {
+                    Insn::SetItemKwCall(desc_idx)
+                } else {
+                    Insn::SetItemKwCall(push_desc(descs, InsnDesc::SetItemKwCall(updated)))
+                }
+            }
             Insn::SetAttr(obj, n, val) => Insn::SetAttr(obj, n, s(&copies, val)),
             Insn::SetTypeVarAttr(obj, n, val) => Insn::SetTypeVarAttr(obj, n, s(&copies, val)),
             Insn::DeleteAttr(obj, n) => Insn::DeleteAttr(obj, n),
@@ -169,8 +188,18 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             // and `dst` (the matched subgroup); only `r` (the exception type)
             // is a pure read operand.  Substituting `src` or `dst` would
             // redirect the in-place write onto an aliased register!
-            Insn::MatchExceptStar(r, src, dst, k) => {
-                Insn::MatchExceptStar(s(&copies, r), src, dst, k)
+            Insn::MatchExceptStar(desc_idx, k) => {
+                let old = *descs[desc_idx as usize].as_match_except_star();
+                let updated = MatchExceptStarDesc {
+                    type_reg: s(&copies, old.type_reg),
+                    src_group: old.src_group,
+                    matched_dst: old.matched_dst,
+                };
+                if updated == old {
+                    Insn::MatchExceptStar(desc_idx, k)
+                } else {
+                    Insn::MatchExceptStar(push_desc(descs, InsnDesc::MatchExceptStar(updated)), k)
+                }
             }
             Insn::StoreGlobal(n, src) => Insn::StoreGlobal(n, s(&copies, src)),
             Insn::StoreCell(n, src) => Insn::StoreCell(n, s(&copies, src)),
@@ -213,7 +242,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         }
 
         // Kill map entries: any key or value that == dst is stale after a write.
-        if let Some(dst) = writable_dst(&insn) {
+        if let Some(dst) = writable_dst(&insn, descs) {
             copies.retain(|k, v| *k != dst && *v != dst);
         }
         // YieldFrom writes both result_reg and sent_reg; writable_dst cannot
@@ -230,8 +259,11 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         }
         // MatchExceptStar writes both `src` (narrowed group) and `dst` (matched
         // subgroup); evict both so stale aliases cannot survive past the split.
-        if let Insn::MatchExceptStar(_, src, dst, _) = &insn {
-            copies.retain(|k, v| *k != *src && *v != *src && *k != *dst && *v != *dst);
+        if let Insn::MatchExceptStar(desc_idx, _) = &insn {
+            let desc = descs[*desc_idx as usize].as_match_except_star();
+            let src = desc.src_group;
+            let dst = desc.matched_dst;
+            copies.retain(|k, v| *k != src && *v != src && *k != dst && *v != dst);
         }
         // LoadConst writes dst (not in writable_dst so handled here).
         if let Insn::LoadConst(dst, _) = &insn {
@@ -256,9 +288,10 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
         }
         // MatchClassPositional writes dst_base..dst_base+n; kill the entire range.
-        if let Insn::MatchClassPositional { dst_base, n, .. } = &insn {
-            let lo = *dst_base;
-            let hi = dst_base + *n;
+        if let Insn::MatchClassPositional(desc_idx) = &insn {
+            let desc = descs[*desc_idx as usize].as_match_class_positional();
+            let lo = desc.dst_base;
+            let hi = desc.dst_base + desc.n;
             copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
         }
         // LoadNoneRange writes start..start+count; kill the entire range.

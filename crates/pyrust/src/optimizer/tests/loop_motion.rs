@@ -94,7 +94,7 @@ fn licm_hoists_loadconst_before_loop() {
         Insn::Return(1),                     // [4]
     ];
     // r0..r4 are named locals; r5 is a temp (>= num_locals=5) → hoistable.
-    let out = pass_licm(insns, 5);
+    let out = pass_licm(insns, &[], 5);
 
     // After hoisting LoadConst(r5, 0) before header [0], the new layout is:
     //  [0] LoadConst(r5, 0)               — hoisted
@@ -141,7 +141,7 @@ fn licm_does_not_hoist_binopconst_with_invariant_src() {
     ];
     // r0..r4 are named locals and r5 is a temp, but that alone cannot prove the
     // operands are exact built-in values with non-observable arithmetic.
-    let out = pass_licm(insns, 5);
+    let out = pass_licm(insns, &[], 5);
 
     assert_eq!(out.len(), 5);
     assert!(
@@ -176,7 +176,7 @@ fn licm_does_not_hoist_loadconst_to_named_local() {
     ];
     let before = insns.clone();
     // r1 < num_locals=5 → named local → must not be hoisted.
-    let out = pass_licm(insns, 5);
+    let out = pass_licm(insns, &[], 5);
 
     // Instruction count must be unchanged (nothing hoisted).
     assert_eq!(out.len(), before.len(), "instruction count must not change");
@@ -217,7 +217,7 @@ fn licm_continue_backedge_uses_complete_loop_write_set() {
         Insn::ReturnNone,
     ];
 
-    let out = pass_licm(insns, 5);
+    let out = pass_licm(insns, &[], 5);
 
     assert!(
         matches!(out[0], Insn::ForIter(0, 0, _)),
@@ -265,7 +265,7 @@ fn licm_does_not_hoist_binopconst_to_named_local() {
         Insn::Return(1),                                 // [3]
     ];
     let before = insns.clone();
-    let out = pass_licm(insns, 5);
+    let out = pass_licm(insns, &[], 5);
 
     assert_eq!(out.len(), before.len(), "instruction count must not change");
     assert!(
@@ -299,7 +299,7 @@ fn licm_does_not_hoist_binopconst_with_variant_src() {
     ];
     let before = insns.clone();
     // r5 is a temp but r0 (src) IS written by ForIter → still not hoisted.
-    let out = pass_licm(insns, 5);
+    let out = pass_licm(insns, &[], 5);
 
     // Nothing should move: BinOpConst reads r0 which is written by ForIter.
     assert_eq!(
@@ -348,7 +348,7 @@ fn licm_hoists_inner_invariant_out_of_inner_loop() {
         Insn::Return(1),                     // [8]
     ];
     // r0..r4 are named locals; r9 is a temp (>= num_locals=5) → LoadConst(r9) hoistable.
-    let out = pass_licm(insns, 5);
+    let out = pass_licm(insns, &[], 5);
 
     assert_eq!(out.len(), 9, "total instruction count unchanged");
 

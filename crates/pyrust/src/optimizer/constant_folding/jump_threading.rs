@@ -48,7 +48,7 @@ fn pass_thread_jumps(insns: Vec<Insn>) -> Vec<Insn> {
                 ForIter(dst, slot, k) => ForIter(dst, slot, thread(k)),
                 SetupExcept(k) => SetupExcept(thread(k)),
                 MatchExcept(r, k) => MatchExcept(r, thread(k)),
-                MatchExceptStar(r, src, dst, k) => MatchExceptStar(r, src, dst, thread(k)),
+                MatchExceptStar(desc, k) => MatchExceptStar(desc, thread(k)),
                 other => other,
             }
         })

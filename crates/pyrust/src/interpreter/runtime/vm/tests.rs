@@ -8,6 +8,7 @@ mod vm_tests {
     fn empty_code(insns: Vec<Insn>) -> FnCode {
         FnCode {
             insns,
+            descs: Vec::new(),
             filename: std::sync::Arc::from("<unknown>"),
             qualname: std::sync::Arc::from("<module>"),
             lineno_table: crate::bytecode::LinenoTable::empty(),

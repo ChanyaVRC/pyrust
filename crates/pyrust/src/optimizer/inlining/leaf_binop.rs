@@ -33,7 +33,11 @@
 /// Jumps that target the sequence head are redirected to the guard (a loop
 /// whose body starts at the call keeps the guard on its hot path); jumps into
 /// the middle of the sequence simply run the original tail unoptimized.
-fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> {
+fn pass_inline_leaf_binop(
+    insns: Vec<Insn>,
+    descs: &mut Vec<InsnDesc>,
+    fn_protos: &[FnProto],
+) -> Vec<Insn> {
     const MAX_INLINE_SITES: usize = 64;
 
     // `optimize` is normally single-shot, but callers and tests are allowed to
@@ -43,7 +47,7 @@ fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> 
     if fn_protos.is_empty()
         || insns
             .iter()
-            .any(|insn| matches!(insn, Insn::CallInlineBinOp { .. }))
+            .any(|insn| matches!(insn, Insn::CallInlineBinOp(..)))
     {
         return insns;
     }
@@ -121,21 +125,22 @@ fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> 
     let mut i = 0usize;
     while i < n {
         let rebound = match &insns[i] {
-            Insn::MakeFunction(dst, proto, ..) => Some((
-                *dst,
-                eligible
-                    .get(*proto as usize)
-                    .copied()
-                    .flatten()
-                    .map(|_| *proto),
-            )),
-            Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
-                Some((*dst, reg_proto.get(src).copied()))
+            Insn::MakeFunction(desc_idx) => {
+                let desc = descs[*desc_idx as usize].as_make_function();
+                Some((
+                    desc.dst,
+                    eligible
+                        .get(desc.proto_idx as usize)
+                        .copied()
+                        .flatten()
+                        .map(|_| desc.proto_idx),
+                ))
             }
+            Insn::Move(dst, src) => Some((*dst, reg_proto.get(src).copied())),
             _ => None,
         };
         written.clear();
-        collect_writes(&insns[i], &mut written);
+        collect_writes(&insns[i], descs, &mut written);
         for dst in &written {
             reg_proto.remove(dst);
         }
@@ -239,15 +244,18 @@ fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> 
             let site = &sites[si];
             let gpos = out.len();
             let skip = (placement[site.resume] as i64 - gpos as i64 - 1) as i32;
-            out.push(Insn::CallInlineBinOp {
-                callee: site.callee,
-                dst: site.dst,
-                a: site.a,
-                op: site.op,
-                b: site.b,
-                proto: site.proto,
-                skip,
-            });
+            let desc_idx = push_desc(
+                descs,
+                InsnDesc::CallInlineBinOp(CallInlineBinOpDesc {
+                    callee: site.callee,
+                    dst: site.dst,
+                    a: site.a,
+                    op: site.op,
+                    b: site.b,
+                    proto: site.proto,
+                }),
+            );
+            out.push(Insn::CallInlineBinOp(desc_idx, skip));
             si += 1;
         }
         out.push(rewrite_offsets_with(

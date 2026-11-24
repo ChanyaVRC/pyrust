@@ -11,6 +11,7 @@
 /// set always means "definitely a str on this straight-line path".
 fn apply_str_regs_transfer(
     insn: &Insn,
+    descs: &[InsnDesc],
     consts: &[Value],
     num_locals: u32,
     str_regs: &mut HashSet<u32>,
@@ -69,7 +70,7 @@ fn apply_str_regs_transfer(
         }
         // Any other instruction that writes a register clears its string-ness.
         other => {
-            if let Some(dst) = writable_dst(other) {
+            if let Some(dst) = writable_dst(other, descs) {
                 str_regs.remove(&dst);
             }
         }
@@ -146,12 +147,13 @@ fn apply_str_regs_transfer(
 /// iterating ensures all chains in a function are folded.
 fn pass_concat_merge(
     mut insns: Vec<Insn>,
+    descs: &[InsnDesc],
     num_locals: u32,
     num_regs: &mut u32,
     consts: &[Value],
 ) -> Vec<Insn> {
     loop {
-        let (next, changed) = pass_concat_merge_once(insns, num_locals, num_regs, consts);
+        let (next, changed) = pass_concat_merge_once(insns, descs, num_locals, num_regs, consts);
         insns = next;
         if !changed {
             return insns;
@@ -164,6 +166,7 @@ fn pass_concat_merge(
 /// `(new_insns, true)`.  Returns `(insns, false)` when no chain exists.
 fn pass_concat_merge_once(
     insns: Vec<Insn>,
+    descs: &[InsnDesc],
     num_locals: u32,
     num_regs: &mut u32,
     consts: &[Value],
@@ -189,7 +192,7 @@ fn pass_concat_merge_once(
             | Insn::ForIter(_, _, k)
             | Insn::SetupExcept(k)
             | Insn::MatchExcept(_, k)
-            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
+            | Insn::MatchExceptStar(_, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -203,7 +206,7 @@ fn pass_concat_merge_once(
     // Compute use-count per register (number of instruction sites that read it).
     let mut use_count: HashMap<u32, usize> = HashMap::new();
     for insn in &insns {
-        for_each_read(insn, |r| {
+        for_each_read(insn, descs, |r| {
             *use_count.entry(r).or_insert(0) += 1;
         });
     }
@@ -222,7 +225,7 @@ fn pass_concat_merge_once(
                 str_regs.clear();
             }
             str_regs_before.push(str_regs.clone());
-            apply_str_regs_transfer(insn, consts, num_locals, &mut str_regs);
+            apply_str_regs_transfer(insn, descs, consts, num_locals, &mut str_regs);
         }
     }
 

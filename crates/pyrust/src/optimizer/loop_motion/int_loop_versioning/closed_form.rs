@@ -86,7 +86,7 @@ fn traced_const_range_bounds(
             Insn::UnaryOp(dst, crate::ast::UnaryOp::Neg, src) => {
                 (dst, known_value(src)?.checked_neg()?)
             }
-            Insn::Move(dst, src) | Insn::CopyReg(dst, src) => (dst, known_value(src)?),
+            Insn::Move(dst, src) => (dst, known_value(src)?),
             _ => return None,
         };
         match env.iter_mut().find(|(reg, _)| *reg == dst) {
@@ -233,7 +233,11 @@ fn closed_form_for(
 /// at or before the read: that write could be carried into the next iteration
 /// without re-running the producer.  Named locals are never facts because the
 /// live namespace mirror can replace them outside this instruction stream.
-fn compute_reaching_const_reads(insns: &[Insn], num_locals: u32) -> HashMap<(usize, Reg), u16> {
+fn compute_reaching_const_reads(
+    insns: &[Insn],
+    descs: &[InsnDesc],
+    num_locals: u32,
+) -> HashMap<(usize, Reg), u16> {
     let n = insns.len();
     let mut skipped_producer_delta = vec![0i32; n + 1];
     let mut backedge_end_at_target = vec![None; n];
@@ -264,7 +268,7 @@ fn compute_reaching_const_reads(insns: &[Insn], num_locals: u32) -> HashMap<(usi
     let mut written_regs: HashSet<Reg> = HashSet::new();
     for (pc, insn) in insns.iter().enumerate() {
         read_regs.clear();
-        collect_reads(insn, &mut read_regs);
+        collect_reads(insn, descs, &mut read_regs);
         for &reg in &read_regs {
             if reg >= num_locals
                 && let Some(&(producer, cidx)) = last_const.get(&reg)
@@ -275,7 +279,7 @@ fn compute_reaching_const_reads(insns: &[Insn], num_locals: u32) -> HashMap<(usi
         }
 
         written_regs.clear();
-        collect_writes(insn, &mut written_regs);
+        collect_writes(insn, descs, &mut written_regs);
         for reg in &written_regs {
             last_const.remove(reg);
         }
@@ -309,7 +313,7 @@ fn compute_reaching_const_reads(insns: &[Insn], num_locals: u32) -> HashMap<(usi
     let mut next_write: HashMap<Reg, usize> = HashMap::new();
     for pc in (0..n).rev() {
         written_regs.clear();
-        collect_writes(&insns[pc], &mut written_regs);
+        collect_writes(&insns[pc], descs, &mut written_regs);
         for &reg in &written_regs {
             // Include a same-instruction write: a read-then-write operation in
             // a loop would otherwise feed its previous iteration's result into
@@ -318,7 +322,7 @@ fn compute_reaching_const_reads(insns: &[Insn], num_locals: u32) -> HashMap<(usi
         }
         if let Some(component_end) = backedge_extent[pc] {
             read_regs.clear();
-            collect_reads(&insns[pc], &mut read_regs);
+            collect_reads(&insns[pc], descs, &mut read_regs);
             for &reg in &read_regs {
                 if next_write
                     .get(&reg)

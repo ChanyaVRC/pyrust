@@ -21,7 +21,7 @@
 /// fusion whenever `i+1` is the target of any jump.
 /// True if temp register `reg` may be read before being overwritten along any
 /// path starting at `start_pc` (bounded BFS over the instruction stream).
-fn temp_reg_live_from(insns: &[Insn], start_pc: usize, reg: u32) -> bool {
+fn temp_reg_live_from(insns: &[Insn], descs: &[InsnDesc], start_pc: usize, reg: u32) -> bool {
     let n = insns.len();
     let mut visited = vec![false; n];
     let mut work = Vec::new();
@@ -31,11 +31,11 @@ fn temp_reg_live_from(insns: &[Insn], start_pc: usize, reg: u32) -> bool {
     }
     while let Some(pc) = work.pop() {
         let insn = &insns[pc];
-        if insn_reads_reg(insn, reg) {
+        if insn_reads_reg(insn, descs, reg) {
             return true;
         }
         let mut overwritten = false;
-        for_each_write(insn, |w| {
+        for_each_write(insn, descs, |w| {
             if w == reg {
                 overwritten = true;
             }
@@ -60,7 +60,6 @@ fn temp_reg_live_from(insns: &[Insn], start_pc: usize, reg: u32) -> bool {
                 | Insn::RaiseFrom(..)
                 | Insn::RaiseReRaise
                 | Insn::RaiseAssert(_)
-                | Insn::RaiseAssertNoMsg
         );
         if falls_through && pc + 1 < n && !visited[pc + 1] {
             visited[pc + 1] = true;
@@ -70,7 +69,7 @@ fn temp_reg_live_from(insns: &[Insn], start_pc: usize, reg: u32) -> bool {
     false
 }
 
-fn pass_cmpjump_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+fn pass_cmpjump_fusion(insns: Vec<Insn>, descs: &[InsnDesc], num_locals: u32) -> Vec<Insn> {
     let n = insns.len();
     let mut transformed = insns;
     let mut keep = vec![true; n];
@@ -121,8 +120,8 @@ fn pass_cmpjump_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             // `reg` is dead on both the fallthrough (`i + 2`) and jump target
             // (e.g. a short-circuit `a or b` branch edge still consumes `reg`!).
             let target_pc = (i as i64 + 2 + k as i64) as usize;
-            let live_fallthrough = temp_reg_live_from(&transformed, i + 2, reg);
-            let live_target = temp_reg_live_from(&transformed, target_pc, reg);
+            let live_fallthrough = temp_reg_live_from(&transformed, descs, i + 2, reg);
+            let live_target = temp_reg_live_from(&transformed, descs, target_pc, reg);
             if !live_fallthrough && !live_target {
                 keep[i] = false;
                 transformed[i + 1] = new_insn;

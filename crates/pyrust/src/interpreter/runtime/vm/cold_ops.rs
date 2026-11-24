@@ -36,6 +36,7 @@ impl Interpreter {
         use crate::bytecode::Insn;
         if let Some(outcome) = self.exec_cold_control_insn(
             insn,
+            code,
             regs,
             num_locals,
             exc_ctx_frame_base,
@@ -43,7 +44,7 @@ impl Interpreter {
         )? {
             return Ok(outcome);
         }
-        if self.exec_cold_match_insn(insn, regs, num_locals)? {
+        if self.exec_cold_match_insn(insn, code, regs, num_locals)? {
             return Ok(ColdInsnOutcome::Continue);
         }
         match insn {
@@ -113,69 +114,59 @@ impl Interpreter {
                     num_locals,
                 )?;
             }
-            Insn::CallEx { func, npos, kwargs } => {
-                regs[*func as usize] =
-                    self.exec_call_ex(regs, code, pc, *func, *npos, *kwargs, num_locals)?;
+            Insn::CallExArgs(desc_idx) => {
+                let desc = code.descs[*desc_idx as usize].as_call_ex_args();
+                regs[desc.func as usize] = if desc.args_splat == crate::bytecode::NO_ARGS_SPLAT {
+                    self.exec_call_ex(
+                        regs,
+                        code,
+                        pc,
+                        desc.func,
+                        desc.npos,
+                        desc.kwargs,
+                        num_locals,
+                    )?
+                } else {
+                    self.exec_call_ex_args(
+                        regs,
+                        code,
+                        pc,
+                        desc.func,
+                        desc.npos,
+                        desc.nkw,
+                        desc.kwnames_idx,
+                        desc.args_splat,
+                        desc.kwargs,
+                        num_locals,
+                    )?
+                };
             }
-            Insn::CallExArgs {
-                func,
-                npos,
-                nkw,
-                kwnames_idx,
-                args_splat,
-                kwargs,
-            } => {
-                regs[*func as usize] = self.exec_call_ex_args(
-                    regs,
-                    code,
-                    pc,
-                    *func,
-                    *npos,
-                    *nkw,
-                    *kwnames_idx,
-                    *args_splat,
-                    *kwargs,
-                    num_locals,
-                )?;
-            }
-            Insn::CallMethodExpanded {
-                dst,
-                obj,
-                name_idx,
-                pos_list,
-                kw_dict,
-            } => {
-                regs[*dst as usize] = self.exec_call_method_expanded(
+            Insn::CallMethodExpanded(desc_idx) => {
+                let desc = code.descs[*desc_idx as usize].as_call_method_expanded();
+                regs[desc.dst as usize] = self.exec_call_method_expanded(
                     regs,
                     num_locals,
-                    *dst,
-                    *obj,
-                    *name_idx,
-                    *pos_list,
-                    *kw_dict,
+                    desc.dst,
+                    desc.obj,
+                    desc.name_idx,
+                    desc.pos_list,
+                    desc.kw_dict,
                     code,
                     pc - 1,
                 )?;
             }
-            Insn::CallMethodKw {
-                dst,
-                obj,
-                name_idx,
-                args_base,
-                total,
-                nkw,
-                kwnames_idx,
-            } => {
-                regs[*dst as usize] = self.exec_call_method_kw(
+            Insn::CallMethodKw(desc_idx) => {
+                let desc = code.descs[*desc_idx as usize].as_call_method_kw();
+                regs[desc.dst as usize] = self.exec_call_method_kw(
                     regs,
                     num_locals,
-                    *dst,
-                    *obj,
-                    *name_idx,
-                    *args_base,
-                    *total,
-                    *nkw,
-                    *kwnames_idx,
+                    desc.dst,
+                    desc.obj,
+                    desc.name_idx,
+                    desc.args_base,
+                    desc.total,
+                    desc.nkw,
+                    desc.kwnames_idx,
                     code,
                     pc - 1,
                 )?;
@@ -214,73 +205,71 @@ impl Interpreter {
             Insn::ListExtend(list_reg, src_reg) => {
                 self.exec_list_extend(regs, *list_reg, *src_reg, num_locals)?;
             }
-            Insn::ListExtendCall { list, src, name } => {
-                self.exec_list_extend_call(regs, *list, *src, name, code, num_locals)?;
+            Insn::ListExtendCall(desc_idx) => {
+                let desc = code.descs[*desc_idx as usize].as_list_extend_call();
+                self.exec_list_extend_call(
+                    regs, desc.list, desc.src, &desc.name, code, num_locals,
+                )?;
             }
             Insn::DictUpdate(dict_reg, src_reg) => {
                 self.exec_dict_update(regs, *dict_reg, *src_reg, num_locals)?;
             }
-            Insn::DictMergeKwCall { dict, src, name } => {
-                self.exec_dict_merge_kw_call(regs, *dict, *src, name, code, num_locals)?;
+            Insn::DictMergeKwCall(desc_idx) => {
+                let desc = code.descs[*desc_idx as usize].as_dict_merge_kw_call();
+                self.exec_dict_merge_kw_call(
+                    regs, desc.dict, desc.src, &desc.name, code, num_locals,
+                )?;
             }
-            Insn::SetItemKwCall {
-                dict,
-                key,
-                val,
-                name,
-            } => {
-                self.exec_set_item_kw_call(regs, *dict, *key, *val, name, code, num_locals)?;
+            Insn::SetItemKwCall(desc_idx) => {
+                let desc = code.descs[*desc_idx as usize].as_set_item_kw_call();
+                self.exec_set_item_kw_call(
+                    regs, desc.dict, desc.key, desc.val, &desc.name, code, num_locals,
+                )?;
             }
 
             // ── Function / Class / PEP 695 / Import / REPL ───────────────
-            Insn::MakeFunction(dst, proto_idx, defs_base, _defs_n, annots_base, _annots_n) => {
-                regs[*dst as usize] = self.exec_make_function(
+            Insn::MakeFunction(desc_idx) => {
+                let desc = code.descs[*desc_idx as usize].as_make_function();
+                regs[desc.dst as usize] = self.exec_make_function(
                     code,
                     regs,
                     cells,
                     num_locals,
-                    *proto_idx,
-                    *defs_base,
-                    *annots_base,
+                    desc.proto_idx,
+                    desc.defs_base,
+                    desc.annots_base,
                 )?;
             }
-            Insn::MakeClass(dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n) => {
-                regs[*dst as usize] = self.exec_make_class(
-                    code,
-                    regs,
-                    cells,
-                    num_locals,
-                    *proto_idx,
-                    *bases_base,
-                    *bases_n,
-                    *name_idx,
-                    *kwarg_base,
-                    *kwarg_n,
-                )?;
-            }
-            Insn::MakeClassMeta(
-                dst,
-                proto_idx,
-                bases_base,
-                bases_n,
-                name_idx,
-                kwarg_base,
-                kwarg_n,
-                meta_reg,
-            ) => {
-                regs[*dst as usize] = self.exec_make_class_meta(
-                    code,
-                    regs,
-                    cells,
-                    num_locals,
-                    *proto_idx,
-                    *bases_base,
-                    *bases_n,
-                    *name_idx,
-                    *kwarg_base,
-                    *kwarg_n,
-                    *meta_reg,
-                )?;
+            Insn::MakeClass(desc_idx) => {
+                let desc = code.descs[*desc_idx as usize].as_make_class();
+                regs[desc.dst as usize] = if desc.meta_reg == crate::bytecode::NO_METACLASS {
+                    self.exec_make_class(
+                        code,
+                        regs,
+                        cells,
+                        num_locals,
+                        desc.proto_idx,
+                        desc.bases_base,
+                        desc.bases_n,
+                        desc.name_idx,
+                        desc.kwarg_base,
+                        desc.kwarg_n,
+                    )?
+                } else {
+                    self.exec_make_class_meta(
+                        code,
+                        regs,
+                        cells,
+                        num_locals,
+                        desc.proto_idx,
+                        desc.bases_base,
+                        desc.bases_n,
+                        desc.name_idx,
+                        desc.kwarg_base,
+                        desc.kwarg_n,
+                        desc.meta_reg,
+                    )?
+                };
             }
             Insn::MakeTypeVar(dst, name_idx, kind) => {
                 regs[*dst as usize] = Self::exec_make_typevar(code, *name_idx, *kind)?;

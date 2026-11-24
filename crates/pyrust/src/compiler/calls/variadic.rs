@@ -28,19 +28,21 @@ impl Compiler {
         for arg in args {
             if arg.splat {
                 let val = self.compile_expr(&arg.value);
-                self.emit(Insn::ListExtendCall {
+                let desc_idx = self.push_desc(InsnDesc::ListExtendCall(ListExtendCallDesc {
                     list: pos_list_reg,
                     src: val,
                     name: make_kw_name(),
-                });
+                }));
+                self.emit(Insn::ListExtendCall(desc_idx));
                 self.free_temp(val);
             } else if arg.double_splat {
                 let val = self.compile_expr(&arg.value);
-                self.emit(Insn::DictMergeKwCall {
+                let desc_idx = self.push_desc(InsnDesc::DictMergeKwCall(DictMergeKwCallDesc {
                     dict: kw_dict_reg,
                     src: val,
                     name: make_kw_name(),
-                });
+                }));
+                self.emit(Insn::DictMergeKwCall(desc_idx));
                 self.free_temp(val);
             } else if let Some(kw_name) = arg.name {
                 let val = self.compile_expr(&arg.value);
@@ -48,12 +50,13 @@ impl Compiler {
                 let key_reg = self.alloc_temp();
                 self.emit(Insn::LoadConst(key_reg, key_idx));
                 if has_kw_splat {
-                    self.emit(Insn::SetItemKwCall {
+                    let desc_idx = self.push_desc(InsnDesc::SetItemKwCall(SetItemKwCallDesc {
                         dict: kw_dict_reg,
                         key: key_reg,
                         val,
                         name: make_kw_name(),
-                    });
+                    }));
+                    self.emit(Insn::SetItemKwCall(desc_idx));
                 } else {
                     self.emit(Insn::SetItem(kw_dict_reg, key_reg, val));
                 }
@@ -101,13 +104,14 @@ impl Compiler {
                 return 0;
             };
 
-            self.emit(Insn::CallMethodExpanded {
+            let desc_idx = self.push_desc(InsnDesc::CallMethodExpanded(CallMethodExpandedDesc {
                 dst: dst_reg,
                 obj: obj_reg,
                 name_idx,
                 pos_list: pos_list_reg,
                 kw_dict: kw_dict_reg,
-            });
+            }));
+            self.emit(Insn::CallMethodExpanded(desc_idx));
             self.free_temp(kw_dict_reg);
             self.free_temp(pos_list_reg);
             self.next_temp = dst_reg + 1;
@@ -125,7 +129,7 @@ impl Compiler {
 
         // Reuse CallExArgs as the typed VM transport for the materialized
         // `(pos_list_reg, kw_dict_reg)` pair.
-        self.emit(Insn::CallExArgs {
+        let desc_idx = self.push_desc(InsnDesc::CallExArgs(CallExArgsDesc {
             func: func_reg,
             npos: 0,
             nkw: 0,
@@ -133,7 +137,8 @@ impl Compiler {
             kwnames_idx: 0,
             args_splat: pos_list_reg,
             kwargs: kw_dict_reg,
-        });
+        }));
+        self.emit(Insn::CallExArgs(desc_idx));
         self.free_temp(kw_dict_reg);
         self.free_temp(pos_list_reg);
         // CallExArgs writes the result back to `func_reg`. Keep it live for the
@@ -165,11 +170,15 @@ impl Compiler {
         }
         let kwargs_reg = func_reg + 1 + npos as Reg;
         self.compile_call_arg_into(&args[npos].value, kwargs_reg);
-        self.emit(Insn::CallEx {
+        let desc_idx = self.push_desc(InsnDesc::CallExArgs(CallExArgsDesc {
             func: func_reg,
             npos: npos as u8,
+            nkw: 0,
+            kwnames_idx: 0,
+            args_splat: NO_ARGS_SPLAT,
             kwargs: kwargs_reg,
-        });
+        }));
+        self.emit(Insn::CallExArgs(desc_idx));
         self.next_temp = func_reg + 1;
         func_reg
     }
@@ -222,14 +231,15 @@ impl Compiler {
         } else {
             crate::bytecode::NO_KWARGS
         };
-        self.emit(Insn::CallExArgs {
+        let desc_idx = self.push_desc(InsnDesc::CallExArgs(CallExArgsDesc {
             func: func_reg,
             npos: npos as u8,
             nkw: nkw as u8,
             kwnames_idx,
             args_splat: args_splat_reg,
             kwargs: kwargs_reg,
-        });
+        }));
+        self.emit(Insn::CallExArgs(desc_idx));
         self.next_temp = func_reg + 1;
         func_reg
     }

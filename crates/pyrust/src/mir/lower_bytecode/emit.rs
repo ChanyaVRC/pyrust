@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use crate::ast::CaretSpan;
-use crate::bytecode::{Insn, Reg};
+use crate::bytecode::{Insn, InsnDesc, Reg};
 use crate::value::{Value, ValueKind};
 
 use crate::mir::ir::{BlockId, MirFn, MirOp, Terminator, Val, mir_const_exact_eq};
@@ -87,6 +87,7 @@ impl ConstPool {
 /// Emitted bytecode streams and metadata ready for [`crate::bytecode::FnCode`].
 pub(super) struct EmittedBytecode {
     pub(super) insns: Vec<Insn>,
+    pub(super) descs: Vec<InsnDesc>,
     pub(super) lineno_table: Vec<u32>,
     pub(super) col_table: Vec<CaretSpan>,
     pub(super) consts: Vec<Value>,
@@ -137,6 +138,7 @@ pub(super) fn emit_mir_bytecode(
         scratch_base: alloc.ssa_reg_end + 1,
         max_reg_used: alloc.ssa_reg_end,
         insns: Vec::new(),
+        descs: Vec::new(),
         lineno_table: Vec::new(),
         col_table: Vec::new(),
         block_pc: vec![usize::MAX; func.blocks.len()],
@@ -155,6 +157,7 @@ pub(super) fn emit_mir_bytecode(
 
     EmittedBytecode {
         insns: emitter.insns,
+        descs: emitter.descs,
         lineno_table: emitter.lineno_table,
         col_table: emitter.col_table,
         consts: emitter.pool.consts,
@@ -175,6 +178,7 @@ pub(super) struct BytecodeEmitter<'a> {
     pub(super) scratch_base: Reg,
     pub(super) max_reg_used: Reg,
     pub(super) insns: Vec<Insn>,
+    pub(super) descs: Vec<InsnDesc>,
     pub(super) lineno_table: Vec<u32>,
     pub(super) col_table: Vec<CaretSpan>,
     block_pc: Vec<usize>,

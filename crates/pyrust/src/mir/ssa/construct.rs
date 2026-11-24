@@ -3,7 +3,7 @@
 use smallvec::SmallVec;
 
 use crate::ast::CaretSpan;
-use crate::bytecode::{FnCode, Insn, Reg};
+use crate::bytecode::{FnCode, Insn, InsnDesc, Reg};
 
 use crate::mir::insn_info::insn_may_invalidate_named_locals;
 use crate::mir::ir::{BlockId, MirBlock, MirFn, MirInst, MirOp, Terminator, Val};
@@ -223,20 +223,23 @@ impl<'a> SsaRenamer<'a> {
                         Some((body_bb.0 as usize, smallvec::smallvec![(*dst_reg, *dst)]))
                     }
                     (
-                        Insn::MatchExceptStar(_, src_group, matched_dst, _),
+                        Insn::MatchExceptStar(desc_idx, _),
                         Terminator::MatchExceptStar {
                             matched_def,
                             residual_def,
                             matched_bb,
                             ..
                         },
-                    ) => Some((
-                        matched_bb.0 as usize,
-                        smallvec::smallvec![
-                            (*matched_dst, *matched_def),
-                            (*src_group, *residual_def),
-                        ],
-                    )),
+                    ) => {
+                        let desc = self.code.descs[*desc_idx as usize].as_match_except_star();
+                        Some((
+                            matched_bb.0 as usize,
+                            smallvec::smallvec![
+                                (desc.matched_dst, *matched_def),
+                                (desc.src_group, *residual_def),
+                            ],
+                        ))
+                    }
                     _ => None,
                 }
             });
@@ -302,6 +305,7 @@ impl<'a> SsaRenamer<'a> {
 pub(super) fn insert_pinned_edge_bridges(
     compact_raw: &[RawBlock],
     insns: &[Insn],
+    descs: &[InsnDesc],
     pinned: &RegBits,
     mir: &mut MirFn,
 ) {
@@ -317,10 +321,11 @@ pub(super) fn insert_pinned_edge_bridges(
                 pinned.contains(*dst_reg) && compact_raw[body_bb.0 as usize].preds.len() > 1
             }
             (
-                Insn::MatchExceptStar(_, src_group, matched_dst, _),
+                Insn::MatchExceptStar(desc_idx, _),
                 Terminator::MatchExceptStar { matched_bb, .. },
             ) => {
-                (pinned.contains(*src_group) || pinned.contains(*matched_dst))
+                let desc = descs[*desc_idx as usize].as_match_except_star();
+                (pinned.contains(desc.src_group) || pinned.contains(desc.matched_dst))
                     && compact_raw[matched_bb.0 as usize].preds.len() > 1
             }
             _ => false,
@@ -361,7 +366,7 @@ pub(super) fn insert_pinned_edge_bridges(
                 (t, a)
             }
             (
-                Insn::MatchExceptStar(_, src_group, matched_dst, _),
+                Insn::MatchExceptStar(desc_idx, _),
                 Terminator::MatchExceptStar {
                     matched_def,
                     residual_def,
@@ -370,8 +375,9 @@ pub(super) fn insert_pinned_edge_bridges(
                     ..
                 },
             ) => {
-                push_store(*matched_dst, *matched_def);
-                push_store(*src_group, *residual_def);
+                let desc = descs[*desc_idx as usize].as_match_except_star();
+                push_store(desc.matched_dst, *matched_def);
+                push_store(desc.src_group, *residual_def);
                 let t = *matched_bb;
                 let a = std::mem::take(matched_args);
                 *matched_bb = bridge_id;

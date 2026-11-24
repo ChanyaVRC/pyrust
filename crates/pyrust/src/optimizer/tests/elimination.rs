@@ -54,7 +54,7 @@ fn dse_removes_overwritten_load_const() {
         Insn::LoadConst(2, 1), // live — r2 used by Return
         Insn::Return(2),
     ];
-    let out = pass_dead_store_elim(insns, 2);
+    let out = pass_dead_store_elim(insns, &[], 2);
     assert_eq!(out.len(), 2, "dead LoadConst should be removed");
     assert!(matches!(out[0], Insn::LoadConst(2, 1)));
     assert!(matches!(out[1], Insn::Return(2)));
@@ -64,7 +64,7 @@ fn dse_removes_overwritten_load_const() {
 fn dse_keeps_store_that_is_read() {
     // LoadConst(r2, 0) is read by Return — must be kept.
     let insns = vec![Insn::LoadConst(2, 0), Insn::Return(2)];
-    let out = pass_dead_store_elim(insns, 2);
+    let out = pass_dead_store_elim(insns, &[], 2);
     assert_eq!(out.len(), 2, "live LoadConst must not be removed");
 }
 
@@ -76,7 +76,7 @@ fn dse_keeps_local_register_writes() {
         Insn::LoadConst(0, 1), // overwrites r0
         Insn::Return(0),
     ];
-    let out = pass_dead_store_elim(insns, 2);
+    let out = pass_dead_store_elim(insns, &[], 2);
     assert_eq!(out.len(), 3, "local register writes must not be removed");
 }
 
@@ -93,7 +93,7 @@ fn dse_skips_when_back_edge_present_and_register_is_read() {
         Insn::Jump(-2),        // back-edge
         Insn::Return(2),
     ];
-    let out = pass_dead_store_elim(insns, 2);
+    let out = pass_dead_store_elim(insns, &[], 2);
     assert_eq!(
         out.len(),
         3,
@@ -111,7 +111,7 @@ fn dse_removes_dead_move() {
         Insn::BinOp(3, 2, BinaryOp::Add, 2), // overwrites r3
         Insn::Return(3),
     ];
-    let out = pass_dead_store_elim(insns, 2);
+    let out = pass_dead_store_elim(insns, &[], 2);
     assert_eq!(out.len(), 3, "dead Move should be removed");
     assert!(matches!(out[1], Insn::BinOp(3, 2, BinaryOp::Add, 2)));
 }
@@ -138,7 +138,7 @@ fn dse_keeps_then_branch_write_across_jump() {
         Insn::LoadConst(2, 1),
         Insn::Return(2),
     ];
-    let out = pass_dead_store_elim(insns, 2);
+    let out = pass_dead_store_elim(insns, &[], 2);
     assert_eq!(
         out.len(),
         5,
@@ -171,7 +171,7 @@ fn dse_global_read_count_removes_zero_read_temp_inside_loop() {
         Insn::Jump(-3),        // back-edge: target = 2+1-3 = 0
         Insn::Return(2),
     ];
-    let out = pass_dead_store_elim(insns, 2);
+    let out = pass_dead_store_elim(insns, &[], 2);
     assert_eq!(
         out.len(),
         3,
@@ -206,7 +206,7 @@ fn dse_keeps_dead_call_memo() {
         Insn::CallMemo(2, 0),   // r2 = some_pure_fn() — result dead
         Insn::ReturnNone,
     ];
-    let out = pass_dead_store_elim(insns, 2);
+    let out = pass_dead_store_elim(insns, &[], 2);
     assert_eq!(out.len(), 3, "dead CallMemo must be preserved");
     assert!(
         out.iter().any(|i| matches!(i, Insn::CallMemo(..))),
@@ -315,7 +315,7 @@ fn dse_keeps_call_memo_whose_result_is_used() {
         Insn::CallMemo(2, 0),   // r2 = some_fn() — result used by Return
         Insn::Return(2),
     ];
-    let out = pass_dead_store_elim(insns, 2);
+    let out = pass_dead_store_elim(insns, &[], 2);
     assert_eq!(out.len(), 3, "live CallMemo must not be removed");
     assert!(matches!(out[1], Insn::CallMemo(2, 0)));
 }
@@ -328,7 +328,7 @@ fn dse_keeps_call_memo_local_reg() {
         Insn::CallMemo(1, 0),   // r1 = fn() — local, must not be removed
         Insn::ReturnNone,
     ];
-    let out = pass_dead_store_elim(insns, 2);
+    let out = pass_dead_store_elim(insns, &[], 2);
     assert_eq!(out.len(), 3, "CallMemo to local must not be removed");
 }
 
@@ -344,7 +344,7 @@ fn dead_store_elim_reference(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     let mut reads_buf: HashSet<u32> = HashSet::new();
     for insn in &insns {
         reads_buf.clear();
-        collect_reads(insn, &mut reads_buf);
+        collect_reads(insn, &[], &mut reads_buf);
         for &r in &reads_buf {
             if r >= num_locals {
                 *global_read_count.entry(r).or_insert(0) += 1;
@@ -353,11 +353,7 @@ fn dead_store_elim_reference(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     }
     for i in 0..n {
         let dst = match &insns[i] {
-            Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::Move(r, _) | Insn::CopyReg(r, _)
-                if *r >= num_locals =>
-            {
-                *r
-            }
+            Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::Move(r, _) if *r >= num_locals => *r,
             // `CallMemo` remains observable even when its result is dead, so
             // dead-store elimination never drops it.
             _ => continue,
@@ -369,7 +365,7 @@ fn dead_store_elim_reference(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         if slice_has_back_edge(&insns[i + 1..]) {
             continue;
         }
-        if !reg_is_read_before_next_write(&insns[i + 1..], dst) {
+        if !reg_is_read_before_next_write(&insns[i + 1..], &[], dst) {
             keep[i] = false;
         }
     }
@@ -416,8 +412,6 @@ fn sample_dse_streams() -> Vec<Vec<Insn>> {
             Insn::BinOpConst(2, 2, BinaryOp::Add, 1, false),
             Insn::Jump(-2),
         ],
-        // CopyReg dead store (never read).
-        vec![Insn::LoadConst(2, 0), Insn::CopyReg(3, 2), Insn::Return(2)],
         // Duplicate LoadConst with intervening write.
         vec![
             Insn::LoadConst(2, 0),
@@ -446,7 +440,7 @@ fn sample_dse_streams() -> Vec<Vec<Insn>> {
 fn dead_store_elim_matches_reference() {
     for stream in sample_dse_streams() {
         for num_locals in [0u32, 2, 3] {
-            let a = pass_dead_store_elim(stream.clone(), num_locals);
+            let a = pass_dead_store_elim(stream.clone(), &[], num_locals);
             let b = dead_store_elim_reference(stream.clone(), num_locals);
             assert_eq!(
                 a, b,

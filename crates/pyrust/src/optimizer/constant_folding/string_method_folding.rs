@@ -13,6 +13,7 @@
 /// across control-flow merge points.
 fn pass_str_method_const_fold(
     insns: Vec<Insn>,
+    descs: &[InsnDesc],
     consts: &mut Vec<Value>,
     names: &[pyrust_core::Symbol],
     num_locals: u32,
@@ -73,7 +74,7 @@ fn pass_str_method_const_fold(
             | Insn::ForIter(_, _, k)
             | Insn::SetupExcept(k)
             | Insn::MatchExcept(_, k)
-            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
+            | Insn::MatchExceptStar(_, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -157,7 +158,7 @@ fn pass_str_method_const_fold(
             }
             insn => {
                 written_buf.clear();
-                collect_writes(&insn, &mut written_buf);
+                collect_writes(&insn, descs, &mut written_buf);
                 for r in &written_buf {
                     const_regs.remove(r);
                 }

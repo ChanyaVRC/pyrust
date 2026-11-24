@@ -26,8 +26,7 @@ fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
             | Insn::RaiseExceptStarResidual(_)
             | Insn::RaiseReRaise
             | Insn::RaiseFrom(_, _)
-            | Insn::RaiseAssert(_)
-            | Insn::RaiseAssertNoMsg => {}
+            | Insn::RaiseAssert(_) => {}
 
             Insn::JumpIfFalse(_, k) | Insn::JumpIfTrue(_, k) => {
                 queue.push(pc + 1);
@@ -39,7 +38,7 @@ fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
             | Insn::CmpJumpIfTrueConst(_, _, _, k)
             | Insn::ForIter(_, _, k)
             | Insn::MatchExcept(_, k)
-            | Insn::MatchExceptStar(_, _, _, k) => {
+            | Insn::MatchExceptStar(_, k) => {
                 queue.push(pc + 1);
                 queue.push(jt(*k));
             }

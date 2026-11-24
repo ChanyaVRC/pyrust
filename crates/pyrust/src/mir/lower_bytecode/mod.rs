@@ -53,6 +53,7 @@ pub fn lower_mir_to_fncode(func: &MirFn) -> FnCode {
 
     FnCode {
         insns: emitted.insns,
+        descs: emitted.descs,
         filename: func.filename.clone(),
         qualname: func.qualname.clone(),
         lineno_table: LinenoTable::from_dense(&emitted.lineno_table),

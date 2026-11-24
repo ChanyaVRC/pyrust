@@ -5,6 +5,7 @@
 #[allow(clippy::too_many_arguments)]
 fn pre_plan_exprs(
     insns: &[Insn],
+    descs: &[InsnDesc],
     consts: &[Value],
     num_locals: u32,
     num_regs: u32,
@@ -19,12 +20,12 @@ fn pre_plan_exprs(
     // Ensure fresh temp registers never collide with existing registers.
     let mut max_reg_used = num_regs.max(num_locals);
     for insn in insns {
-        for_each_read(insn, |r| {
+        for_each_read(insn, descs, |r| {
             if r + 1 > max_reg_used {
                 max_reg_used = r + 1;
             }
         });
-        for_each_write(insn, |w| {
+        for_each_write(insn, descs, |w| {
             if w + 1 > max_reg_used {
                 max_reg_used = w + 1;
             }
@@ -197,7 +198,7 @@ fn pre_plan_exprs(
                         capture_pcs.push(pc);
                     }
                 }
-                let (pure, may_raise) = pre_step_types(insn, &mut state, consts, num_locals);
+                let (pure, may_raise) = pre_step_types(insn, descs, &mut state, consts, num_locals);
                 let mut killed = false;
                 if in_try && may_raise {
                     killed = true;
@@ -205,7 +206,7 @@ fn pre_plan_exprs(
                     if !pure && expr.reads_named_local(num_locals) {
                         killed = true;
                     }
-                    for_each_write(insn, |w| {
+                    for_each_write(insn, descs, |w| {
                         if expr.reads_reg(w) {
                             killed = true;
                         }
@@ -361,7 +362,6 @@ fn pre_materialize(
                     | Insn::RaiseFrom(..)
                     | Insn::RaiseReRaise
                     | Insn::RaiseAssert(_)
-                    | Insn::RaiseAssertNoMsg
             )
         );
         let guard_jump_idx = if !last_terminates {
@@ -437,7 +437,13 @@ fn pre_materialize(
 ///    register is initialized and fresh along every executable path reaching
 ///    each `Move(dst, temp)` replacement and that at least one original
 ///    computation is strictly eliminated.
-fn pass_pre(insns: Vec<Insn>, consts: &[Value], num_locals: u32, num_regs: &mut u32) -> Vec<Insn> {
+fn pass_pre(
+    insns: Vec<Insn>,
+    descs: &[InsnDesc],
+    consts: &[Value],
+    num_locals: u32,
+    num_regs: &mut u32,
+) -> Vec<Insn> {
     debug_assert_no_late_stage_insns(&insns, "pass_pre");
     if insns.len() < 3 {
         return insns;
@@ -446,14 +452,16 @@ fn pass_pre(insns: Vec<Insn>, consts: &[Value], num_locals: u32, num_regs: &mut 
     let Some(cfg) = pre_build_cfg(&insns) else {
         return insns;
     };
-    let (type_in, type_out_before_term) = pre_analyze_types(&insns, consts, num_locals, &cfg);
-    let discovered = pre_discover_exprs(&insns, consts, num_locals, &cfg, &type_in);
+    let (type_in, type_out_before_term) =
+        pre_analyze_types(&insns, descs, consts, num_locals, &cfg);
+    let discovered = pre_discover_exprs(&insns, descs, consts, num_locals, &cfg, &type_in);
     if discovered.exprs.is_empty() {
         return insns;
     }
 
     let df = pre_compute_dataflow(
         &insns,
+        descs,
         consts,
         num_locals,
         &cfg,
@@ -463,6 +471,7 @@ fn pass_pre(insns: Vec<Insn>, consts: &[Value], num_locals: u32, num_regs: &mut 
     );
     let (plans, next_temp) = pre_plan_exprs(
         &insns,
+        descs,
         consts,
         num_locals,
         *num_regs,
@@ -494,7 +503,7 @@ fn set_insn_jump_off(insn: &mut Insn, new_off: i32) {
         | ForIter(_, _, k)
         | SetupExcept(k)
         | MatchExcept(_, k)
-        | MatchExceptStar(_, _, _, k) => *k = new_off,
+        | MatchExceptStar(_, k) => *k = new_off,
         _ => {}
     }
 }

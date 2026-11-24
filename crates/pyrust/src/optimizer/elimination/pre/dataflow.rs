@@ -88,7 +88,7 @@ fn pre_build_cfg(insns: &[Insn]) -> Option<PreCfg> {
             | Insn::ForIter(_, _, k)
             | Insn::SetupExcept(k)
             | Insn::MatchExcept(_, k)
-            | Insn::MatchExceptStar(_, _, _, k) => {
+            | Insn::MatchExceptStar(_, k) => {
                 add_succ(last_pc + 1);
                 add_succ(pre_jump_target(last_pc, *k));
             }
@@ -98,8 +98,7 @@ fn pre_build_cfg(insns: &[Insn]) -> Option<PreCfg> {
             | Insn::RaiseExceptStarResidual(_)
             | Insn::RaiseFrom(..)
             | Insn::RaiseReRaise
-            | Insn::RaiseAssert(_)
-            | Insn::RaiseAssertNoMsg => {
+            | Insn::RaiseAssert(_) => {
                 is_exit[b] = true;
             }
             _ => add_succ(b_end),
@@ -121,6 +120,7 @@ fn pre_build_cfg(insns: &[Insn]) -> Option<PreCfg> {
 /// Step 2: Forward exact-type analysis (worklist fixpoint).
 fn pre_analyze_types(
     insns: &[Insn],
+    descs: &[InsnDesc],
     consts: &[Value],
     num_locals: u32,
     cfg: &PreCfg,
@@ -178,13 +178,13 @@ fn pre_analyze_types(
             } else {
                 None
             };
-            let (pure, may_raise) = pre_step_types(insn, &mut state, consts, num_locals);
+            let (pure, may_raise) = pre_step_types(insn, descs, &mut state, consts, num_locals);
             if may_raise && let Some(mut exc_state) = pre_state {
                 let hb = cfg.pc_to_block[cfg.handler_pc_at[pc]];
                 if !pure {
                     exc_state.retain(|&r, _| r >= num_locals);
                 }
-                for_each_write(insn, |w| {
+                for_each_write(insn, descs, |w| {
                     exc_state.remove(&w);
                 });
                 propagate_types(hb, &exc_state, &mut type_in, &mut in_wl, &mut wl);
@@ -201,13 +201,13 @@ fn pre_analyze_types(
             } else {
                 None
             };
-            let (pure, may_raise) = pre_step_types(term, &mut state, consts, num_locals);
+            let (pure, may_raise) = pre_step_types(term, descs, &mut state, consts, num_locals);
             if may_raise && let Some(mut exc_state) = pre_state {
                 let hb = cfg.pc_to_block[cfg.handler_pc_at[last_pc]];
                 if !pure {
                     exc_state.retain(|&r, _| r >= num_locals);
                 }
-                for_each_write(term, |w| {
+                for_each_write(term, descs, |w| {
                     exc_state.remove(&w);
                 });
                 propagate_types(hb, &exc_state, &mut type_in, &mut in_wl, &mut wl);
@@ -256,6 +256,7 @@ fn pre_analyze_types(
 /// possibly be redundant (appear >= 2 times, or appear in a function with loops).
 fn pre_discover_exprs(
     insns: &[Insn],
+    descs: &[InsnDesc],
     consts: &[Value],
     num_locals: u32,
     cfg: &PreCfg,
@@ -277,7 +278,7 @@ fn pre_discover_exprs(
                 pc_expr[pc] = Some((dst, expr));
                 expr_occurrences.entry(expr).or_default().push((b, pc, dst));
             }
-            pre_step_types(insn, &mut state, consts, num_locals);
+            pre_step_types(insn, descs, &mut state, consts, num_locals);
         }
     }
 
@@ -304,8 +305,10 @@ fn pre_discover_exprs(
 
 /// Steps 4, 5, 6: Compute per-block local bitmasks, anticipated (down-safe),
 /// real availability (forward MUST), and partial availability (forward MAY).
+#[allow(clippy::too_many_arguments)]
 fn pre_compute_dataflow(
     insns: &[Insn],
+    descs: &[InsnDesc],
     consts: &[Value],
     num_locals: u32,
     cfg: &PreCfg,
@@ -383,7 +386,7 @@ fn pre_compute_dataflow(
                 }
             }
 
-            let (pure, may_raise) = pre_step_types(insn, &mut state, consts, num_locals);
+            let (pure, may_raise) = pre_step_types(insn, descs, &mut state, consts, num_locals);
             let mut insn_kill = 0u64;
             if in_try && may_raise {
                 insn_kill = all_mask;
@@ -391,7 +394,7 @@ fn pre_compute_dataflow(
                 if !pure {
                     insn_kill |= named_local_expr_mask;
                 }
-                for_each_write(insn, |w| {
+                for_each_write(insn, descs, |w| {
                     insn_kill |= mask_for_write(w);
                 });
             }
@@ -412,7 +415,7 @@ fn pre_compute_dataflow(
         if has_term {
             let last_pc = b_end - 1;
             let term = &insns[last_pc];
-            let (pure, may_raise) = pre_step_types(term, &mut state, consts, num_locals);
+            let (pure, may_raise) = pre_step_types(term, descs, &mut state, consts, num_locals);
             let mut tk = 0u64;
             if in_try && may_raise {
                 tk = all_mask;
@@ -420,7 +423,7 @@ fn pre_compute_dataflow(
                 if !pure {
                     tk |= named_local_expr_mask;
                 }
-                for_each_write(term, |w| {
+                for_each_write(term, descs, |w| {
                     tk |= mask_for_write(w);
                 });
             }

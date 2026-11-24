@@ -31,7 +31,7 @@ impl BlockBuilder<'_, '_> {
                     self.write_reg(*start + offset, v, ln, sp);
                 }
             }
-            Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
+            Insn::Move(dst, src) => {
                 let sv = self.read_reg(*src, ln, sp);
                 let v = self.emit_def(MirOp::Copy(sv), ln, sp);
                 self.write_reg(*dst, v, ln, sp);
@@ -219,13 +219,14 @@ impl BlockBuilder<'_, '_> {
                 self.push_def(*reg, None);
             }
             other => {
-                let mut uses: SmallVec<[Val; 4]> = SmallVec::new();
-                visit_ssa_reads(other, |r| {
-                    let v = self.read_reg(r, ln, sp);
-                    uses.push(v);
-                });
+                let mut read_regs: SmallVec<[Reg; 4]> = SmallVec::new();
+                visit_ssa_reads(other, &self.renamer.code.descs, |r| read_regs.push(r));
+                let mut uses: SmallVec<[Val; 4]> = SmallVec::with_capacity(read_regs.len());
+                for r in read_regs {
+                    uses.push(self.read_reg(r, ln, sp));
+                }
                 let mut write_regs: SmallVec<[Reg; 2]> = SmallVec::new();
-                visit_ssa_writes(other, |w| write_regs.push(w));
+                visit_ssa_writes(other, &self.renamer.code.descs, |w| write_regs.push(w));
                 let mut defs: SmallVec<[Val; 2]> = SmallVec::with_capacity(write_regs.len());
                 for _ in &write_regs {
                     defs.push(self.renamer.mir.fresh_val());
@@ -331,6 +332,12 @@ impl BlockBuilder<'_, '_> {
                     uses: smallvec::smallvec![av, bv],
                 }
             }
+            Insn::RaiseAssert(r) if *r == crate::bytecode::NO_ASSERT_MSG => {
+                Terminator::RaiseSpecial {
+                    insn: t_insn.clone(),
+                    uses: SmallVec::new(),
+                }
+            }
             Insn::RaiseAssert(r) | Insn::RaiseExceptStarResidual(r) => {
                 let rv = self.read_reg(*r, ln, sp);
                 Terminator::RaiseSpecial {
@@ -338,10 +345,6 @@ impl BlockBuilder<'_, '_> {
                     uses: smallvec::smallvec![rv],
                 }
             }
-            Insn::RaiseAssertNoMsg => Terminator::RaiseSpecial {
-                insn: t_insn.clone(),
-                uses: SmallVec::new(),
-            },
             Insn::ForIter(dst_reg, slot, _) => {
                 let dst_val = self.renamer.mir.fresh_val();
                 let body_t = rb.succs[0].target;
@@ -379,9 +382,10 @@ impl BlockBuilder<'_, '_> {
                     nomatch_args: self.renamer.collect_edge_args(nomatch_t, &[]),
                 }
             }
-            Insn::MatchExceptStar(type_r, src_group, matched_dst, _) => {
-                let tv = self.read_reg(*type_r, ln, sp);
-                let sv = self.read_reg(*src_group, ln, sp);
+            Insn::MatchExceptStar(desc_idx, _) => {
+                let desc = *self.renamer.code.descs[*desc_idx as usize].as_match_except_star();
+                let tv = self.read_reg(desc.type_reg, ln, sp);
+                let sv = self.read_reg(desc.src_group, ln, sp);
                 let matched_def = self.renamer.mir.fresh_val();
                 let residual_def = self.renamer.mir.fresh_val();
                 let matched_t = rb.succs[0].target;
@@ -394,7 +398,10 @@ impl BlockBuilder<'_, '_> {
                     matched_bb: BlockId(matched_t as u32),
                     matched_args: self.renamer.collect_edge_args(
                         matched_t,
-                        &[(*matched_dst, matched_def), (*src_group, residual_def)],
+                        &[
+                            (desc.matched_dst, matched_def),
+                            (desc.src_group, residual_def),
+                        ],
                     ),
                     nomatch_bb: BlockId(nomatch_t as u32),
                     nomatch_args: self.renamer.collect_edge_args(nomatch_t, &[]),
