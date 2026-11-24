@@ -298,13 +298,45 @@ def _details_summary(shown: int, total: int, label: str) -> str:
     return f"Top {shown} of {total} scripts — {label} (full report attached)"
 
 
-def _summary_md(rows: list[ScriptResult], top: "int | None" = None) -> str:
+def _timeout_label(timeout_s: int) -> str:
+    if timeout_s > 0:
+        return f"⏱ timed out (>{timeout_s}s)"
+    return "⏱ timed out"
+
+
+def _timed_out_iters(rel: str, config: "BenchConfig | None") -> str:
+    if config is None:
+        return "—"
+    return str(config.resolve(rel).iterations)
+
+
+def _summary_md(
+    rows: list[ScriptResult],
+    top: "int | None" = None,
+    timed_out: "list[str] | tuple[str, ...] | None" = None,
+    timeout_s: int = 0,
+    config: "BenchConfig | None" = None,
+) -> str:
     """Timing-only PR comment. Memory is a separate comment.
 
     `top` caps each `<details>` table to that many (slowest) scripts so the
     posted comment stays small; pass `None` for the complete, attachable report.
     """
     lines: list[str] = []
+    timed_out_list = list(dict.fromkeys(timed_out or ()))
+    timeout_cell = _timeout_label(timeout_s)
+
+    if timed_out_list:
+        cap_desc = f"the {timeout_s}s timeout cap" if timeout_s > 0 else "the timeout cap"
+        timed_out_names = ", ".join(f"`{rel}`" for rel in timed_out_list)
+        lines += [
+            "> [!WARNING]",
+            f"> **Partial benchmark run**: {len(timed_out_list)} case(s) exceeded {cap_desc} and are excluded from totals. Do not compare partial totals directly against a full baseline.",
+            ">",
+            f"> Timed out: {timed_out_names}",
+            "",
+        ]
+
     base_rows = [r for r in rows if r.has_base]
 
     # ── PR vs Base ────────────────────────────────────────────────────────────
@@ -333,19 +365,39 @@ def _summary_md(rows: list[ScriptResult], top: "int | None" = None) -> str:
                 f" | {r.base_avg_ms:.3f} | {r.rs_avg_ms:.3f}"
                 f" | {r.pr_change_pct:+.2f}% {_indicator(r.pr_change_pct)} |"
             )
+        for rel in timed_out_list:
+            lines.append(
+                f"| `{rel}` | {_timed_out_iters(rel, config)} | — | — | {timeout_cell} |"
+            )
         lines += ["", "</details>", "", "---", ""]
 
     # ── Speed: Python vs PyRust ───────────────────────────────────────────────
+    if not rows and timed_out_list:
+        lines += [
+            "### ⏱ Timed-out Cases",
+            "",
+            "| Script | iters | Status |",
+            "|---|---:|---:|",
+        ]
+        for rel in timed_out_list:
+            lines.append(f"| `{rel}` | {_timed_out_iters(rel, config)} | {timeout_cell} |")
+        return "\n".join(lines) + "\n"
+
     total_py = sum(r.py_avg_ms for r in rows)
     total_rs = sum(r.rs_avg_ms for r in rows)
     overall_ratio = total_rs / total_py if total_py > 0 else math.inf
     rows_shown = rows if top is None else rows[:top]
+    scripts_label = (
+        f"{len(rows)} completed ({len(timed_out_list)} timed out)"
+        if timed_out_list
+        else f"{len(rows)}"
+    )
     lines += [
         "### 🚀 Speed: Python vs PyRust",
         "",
         f"| | |",
         "|---|---|",
-        f"| Scripts       | {len(rows)} |",
+        f"| Scripts       | {scripts_label} |",
         f"| Python total  | {total_py:.1f} ms |",
         f"| PyRust total  | {total_rs:.1f} ms |",
         f"| Overall ratio | {overall_ratio:.3f}x |",
@@ -359,6 +411,10 @@ def _summary_md(rows: list[ScriptResult], top: "int | None" = None) -> str:
         lines.append(
             f"| `{r.rel}` | {r.cfg.iterations}"
             f" | {r.py_avg_ms:.3f} | {r.rs_avg_ms:.3f} | {r.ratio:.3f}x |"
+        )
+    for rel in timed_out_list:
+        lines.append(
+            f"| `{rel}` | {_timed_out_iters(rel, config)} | — | — | {timeout_cell} |"
         )
     lines += ["", "</details>"]
     return "\n".join(lines) + "\n"
@@ -438,10 +494,18 @@ def load_memory(memory_dir: str) -> "dict[str, dict] | None":
     return result or None
 
 
-def write_github_step_summary(rows: list[ScriptResult]) -> None:
+def write_github_step_summary(
+    rows: list[ScriptResult],
+    timed_out: "list[str] | tuple[str, ...] | None" = None,
+    timeout_s: int = 0,
+    config: "BenchConfig | None" = None,
+) -> None:
     dest = os.environ.get("GITHUB_STEP_SUMMARY")
     if dest:
-        Path(dest).write_text(_summary_md(rows), encoding="utf-8")
+        Path(dest).write_text(
+            _summary_md(rows, timed_out=timed_out, timeout_s=timeout_s, config=config),
+            encoding="utf-8",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +677,10 @@ def main() -> int:
     p.add_argument("--svg-out",              default="", metavar="PATH")
     p.add_argument("--markdown-out",         default="", metavar="PATH")
     p.add_argument("--json-out",             default="", metavar="PATH")
+    p.add_argument("--timed-out",            action="append", default=[], metavar="REL",
+                   help="relative path of a script that timed out (repeatable)")
+    p.add_argument("--timeout-s",            type=int, default=0, metavar="SECONDS",
+                   help="per-case wall-clock timeout in seconds")
     args = p.parse_args()
 
     config = load_config(Path(args.config), ScriptConfig(iterations=20, warmup=3, trim=10.0))
@@ -625,43 +693,51 @@ def main() -> int:
         print("error: --results-dir required", file=sys.stderr)
         return 2
 
+    timed_out = list(dict.fromkeys(args.timed_out))
     rows = load_results(Path(args.results_dir), config)
-    if not rows:
+    if not rows and not timed_out:
         print("error: no results found in results-dir", file=sys.stderr)
         return 2
 
     memory = load_memory(args.memory_dir)
 
-    print_summary(rows)
-    print_per_script(rows, args.top)
-    print_pr_vs_base(rows, args.top)
-    write_github_step_summary(rows)
+    if rows:
+        print_summary(rows)
+        print_per_script(rows, args.top)
+        print_pr_vs_base(rows, args.top)
+    write_github_step_summary(rows, timed_out=timed_out, timeout_s=args.timeout_s, config=config)
 
     if args.pr_comment_out:
-        Path(args.pr_comment_out).write_text(_summary_md(rows, top=args.top), encoding="utf-8")
+        Path(args.pr_comment_out).write_text(
+            _summary_md(rows, top=args.top, timed_out=timed_out, timeout_s=args.timeout_s, config=config),
+            encoding="utf-8",
+        )
     if args.pr_full_out:
-        Path(args.pr_full_out).write_text(_summary_md(rows), encoding="utf-8")
-    if args.memory_comment_out and memory:
+        Path(args.pr_full_out).write_text(
+            _summary_md(rows, timed_out=timed_out, timeout_s=args.timeout_s, config=config),
+            encoding="utf-8",
+        )
+    if rows and args.memory_comment_out and memory:
         Path(args.memory_comment_out).write_text(
             _memory_comment_md(rows, memory, top=args.top), encoding="utf-8"
         )
-    if args.memory_full_out and memory:
+    if rows and args.memory_full_out and memory:
         Path(args.memory_full_out).write_text(
             _memory_comment_md(rows, memory), encoding="utf-8"
         )
-    if args.benchmark_action_out:
+    if rows and args.benchmark_action_out:
         Path(args.benchmark_action_out).write_text(
             json.dumps(build_benchmark_action(rows), indent=2), encoding="utf-8"
         )
-    if args.markdown_out:
+    if rows and args.markdown_out:
         Path(args.markdown_out).write_text(
             build_markdown_snapshot(rows, args.top), encoding="utf-8"
         )
-    if args.svg_out:
+    if rows and args.svg_out:
         Path(args.svg_out).write_text(
             build_svg_snapshot(rows, args.top), encoding="utf-8"
         )
-    if args.json_out:
+    if rows and args.json_out:
         Path(args.json_out).write_text(
             json.dumps(build_json_snapshot(rows), indent=2), encoding="utf-8"
         )
