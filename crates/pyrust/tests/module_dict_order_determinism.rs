@@ -32,7 +32,7 @@ import math
 import os.path
 import collections.abc
 import __future__
-names = ["abc", "asyncio", "bisect", "builtins", "collections", "contextlib",
+names = ["abc", "asyncio", "base64", "binascii", "bisect", "builtins", "collections", "contextlib",
          "copy", "csv", "dataclasses", "decimal", "enum", "errno",
          "fractions", "functools", "heapq", "io", "itertools", "json", "math",
          "operator", "os", "pathlib", "pprint", "random", "re", "statistics",
