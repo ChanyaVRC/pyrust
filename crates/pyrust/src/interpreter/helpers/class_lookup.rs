@@ -117,7 +117,14 @@ pub(crate) fn lookup_class_attr_owner(
 /// inconsistent linearization at class-creation time — whereas this variant is
 /// only reached after a class already exists and so never needs to fail.
 pub(crate) fn c3_linearize_classes(class: &Rc<RefCell<PyClass>>) -> Vec<Rc<RefCell<PyClass>>> {
-    fn linearize(c: &Rc<RefCell<PyClass>>) -> Vec<Rc<RefCell<PyClass>>> {
+    fn linearize(
+        c: &Rc<RefCell<PyClass>>,
+        obj: &Rc<RefCell<PyClass>>,
+        obj_ptr: *const RefCell<PyClass>,
+    ) -> Vec<Rc<RefCell<PyClass>>> {
+        if Rc::as_ptr(c) == obj_ptr {
+            return vec![Rc::clone(obj)];
+        }
         let (base, extra_bases) = {
             let b = c.borrow();
             (b.base.clone(), b.extra_bases.clone())
@@ -128,9 +135,12 @@ pub(crate) fn c3_linearize_classes(class: &Rc<RefCell<PyClass>>) -> Vec<Rc<RefCe
         }
         all_bases.extend(extra_bases);
         if all_bases.is_empty() {
-            return vec![Rc::clone(c)];
+            return vec![Rc::clone(c), Rc::clone(obj)];
         }
-        let mut lists: Vec<Vec<Rc<RefCell<PyClass>>>> = all_bases.iter().map(linearize).collect();
+        let mut lists: Vec<Vec<Rc<RefCell<PyClass>>>> = all_bases
+            .iter()
+            .map(|b| linearize(b, obj, obj_ptr))
+            .collect();
         lists.push(all_bases);
 
         let mut result = vec![Rc::clone(c)];
@@ -139,11 +149,7 @@ pub(crate) fn c3_linearize_classes(class: &Rc<RefCell<PyClass>>) -> Vec<Rc<RefCe
             if lists.is_empty() {
                 break;
             }
-            // `object` is deferred so it never wins ahead of a non-object head;
-            // see the matching `class_mro_items` (env.rs) comment for why (#2611).
-            let obj_ptr = Rc::as_ptr(&object_class_singleton());
             let mut chosen: Option<Rc<RefCell<PyClass>>> = None;
-            let mut deferred_object: Option<Rc<RefCell<PyClass>>> = None;
             'outer: for list in &lists {
                 let head_ptr = Rc::as_ptr(&list[0]);
                 for other in &lists {
@@ -153,20 +159,13 @@ pub(crate) fn c3_linearize_classes(class: &Rc<RefCell<PyClass>>) -> Vec<Rc<RefCe
                         }
                     }
                 }
-                if head_ptr == obj_ptr {
-                    deferred_object = Some(Rc::clone(&list[0]));
-                    continue;
-                }
                 chosen = Some(Rc::clone(&list[0]));
                 break;
             }
-            // No consistent head: fall back to a deferred `object`, else to the
-            // first remaining head so the scan still terminates.  The latter
-            // cannot happen for a validly-created class (the MRO was checked at
-            // creation), but we never panic.
-            let chosen = chosen
-                .or(deferred_object)
-                .unwrap_or_else(|| Rc::clone(&lists[0][0]));
+            // No consistent head: fall back to the first remaining head so the
+            // scan still terminates.  This cannot happen for a validly-created
+            // class (the MRO was checked at creation), but we never panic.
+            let chosen = chosen.unwrap_or_else(|| Rc::clone(&lists[0][0]));
             let chosen_ptr = Rc::as_ptr(&chosen);
             result.push(chosen);
             for list in &mut lists {
@@ -178,11 +177,13 @@ pub(crate) fn c3_linearize_classes(class: &Rc<RefCell<PyClass>>) -> Vec<Rc<RefCe
         result
     }
 
-    let mut mro = linearize(class);
     let obj = object_class_singleton();
-    if !mro.iter().any(|c| Rc::ptr_eq(c, &obj)) {
-        mro.push(obj);
-    }
+    let obj_ptr = Rc::as_ptr(&obj);
+    let mro = linearize(class, &obj, obj_ptr);
+    debug_assert!(
+        mro.last().is_some_and(|c| Rc::as_ptr(c) == obj_ptr),
+        "C3 linearization must always place `object` last"
+    );
     mro
 }
 
