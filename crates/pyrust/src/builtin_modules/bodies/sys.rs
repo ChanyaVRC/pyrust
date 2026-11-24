@@ -44,7 +44,7 @@ pyrust_module! {
         // Placeholder replaced by `prepare_builtin_module` with the importing
         // Interpreter's authoritative registry before import-cache insertion.
         "modules"              => Value::dict(crate::value::PyDict::default()),
-        "executable"           => Value::string(""),
+        "executable"           => Value::string(platform_info::sys_executable()),
         "byteorder"            => Value::string(platform_info::sys_byteorder()),
         "prefix"               => Value::string(""),
         "exec_prefix"          => Value::string(""),
