@@ -48,6 +48,7 @@ fn non_value_responsibilities_are_not_folded_back_into_object_model() {
         "include!(\"arguments.rs\")",
         "include!(\"environment.rs\")",
         "include!(\"errors.rs\")",
+        "include!(\"numeric_ops.rs\")",
         "include!(\"traceback.rs\")",
         "include!(\"class_epoch.rs\")",
         "include!(\"object_identity.rs\")",

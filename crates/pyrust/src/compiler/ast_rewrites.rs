@@ -82,12 +82,11 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
 
 pub(crate) fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
     use BinaryOp::*;
-    // Int/int arithmetic, shifts, and bitwise route through the single
-    // canonical numeric implementation shared with `eval_binary` (issue
-    // #458): one definition of overflow promotion, CPython floored `//` /
-    // `%`, and shift/bitwise semantics.  A runtime error (e.g.
-    // ZeroDivisionError on `x / 0`) returns `None` so the BinOp stays in
-    // the bytecode and raises at runtime, never at compile time.
+    // Numeric arithmetic, shifts, bitwise, and comparisons route through the
+    // single canonical pyrust_core::numeric_ops protocol shared with
+    // `eval_binary` (issue #458).  A runtime error (e.g. ZeroDivisionError on
+    // `x / 0`) returns `None` so the BinOp stays in the bytecode and raises at
+    // runtime, never at compile time.
     if matches!((l.kind(), r.kind()), (ValueKind::Int(_), ValueKind::Int(_))) {
         match op {
             Add | Sub | Mul | Div | FloorDiv | Mod | BitAnd | BitOr | BitXor => {
@@ -114,28 +113,35 @@ pub(crate) fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
                 }
                 return None;
             }
+            Eq | Ne | Lt | Le | Gt | Ge => {
+                let cmp = crate::interpreter::binary_op_to_numeric_cmp(op)?;
+                return pyrust_core::dispatch_numeric_compare(cmp, l, r)?
+                    .ok()
+                    .map(Value::bool_);
+            }
             _ => {}
         }
     }
-    // Non-int-arithmetic folds the optimizer has always done: float
-    // arithmetic, string concatenation, and constant comparisons.  These
-    // are not numeric-slot arithmetic (comparisons) or involve non-int
-    // operands, so they stay as explicit arms.
+    if matches!(
+        (l.kind(), r.kind()),
+        (ValueKind::Float(_), ValueKind::Float(_))
+    ) && matches!(op, Add | Sub | Mul | Div)
+    {
+        return dispatch_numeric_binop(op, l, r)?.ok();
+    }
+    if matches!(
+        (l.kind(), r.kind()),
+        (ValueKind::Bool(_), ValueKind::Bool(_))
+    ) && op == Eq
+    {
+        return pyrust_core::dispatch_numeric_compare(pyrust_core::NumericCmpOp::Eq, l, r)?
+            .ok()
+            .map(Value::bool_);
+    }
     match (l.kind(), op, r.kind()) {
-        (ValueKind::Float(a), Add, ValueKind::Float(b)) => Some(Value::float(a + b)),
-        (ValueKind::Float(a), Sub, ValueKind::Float(b)) => Some(Value::float(a - b)),
-        (ValueKind::Float(a), Mul, ValueKind::Float(b)) => Some(Value::float(a * b)),
-        (ValueKind::Float(a), Div, ValueKind::Float(b)) if b != 0.0 => Some(Value::float(a / b)),
         (ValueKind::Str(a), Add, ValueKind::Str(b)) => Some(Value::string(a.to_string() + b)),
-        (ValueKind::Int(a), Eq, ValueKind::Int(b)) => Some(Value::bool_(a == b)),
-        (ValueKind::Int(a), Ne, ValueKind::Int(b)) => Some(Value::bool_(a != b)),
-        (ValueKind::Int(a), Lt, ValueKind::Int(b)) => Some(Value::bool_(a < b)),
-        (ValueKind::Int(a), Le, ValueKind::Int(b)) => Some(Value::bool_(a <= b)),
-        (ValueKind::Int(a), Gt, ValueKind::Int(b)) => Some(Value::bool_(a > b)),
-        (ValueKind::Int(a), Ge, ValueKind::Int(b)) => Some(Value::bool_(a >= b)),
         (ValueKind::Str(a), Eq, ValueKind::Str(b)) => Some(Value::bool_(a == b)),
         (ValueKind::Str(a), Ne, ValueKind::Str(b)) => Some(Value::bool_(a != b)),
-        (ValueKind::Bool(a), Eq, ValueKind::Bool(b)) => Some(Value::bool_(a == b)),
         _ => None,
     }
 }

@@ -15,42 +15,31 @@ pyrust_module! {
     /// METH_O wording `abs() takes exactly one argument (N given)`.
     #[arity_style(takes_exactly_one)]
     fn abs(#[positional_only] x: PyInt) -> Result<Value> {
-        // i64 fast path; fall back to BigInt for both genuine bignums
-        // *and* the `i64::MIN` boundary case — `i64::MIN.checked_abs()`
-        // returns `None` because `-i64::MIN` doesn't fit in i64 (one
-        // more positive value than negative in two's complement).
-        // CPython returns `9223372036854775808` for `abs(-i64::MIN)`;
-        // matching that requires the BigInt path even though `as_i64`
-        // succeeded.  We can't call `BigInt::abs` here without pulling
-        // `num_traits` in as a direct dep, so do the negate-if-negative
-        // dance manually.
-        if let Some(n) = x.as_i64()
-            && let Some(abs) = n.checked_abs()
-        {
-            return Ok(Value::int(abs));
+        use pyrust_core::{NumericOps, NumericSlot};
+        if let Some(n) = x.as_i64() {
+            return NumericSlot::Int(n).nb_absolute();
         }
         let big = x.to_bigint();
-        let zero: crate::value::PyBigInt = 0i64.into();
-        let abs = if big < zero { -big } else { big };
-        Ok(Value::bigint(abs))
+        NumericSlot::BigInt(&big).nb_absolute()
     }
 
     #[arity_style(takes_exactly_one)]
     fn abs(#[positional_only] x: PyFloat) -> Result<Value> {
-        Ok(Value::float(x.0.abs()))
+        use pyrust_core::{NumericOps, NumericSlot};
+        NumericSlot::Float(x.0).nb_absolute()
     }
 
     #[arity_style(takes_exactly_one)]
     fn abs(#[positional_only] x: PyBool) -> Result<Value> {
-        // CPython: abs(True) == 1, abs(False) == 0 — promoted to int.
-        Ok(Value::int(if x.0 { 1 } else { 0 }))
+        use pyrust_core::{NumericOps, NumericSlot};
+        NumericSlot::Bool(x.0).nb_absolute()
     }
 
     #[arity_style(takes_exactly_one)]
     fn abs(#[positional_only] x: PyValue) -> Result<Value> {
         // Catch-all: complex magnitude, user-defined `__abs__`, and the
-        // "not a number" error otherwise.  Reached when none of the
-        // typed overloads above matched the call's argument.
+        // "not a number" error otherwise.  All 5 numeric kinds route through
+        // `pyrust_core::dispatch_numeric_unary(NumericUnaryOp::Abs, ...)` (#458).
         let val = x.0;
         if let ValueKind::PyInstance(inst) = val.kind() {
             let inst_rc = Rc::clone(inst);
@@ -66,42 +55,21 @@ pyrust_module! {
             // Issue #1204/#2386: fall through to the validated backing value
             // for numeric subclasses (MyInt, MyFloat, MyComplex, …) that have
             // no user __abs__ defined.
-            if let Some(backing) = effective_builtin_receiver(&val, &[]) {
-                match backing.kind() {
-                    ValueKind::Int(v) => {
-                        // i64::MIN.checked_abs() returns None because
-                        // -i64::MIN overflows i64; promote to BigInt to
-                        // match CPython (mirrors the PyInt arm above).
-                        return Ok(match v.checked_abs() {
-                            Some(abs) => Value::int(abs),
-                            None => {
-                                let big: crate::value::PyBigInt = v.into();
-                                Value::bigint(-big)
-                            }
-                        });
-                    }
-                    ValueKind::BigInt(v) => {
-                        let zero: crate::value::PyBigInt = 0i64.into();
-                        let abs = if v < &zero { -v.clone() } else { v.clone() };
-                        return Ok(Value::bigint(abs));
-                    }
-                    ValueKind::Float(v) => return Ok(Value::float(v.abs())),
-                    ValueKind::Bool(b) => return Ok(Value::int(if b { 1 } else { 0 })),
-                    ValueKind::Complex(re, im) => return Ok(Value::float(re.hypot(im))),
-                    _ => {}
-                }
+            if let Some(backing) = effective_builtin_receiver(&val, &[])
+                && let Some(result) =
+                    pyrust_core::dispatch_numeric_unary(pyrust_core::NumericUnaryOp::Abs, &backing)
+            {
+                return result;
             }
             return Err(PyError::named(
                 "TypeError",
                 format!("bad operand type for abs(): '{}'", class.borrow().name),
             ));
         }
-        if let ValueKind::Complex(re, im) = val.kind() {
-            // Overflow/underflow-safe magnitude (CPython's `_Py_c_abs` uses
-            // `hypot`): `(re*re + im*im).sqrt()` spuriously yields inf/0.0 for
-            // huge/tiny components.  `f64::hypot` matches CPython byte-for-byte,
-            // including inf-beats-nan on infinite components.
-            return Ok(Value::float(re.hypot(im)));
+        if let Some(result) =
+            pyrust_core::dispatch_numeric_unary(pyrust_core::NumericUnaryOp::Abs, &val)
+        {
+            return result;
         }
         Err(PyError::named(
             "TypeError",

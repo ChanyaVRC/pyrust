@@ -1,45 +1,4 @@
-pub(crate) fn py_mod_i64(a: i64, b: i64) -> i64 {
-    // `i64::MIN % -1` overflows; the mathematical result is 0.
-    let mut remainder = a.wrapping_rem(b);
-    if (remainder > 0 && b < 0) || (remainder < 0 && b > 0) {
-        remainder += b;
-    }
-    remainder
-}
-
-/// Port of CPython's `float_divmod` (Objects/floatobject.c).
-///
-/// Returns `(floordiv, mod)` for non-zero divisor `b`, using `fmod` so that
-/// infinities and signed zeros propagate exactly as in CPython:
-///   - `divmod(inf, 1)` → `(nan, nan)` (the `(a - mod)/b` quotient is nan)
-///   - `divmod(5.0, inf)` → `(0.0, 5.0)`, `divmod(-5.0, inf)` → `(-1.0, inf)`
-///
-/// The remainder matches the `%` operator and the quotient matches `//`,
-/// keeping `divmod(a, b) == (a // b, a % b)` for floats.  The caller is
-/// responsible for raising `ZeroDivisionError` when `b == 0`.
-pub(crate) fn float_divmod(a: f64, b: f64) -> (f64, f64) {
-    let mut mod_ = a % b; // fmod(a, b)
-    let mut div = (a - mod_) / b;
-    if mod_ != 0.0 {
-        // Snap the remainder's sign to the divisor's, adjusting the quotient.
-        if (b < 0.0) != (mod_ < 0.0) {
-            mod_ += b;
-            div -= 1.0;
-        }
-    } else {
-        // The remainder is zero; ensure it has the sign of the divisor.
-        mod_ = 0.0_f64.copysign(b);
-    }
-    let floordiv = if div != 0.0 {
-        let fl = div.floor();
-        // Round-half-up on the quotient boundary, as CPython does.
-        if div - fl > 0.5 { fl + 1.0 } else { fl }
-    } else {
-        // div is zero; ensure it has the sign of a/b.
-        0.0_f64.copysign(a / b)
-    };
-    (floordiv, mod_)
-}
+pub(crate) use pyrust_core::{float_divmod, py_mod_i64};
 
 /// CPython's Py_HASH_MODULUS = 2^61 - 1 (Mersenne prime).
 ///

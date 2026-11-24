@@ -17,9 +17,6 @@ impl Interpreter {
     }
 
     pub(super) fn add(&self, left: Value, right: Value) -> Result<Value> {
-        if let Some((a, b)) = both_as_complex(&left, &right)? {
-            return Ok(Value::complex(a.0 + b.0, a.1 + b.1));
-        }
         // collections.deque concatenation (`sq_concat`): reached after
         // `try_dunder_binary` has already given any user `__add__`/`__radd__`
         // priority (issue #2989).
@@ -145,11 +142,11 @@ impl Interpreter {
     }
 
     fn sub(&self, left: Value, right: Value) -> Result<Value> {
-        if let Some((a, b)) = both_as_complex(&left, &right)? {
-            return Ok(Value::complex(a.0 - b.0, a.1 - b.1));
-        }
-        let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
-        // Canonical numeric arithmetic via the NumericOps slot table (#458).
+        let (l, r) = (
+            unwrap_numeric_subclass(&left),
+            unwrap_numeric_subclass(&right),
+        );
+        // Canonical 5-type numeric arithmetic via pyrust_core::NumericOps (#458).
         if let Some(result) = dispatch_numeric_binop(BinaryOp::Sub, &l, &r) {
             return result;
         }
@@ -182,10 +179,6 @@ impl Interpreter {
     }
 
     pub(super) fn mul(&self, left: Value, right: Value) -> Result<Value> {
-        if let Some((a, b)) = both_as_complex(&left, &right)? {
-            // (ar+ai*j) * (br+bi*j) = (ar*br - ai*bi) + (ar*bi + ai*br)j
-            return Ok(Value::complex(a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0));
-        }
         // collections.deque repetition (`sq_repeat`): reached after
         // `try_dunder_binary` and `try_index_for_seq_repeat` (issue #2989).
         if crate::interpreter::is_deque_value(&left) {
