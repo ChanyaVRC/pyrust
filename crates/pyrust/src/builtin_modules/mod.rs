@@ -190,6 +190,50 @@ macro_rules! pyrust_builtin_modules_internal {
             None
         }
 
+        /// Return `true` when `name` is a built-in module declared in
+        /// `pyrust_builtin_modules!` without allocating a module object.
+        pub fn is_builtin_module(name: &str) -> bool {
+            $(
+                if name == $py_name {
+                    return true;
+                }
+            )*
+            false
+        }
+
+        /// Return `true` when `name` is a built-in package (matches CPython
+        /// 3.12 stdlib packages shipped as built-in modules in PyRust, plus
+        /// any parent of a dotted built-in module except `os`).
+        pub fn is_builtin_package(name: &str) -> bool {
+            if name == "os" {
+                return false;
+            }
+            if matches!(
+                name,
+                "asyncio"
+                    | "collections"
+                    | "html"
+                    | "importlib"
+                    | "json"
+                    | "logging"
+                    | "re"
+                    | "tomllib"
+                    | "unittest"
+                    | "urllib"
+                    | "zipfile"
+            ) {
+                return true;
+            }
+            $(
+                if let Some(rest) = $py_name.strip_prefix(name)
+                    && rest.starts_with('.')
+                {
+                    return true;
+                }
+            )*
+            false
+        }
+
         /// Post-import hook for Python-source modules.  For every `@inject`
         /// entry this dispatches to that module's `inject_python_members`,
         /// which exec's its `*_py.py` source onto the freshly imported
@@ -483,6 +527,14 @@ pyrust_builtin_modules! {
     // (`Pickler`, `Unpickler`, `dump`/`dumps`, `load`/`loads`, `PickleBuffer`,
     // protocols 0-5) injected from `pickle_py.py`.
     pickle @inject,
+    // `importlib`, `importlib.machinery`, and `importlib.util` (issue #3189):
+    // Python 3.12 import machinery (`import_module`, `reload`,
+    // `invalidate_caches`, `ModuleSpec`, `SourceFileLoader`, `resolve_name`,
+    // `find_spec`, `spec_from_file_location`, `spec_from_loader`,
+    // `module_from_spec`, `MAGIC_NUMBER`, `cache_from_source`).
+    "importlib.machinery" as importlib_machinery @inject,
+    "importlib.util" as importlib_util @inject,
+    importlib @inject,
 }
 
 include!("finalization.rs");
