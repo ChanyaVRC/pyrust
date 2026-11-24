@@ -460,6 +460,12 @@ pyrust_builtin_modules! {
     // `RawConfigParser`, interpolations, `SectionProxy`, `ConverterMapping`)
     // injected from `configparser_py.py`.
     configparser @inject,
+    // `contextvars` (issue #3184, PEP 567): context variables (`ContextVar`,
+    // `Token`, `Context`, `copy_context`) injected from `contextvars_py.py`.
+    contextvars @inject,
+    // `tomllib` (issue #3184, PEP 680): pure-Python TOML 1.0.0 parser
+    // (`loads`, `load`, `TOMLDecodeError`) injected from `tomllib_py.py`.
+    tomllib @inject,
 }
 
 include!("finalization.rs");

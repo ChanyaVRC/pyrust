@@ -45,6 +45,14 @@ pub(crate) fn register_virtual_mutable_sequence(class: &Rc<RefCell<PyClass>>) {
     register_virtual_subclass(&mut_seq, class);
 }
 
+/// Register a class (e.g. `contextvars.Context`) as a virtual subclass of
+/// `collections.abc.Mapping`.
+pub(crate) fn register_virtual_mapping(class: &Rc<RefCell<PyClass>>) {
+    ensure_abc_initialized();
+    let mapping = Abc::Mapping.class();
+    register_virtual_subclass(&mapping, class);
+}
+
 fn set_bases(sub: &Rc<RefCell<PyClass>>, bases: &[&Rc<RefCell<PyClass>>]) {
     let Some((first, rest)) = bases.split_first() else {
         return;

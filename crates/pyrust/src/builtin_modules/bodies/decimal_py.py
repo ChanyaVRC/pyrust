@@ -406,27 +406,9 @@ _rounding_modes = (ROUND_DOWN, ROUND_HALF_UP, ROUND_HALF_EVEN, ROUND_CEILING,
 # The getcontext() and setcontext() function manage access to a thread-local
 # current context.
 
-# pyrust note: the stdlib ``contextvars`` module is not available.  pyrust runs
-# the interpreter single-threaded, so a plain module-level holder reproduces the
-# observable behaviour of the per-thread context (the C/CPython implementation
-# uses a coroutine-local ``ContextVar``).
-class _ContextVarShim:
-    _UNSET = object()
+import contextvars
 
-    def __init__(self, name):
-        self._name = name
-        self._value = _ContextVarShim._UNSET
-
-    def get(self):
-        if self._value is _ContextVarShim._UNSET:
-            raise LookupError(self._name)
-        return self._value
-
-    def set(self, value):
-        self._value = value
-
-
-_current_context_var = _ContextVarShim('decimal_context')
+_current_context_var = contextvars.ContextVar('decimal_context')
 
 _context_attributes = frozenset(
     ['prec', 'Emin', 'Emax', 'capitals', 'clamp', 'rounding', 'flags', 'traps']
@@ -453,7 +435,7 @@ def setcontext(context):
         context.clear_flags()
     _current_context_var.set(context)
 
-# pyrust note: ``del contextvars`` removed -- the shim above replaces the import.
+del contextvars
 
 def localcontext(ctx=None, **kwargs):
     """Return a context manager for a copy of the supplied context
