@@ -21,6 +21,17 @@ pub(crate) fn check_exactly_one_argument(fn_name: &str, positional_len: usize) -
     Ok(())
 }
 
+/// `takes no arguments (N given)` — the METH_NOARGS C-builtin wording
+/// (`globals`, `locals`).
+pub(crate) fn check_no_arguments(fn_name: &str, positional_len: usize) -> Result<()> {
+    if positional_len != 0 {
+        return Err(type_error(format!(
+            "{fn_name}() takes no arguments ({positional_len} given)"
+        )));
+    }
+    Ok(())
+}
+
 /// `NAME expected N arguments, got M` (and the `at least` / `at most`
 /// variants) — the METH_VARARGS C-builtin wording used by `isinstance`,
 /// `issubclass`, `divmod`, `hasattr`, … .  Note CPython prints the bare
@@ -30,6 +41,27 @@ pub(crate) fn check_exactly_one_argument(fn_name: &str, positional_len: usize) -
 /// is unreachable when this guard is used.
 pub(crate) fn check_arity_expected_got(
     fn_name: &str,
+    positional_len: usize,
+    min: usize,
+    max: usize,
+) -> Result<()> {
+    check_arity_expected_got_inner(fn_name, "", positional_len, min, max)
+}
+
+/// `NAME() expected N arguments, got M` — same as [`check_arity_expected_got`]
+/// with trailing `()` (used by `super`).
+pub(crate) fn check_arity_expected_got_parens(
+    fn_name: &str,
+    positional_len: usize,
+    min: usize,
+    max: usize,
+) -> Result<()> {
+    check_arity_expected_got_inner(fn_name, "()", positional_len, min, max)
+}
+
+fn check_arity_expected_got_inner(
+    fn_name: &str,
+    suffix: &str,
     positional_len: usize,
     min: usize,
     max: usize,
@@ -46,7 +78,7 @@ pub(crate) fn check_arity_expected_got(
             format!("expected at most {max} {plural}")
         };
         return Err(type_error(format!(
-            "{fn_name} {bound}, got {positional_len}"
+            "{fn_name}{suffix} {bound}, got {positional_len}"
         )));
     }
     Ok(())

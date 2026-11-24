@@ -19,6 +19,39 @@ pub(super) fn i64_range_contains(start: i64, stop: i64, step: i64, x: i64) -> bo
 }
 
 impl Interpreter {
+    pub(crate) fn call_range_values(
+        &mut self,
+        a: &Value,
+        b: Option<&Value>,
+        c: Option<&Value>,
+    ) -> Result<Value> {
+        let (start, stop, step) = match (b, c) {
+            (None, None) => (
+                PyBigInt::from(0),
+                self.coerce_range_arg_big(a.clone())?,
+                PyBigInt::from(1),
+            ),
+            (Some(stop_v), None) => (
+                self.coerce_range_arg_big(a.clone())?,
+                self.coerce_range_arg_big(stop_v.clone())?,
+                PyBigInt::from(1),
+            ),
+            (Some(stop_v), Some(step_v)) => (
+                self.coerce_range_arg_big(a.clone())?,
+                self.coerce_range_arg_big(stop_v.clone())?,
+                self.coerce_range_arg_big(step_v.clone())?,
+            ),
+            (None, Some(_)) => unreachable!("positional-only range args cannot have a gap"),
+        };
+
+        if step == PyBigInt::from(0) {
+            return Err(pyrust_core::value_err!("range() arg 3 must not be zero"));
+        }
+
+        Ok(Value::range_big(start, stop, step))
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn call_range_expanded(&mut self, args: &[ExpandedCallArg]) -> Result<Value> {
         reject_keyword_args_expanded("range", args)?;
         if args.is_empty() {
@@ -33,28 +66,11 @@ impl Interpreter {
                 args.len()
             ));
         }
-
-        // Resolve each argument to an arbitrary-precision int through the
-        // `__index__` protocol (#2118).  Bounds beyond i64 are kept as BigInt;
-        // `Value::range_big` collapses the all-i64 case back to the cheap
-        // i64-backed range so the common path is unchanged.
-        let mut ints: Vec<PyBigInt> = Vec::with_capacity(args.len());
-        for arg in args {
-            ints.push(self.coerce_range_arg_big(arg.value.clone())?);
-        }
-
-        let (start, stop, step) = match ints.as_slice() {
-            [stop] => (PyBigInt::from(0), stop.clone(), PyBigInt::from(1)),
-            [start, stop] => (start.clone(), stop.clone(), PyBigInt::from(1)),
-            [start, stop, step] => (start.clone(), stop.clone(), step.clone()),
-            _ => unreachable!("validated by length"),
-        };
-
-        if step == PyBigInt::from(0) {
-            return Err(pyrust_core::value_err!("range() arg 3 must not be zero"));
-        }
-
-        Ok(Value::range_big(start, stop, step))
+        self.call_range_values(
+            &args[0].value,
+            args.get(1).map(|a| &a.value),
+            args.get(2).map(|a| &a.value),
+        )
     }
     /// Resolve a single `range()` argument to an arbitrary-precision `BigInt`
     /// through the `__index__` protocol (#2118).  Unlike [`Self::coerce_range_arg`]

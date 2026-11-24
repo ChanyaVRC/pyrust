@@ -1,37 +1,29 @@
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
-    /// CPython: int(x=0, base=10) — integer constructor.
+    /// CPython: int(x=0, /, base=10) — integer constructor.
     /// <https://docs.python.org/3/library/functions.html#int>
+    ///
+    /// Migrated to the typed-signature dialect (#400): `#[arity_style(clinic)]`
+    /// makes `x` positional-only and `base` keyword-or-positional with CPython
+    /// 3.12's exact error wording, while granting positional `int(x)` the
+    /// vectorcall fast entry.
     /// This can run user code by dispatching `__int__`, `__index__`,
     /// and `__trunc__` on user-defined objects.
-    fn int(args) -> Result<Value> {
-        // CPython 3.12: int(x, /, base=10) — `x` positional-only, `base`
-        // keyword-or-positional.  `int(x='5')` → invalid-keyword error;
-        // `int('10', base=2)` is accepted.
-        let bound = bind_constructor_kwargs(FN_NAME, args, &["x", "base"], &[false, true], 2)?;
-        // `int(base=2)` (base supplied, value omitted): CPython raises
-        // `int() missing string argument`, not the default-0 path.
-        if bound[0].is_none() && bound[1].is_some() {
-            return Err(PyError::named(
+    #[arity_style(clinic)]
+    fn int(
+        #[positional_only] #[default(OptionalArg::Omitted)] x: OptValueRef,
+        #[default(OptionalArg::Omitted)] base: OptValueRef,
+    ) -> Result<Value> {
+        match (x.as_value(), base.as_value()) {
+            // `int(base=2)` (base supplied, value omitted): CPython raises
+            // `int() missing string argument`, not the default-0 path.
+            (None, Some(_)) => Err(PyError::named(
                 "TypeError",
                 "int() missing string argument".to_string(),
-            ));
-        }
-        // Flatten to positional args (stop at the first unfilled slot — `int`
-        // has no interior optional gaps once the missing-value case above is
-        // handled).
-        let mut bound_pos: Vec<ExpandedCallArg> = Vec::with_capacity(2);
-        for slot in bound.into_iter() {
-            match slot {
-                Some(v) => bound_pos.push(ExpandedCallArg { name: None, value: v }),
-                None => break,
-            }
-        }
-        let args = &bound_pos[..];
-        match args.len() {
-            0 => Ok(Value::int(0)),
-            1 => match args[0].value.kind() {
+            )),
+            (None, None) => Ok(Value::int(0)),
+            (Some(val), None) => match val.kind() {
                 ValueKind::Int(v) => Ok(Value::int(v)),
                 ValueKind::BigInt(b) => Ok(Value::bigint((*b).clone())),
                 ValueKind::Float(v) => {
@@ -79,10 +71,10 @@ pyrust_module! {
                     }
                 }
                 ValueKind::Bytes(rc) => {
-                    int_parse_bytes_like(rc.as_slice(), &args[0].value.repr_raw(), 10)
+                    int_parse_bytes_like(rc.as_slice(), &val.repr_raw(), 10)
                 }
                 ValueKind::PyInstance(_) | ValueKind::PyClass(_) => {
-                    let self_val = args[0].value.clone();
+                    let self_val = val.clone();
                     // Issue #1204: if the instance is a scalar-primitive subclass
                     // (MyInt, MyFloat, …) extract the backing value first.
                     // `int(MyInt(42))` must return 42, not raise TypeError.
@@ -174,9 +166,9 @@ pyrust_module! {
                 // base-10 ASCII, same as the `bytes` arm above (#2077).  Note
                 // CPython's `int()` error uses the *bytes* repr (`b'…'`) even
                 // for a bytearray operand, so render from the byte data.
-                _ if pyrust_builtins::bytearray::as_bytearray_snapshot(&args[0].value).is_some() => {
+                _ if pyrust_builtins::bytearray::as_bytearray_snapshot(val).is_some() => {
                     let data =
-                        pyrust_builtins::bytearray::as_bytearray_snapshot(&args[0].value).unwrap();
+                        pyrust_builtins::bytearray::as_bytearray_snapshot(val).unwrap();
                     let repr = Value::bytes(data.clone()).repr_raw();
                     int_parse_bytes_like(&data, &repr, 10)
                 }
@@ -184,12 +176,12 @@ pyrust_module! {
                     "TypeError",
                     format!(
                         "int() argument must be a string, a bytes-like object or a real number, not '{}'",
-                        crate::interpreter::error_type_name_str(&args[0].value),
+                        crate::interpreter::error_type_name_str(val),
                     ),
                 )),
             },
-            2 => {
-                let resolved_base = _interp.value_to_index(&args[1].value, |value| {
+            (Some(val), Some(base_val)) => {
+                let resolved_base = _interp.value_to_index(base_val, |value| {
                     PyError::named(
                         "TypeError",
                         format!(
@@ -215,7 +207,7 @@ pyrust_module! {
                         "int() base must be >= 2 and <= 36, or 0",
                     ));
                 }
-                match args[0].value.kind() {
+                match val.kind() {
                     ValueKind::Str(s) => {
                         let trimmed = s.trim();
                         if base_arg == 0 {
@@ -264,18 +256,15 @@ pyrust_module! {
                         }
                     }
                     ValueKind::Bytes(rc) => {
-                        int_parse_bytes_like(rc.as_slice(), &args[0].value.repr_raw(), base_arg)
+                        int_parse_bytes_like(rc.as_slice(), &val.repr_raw(), base_arg)
                     }
                     // bytearray with explicit base — bytes-like, parse as ASCII
                     // (#2077).  As above, CPython's `int()` error uses the
                     // bytes repr for a bytearray operand.
-                    _ if pyrust_builtins::bytearray::as_bytearray_snapshot(&args[0].value)
+                    _ if pyrust_builtins::bytearray::as_bytearray_snapshot(val)
                         .is_some() =>
                     {
-                        let data = pyrust_builtins::bytearray::as_bytearray_snapshot(
-                            &args[0].value,
-                        )
-                        .unwrap();
+                        let data = pyrust_builtins::bytearray::as_bytearray_snapshot(val).unwrap();
                         let repr = Value::bytes(data.clone()).repr_raw();
                         int_parse_bytes_like(&data, &repr, base_arg)
                     }
@@ -285,10 +274,6 @@ pyrust_module! {
                     )),
                 }
             }
-            _ => Err(PyError::named(
-                "TypeError",
-                format!("int() takes at most 2 arguments ({} given)", args.len()),
-            )),
         }
     }
 

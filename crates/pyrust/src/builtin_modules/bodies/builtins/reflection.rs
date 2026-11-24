@@ -3,14 +3,11 @@ use pyrust_derive::pyrust_module;
 pyrust_module! {
     /// CPython: issubclass(cls, classinfo) — true if `cls` is a subclass.
     /// <https://docs.python.org/3/library/functions.html#issubclass>
-    fn issubclass(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
-            ));
-        }
+    #[arity_style(expected_got)]
+    fn issubclass(
+        #[positional_only] cls: PyValueRef,
+        #[positional_only] classinfo: PyValueRef,
+    ) -> Result<Value> {
         // The `arg 1 must be a class` validation lives inside
         // `issubclass_check`, *after* the `__subclasscheck__` hook is
         // resolved on `type(classinfo)`: CPython only rejects a non-class
@@ -18,34 +15,28 @@ pyrust_module! {
         // lazily per tuple/union leaf), so `issubclass(5, M())` where
         // `type(M())` defines the hook must return the hook's result rather
         // than raising.  See issue #2525.
-        let result = issubclass_check(FN_NAME, &args[0].value, &args[1].value, _interp)?;
+        let result = issubclass_check(FN_NAME, cls.0, classinfo.0, _interp)?;
         Ok(Value::bool_(result))
     }
 
     /// CPython: delattr(obj, name) — delete an attribute.
     /// <https://docs.python.org/3/library/functions.html#delattr>
     ///
-    /// Kept in the `(args)` dialect (#2350): a non-`str` name must raise
-    /// CPython's `attribute name must be string, not '<type>'` (no
-    /// function prefix, names the offending type, accepts `str`
-    /// subclasses) — a `PyStr` typed binding instead emits the generic
-    /// `delattr() argument 'name' must be str, not int` and rejects str
-    /// subclasses.  The shared `attr_name_arg` validator matches
-    /// `getattr`/`hasattr`/`setattr` byte-for-byte.
-    fn delattr(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
-            ));
-        }
-        let name = attr_name_arg(&args[1].value)?;
+    /// Migrated to the typed-signature dialect (#400): `PyValueRef` +
+    /// `attr_name_arg` preserves CPython's `attribute name must be string,
+    /// not '<type>'` wording and `str` subclass acceptance while gaining the
+    /// vectorcall fast entry.
+    #[arity_style(expected_got)]
+    fn delattr(
+        #[positional_only] object: PyValueRef,
+        #[positional_only] name: PyValueRef,
+    ) -> Result<Value> {
+        let name = attr_name_arg(name.0)?;
         // Delegate to the canonical delete_attr path so that every value
         // kind (BuiltinFunction, UserFunction, BoundMethod, PyClass, …)
         // raises the correct error type and message instead of the old
         // catch-all "delattr() object has no writable attributes".
-        _interp.delete_attr(args[0].value.clone(), &name)?;
+        _interp.delete_attr(object.0.clone(), &name)?;
         Ok(Value::none())
     }
 
@@ -215,21 +206,16 @@ pyrust_module! {
     /// CPython: hasattr(obj, name) — true if `getattr(obj, name)` would succeed.
     /// <https://docs.python.org/3/library/functions.html#hasattr>
     ///
-    /// Kept in the `(args)` dialect (#400/#2331): hasattr is a warm path,
-    /// and migrating to a typed `expected_got` signature regressed a tight
-    /// `hasattr(o, 'x')` hit/miss loop ~6–8% (the per-arg `PyValue` binding
-    /// clone) for zero wording benefit — its arity/kwarg messages already
-    /// match CPython.  Bench captured in the #400 batch-1 PR.
-    fn hasattr(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
-            ));
-        }
-        let name = attr_name_arg(&args[1].value)?;
-        let result = match _interp.get_attr(&args[0].value, &name) {
+    /// Migrated to the typed-signature dialect (#400): `PyValueRef` borrows
+    /// arguments with zero cloning (avoiding the `PyValue` clone overhead) and
+    /// enables the vectorcall fast entry.
+    #[arity_style(expected_got)]
+    fn hasattr(
+        #[positional_only] object: PyValueRef,
+        #[positional_only] name: PyValueRef,
+    ) -> Result<Value> {
+        let name = attr_name_arg(name.0)?;
+        let result = match _interp.get_attr(object.0, &name) {
             Ok(_) => true,
             Err(ref e) if e.class_name_is("AttributeError") => false,
             Err(e) => return Err(e),
@@ -240,34 +226,23 @@ pyrust_module! {
     /// CPython: getattr(obj, name[, default]) — attribute access by name.
     /// <https://docs.python.org/3/library/functions.html#getattr>
     ///
-    /// Must stay in the `(args)` dialect (#400/#2331): `getattr(o, n, None)`
-    /// must return Python `None` as the default rather than re-raising the
-    /// `AttributeError`, but an `Option<PyValue>` + `#[default(None)]`
-    /// trailing param collapses an explicit `None` default and an absent
-    /// default into the same Rust `None`, breaking the `default=None` case
-    /// (the exact blocker documented on `fn next`).  Its arity/kwarg
-    /// wording already matches CPython, so there is no wording gain from a
-    /// typed migration either.
-    fn getattr(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() < 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected at least 2 arguments, got {}", args.len()),
-            ));
-        }
-        if args.len() > 3 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected at most 3 arguments, got {}", args.len()),
-            ));
-        }
-        let name = attr_name_arg(&args[1].value)?;
-        match _interp.get_attr(&args[0].value, &name) {
+    /// Migrated to the typed-signature dialect (#400): `PyValueRef` +
+    /// `OptValueRef` avoid cloning on hit, keep explicit `getattr(o, n, None)`
+    /// distinct from omitted `getattr(o, n)`, and enable the vectorcall fast
+    /// entry.
+    #[arity_style(expected_got)]
+    fn getattr(
+        #[positional_only] object: PyValueRef,
+        #[positional_only] name: PyValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] default: OptValueRef,
+    ) -> Result<Value> {
+        let name = attr_name_arg(name.0)?;
+        match _interp.get_attr(object.0, &name) {
             Ok(v) => Ok(v),
-            Err(ref e) if e.class_name_is("AttributeError") && args.len() == 3 => {
-                Ok(args[2].value.clone())
-            }
+            Err(ref e) if e.class_name_is("AttributeError") => match default.as_value() {
+                Some(fallback) => Ok(fallback.clone()),
+                None => Err(e.clone()),
+            },
             Err(e) => Err(e),
         }
     }
@@ -275,38 +250,29 @@ pyrust_module! {
     /// CPython: setattr(obj, name, value) — attribute assignment by name.
     /// <https://docs.python.org/3/library/functions.html#setattr>
     ///
-    /// Kept in the `(args)` dialect (#2350): a non-`str` name must raise
-    /// CPython's `attribute name must be string, not '<type>'` (no
-    /// function prefix, names the offending type, accepts `str`
-    /// subclasses) — a `PyStr` typed binding instead emits the generic
-    /// `setattr() argument 'name' must be str, not int` and rejects str
-    /// subclasses.  The shared `attr_name_arg` validator matches
-    /// `getattr`/`hasattr`/`delattr` byte-for-byte.
-    fn setattr(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 3 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected 3 arguments, got {}", args.len()),
-            ));
-        }
-        let name = attr_name_arg(&args[1].value)?;
-        _interp.assign_attr(args[0].value.clone(), &name, args[2].value.clone())?;
+    /// Migrated to the typed-signature dialect (#400): `PyValueRef` +
+    /// `attr_name_arg` preserves CPython's `attribute name must be string,
+    /// not '<type>'` wording and `str` subclass acceptance while gaining the
+    /// vectorcall fast entry.
+    #[arity_style(expected_got)]
+    fn setattr(
+        #[positional_only] object: PyValueRef,
+        #[positional_only] name: PyValueRef,
+        #[positional_only] value: PyValueRef,
+    ) -> Result<Value> {
+        let name = attr_name_arg(name.0)?;
+        _interp.assign_attr(object.0.clone(), &name, value.0.clone())?;
         Ok(Value::none())
     }
 
     /// CPython: vars([object]) — live `__dict__` where one exists, or current
     /// env if no argument.
     /// <https://docs.python.org/3/library/functions.html#vars>
-    fn vars(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() > 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes at most 1 argument"),
-            ));
-        }
-        if args.is_empty() {
+    #[arity_style(expected_got)]
+    fn vars(
+        #[positional_only] #[default(OptionalArg::Omitted)] object: OptValueRef,
+    ) -> Result<Value> {
+        let Some(target) = object.as_value() else {
             // vars() with no args == locals(). Module frames return their live
             // globals, class frames their persistent live namespace, and only
             // function frames return a snapshot.
@@ -320,8 +286,8 @@ pyrust_module! {
                 return Ok(_interp.active_locals_dict());
             }
             return Ok(current_locals_value(_interp));
-        }
-        match args[0].value.kind() {
+        };
+        match target.kind() {
             ValueKind::PyInstance(instance) => {
                 // Issue #2076: a `__slots__` instance with no `__dict__` has no
                 // mapping, so `vars()` raises TypeError (CPython parity).
@@ -348,7 +314,7 @@ pyrust_module! {
                 // module namespace — including the `__name__` / `__doc__` /
                 // `__package__` / `__loader__` / `__spec__` slots CPython
                 // exposes, which this arm previously dropped (issue #2918).
-                _interp.get_attr(&args[0].value, "__dict__")
+                _interp.get_attr(target, "__dict__")
             }
             ValueKind::PyClass(class) => {
                 Ok(pyrust_builtins::mapping_proxy::mapping_proxy(Rc::clone(class)))
@@ -367,14 +333,8 @@ pyrust_module! {
     /// On the first call, syncs current module env values into the dict and
     /// disables that root's opcode caches so arbitrary alias mutations remain
     /// observable. `globals() is globals()` is always `True` (same Rc).
-    fn globals(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if !args.is_empty() {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes no arguments ({} given)", args.len()),
-            ));
-        }
+    #[arity_style(takes_no_args)]
+    fn globals() -> Result<Value> {
         sync_module_env_to_globals_dict(_interp);
         Ok(_interp.active_globals_dict())
     }
@@ -388,14 +348,8 @@ pyrust_module! {
     /// Inside a function it returns a snapshot — CPython also snapshots and its
     /// docs warn that mutations to the returned dict aren't guaranteed to
     /// propagate.
-    fn locals(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if !args.is_empty() {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes no arguments ({} given)", args.len()),
-            ));
-        }
+    #[arity_style(takes_no_args)]
+    fn locals() -> Result<Value> {
         // At module scope (the innermost frame is the Script frame, or there are
         // no function frames), return the persistent root namespace provider —
         // the same object as globals() for a normal module.
@@ -419,9 +373,21 @@ pyrust_module! {
     /// frame's globals and locals namespaces.
     /// When an explicit `globals` dict is supplied the code runs in that
     /// namespace.  Returns `None`.
-    fn exec(args) -> Result<Value> {
-        let (source_val, mut globals_opt, mut locals_opt) =
-            parse_exec_eval_args(FN_NAME, args)?;
+    #[arity_style(clinic)]
+    fn exec(
+        #[positional_only] source: PyValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] globals: OptValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] locals: OptValueRef,
+    ) -> Result<Value> {
+        let source_val = source.0;
+        let mut globals_opt = globals
+            .as_value()
+            .filter(|v| !matches!(v.kind(), ValueKind::None))
+            .cloned();
+        let mut locals_opt = locals
+            .as_value()
+            .filter(|v| !matches!(v.kind(), ValueKind::None))
+            .cloned();
         if globals_opt.is_none()
             && _interp
                 .vm_frame_views
@@ -440,7 +406,7 @@ pyrust_module! {
             inject_builtins_into_globals(g);
         }
         // Code object path (from compile()).
-        if let Some(result) = crate::interpreter::with_code_state(&source_val, |cs| {
+        if let Some(result) = crate::interpreter::with_code_state(source_val, |cs| {
             use crate::interpreter::CodeMode;
             match cs.mode {
                 CodeMode::Exec => {
@@ -471,7 +437,7 @@ pyrust_module! {
                 "TypeError",
                 format!(
                     "{FN_NAME}() arg 1 must be a string or code object, not '{}'",
-                    value_type_name_str(&source_val),
+                    value_type_name_str(source_val),
                 ),
             )
         })?;
@@ -482,15 +448,28 @@ pyrust_module! {
     /// CPython: eval(expression[, globals[, locals]]) — evaluate a Python
     /// expression string and return its value.
     /// <https://docs.python.org/3/library/functions.html#eval>
-    fn eval(args) -> Result<Value> {
-        let (source_val, globals_opt, locals_opt) = parse_exec_eval_args(FN_NAME, args)?;
+    #[arity_style(expected_got)]
+    fn eval(
+        #[positional_only] source: PyValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] globals: OptValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] locals: OptValueRef,
+    ) -> Result<Value> {
+        let source_val = source.0;
+        let globals_opt = globals
+            .as_value()
+            .filter(|v| !matches!(v.kind(), ValueKind::None))
+            .cloned();
+        let locals_opt = locals
+            .as_value()
+            .filter(|v| !matches!(v.kind(), ValueKind::None))
+            .cloned();
         // Inject `__builtins__` into a caller-supplied globals dict, matching
         // CPython's PyEval_EvalCode behaviour.
         if let Some(g) = &globals_opt {
             inject_builtins_into_globals(g);
         }
         // Code object path (from compile()).
-        if let Some(result) = crate::interpreter::with_code_state(&source_val, |cs| {
+        if let Some(result) = crate::interpreter::with_code_state(source_val, |cs| {
             _interp.run_eval_code_dispatch(
                 Rc::clone(&cs.code),
                 Rc::clone(&cs.local_index),
@@ -506,38 +485,31 @@ pyrust_module! {
                 "TypeError",
                 format!(
                     "{FN_NAME}() arg 1 must be a string or code object, not '{}'",
-                    value_type_name_str(&source_val),
+                    value_type_name_str(source_val),
                 ),
             )
         })?;
         _interp.eval_source(source, globals_opt, locals_opt)
     }
 
-    /// CPython: compile(source, filename, mode, ...) — compile source to a code
-    /// object.
+    /// CPython: compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1) —
+    /// compile source to a code object.
     /// <https://docs.python.org/3/library/functions.html#compile>
     ///
     /// pyrust stores the compiled `FnCode` wrapped in a `Value`; the returned
     /// value can be passed to `exec()` or `eval()`.  Only the `"exec"` and
     /// `"eval"` modes are supported; `"single"` raises `NotImplementedError`.
-    fn compile(args) -> Result<Value> {
-        // Reject keyword arguments — CPython accepts them but we keep it simple.
-        if args.iter().any(|a| a.name.is_some()) {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() does not accept keyword arguments"),
-            ));
-        }
-        if args.len() < 3 {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "{FN_NAME}() requires at least 3 arguments ({} given)",
-                    args.len()
-                ),
-            ));
-        }
-        let source_val = &args[0].value;
+    #[arity_style(clinic)]
+    fn compile(
+        source: PyValueRef,
+        filename: PyValueRef,
+        mode: PyValueRef,
+        #[default(OptionalArg::Omitted)] flags: OptValueRef,
+        #[default(OptionalArg::Omitted)] dont_inherit: OptValueRef,
+        #[default(OptionalArg::Omitted)] optimize: OptValueRef,
+    ) -> Result<Value> {
+        let _ = (flags, dont_inherit, optimize);
+        let source_val = source.0;
         let source = source_val.as_str().ok_or_else(|| {
             PyError::named(
                 "TypeError",
@@ -551,12 +523,12 @@ pyrust_module! {
         // `co_filename` with it, so an exception raised inside the compiled code
         // reports this name in its traceback (#2438).  Non-string filenames
         // (CPython also accepts bytes / path-like) fall back to `<unknown>`.
-        let compile_filename = args[1]
-            .value
+        let compile_filename = filename
+            .0
             .as_str()
             .map(|s| s.to_string())
             .unwrap_or_else(|| "<unknown>".to_string());
-        let mode_val = &args[2].value;
+        let mode_val = mode.0;
         let mode = mode_val.as_str().ok_or_else(|| {
             PyError::named(
                 "TypeError",
@@ -639,32 +611,28 @@ pyrust_module! {
 
     /// CPython: dir([object]) — list of attribute names.
     /// <https://docs.python.org/3/library/functions.html#dir>
-    fn dir(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() > 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes at most 1 argument"),
-            ));
-        }
-        if args.is_empty() {
+    #[arity_style(expected_got)]
+    fn dir(
+        #[positional_only] #[default(OptionalArg::Omitted)] object: OptValueRef,
+    ) -> Result<Value> {
+        let Some(target) = object.as_value() else {
             let mut names: Vec<String> =
                 _interp.env.borrow().values.keys().map(String::from).collect();
             names.sort();
             names.dedup();
             return Ok(Value::list(names.into_iter().map(Value::string).collect()));
-        }
+        };
         // Honour a user-defined `__dir__` override.  CPython's `dir(obj)` is
         // `sorted(type(obj).__dir__(obj))`: it accepts any iterable result,
         // sorts it via the elements' own comparison (so a non-str element only
         // errors if the `<` comparison fails), and does NOT dedup the custom
         // result.  Only `PyInstance` values can carry an overridden `__dir__`;
         // primitives use the default `dir_names` path (issue #1941).
-        if let ValueKind::PyInstance(inst) = args[0].value.kind() {
+        if let ValueKind::PyInstance(inst) = target.kind() {
             let class = Rc::clone(&inst.borrow().class);
             if let Some(method_val) = lookup_class_attr(&class, "__dir__") {
                 let result =
-                    invoke_class_method(_interp, method_val, args[0].value.clone(), &[])?;
+                    invoke_class_method(_interp, method_val, target.clone(), &[])?;
                 let mut items = _interp.collect_iterable(&result)?;
                 // Sort the collected values exactly as `sorted()` would,
                 // surfacing the element comparison error verbatim.
@@ -705,10 +673,10 @@ pyrust_module! {
                 return Ok(Value::list(items));
             }
         }
-        if let ValueKind::PyModule(module) = args[0].value.kind() {
+        if let ValueKind::PyModule(module) = target.kind() {
             _interp.ensure_module_namespace_synced(module);
         }
-        let mut names: Vec<String> = dir_names(&args[0].value);
+        let mut names: Vec<String> = dir_names(target);
         names.sort();
         names.dedup();
         Ok(Value::list(names.into_iter().map(Value::string).collect()))

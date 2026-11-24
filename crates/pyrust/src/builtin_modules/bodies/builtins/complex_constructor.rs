@@ -3,24 +3,31 @@ use pyrust_derive::pyrust_module;
 pyrust_module! {
     /// CPython: complex(real=0, imag=0) — complex constructor.
     /// <https://docs.python.org/3/library/functions.html#complex>
+    ///
+    /// Migrated to the typed-signature dialect (#400): `#[arity_style(clinic)]`
+    /// handles keyword-or-positional `real`/`imag` with CPython 3.12 error
+    /// wording and enables the vectorcall fast entry.
     /// This can run user code by dispatching `__complex__`,
     /// `__float__`, and `__index__` on user-defined objects.
-    fn complex(args) -> Result<Value> {
-        // CPython 3.12: complex(real=0, imag=0) — both keyword-or-positional.
-        let bound = bind_constructor_kwargs(FN_NAME, args, &["real", "imag"], &[true, true], 2)?;
-        // Flatten to positional args.  If `imag` is supplied but `real` is
+    #[arity_style(clinic)]
+    fn complex(
+        #[default(OptionalArg::Omitted)] real: OptValueRef,
+        #[default(OptionalArg::Omitted)] imag: OptValueRef,
+    ) -> Result<Value> {
+        // Flatten to positional slots.  If `imag` is supplied but `real` is
         // omitted (`complex(imag=5)`), CPython treats `real` as its default
         // `0` — fill the interior gap so the two-arg path runs.
-        let mut bound_pos: Vec<ExpandedCallArg> = Vec::with_capacity(2);
-        if bound[1].is_some() && bound[0].is_none() {
-            bound_pos.push(ExpandedCallArg { name: None, value: Value::int(0) });
-            bound_pos.push(ExpandedCallArg { name: None, value: bound[1].clone().unwrap() });
-        } else {
-            for slot in bound.into_iter() {
-                match slot {
-                    Some(v) => bound_pos.push(ExpandedCallArg { name: None, value: v }),
-                    None => break,
-                }
+        let mut bound_pos: smallvec::SmallVec<[Value; 2]> = smallvec::SmallVec::new();
+        match (real.as_value(), imag.as_value()) {
+            (None, None) => {}
+            (Some(r), None) => bound_pos.push(r.clone()),
+            (None, Some(i)) => {
+                bound_pos.push(Value::int(0));
+                bound_pos.push(i.clone());
+            }
+            (Some(r), Some(i)) => {
+                bound_pos.push(r.clone());
+                bound_pos.push(i.clone());
             }
         }
         let args = &bound_pos[..];
@@ -52,7 +59,7 @@ pyrust_module! {
 
         match args.len() {
             0 => Ok(Value::complex(0.0, 0.0)),
-            1 => match args[0].value.kind() {
+            1 => match args[0].kind() {
                 ValueKind::Complex(re, im) => Ok(Value::complex(re, im)),
                 ValueKind::Str(s) => {
                     let (re, im) = parse_complex_str(s).ok_or_else(|| {
@@ -61,7 +68,7 @@ pyrust_module! {
                     Ok(Value::complex(re, im))
                 }
                 ValueKind::PyInstance(_) | ValueKind::PyClass(_) => {
-                    let self_val = args[0].value.clone();
+                    let self_val = args[0].clone();
                     // CPython 3.12 dispatch: __complex__ → __float__ → __index__
                     // A complex subclass with no user-owned `__complex__` is
                     // already a complex value. Its backing wins over
@@ -145,18 +152,18 @@ pyrust_module! {
                     ))
                 }
                 _ => Ok(Value::complex(
-                    prim_to_f64(&args[0].value, "complex() first argument must be a string or a number")?,
+                    prim_to_f64(&args[0], "complex() first argument must be a string or a number")?,
                     0.0,
                 )),
             },
             2 => {
-                if matches!(args[0].value.kind(), ValueKind::Str(_)) {
+                if matches!(args[0].kind(), ValueKind::Str(_)) {
                     return Err(PyError::named(
                         "TypeError",
                         "complex() can't take second arg if first is a string",
                     ));
                 }
-                if matches!(args[1].value.kind(), ValueKind::Str(_)) {
+                if matches!(args[1].kind(), ValueKind::Str(_)) {
                     return Err(PyError::named(
                         "TypeError",
                         "complex() second arg can't be a string",
@@ -165,8 +172,8 @@ pyrust_module! {
                 // Resolve each arg to a (re, im) pair.
                 // First arg: __complex__ yields (re, im); __float__/__index__ → scalar.
                 // Second arg: __float__/__index__ only (CPython ignores __complex__ there).
-                let first_val = args[0].value.clone();
-                let second_val = args[1].value.clone();
+                let first_val = args[0].clone();
+                let second_val = args[1].clone();
 
                 // Helper: call __float__ then __index__ on a user object and return f64.
                 // $no_conv_msg is the prefix of the TypeError when no suitable dunder is found;

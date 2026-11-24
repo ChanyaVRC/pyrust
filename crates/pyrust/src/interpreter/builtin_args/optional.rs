@@ -37,3 +37,42 @@ impl<'a, T: FromValue<'a>> FromValue<'a> for Option<T> {
         value.is_none() || T::matches(value)
     }
 }
+
+// ─── OptionalArg<T> — distinguishes omitted argument from explicit None ───────
+//
+// Unlike `Option<T>`, which maps both an absent argument and an explicit
+// Python `None` to `None`, `OptionalArg<T>` only produces `Omitted` via
+// `#[default(OptionalArg::Omitted)]`; any supplied argument (including `None`)
+// converts via `T::try_from_value` and yields `Provided(T)`.
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OptionalArg<T> {
+    Omitted,
+    Provided(T),
+}
+
+pub(crate) type OptValueRef<'a> = OptionalArg<PyValueRef<'a>>;
+
+impl<'a> OptValueRef<'a> {
+    #[inline(always)]
+    pub(crate) fn as_value(&self) -> Option<&'a Value> {
+        match self {
+            OptionalArg::Omitted => None,
+            OptionalArg::Provided(v) => Some(v.0),
+        }
+    }
+}
+
+impl<'a, T: FromValue<'a>> FromValue<'a> for OptionalArg<T> {
+    const PY_TYPE_NAME: &'static str = T::PY_TYPE_NAME;
+
+    #[inline(always)]
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+        T::try_from_value(value, fn_name, arg_name).map(OptionalArg::Provided)
+    }
+
+    #[inline(always)]
+    fn matches(value: &'a Value) -> bool {
+        T::matches(value)
+    }
+}

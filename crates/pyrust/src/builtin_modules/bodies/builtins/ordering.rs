@@ -3,16 +3,19 @@ use pyrust_derive::pyrust_module;
 pyrust_module! {
     /// CPython: sorted(iterable, /, *, key=None, reverse=False) — new sorted list.
     /// <https://docs.python.org/3/library/functions.html#sorted>
+    ///
+    /// Migrated to the typed-signature dialect (#400): `iterable` is
+    /// positional-only, `key` and `reverse` are keyword-only, and
+    /// `#[arity_style(expected_got)]` preserves `sorted expected 1 argument, got N`.
     /// This can run user code by dispatching `__lt__` (and related
     /// comparison dunders) when sorting, and may invoke the user-supplied key
     /// function which can execute arbitrary user code.
-    fn sorted(args) -> Result<Value> {
-        if args.is_empty() {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected 1 argument, got 0"),
-            ));
-        }
+    #[arity_style(expected_got)]
+    fn sorted(
+        #[positional_only] iterable: PyValueRef,
+        #[keyword_only] #[default(OptionalArg::Omitted)] key: OptValueRef,
+        #[keyword_only] #[default(OptionalArg::Omitted)] reverse: OptValueRef,
+    ) -> Result<Value> {
         // `reverse=` is dispatched through `__bool__` (with `__len__`
         // fallback and default-truthy for instances without either) —
         // matches CPython 3.12+ which coerces via `bool()`.  An earlier
@@ -21,23 +24,12 @@ pyrust_module! {
         // so the truthy-dispatch path is the cross-version-safe choice
         // for the pyrust matrix.  See #432 review + CI parity failure
         // on `sorted-rev-justbool` / `-nothing` cases under 3.12.
-        let reverse = match args.iter().find(|a| a.name.as_deref() == Some("reverse")) {
-            Some(a) => _interp.truthy_value(&a.value)?,
+        let reverse = match reverse.as_value() {
+            Some(v) => _interp.truthy_value(v)?,
             None => false,
         };
-        let key_fn = args.iter().find(|a| a.name.as_deref() == Some("key"))
-            .map(|a| a.value.clone())
-            .filter(|v| !v.is_none());
-        let positional: Vec<&ExpandedCallArg> = args.iter()
-            .filter(|a| a.name.is_none())
-            .collect();
-        if positional.len() != 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected 1 argument, got {}", positional.len()),
-            ));
-        }
-        let source = &positional[0].value;
+        let key_fn = key.as_value().filter(|v| !v.is_none()).cloned();
+        let source = iterable.0;
         let mut items = match _interp.collect_mapping_proxy_with_length_hint(source)? {
             Some(items) => items,
             None => _interp.collect_iterable(source)?,

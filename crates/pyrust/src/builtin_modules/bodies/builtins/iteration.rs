@@ -317,15 +317,10 @@ pyrust_module! {
     /// CPython: enumerate(iterable, start=0) — enumerate iterator.
     /// <https://docs.python.org/3/library/functions.html#enumerate>
     ///
-    /// Migrated to the typed-signature dialect (#400).  `iterable` is
-    /// `PyValue` (not `PyIterable`) so that user-defined `PyInstance`
-    /// iterables reach `make_iterator` (which dispatches `__iter__`) — the
-    /// registry-only path cannot dispatch `__iter__` dunders.  `start` is
-    /// `PyValue` so the body can handle both `int` and `bool` inputs (CPython
-    /// accepts both; `bool ⊆ int` in CPython) and produce the
-    /// exact CPython `TypeError` wording for non-integer `start`.  Keeping the
-    /// default as an integer `PyValue` distinguishes an omitted start from an
-    /// explicitly supplied `None`.
+    /// Intentionally stays in `(args)` dialect (#400): CPython's custom
+    /// `enum_new` parser emits non-clinic `TypeError` wording (`enumerate()`
+    /// without `(pos 1)`, `enumerate(start=5)` → invalid keyword argument)
+    /// pinned verbatim by `test_builtin_introspection_2964.py`.
     fn enumerate(args) -> Result<Value> {
         if args.len() > 2 {
             return Err(PyError::named(
@@ -663,118 +658,84 @@ pyrust_module! {
     /// CPython: iter(obj) / iter(callable, sentinel) — return an iterator.
     /// <https://docs.python.org/3/library/functions.html#iter>
     ///
+    /// Migrated to the typed-signature dialect (#400): `PyValueRef` +
+    /// `OptValueRef` avoid per-call cloning, distinguish `iter(fn, None)` from
+    /// 1-arg `iter(obj)`, and enable the vectorcall fast entry.
+    ///
     /// The one-argument form returns an iterator over an iterable object.
     /// The two-argument form returns a callable-iterator that calls
     /// `callable()` on each `next()` and stops when the result equals
     /// `sentinel`.  The two-argument form calls user code on every iteration.
-    fn iter(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        match args.len() {
-            2 => {
-                // Two-argument form: iter(callable, sentinel).
-                let callable = args[0].value.clone();
-                let sentinel = args[1].value.clone();
-                // Validate that arg 0 is callable — matches CPython's TypeError.
-                let is_callable = match callable.kind() {
-                    ValueKind::UserFunction(_)
-                    | ValueKind::BuiltinFunction(_)
-                    | ValueKind::BoundMethod { .. }
-                    | ValueKind::ClassBoundMethod { .. }
-                    | ValueKind::PyClass(_) => true,
-                    ValueKind::BuiltinObject { .. } => {
-                        crate::interpreter::is_builtin_callable_adapter(&callable)
-                    }
-                    ValueKind::PyInstance(inst) => {
-                        let class = Rc::clone(&inst.borrow().class);
-                        lookup_class_attr(&class, "__call__").is_some()
-                    }
-                    _ => false,
-                };
-                if !is_callable {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "iter(object, sentinel): object must be callable".to_string(),
-                    ));
+    #[arity_style(expected_got)]
+    fn iter(
+        #[positional_only] object: PyValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] sentinel: OptValueRef,
+    ) -> Result<Value> {
+        if let Some(sentinel_val) = sentinel.as_value() {
+            // Two-argument form: iter(callable, sentinel).
+            let callable = object.0.clone();
+            let sentinel = sentinel_val.clone();
+            // Validate that arg 0 is callable — matches CPython's TypeError.
+            let is_callable = match callable.kind() {
+                ValueKind::UserFunction(_)
+                | ValueKind::BuiltinFunction(_)
+                | ValueKind::BoundMethod { .. }
+                | ValueKind::ClassBoundMethod { .. }
+                | ValueKind::PyClass(_) => true,
+                ValueKind::BuiltinObject { .. } => {
+                    crate::interpreter::is_builtin_callable_adapter(&callable)
                 }
-                Ok(Value::generator(Box::new(CallableIter {
-                    callable,
-                    sentinel,
-                    done: false,
-                })))
+                ValueKind::PyInstance(inst) => {
+                    let class = Rc::clone(&inst.borrow().class);
+                    lookup_class_attr(&class, "__call__").is_some()
+                }
+                _ => false,
+            };
+            if !is_callable {
+                return Err(PyError::named(
+                    "TypeError",
+                    "iter(object, sentinel): object must be callable".to_string(),
+                ));
             }
-            // One canonical owner classifies primitive, builtin-subclass,
-            // metaclass, and user-protocol iterables.  Every lazy consumer
-            // (`iter`, `map`, `zip`, `tee`, …) now takes this same path.
-            1 => make_iterator(_interp, &args[0].value),
-            0 => Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected at least 1 argument, got 0"),
-            )),
-            n => Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected at most 2 arguments, got {n}"),
-            )),
+            return Ok(Value::generator(Box::new(CallableIter {
+                callable,
+                sentinel,
+                done: false,
+            })));
         }
+        // One canonical owner classifies primitive, builtin-subclass,
+        // metaclass, and user-protocol iterables.  Every lazy consumer
+        // (`iter`, `map`, `zip`, `tee`, …) now takes this same path.
+        make_iterator(_interp, object.0)
     }
 
     /// CPython: next(iterator[, default]) — fetch the next element.
     /// <https://docs.python.org/3/library/functions.html#next>
     ///
-    /// Must stay in `(args)` dialect: `next(it, None)` is semantically
-    /// distinct from `next(it)` — the former returns Python None when
-    /// exhausted; the latter raises StopIteration.  `Option<PyValue>`
-    /// collapses both into Rust None, which breaks the default=None case.
-    fn next(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.is_empty() {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected at least 1 argument, got 0"),
-            ));
-        }
-        if args.len() > 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected at most 2 arguments, got {}", args.len()),
-            ));
-        }
-        let gen_val = args[0].value.clone();
-        let default_val = if args.len() == 2 {
-            Some(args[1].value.clone())
-        } else {
-            None
-        };
-        _interp.call_next(&gen_val, default_val)
+    /// Migrated to the typed-signature dialect (#400): `OptValueRef` preserves
+    /// the distinction between omitted `next(it)` (raises `StopIteration`) and
+    /// explicit `next(it, None)` (returns `None`), while enabling the
+    /// vectorcall fast entry.
+    #[arity_style(expected_got)]
+    fn next(
+        #[positional_only] iterator: PyValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] default: OptValueRef,
+    ) -> Result<Value> {
+        _interp.call_next(iterator.0, default.as_value().cloned())
     }
 
     /// CPython: anext(async_iterator[, default]) — return awaitable for next item.
     /// <https://docs.python.org/3/library/functions.html#anext>
     ///
-    /// Must stay in `(args)` dialect: `anext(ait, None)` is semantically
-    /// distinct from `anext(ait)` — the former wraps in `anext_awaitable` and
-    /// returns `None` on `StopAsyncIteration`, whereas the latter returns the
-    /// raw awaitable produced by `type(ait).__anext__(ait)`.
-    fn anext(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.is_empty() {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected at least 1 argument, got 0"),
-            ));
-        }
-        if args.len() > 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected at most 2 arguments, got {}", args.len()),
-            ));
-        }
-        let aiter_val = args[0].value.clone();
-        let default_val = if args.len() == 2 {
-            Some(args[1].value.clone())
-        } else {
-            None
-        };
-        _interp.call_anext(&aiter_val, default_val)
+    /// Migrated to the typed-signature dialect (#400): `OptValueRef` preserves
+    /// the distinction between omitted `anext(ait)` and explicit
+    /// `anext(ait, None)`.
+    #[arity_style(expected_got)]
+    fn anext(
+        #[positional_only] aiterator: PyValueRef,
+        #[positional_only] #[default(OptionalArg::Omitted)] default: OptValueRef,
+    ) -> Result<Value> {
+        _interp.call_anext(aiterator.0, default.as_value().cloned())
     }
 
 }

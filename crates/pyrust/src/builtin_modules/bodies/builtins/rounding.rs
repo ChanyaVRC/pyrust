@@ -7,14 +7,14 @@ use pyrust_derive::pyrust_module;
 /// therefore does not call this helper. Both primitive values and primitive
 /// subclasses without an override do, keeping their coercion and diagnostics
 /// identical.
-fn round_ndigits_i32(interp: &mut Interpreter, ndigits: Option<&PyValue>) -> Result<Option<i32>> {
+fn round_ndigits_i32(interp: &mut Interpreter, ndigits: Option<&Value>) -> Result<Option<i32>> {
     let Some(ndigits) = ndigits else {
         return Ok(None);
     };
-    if matches!(ndigits.0.kind(), ValueKind::None) {
+    if matches!(ndigits.kind(), ValueKind::None) {
         return Ok(None);
     }
-    let resolved = interp.value_to_index(&ndigits.0, |value| {
+    let resolved = interp.value_to_index(ndigits, |value| {
         pyrust_core::type_err!(
             "'{}' object cannot be interpreted as an integer",
             value_type_name_str(value),
@@ -43,58 +43,24 @@ pyrust_module! {
     /// CPython: round(number, ndigits=None) — banker's rounding.
     /// <https://docs.python.org/3/library/functions.html#round>
     ///
-    /// Both `number` and `ndigits` are keyword-or-positional in CPython 3.12
-    /// (#2180), so this uses the raw-`args` form + `bind_constructor_kwargs`
-    /// rather than the typed-signature dialect (whose unknown-keyword wording
-    /// differs from the C-clinic "invalid keyword argument" message round
-    /// emits).  `x`/`ndigits` are resolved to `PyValue` so the body can
-    /// dispatch on `ValueKind` for full CPython parity: `bool ⊆ int` (both
-    /// round unchanged), `float` uses half-even rounding, and everything else
-    /// raises `TypeError`.
-    fn round(args) -> Result<Value> {
-        // CPython 3.12: round(number, ndigits=None) — both `number` and
-        // `ndigits` are keyword-or-positional.  Bind kwargs (with the
-        // C-clinic "invalid keyword argument" wording) before the existing
-        // positional dispatch below.
-        //
-        // Unlike the int/complex/str constructors, `round` is an argument-clinic
-        // function whose *missing required positional* check precedes the
-        // unknown-keyword check: `round(x=3.5)` / `round(foo=1)` report
-        // "missing required argument 'number'", not "'x'/'foo' is an invalid
-        // keyword argument".  The arity-overflow check still comes first, so
-        // mirror CPython's exact order: arity, then missing-number, then the
-        // generic keyword binding (which surfaces the remaining errors).
-        if args.len() > 2 {
-            let noun = if args.iter().all(|a| a.name.is_some()) {
-                "keyword arguments"
-            } else {
-                "arguments"
-            };
-            return Err(PyError::named(
-                "TypeError",
-                format!("round() takes at most 2 {noun} ({} given)", args.len()),
-            ));
-        }
-        let number_bound = args
-            .iter()
-            .any(|a| a.name.is_none() || a.name.as_deref() == Some("number"));
-        if !number_bound {
-            return Err(PyError::named(
-                "TypeError",
-                "round() missing required argument 'number' (pos 1)".to_string(),
-            ));
-        }
-        let bound =
-            bind_constructor_kwargs(FN_NAME, args, &["number", "ndigits"], &[true, true], 2)?;
-        // `number` was confirmed bound above; the slot is always populated here.
-        let x: PyValue = PyValue(bound[0].clone().expect("number slot bound"));
-        let ndigits: Option<PyValue> = bound[1].clone().map(PyValue);
+    /// Migrated to the typed-signature dialect (#400): `#[arity_style(clinic)]`
+    /// reproduces CPython 3.12's exact Argument Clinic check order (arity
+    /// overflow, missing required `'number' (pos 1)`, then invalid/duplicate
+    /// keyword validation) while granting positional calls the vectorcall fast
+    /// path.
+    #[arity_style(clinic)]
+    fn round(
+        number: PyValueRef,
+        #[default(OptionalArg::Omitted)] ndigits: OptValueRef,
+    ) -> Result<Value> {
+        let x = number.0;
+        let ndigits = ndigits.as_value();
         // Classify x first so we can decide whether to validate ndigits.
         // CPython forwards any ndigits type to user-defined __round__ without
         // pre-validating it (round(obj, 3.5) passes 3.5 to __round__), but
         // raises TypeError for non-int ndigits on all primitive types.
         enum NumKind { Int(i64), Bool(bool), BigInt, Float(f64), Other }
-        let num = match x.0.kind() {
+        let num = match x.kind() {
             ValueKind::Int(v) => NumKind::Int(v),
             ValueKind::Bool(b) => NumKind::Bool(b),
             ValueKind::BigInt(_) => NumKind::BigInt,
@@ -106,7 +72,7 @@ pyrust_module! {
             // Deferred: for user objects ndigits is passed as-is to __round__.
             None
         } else {
-            round_ndigits_i32(_interp, ndigits.as_ref())?
+            round_ndigits_i32(_interp, ndigits)?
         };
         match num {
             NumKind::Int(v) => match ndigits_i32 {
@@ -121,7 +87,7 @@ pyrust_module! {
                 }
             }
             NumKind::BigInt => {
-                if let ValueKind::BigInt(b) = x.0.kind() {
+                if let ValueKind::BigInt(b) = x.kind() {
                     match ndigits_i32 {
                         Some(n) if n < 0 => {
                             Ok(round_bigint_neg_ndigits(b.clone(), (-n) as u32))
@@ -140,7 +106,7 @@ pyrust_module! {
                 // Check for user-defined __round__ before raising TypeError.
                 // CPython does not validate the ndigits type for user objects;
                 // ndigits is forwarded as-is to __round__.
-                if let ValueKind::PyInstance(inst) = x.0.kind() {
+                if let ValueKind::PyInstance(inst) = x.kind() {
                     let inst_rc = Rc::clone(inst);
                     let class = Rc::clone(&inst_rc.borrow().class);
                     if let Some(method_val) = lookup_class_attr(&class, "__round__") {
@@ -149,10 +115,10 @@ pyrust_module! {
                         // (which may be a bool) is forwarded as-is.
                         let call_args: Vec<ExpandedCallArg> = match ndigits {
                             None => vec![],
-                            Some(ref v) if matches!(v.0.kind(), ValueKind::None) => vec![],
-                            Some(ref v) => vec![ExpandedCallArg {
+                            Some(v) if matches!(v.kind(), ValueKind::None) => vec![],
+                            Some(v) => vec![ExpandedCallArg {
                                 name: None,
-                                value: v.0.clone(),
+                                value: v.clone(),
                             }],
                         };
                         return invoke_class_method(
@@ -167,9 +133,9 @@ pyrust_module! {
                     // using the same rounding logic as the primitive arms above.
                     // This matches CPython's inherited int.__round__ / float.__round__
                     // behaviour for subclasses that don't override __round__.
-                    let coerced = coerce_numeric(&x.0);
+                    let coerced = coerce_numeric(x);
                     let ndigits_i32_coerced =
-                        round_ndigits_i32(_interp, ndigits.as_ref())?;
+                        round_ndigits_i32(_interp, ndigits)?;
                     match coerced.kind() {
                         ValueKind::Int(v) => return match ndigits_i32_coerced {
                             Some(n) if n < 0 => Ok(round_bigint_neg_ndigits(PyBigInt::from(v), (-n) as u32)),
@@ -188,7 +154,7 @@ pyrust_module! {
                 }
                 Err(PyError::named(
                     "TypeError",
-                    format!("type {} doesn't define __round__ method", value_type_name_str(&x.0)),
+                    format!("type {} doesn't define __round__ method", value_type_name_str(x)),
                 ))
             }
         }

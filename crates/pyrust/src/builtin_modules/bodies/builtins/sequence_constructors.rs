@@ -4,26 +4,21 @@ pyrust_module! {
     /// CPython: list([iterable]) — list constructor.
     /// <https://docs.python.org/3/library/functions.html#list>
     ///
-    /// Not migrated to the typed-signature dialect in this batch: the
-    /// macro's overload set requires all overloads to share the same arity,
-    /// so the 0-arg / 1-arg split can't be expressed as two typed overloads.
-    /// `Option<PyValue>` would conflate "absent" with "Python None",
-    /// turning `list(None)` into `[]` instead of the correct `TypeError`.
-    /// Remaining as `(args)` until the macro supports variable-arity
-    /// overloads (tracked under #400).
+    /// Migrated to the typed-signature dialect (#400): `OptValueRef` keeps
+    /// omitted `list()` (`[]`) distinct from `list(None)` (`TypeError`), and
+    /// `#[arity_style(expected_got)]` reproduces CPython's wording while
+    /// enabling the vectorcall fast entry.
     ///
     /// This can run user code by dispatching `__iter__` and
     /// `__next__` when consuming a user-defined iterable.
-    fn list(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        match args.len() {
-            0 => Ok(Value::list(vec![])),
-            1 => Ok(Value::list(
-                _interp.collect_sequence_constructor_iterable(&args[0].value)?,
-            )),
-            _ => Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected at most 1 argument, got {}", args.len()),
+    #[arity_style(expected_got)]
+    fn list(
+        #[positional_only] #[default(OptionalArg::Omitted)] iterable: OptValueRef,
+    ) -> Result<Value> {
+        match iterable.as_value() {
+            None => Ok(Value::list(vec![])),
+            Some(val) => Ok(Value::list(
+                _interp.collect_sequence_constructor_iterable(val)?,
             )),
         }
     }
@@ -31,20 +26,19 @@ pyrust_module! {
     /// CPython: tuple([iterable]) — tuple constructor.
     /// <https://docs.python.org/3/library/functions.html#tuple>
     ///
-    /// Not migrated in this batch — same arity-split constraint as `list`.
+    /// Migrated to the typed-signature dialect (#400) — same `OptValueRef`
+    /// pattern as `list`.
     ///
     /// This can run user code by dispatching `__iter__` and
     /// `__next__` when consuming a user-defined iterable.
-    fn tuple(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        match args.len() {
-            0 => Ok(Value::tuple(vec![])),
-            1 => Ok(Value::tuple(
-                _interp.collect_sequence_constructor_iterable(&args[0].value)?,
-            )),
-            _ => Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected at most 1 argument, got {}", args.len()),
+    #[arity_style(expected_got)]
+    fn tuple(
+        #[positional_only] #[default(OptionalArg::Omitted)] iterable: OptValueRef,
+    ) -> Result<Value> {
+        match iterable.as_value() {
+            None => Ok(Value::tuple(vec![])),
+            Some(val) => Ok(Value::tuple(
+                _interp.collect_sequence_constructor_iterable(val)?,
             )),
         }
     }
