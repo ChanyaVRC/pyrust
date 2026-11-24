@@ -33,11 +33,11 @@ import os.path
 import collections.abc
 import __future__
 names = ["abc", "asyncio", "base64", "binascii", "bisect", "builtins", "collections", "contextlib",
-         "copy", "csv", "dataclasses", "decimal", "difflib", "enum", "errno",
-         "fractions", "functools", "hashlib", "heapq", "hmac", "inspect", "io", "itertools",
+         "copy", "csv", "dataclasses", "decimal", "difflib", "enum", "errno", "fnmatch",
+         "fractions", "functools", "glob", "hashlib", "heapq", "hmac", "inspect", "io", "itertools",
          "json", "math", "numbers", "operator", "os", "pathlib", "pprint", "random", "re",
-         "secrets", "shlex", "statistics", "string", "sys", "textwrap", "time", "traceback",
-         "types", "typing", "warnings"]
+         "secrets", "shlex", "shutil", "statistics", "string", "sys", "tempfile", "textwrap",
+         "time", "traceback", "types", "typing", "warnings"]
 for name in names:
     print(name, list(vars(__import__(name))))
 for name, module in [("os.path", os.path),

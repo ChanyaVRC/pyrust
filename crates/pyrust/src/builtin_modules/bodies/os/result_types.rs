@@ -370,10 +370,14 @@ pub(super) fn make_stat_result(metadata: &std::fs::Metadata) -> Value {
     };
     #[cfg(not(unix))]
     let (mode, inode, links, user, group, device) = (
-        if metadata.is_dir() {
-            0o040000_i64
+        if metadata.file_type().is_symlink() {
+            0o120777_i64
+        } else if metadata.is_dir() {
+            0o040777_i64
+        } else if metadata.permissions().readonly() {
+            0o100444_i64
         } else {
-            0o100000_i64
+            0o100666_i64
         },
         0_i64,
         0_i64,

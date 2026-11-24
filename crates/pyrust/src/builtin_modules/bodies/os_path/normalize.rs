@@ -6,6 +6,46 @@ use crate::value::{Value, ValueKind};
 
 use super::split_join::{nt_join, nt_splitroot};
 
+pub(super) fn normcase_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value> {
+    reject_keyword_args_expanded(fn_name, args)?;
+    if args.len() != 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes exactly one argument"),
+        ));
+    }
+    match args[0].value.kind() {
+        ValueKind::Str(s) => {
+            if cfg!(windows) {
+                Ok(Value::string(s.replace('/', "\\").to_lowercase()))
+            } else {
+                Ok(Value::string(s))
+            }
+        }
+        ValueKind::Bytes(b) => {
+            if cfg!(windows) {
+                let normalized: Vec<u8> = b
+                    .iter()
+                    .map(|&ch| {
+                        let ch = if ch == b'/' { b'\\' } else { ch };
+                        ch.to_ascii_lowercase()
+                    })
+                    .collect();
+                Ok(Value::bytes(normalized))
+            } else {
+                Ok(Value::bytes(b.as_ref().clone()))
+            }
+        }
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "expected str, bytes or os.PathLike object, not {}",
+                crate::interpreter::value_type_name_str(&args[0].value),
+            ),
+        )),
+    }
+}
+
 pub(super) fn relpath_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.is_empty() || args.len() > 2 {

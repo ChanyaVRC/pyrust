@@ -24,17 +24,28 @@ mod split_join;
 #[path = "os_path/stat_queries.rs"]
 mod stat_queries;
 
-use self::normalize::{host_abspath, host_expanduser, host_isabs, host_normpath, relpath_impl};
+use self::normalize::{
+    host_abspath, host_expanduser, host_isabs, host_normpath, normcase_impl, relpath_impl,
+};
 use self::split_join::{
     commonprefix_impl, host_split, host_splitdrive, host_splitext, join_impl, single_path,
 };
-use self::stat_queries::{exists_impl, isdir_impl, isfile_impl, realpath_impl};
+use self::stat_queries::{
+    exists_impl, isdir_impl, isfile_impl, islink_impl, lexists_impl, realpath_impl, samefile_impl,
+};
 
 pyrust_module! {
     constants {
         // Expose the path separator here so callers can build platform-aware
         // paths without depending on `os` proper.
         "sep" => Value::string(std::path::MAIN_SEPARATOR.to_string()),
+        "altsep" => {
+            if cfg!(windows) {
+                Value::string("/")
+            } else {
+                Value::none()
+            }
+        },
     }
 
     /// CPython: os.path.join(path, *paths) — join path components.
@@ -145,5 +156,29 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/os.path.html#os.path.realpath>
     fn realpath(args) -> Result<Value> {
         realpath_impl(FN_NAME, args)
+    }
+
+    /// CPython: os.path.normcase(path) — normalize case and separators for the host OS.
+    /// <https://docs.python.org/3/library/os.path.html#os.path.normcase>
+    fn normcase(args) -> Result<Value> {
+        normcase_impl(FN_NAME, args)
+    }
+
+    /// CPython: os.path.islink(path) — true if `path` refers to a symbolic link.
+    /// <https://docs.python.org/3/library/os.path.html#os.path.islink>
+    fn islink(args) -> Result<Value> {
+        islink_impl(FN_NAME, args)
+    }
+
+    /// CPython: os.path.lexists(path) — true if `path` exists (including broken symlinks).
+    /// <https://docs.python.org/3/library/os.path.html#os.path.lexists>
+    fn lexists(args) -> Result<Value> {
+        lexists_impl(FN_NAME, args)
+    }
+
+    /// CPython: os.path.samefile(path1, path2) — true if both paths refer to the same file.
+    /// <https://docs.python.org/3/library/os.path.html#os.path.samefile>
+    fn samefile(args) -> Result<Value> {
+        samefile_impl(FN_NAME, args)
     }
 }
