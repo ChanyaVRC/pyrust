@@ -187,7 +187,7 @@ impl Interpreter {
                         gen_drive_return!(__v);
                     }
                     if let Some(__saved) = tramp_stack.pop() {
-                        self.pop_vm_frame_view();
+                        self.detach_vm_frame_view();
                         let __memo_key = __saved.memo_key;
                         tramp_arena.truncate(tramp_active_base);
                         tramp_active_base = __saved.saved_base;
@@ -201,6 +201,7 @@ impl Interpreter {
                         active_code_rc = __saved.saved_active_code_rc;
                         num_locals = __saved.saved_num_locals;
                         self.env = __saved.saved_env;
+                        self.finish_pop_vm_frame_view();
                         if let Some(__key) = __memo_key {
                             self.finish_memoized_call(__key, &__v);
                         }
@@ -296,6 +297,7 @@ impl Interpreter {
                         iter_next_cache: &mut iter_next_cache,
                         exc_handlers: &mut exc_handlers,
                         tramp_active_base: &mut tramp_active_base,
+                        tramp_arena: &mut tramp_arena,
                         tramp_stack: &mut tramp_stack,
                         gen_drive_stack: &mut gen_drive_stack,
                         exc_ctx_frame_base,
@@ -1974,6 +1976,7 @@ impl Interpreter {
                             iter_next_cache: &mut iter_next_cache,
                             exc_handlers: &mut exc_handlers,
                             tramp_active_base: &mut tramp_active_base,
+                            tramp_arena: &mut tramp_arena,
                             tramp_stack: &mut tramp_stack,
                             gen_drive_stack: &mut gen_drive_stack,
                             exc_ctx_frame_base,

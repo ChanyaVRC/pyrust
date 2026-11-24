@@ -355,8 +355,7 @@ impl Interpreter {
                     match name {
                         "f_locals" => self.refresh_live_frame_locals_for_attribute(target),
                         "f_back" => {
-                            if let Some(back) = self.live_generator_frame_back_for_attribute(target)
-                            {
+                            if let Some(back) = self.live_frame_back_for_attribute(target) {
                                 return Ok(back);
                             }
                         }

@@ -75,12 +75,13 @@ impl Interpreter {
             self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
         let vm_result = self.run_bytecode(&code, regs_slice);
         drop(namespace_mirror_guard);
-        self.pop_vm_frame_view();
+        self.detach_vm_frame_view();
         record_exec_string_frame(self, &vm_result, &code.filename);
 
         self.flush_explicit_exec_locals(&local_index, &regs, &globals_dict, locals_dict.as_ref());
-
+        drop(regs);
         self.env = previous_env;
+        self.finish_pop_vm_frame_view();
 
         vm_result.map(|_| ())
     }
@@ -121,10 +122,11 @@ impl Interpreter {
             self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
         let vm_result = self.run_bytecode(code, regs_slice);
         drop(namespace_mirror_guard);
-        self.pop_vm_frame_view();
-        record_exec_string_frame(self, &vm_result, &code.filename);
-
+        self.detach_vm_frame_view();
+        drop(regs);
         self.env = previous_env;
+        self.finish_pop_vm_frame_view();
+        record_exec_string_frame(self, &vm_result, &code.filename);
 
         vm_result
     }
@@ -162,10 +164,12 @@ impl Interpreter {
                     self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
                 let vm_result = self.run_bytecode(&code, regs_slice);
                 drop(namespace_mirror_guard);
-                self.pop_vm_frame_view();
+                self.detach_vm_frame_view();
                 record_exec_string_frame(self, &vm_result, &code.filename);
                 // Write fastlocals back to module env, in binding order.
                 self.write_back_script_locals(&local_index, &mut regs);
+                drop(regs);
+                self.finish_pop_vm_frame_view();
                 vm_result.map(|_| ())
             }
             Some(gdict) => {
@@ -206,11 +210,13 @@ impl Interpreter {
                     self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
                 let vm_result = self.run_bytecode(&code, regs_slice);
                 drop(namespace_mirror_guard);
-                self.pop_vm_frame_view();
+                self.detach_vm_frame_view();
                 record_exec_string_frame(self, &vm_result, &code.filename);
 
                 self.flush_explicit_exec_locals(&local_index, &regs, &gdict, locals_dict.as_ref());
+                drop(regs);
                 self.env = previous_env;
+                self.finish_pop_vm_frame_view();
                 vm_result.map(|_| ())
             }
         }

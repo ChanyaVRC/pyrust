@@ -457,12 +457,13 @@ impl Interpreter {
                         col_span: pyrust_core::get_current_vm_col_span(),
                     });
                 }
-                self.pop_vm_frame_view();
-
+                self.detach_vm_frame_view();
+                drop(regs);
                 let used_env = std::mem::replace(&mut self.env, previous_env);
                 if needs_local_env {
                     self.free_env(used_env);
                 }
+                self.finish_pop_vm_frame_view();
                 let value = vm_result?;
                 return Ok(value);
             }

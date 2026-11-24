@@ -277,6 +277,7 @@ struct UnwindState<'a> {
     iter_next_cache: &'a mut IterCacheBuf,
     exc_handlers: &'a mut ExcHandlersBuf,
     tramp_active_base: &'a mut usize,
+    tramp_arena: &'a mut Vec<Value>,
     tramp_stack: &'a mut Vec<TrampFrame>,
     gen_drive_stack: &'a mut Vec<GenDriveFrame>,
     exc_ctx_frame_base: usize,
