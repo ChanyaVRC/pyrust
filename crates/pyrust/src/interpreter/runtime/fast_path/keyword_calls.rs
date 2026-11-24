@@ -74,7 +74,13 @@ impl Interpreter {
                 for i in 0..nkw as u32 {
                     kw_vals.push(vm_read(regs, func + 1 + npos as u32 + i, num_locals)?);
                 }
-                return self.call_user_function_kw_cached(
+                let cur_line = code.line_at(pc - 1);
+                if cur_line != 0 {
+                    self.cold
+                        .call_site_lines
+                        .push((regs.non_null_ptr().as_ptr(), cur_line));
+                }
+                let res = self.call_user_function_kw_cached(
                     &f,
                     &callee_code,
                     npos,
@@ -82,6 +88,10 @@ impl Interpreter {
                     &slots,
                     &mut kw_vals.into_iter(),
                 );
+                if cur_line != 0 {
+                    self.cold.call_site_lines.pop();
+                }
+                return res;
             }
 
             // Cache empty (or shape changed): try to resolve this call as simple.
@@ -123,7 +133,13 @@ impl Interpreter {
                         for i in 0..nkw as u32 {
                             kw_vals.push(vm_read(regs, func + 1 + npos as u32 + i, num_locals)?);
                         }
-                        return self.call_user_function_kw_cached(
+                        let cur_line = code.line_at(pc - 1);
+                        if cur_line != 0 {
+                            self.cold
+                                .call_site_lines
+                                .push((regs.non_null_ptr().as_ptr(), cur_line));
+                        }
+                        let res = self.call_user_function_kw_cached(
                             &f,
                             &callee_code,
                             npos,
@@ -131,6 +147,10 @@ impl Interpreter {
                             &slots,
                             &mut kw_vals.into_iter(),
                         );
+                        if cur_line != 0 {
+                            self.cold.call_site_lines.pop();
+                        }
+                        return res;
                     }
                     None => {
                         // Not simple — permanent fallback to the general binder.
@@ -178,7 +198,22 @@ impl Interpreter {
                 value,
             });
         }
+        Self::publish_frame_line_for_builtin(&func_val, code, pc - 1);
+        let cur_line = if !matches!(func_val.kind(), ValueKind::BuiltinFunction(_)) {
+            code.line_at(pc - 1)
+        } else {
+            0
+        };
+        let pushed_line = cur_line != 0;
+        if pushed_line {
+            self.cold
+                .call_site_lines
+                .push((regs.non_null_ptr().as_ptr(), cur_line));
+        }
         let call_result = self.call_function_expanded(func_val, &buf);
+        if pushed_line {
+            self.cold.call_site_lines.pop();
+        }
         self.call_arg_buf = buf;
         call_result
     }
@@ -311,7 +346,13 @@ impl Interpreter {
                 for i in 0..nkw as u32 {
                     kw_vals.push(vm_read(regs, args_base + npos_args as u32 + i, num_locals)?);
                 }
-                return self.call_user_function_kw_cached(
+                let cur_line = code.line_at(call_site_pc);
+                if cur_line != 0 {
+                    self.cold
+                        .call_site_lines
+                        .push((regs.non_null_ptr().as_ptr(), cur_line));
+                }
+                let res = self.call_user_function_kw_cached(
                     &f,
                     &callee_code,
                     eff_npos,
@@ -319,6 +360,10 @@ impl Interpreter {
                     &slots,
                     &mut kw_vals.into_iter(),
                 );
+                if cur_line != 0 {
+                    self.cold.call_site_lines.pop();
+                }
+                return res;
             }
         }
 
@@ -377,6 +422,8 @@ impl Interpreter {
             pos_items,
             kw_map,
             ResolvedMethodCallShape::Fused,
+            code,
+            call_site_pc,
         )
     }
 }

@@ -268,6 +268,10 @@ pub(crate) struct InterpreterColdState {
     /// stashes its inner PEP 657 caret anchor here so the enclosing frame's
     /// `vm_try!` adopts that anchor instead of clobbering it (#2993).
     pub(crate) inlined_comp_escaped_span: Option<Option<(u32, u32, u32, u32)>>,
+    /// Side-stack of `(caller_regs_ptr, line)` for non-trampolined calls so
+    /// cold frame inspection (`warnings.warn(stacklevel=...)`) can recover the
+    /// exact caller line without changing `VmFrameView` or `Interpreter` size.
+    pub(crate) call_site_lines: Vec<(*mut Value, u32)>,
 }
 
 impl Default for InterpreterColdState {
@@ -299,6 +303,7 @@ impl Default for InterpreterColdState {
             exc_classes: ExcClasses::uninitialized(),
             push_exc_ctx_marks: Vec::new(),
             inlined_comp_escaped_span: None,
+            call_site_lines: Vec::new(),
         }
     }
 }

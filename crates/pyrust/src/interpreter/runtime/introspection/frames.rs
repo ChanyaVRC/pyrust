@@ -179,9 +179,9 @@ fn install_materialized_frame_cache(
 }
 
 impl Interpreter {
-    /// Publish the running source line only for the frame-introspection
-    /// built-in. Exact `sys` API recognition belongs to this domain rather
-    /// than the opcode loop or generic method-call router.
+    /// Publish the running source line only for frame-introspection built-ins.
+    /// Exact API recognition belongs to this domain rather than the opcode loop
+    /// or generic method-call router.
     #[inline]
     pub(crate) fn publish_frame_line_for_builtin(
         callable: &Value,
@@ -190,10 +190,137 @@ impl Interpreter {
     ) {
         if matches!(
             callable.kind(),
-            ValueKind::BuiltinFunction(name) if name.ends_with("_getframe")
+            ValueKind::BuiltinFunction(name) if name.ends_with("_getframe") || name == "warnings.warn"
         ) {
             pyrust_core::set_current_vm_line(code.line_at(call_site_pc));
         }
+    }
+
+    /// Resolve the live source line for `self.vm_frame_views[view_index]`.
+    fn resolve_view_lineno(
+        &self,
+        view_index: usize,
+        is_innermost: bool,
+        fallback_lineno: i64,
+    ) -> i64 {
+        let view = &self.vm_frame_views[view_index];
+        let regs_ptr = view.regs_ptr.as_ptr();
+        if is_innermost {
+            if fallback_lineno != 0 {
+                return fallback_lineno;
+            }
+            let line = pyrust_core::get_current_vm_line();
+            if line != 0 {
+                return line as i64;
+            }
+        } else {
+            if let Some(line) = self
+                .tramp_stack
+                .iter()
+                .rev()
+                .find(|frame| frame.saved_regs_ptr() == regs_ptr)
+                .map(|frame| frame.saved_cur_line())
+                .filter(|&line| line != 0)
+            {
+                return line as i64;
+            }
+            if let Some(line) = self
+                .gen_drive_stack
+                .iter()
+                .rev()
+                .find(|frame| frame.saved_regs_ptr() == regs_ptr)
+                .map(|frame| frame.saved_cur_line())
+                .filter(|&line| line != 0)
+            {
+                return line as i64;
+            }
+            if let Some(line) = self
+                .cold
+                .call_site_lines
+                .iter()
+                .rev()
+                .find(|(ptr, _)| *ptr == regs_ptr)
+                .map(|(_, line)| *line)
+                .filter(|&line| line != 0)
+            {
+                return line as i64;
+            }
+        }
+        match (view.function(), view.gen_frame()) {
+            (Some(func), _) => func
+                .precompiled_code
+                .as_deref()
+                .and_then(|any| any.downcast_ref::<crate::bytecode::FnCode>())
+                .map(|code| code.first_lineno as i64)
+                .unwrap_or(fallback_lineno),
+            (None, Some(gen_frame)) => unsafe { gen_frame.as_ref() }.code.first_lineno as i64,
+            (None, None) => fallback_lineno,
+        }
+    }
+
+    /// Resolve caller `(filename, lineno, module_name, globals)` for
+    /// `warnings.warn(..., stacklevel=...)` using active frame views and saved
+    /// call-site lines. Returns `None` when `stacklevel` walks past the top of
+    /// the call stack (so `warnings.warn` falls back to `("sys", 1, "sys")`).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn resolve_warning_caller(
+        &mut self,
+        stacklevel: isize,
+    ) -> Option<(String, i64, String, Value)> {
+        let depth = if stacklevel <= 1 {
+            0usize
+        } else {
+            (stacklevel - 1) as usize
+        };
+        let view_index = self.visible_view_index_for_depth(depth)?;
+        let lineno = self.resolve_view_lineno(view_index, depth == 0, 0);
+        let lineno = if lineno != 0 { lineno } else { 1 };
+        let view = &self.vm_frame_views[view_index];
+
+        let filename = match (view.function(), view.gen_frame()) {
+            (Some(func), _) => func
+                .precompiled_code
+                .as_deref()
+                .and_then(|any| any.downcast_ref::<crate::bytecode::FnCode>())
+                .map(|code| code.filename.to_string())
+                .unwrap_or_else(|| {
+                    self.cold
+                        .script_filename
+                        .as_ref()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "<string>".to_string())
+                }),
+            (None, Some(gen_frame)) => unsafe { gen_frame.as_ref() }.code.filename.to_string(),
+            (None, None) => {
+                if view.kind() == FrameKind::Class
+                    && let Some((_, filename)) = class_frame_identity(self, view)
+                {
+                    filename.to_string()
+                } else {
+                    self.cold
+                        .script_filename
+                        .as_ref()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "<string>".to_string())
+                }
+            }
+        };
+
+        let env = view
+            .env()
+            .or_else(|| {
+                view.gen_frame()
+                    .map(|gen_frame| &unsafe { gen_frame.as_ref() }.function.env)
+            })
+            .unwrap_or(&self.env);
+        let globals = self.globals_for_environment(env);
+        let module = globals
+            .as_dict()
+            .and_then(|d| d.get(&PyKey::str_from("__name__")).cloned())
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "<string>".to_string());
+        Some((filename, lineno, module, globals))
     }
 
     /// Detach the top non-generator frame view from `vm_frame_views` without
@@ -621,7 +748,12 @@ impl Interpreter {
         let Some(view_index) = self.visible_view_index_for_depth(idx) else {
             return Value::none();
         };
-        self.build_frame_object_at_view(view_index, lineno)
+        let effective_lineno = if idx == 0 {
+            lineno
+        } else {
+            self.resolve_view_lineno(view_index, false, lineno)
+        };
+        self.build_frame_object_at_view(view_index, effective_lineno)
     }
 
     /// Build or reuse the Python frame object for the concrete `VmFrameView`

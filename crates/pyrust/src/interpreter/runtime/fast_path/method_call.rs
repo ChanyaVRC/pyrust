@@ -85,15 +85,31 @@ impl Interpreter {
 
             // Inline cache fast path for user-defined class methods on PyInstance
             // objects (Regular UserFunctions / BuiltinFunctions only).
-            if let Some(result) =
-                self.try_call_method_cached(regs, obj, method, &args, code, call_site_pc)?
-            {
+            let cur_line = code.line_at(call_site_pc);
+            if cur_line != 0 {
+                self.cold
+                    .call_site_lines
+                    .push((regs.non_null_ptr().as_ptr(), cur_line));
+            }
+            let cached_res =
+                self.try_call_method_cached(regs, obj, method, &args, code, call_site_pc);
+            if cur_line != 0 {
+                self.cold.call_site_lines.pop();
+            }
+            if let Some(result) = cached_res? {
                 return Ok(result);
             }
 
             let obj_val = vm_read(regs, obj, num_locals)?;
             let method_val = self.get_attr(&obj_val, method)?;
             Self::publish_frame_line_for_builtin(&method_val, code, call_site_pc);
+            let pushed_line =
+                cur_line != 0 && !matches!(method_val.kind(), ValueKind::BuiltinFunction(_));
+            if pushed_line {
+                self.cold
+                    .call_site_lines
+                    .push((regs.non_null_ptr().as_ptr(), cur_line));
+            }
             let mut buf = std::mem::take(&mut self.call_arg_buf);
             buf.clear();
             for arg in args {
@@ -108,6 +124,9 @@ impl Interpreter {
                 &buf,
                 ResolvedMethodCallShape::Fused,
             );
+            if pushed_line {
+                self.cold.call_site_lines.pop();
+            }
             self.call_arg_buf = buf;
 
             // Fill or update the inline cache for this user-object call site.
@@ -128,6 +147,7 @@ impl Interpreter {
         pos_list: crate::bytecode::Reg,
         kw_dict: crate::bytecode::Reg,
         code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
     ) -> Result<Value> {
         let method: &str = code
             .names
@@ -170,6 +190,8 @@ impl Interpreter {
             pos_items,
             kw_map,
             ResolvedMethodCallShape::Expanded,
+            code,
+            call_site_pc,
         )
     }
 
@@ -190,6 +212,8 @@ impl Interpreter {
         pos_items: Vec<Value>,
         kw_map: PyDict,
         call_shape: ResolvedMethodCallShape,
+        code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
     ) -> Result<Value> {
         let obj_kind = BuiltinContainerKind::classify(regs[obj as usize].as_some());
 
@@ -243,6 +267,18 @@ impl Interpreter {
             }
             let obj_val = vm_read(regs, obj, num_locals)?;
             let method_val = self.get_attr(&obj_val, method)?;
+            Self::publish_frame_line_for_builtin(&method_val, code, call_site_pc);
+            let cur_line = if !matches!(method_val.kind(), ValueKind::BuiltinFunction(_)) {
+                code.line_at(call_site_pc)
+            } else {
+                0
+            };
+            let pushed_line = cur_line != 0;
+            if pushed_line {
+                self.cold
+                    .call_site_lines
+                    .push((regs.non_null_ptr().as_ptr(), cur_line));
+            }
             // Build directly into the reusable call buffer, bypassing the
             // intermediate ExpandedArgBuf allocation.
             let mut buf = std::mem::take(&mut self.call_arg_buf);
@@ -260,6 +296,9 @@ impl Interpreter {
                 }
             }
             let r = self.call_resolved_method(&obj_val, method_val, &buf, call_shape);
+            if pushed_line {
+                self.cold.call_site_lines.pop();
+            }
             self.call_arg_buf = buf;
             r
         }

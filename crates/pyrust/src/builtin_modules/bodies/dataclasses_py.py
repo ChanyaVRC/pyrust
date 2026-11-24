@@ -1,13 +1,10 @@
 """
-Data Classes (pyrust port of a minimal subset of CPython 3.12's
-``dataclasses`` module).
+Data Classes (pyrust port targeting CPython 3.12's ``dataclasses`` module).
 
-Provides the ``@dataclass`` decorator and the ``field`` / ``fields`` /
-``asdict`` / ``astuple`` / ``replace`` / ``is_dataclass`` helpers.  The
-decorator reads the class ``__annotations__`` to discover fields (in order,
-honouring inheritance), then generates ``__init__``, ``__repr__``, ``__eq__``
-and — when ``frozen=True`` — ``__setattr__`` / ``__delattr__`` that raise
-``FrozenInstanceError``.
+Provides the ``@dataclass`` decorator, ``InitVar``, ``KW_ONLY``, ``MISSING``,
+``Field``, ``FrozenInstanceError``, and the ``field`` / ``fields`` /
+``asdict`` / ``astuple`` / ``replace`` / ``is_dataclass`` / ``make_dataclass``
+helpers.
 
 This source is exec'd once into a throwaway namespace at first
 ``import dataclasses``; the public names are copied onto the module by
@@ -15,6 +12,10 @@ This source is exec'd once into a throwaway namespace at first
 
 Reference: <https://docs.python.org/3/library/dataclasses.html>
 """
+
+import copy as _copy
+import sys as _sys
+import types as _types
 
 
 # Sentinel for "no default supplied" — distinct from None, which is a valid
@@ -36,6 +37,50 @@ class _KW_ONLY_TYPE:
 KW_ONLY = _KW_ONLY_TYPE()
 
 
+# Field kind sentinels (mirrors CPython's _FIELD_BASE).
+class _FIELD_BASE:
+    def __init__(self, name):
+        self.name = name
+
+    def __repr__(self):
+        return self.name
+
+
+_FIELD = _FIELD_BASE("_FIELD")
+_FIELD_CLASSVAR = _FIELD_BASE("_FIELD_CLASSVAR")
+_FIELD_INITVAR = _FIELD_BASE("_FIELD_INITVAR")
+
+_EMPTY_METADATA = _types.MappingProxyType({})
+
+# Python 3.12 hard keywords for make_dataclass identifier validation.
+_KEYWORDS = frozenset((
+    "False", "None", "True", "and", "as", "assert", "async", "await",
+    "break", "class", "continue", "def", "del", "elif", "else", "except",
+    "finally", "for", "from", "global", "if", "import", "in", "is",
+    "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+    "while", "with", "yield",
+))
+
+
+class InitVar:
+    """Marker for init-only dataclass fields passed to ``__post_init__``."""
+
+    __slots__ = ("type",)
+
+    def __init__(self, type):
+        self.type = type
+
+    def __repr__(self):
+        if isinstance(self.type, type):
+            type_name = self.type.__name__
+        else:
+            type_name = repr(self.type)
+        return "dataclasses.InitVar[%s]" % type_name
+
+    def __class_getitem__(cls, type):
+        return InitVar(type)
+
+
 class FrozenInstanceError(AttributeError):
     """Raised when assigning to a field of a frozen dataclass instance."""
 
@@ -47,30 +92,35 @@ class Field:
     plain annotated attributes, synthesised by the ``@dataclass`` decorator.
     """
     __slots__ = ("name", "type", "default", "default_factory", "init", "repr",
-                 "compare", "hash", "kw_only")
+                 "compare", "hash", "metadata", "kw_only", "_field_type")
 
-    def __init__(self, default, default_factory, init, repr, compare, hash,
-                 kw_only=MISSING):
+    def __init__(self, default, default_factory, init, repr, hash, compare,
+                 metadata=None, kw_only=MISSING):
         self.name = None
         self.type = None
         self.default = default
         self.default_factory = default_factory
         self.init = init
         self.repr = repr
-        self.compare = compare
         self.hash = hash
+        self.compare = compare
+        self.metadata = (_EMPTY_METADATA
+                         if metadata is None
+                         else _types.MappingProxyType(metadata))
         self.kw_only = kw_only
+        self._field_type = None
 
     def __repr__(self):
         return ("Field(name=%r,type=%r,default=%r,default_factory=%r,"
-                "init=%r,repr=%r,compare=%r,hash=%r,kw_only=%r)" % (
+                "init=%r,repr=%r,hash=%r,compare=%r,metadata=%r,"
+                "kw_only=%r,_field_type=%r)" % (
                     self.name, self.type, self.default, self.default_factory,
-                    self.init, self.repr, self.compare, self.hash,
-                    self.kw_only))
+                    self.init, self.repr, self.hash, self.compare,
+                    self.metadata, self.kw_only, self._field_type))
 
 
 def field(*, default=MISSING, default_factory=MISSING, init=True, repr=True,
-          compare=True, hash=None, kw_only=MISSING):
+          hash=None, compare=True, metadata=None, kw_only=MISSING):
     """Return an object to identify dataclass fields.
 
     ``default`` and ``default_factory`` are mutually exclusive.  ``hash``
@@ -80,15 +130,67 @@ def field(*, default=MISSING, default_factory=MISSING, init=True, repr=True,
     """
     if default is not MISSING and default_factory is not MISSING:
         raise ValueError("cannot specify both default and default_factory")
-    return Field(default, default_factory, init, repr, compare, hash, kw_only)
+    return Field(default, default_factory, init, repr, hash, compare,
+                 metadata, kw_only)
 
 
-# Name under which the per-class tuple of Field objects is stashed.
+# Name under which the per-class dict of Field objects is stashed.
 _FIELDS = "__dataclass_fields__"
 
 
+def _is_string_marker(a_type, mod_name, marker_name):
+    """Best-effort check for stringified annotations like ``ClassVar[int]`` or
+    ``typing.ClassVar[int]`` (when ``from __future__ import annotations`` is
+    active)."""
+    s = a_type.strip()
+    if s == marker_name or s.startswith(marker_name + "["):
+        return True
+    qualified = mod_name + "." + marker_name
+    if s == qualified or s.startswith(qualified + "["):
+        return True
+    return False
+
+
+def _is_classvar(a_type, typing_mod):
+    if typing_mod is not None:
+        cv = getattr(typing_mod, "ClassVar", None)
+        if cv is not None:
+            if a_type is cv or getattr(a_type, "__origin__", None) is cv:
+                return True
+    if isinstance(a_type, str):
+        return _is_string_marker(a_type, "typing", "ClassVar")
+    # Handle ClassVar even if `typing` was imported under another generation
+    # or before `sys.modules["typing"]` was consulted.
+    origin = getattr(a_type, "__origin__", None)
+    if (origin is not None
+            and getattr(origin, "__module__", None) == "typing"
+            and getattr(origin, "__name__", None) == "ClassVar"):
+        return True
+    if (isinstance(a_type, type)
+            and getattr(a_type, "__module__", None) == "typing"
+            and getattr(a_type, "__name__", None) == "ClassVar"):
+        return True
+    return False
+
+
+def _is_initvar(a_type):
+    if a_type is InitVar or isinstance(a_type, InitVar):
+        return True
+    if isinstance(a_type, str):
+        return _is_string_marker(a_type, "dataclasses", "InitVar")
+    return False
+
+
+def _is_kw_only(a_type):
+    if a_type is KW_ONLY or isinstance(a_type, _KW_ONLY_TYPE):
+        return True
+    if isinstance(a_type, str):
+        return _is_string_marker(a_type, "dataclasses", "KW_ONLY")
+    return False
+
+
 def _collect_fields(cls, cls_kw_only):
-    """Build the ordered list of Field objects for ``cls``.
+    """Build the ordered dict of Field objects for ``cls``.
 
     Walks base classes first (reverse MRO, excluding ``object`` and ``cls``)
     so inherited fields precede this class's own, matching CPython's ordering.
@@ -97,19 +199,24 @@ def _collect_fields(cls, cls_kw_only):
     ``cls_kw_only`` is the class-level ``kw_only`` flag; a field whose own
     ``kw_only`` is left at ``MISSING`` inherits it.
     """
-    fields = {}
+    typing_mod = _sys.modules.get("typing")
+    all_fields = {}
     # Inherited fields, base-first.
     for base in cls.__mro__[-1:0:-1]:
         base_fields = getattr(base, _FIELDS, None)
-        if base_fields:
-            for f in base_fields:
-                fields[f.name] = f
+        if base_fields is not None:
+            if isinstance(base_fields, dict):
+                items = base_fields.values()
+            else:
+                items = base_fields
+            for f in items:
+                all_fields[f.name] = f
     # This class's own annotations.  A bare ``_: KW_ONLY`` pseudo-field flips
     # every subsequent field in this class body to keyword-only.
     cls_annotations = cls.__dict__.get("__annotations__", {})
     kw_only_seen = False
     for name, atype in cls_annotations.items():
-        if atype is KW_ONLY or isinstance(atype, _KW_ONLY_TYPE):
+        if _is_kw_only(atype):
             if kw_only_seen:
                 raise TypeError(
                     "%r is KW_ONLY, but KW_ONLY has already been specified"
@@ -117,17 +224,38 @@ def _collect_fields(cls, cls_kw_only):
             kw_only_seen = True
             cls_kw_only = True
             continue
-        default = getattr(cls, name, MISSING)
+        default = cls.__dict__.get(name, MISSING)
         if isinstance(default, Field):
             f = default
         else:
-            f = Field(default, MISSING, True, True, True, None)
+            f = Field(default, MISSING, True, True, None, True)
         f.name = name
         f.type = atype
-        if f.kw_only is MISSING:
-            f.kw_only = cls_kw_only
-        fields[name] = f
-    return list(fields.values())
+        if _is_classvar(atype, typing_mod):
+            f._field_type = _FIELD_CLASSVAR
+        elif _is_initvar(atype):
+            f._field_type = _FIELD_INITVAR
+            if f.default_factory is not MISSING:
+                raise TypeError("field %s cannot have a default factory" % name)
+            if f.kw_only is MISSING:
+                f.kw_only = cls_kw_only
+            # Replace Field sentinel on class body with default (or delete).
+            if isinstance(default, Field):
+                if f.default is MISSING:
+                    delattr(cls, name)
+                else:
+                    setattr(cls, name, f.default)
+        else:
+            f._field_type = _FIELD
+            if f.kw_only is MISSING:
+                f.kw_only = cls_kw_only
+            if isinstance(default, Field):
+                if f.default is MISSING:
+                    delattr(cls, name)
+                else:
+                    setattr(cls, name, f.default)
+        all_fields[name] = f
+    return all_fields
 
 
 def _set_new_attribute(cls, name, value):
@@ -139,23 +267,29 @@ def _set_new_attribute(cls, name, value):
 
 
 def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen, match_args,
-                   kw_only, slots):
+                   kw_only, slots, weakref_slot):
     if order and not eq:
         raise ValueError("eq must be true if order is true")
+    if weakref_slot and not slots:
+        raise TypeError("weakref_slot is True but slots is False")
 
-    flds = _collect_fields(cls, kw_only)
-    setattr(cls, _FIELDS, flds)
+    all_fields = _collect_fields(cls, kw_only)
+    setattr(cls, _FIELDS, all_fields)
+
+    regular_fields = [f for f in all_fields.values() if f._field_type is _FIELD]
+    init_fields = [f for f in all_fields.values()
+                   if f._field_type in (_FIELD, _FIELD_INITVAR)]
 
     if init:
-        _set_new_attribute(cls, "__init__", _make_init(cls, flds, frozen))
+        _set_new_attribute(cls, "__init__", _make_init(cls, init_fields, frozen))
     if repr:
-        _set_new_attribute(cls, "__repr__", _make_repr(cls, flds))
+        _set_new_attribute(cls, "__repr__", _make_repr(cls, regular_fields))
     if eq:
-        _set_new_attribute(cls, "__eq__", _make_eq(cls, flds))
+        _set_new_attribute(cls, "__eq__", _make_eq(cls, regular_fields))
     if order:
         for name, op in (("__lt__", "<"), ("__le__", "<="),
                          ("__gt__", ">"), ("__ge__", ">=")):
-            if _set_new_attribute(cls, name, _make_cmp(name, op, flds)):
+            if _set_new_attribute(cls, name, _make_cmp(name, op, regular_fields)):
                 raise TypeError(
                     "Cannot overwrite attribute %s in class %s. Consider "
                     "using functools.total_ordering"
@@ -165,16 +299,17 @@ def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen, match_args,
         setattr(cls, "__setattr__", _frozen_setattr)
         setattr(cls, "__delattr__", _frozen_delattr)
 
-    _set_hash(cls, flds, eq, frozen, unsafe_hash)
+    _set_hash(cls, regular_fields, eq, frozen, unsafe_hash)
 
     if match_args:
-        # __match_args__ lists the non-kw-only init fields, in order.
+        # __match_args__ lists the non-kw-only init fields (including InitVar),
+        # in order, matching CPython 3.12.
         _set_new_attribute(
             cls, "__match_args__",
-            tuple(f.name for f in flds if f.init and not f.kw_only))
+            tuple(f.name for f in init_fields if f.init and not f.kw_only))
 
     if slots:
-        cls = _add_slots(cls, flds)
+        cls = _add_slots(cls, regular_fields, weakref_slot)
 
     return cls
 
@@ -207,15 +342,7 @@ _HASH_ACTION = {
 
 
 def _set_hash(cls, flds, eq, frozen, unsafe_hash):
-    """Install ``__hash__`` following CPython 3.12's ``_hash_action`` table.
-
-    The lookup is keyed on ``(unsafe_hash, eq, frozen, has_explicit_hash)``.
-    ``has_explicit_hash`` uses CPython's heuristic: a ``__hash__`` of ``None``
-    that was auto-installed by Python because the class body defines ``__eq__``
-    is *not* treated as explicit (so the table can still set it to ``None``).
-    """
-    # CPython evaluates this *after* __eq__ generation; at that point a
-    # class-body __eq__ has caused Python to auto-set __hash__ = None.
+    """Install ``__hash__`` following CPython 3.12's ``_hash_action`` table."""
     class_hash = cls.__dict__.get("__hash__", MISSING)
     has_explicit_hash = not (
         class_hash is MISSING
@@ -230,12 +357,9 @@ def _set_hash(cls, flds, eq, frozen, unsafe_hash):
     elif action == "raise":
         raise TypeError("Cannot overwrite attribute __hash__ in class %s"
                         % cls.__name__)
-    # action is None → leave __hash__ untouched.
 
 
 def _make_hash(flds):
-    # A field participates in __hash__ when its `hash` is True, or — when
-    # `hash` is left at the default None — when it participates in compare.
     names = [f.name for f in flds
              if (f.hash if f.hash is not None else f.compare)]
     body = ["return hash(%s)" % _cmp_tuple("self", names)]
@@ -254,7 +378,7 @@ def _init_param(f, locals_ns):
 
 
 def _init_assign(f, body, frozen):
-    """Append the body statements assigning an init field from its param."""
+    """Append the body statements assigning a regular init field from its param."""
     if f.default_factory is not MISSING:
         body.append("if %s is MISSING: %s = __df_%s()"
                     % (f.name, f.name, f.name))
@@ -262,27 +386,31 @@ def _init_assign(f, body, frozen):
 
 
 def _make_init(cls, flds, frozen):
-    # Build a parameter list with defaults, then the body assigning each field.
-    # Positional fields without defaults must precede those with defaults;
-    # keyword-only fields go after a ``*`` separator and have no such rule.
+    # Build a parameter list with defaults, then the body assigning each regular
+    # field and forwarding InitVar arguments to ``__post_init__``.
     pos_params = []
     kw_params = []
+    init_vars = []
     body = []
     seen_default = False
     locals_ns = {"MISSING": MISSING}
     for f in flds:
+        is_initvar = f._field_type is _FIELD_INITVAR
+        if is_initvar:
+            init_vars.append(f.name)
         if not f.init:
-            # Not an __init__ parameter; assign from default/factory directly.
-            if f.default_factory is not MISSING:
-                locals_ns["__df_" + f.name] = f.default_factory
-                body.append(_assign(f.name, "__df_%s()" % f.name, frozen))
-            elif f.default is not MISSING:
-                locals_ns["__def_" + f.name] = f.default
-                body.append(_assign(f.name, "__def_%s" % f.name, frozen))
+            if not is_initvar:
+                if f.default_factory is not MISSING:
+                    locals_ns["__df_" + f.name] = f.default_factory
+                    body.append(_assign(f.name, "__df_%s()" % f.name, frozen))
+                elif f.default is not MISSING:
+                    locals_ns["__def_" + f.name] = f.default
+                    body.append(_assign(f.name, "__def_%s" % f.name, frozen))
             continue
         if f.kw_only:
             kw_params.append(_init_param(f, locals_ns))
-            _init_assign(f, body, frozen)
+            if not is_initvar:
+                _init_assign(f, body, frozen)
             continue
         has_default = (f.default is not MISSING
                        or f.default_factory is not MISSING)
@@ -292,16 +420,14 @@ def _make_init(cls, flds, frozen):
         if has_default:
             seen_default = True
         pos_params.append(_init_param(f, locals_ns))
-        _init_assign(f, body, frozen)
+        if not is_initvar:
+            _init_assign(f, body, frozen)
     params = ["self"] + pos_params
     if kw_params:
         params.append("*")
         params.extend(kw_params)
-    # CPython calls __post_init__ at the end of the generated __init__ when the
-    # class defines it.  InitVar fields would be forwarded as arguments; we do
-    # not model InitVar yet, so the call takes no arguments.
     if hasattr(cls, "__post_init__"):
-        body.append("self.__post_init__()")
+        body.append("self.__post_init__(%s)" % ", ".join(init_vars))
     if not body:
         body = ["pass"]
     return _create_fn("__init__", params, body, locals_ns)
@@ -309,8 +435,7 @@ def _make_init(cls, flds, frozen):
 
 def _assign(name, value_expr, frozen):
     if frozen:
-        # Bypass the frozen __setattr__ guard during construction.
-        return ("object.__setattr__(self, %r, %s)" % (name, value_expr))
+        return "object.__setattr__(self, %r, %s)" % (name, value_expr)
     return "self.%s = %s" % (name, value_expr)
 
 
@@ -350,19 +475,16 @@ def _make_cmp(name, op, flds):
     return _create_fn(name, ["self", "other"], body, {})
 
 
-def _add_slots(cls, flds):
-    """Recreate ``cls`` with ``__slots__`` set to the field names.
-
-    ``__slots__`` cannot be added to an existing class, so build a fresh one
-    from the same bases / namespace, dropping the per-field class attributes
-    that would otherwise shadow the slot descriptors.
-    """
+def _add_slots(cls, flds, weakref_slot=False):
+    """Recreate ``cls`` with ``__slots__`` set to the regular field names."""
     field_names = tuple(f.name for f in flds)
+    if weakref_slot:
+        field_names = field_names + ("__weakref__",)
     cls_dict = dict(cls.__dict__)
     cls_dict["__slots__"] = field_names
     for name in field_names:
-        cls_dict.pop(name, None)
-    # __dict__ / __weakref__ descriptors are recreated by the new class.
+        if name != "__weakref__":
+            cls_dict.pop(name, None)
     cls_dict.pop("__dict__", None)
     cls_dict.pop("__weakref__", None)
     qualname = getattr(cls, "__qualname__", cls.__name__)
@@ -398,9 +520,8 @@ def dataclass(cls=None, /, *, init=True, repr=True, eq=True, order=False,
     """
     def wrap(klass):
         return _process_class(klass, init, repr, eq, order, unsafe_hash,
-                              frozen, match_args, kw_only, slots)
+                              frozen, match_args, kw_only, slots, weakref_slot)
 
-    # Called as @dataclass without parentheses.
     if cls is None:
         return wrap
     return wrap(cls)
@@ -413,7 +534,9 @@ def fields(class_or_instance):
     except AttributeError:
         raise TypeError("fields() should be called with a dataclass type or "
                         "instance")
-    return tuple(flds)
+    if isinstance(flds, dict):
+        return tuple(f for f in flds.values() if f._field_type is _FIELD)
+    return tuple(f for f in flds if f._field_type is _FIELD)
 
 
 def is_dataclass(obj):
@@ -422,55 +545,151 @@ def is_dataclass(obj):
     return hasattr(cls, _FIELDS)
 
 
-def asdict(obj):
+def _is_dataclass_instance(obj):
+    return hasattr(type(obj), _FIELDS)
+
+
+def asdict(obj, *, dict_factory=dict):
     """Recursively convert a dataclass instance to a dict of field values."""
-    if not is_dataclass(obj) or isinstance(obj, type):
+    if not _is_dataclass_instance(obj):
         raise TypeError("asdict() should be called on dataclass instances")
-    return _asdict_inner(obj)
+    return _asdict_inner(obj, dict_factory)
 
 
-def _asdict_inner(obj):
-    if is_dataclass(obj) and not isinstance(obj, type):
-        result = {}
+def _asdict_inner(obj, dict_factory):
+    if _is_dataclass_instance(obj):
+        if dict_factory is dict:
+            return {
+                f.name: _asdict_inner(getattr(obj, f.name), dict)
+                for f in fields(obj)
+            }
+        result = []
         for f in fields(obj):
-            result[f.name] = _asdict_inner(getattr(obj, f.name))
-        return result
+            value = _asdict_inner(getattr(obj, f.name), dict_factory)
+            result.append((f.name, value))
+        return dict_factory(result)
+    elif isinstance(obj, tuple) and hasattr(obj, "_fields"):
+        return type(obj)(*[_asdict_inner(v, dict_factory) for v in obj])
     elif isinstance(obj, (list, tuple)):
-        return type(obj)(_asdict_inner(v) for v in obj)
+        return type(obj)(_asdict_inner(v, dict_factory) for v in obj)
     elif isinstance(obj, dict):
-        return {_asdict_inner(k): _asdict_inner(v) for k, v in obj.items()}
+        return type(obj)((_asdict_inner(k, dict_factory),
+                          _asdict_inner(v, dict_factory))
+                         for k, v in obj.items())
     else:
-        return obj
+        return _copy.deepcopy(obj)
 
 
-def astuple(obj):
+def astuple(obj, *, tuple_factory=tuple):
     """Recursively convert a dataclass instance to a tuple of field values."""
-    if not is_dataclass(obj) or isinstance(obj, type):
+    if not _is_dataclass_instance(obj):
         raise TypeError("astuple() should be called on dataclass instances")
-    return _astuple_inner(obj)
+    return _astuple_inner(obj, tuple_factory)
 
 
-def _astuple_inner(obj):
-    if is_dataclass(obj) and not isinstance(obj, type):
-        return tuple(_astuple_inner(getattr(obj, f.name)) for f in fields(obj))
+def _astuple_inner(obj, tuple_factory):
+    if _is_dataclass_instance(obj):
+        result = []
+        for f in fields(obj):
+            value = _astuple_inner(getattr(obj, f.name), tuple_factory)
+            result.append(value)
+        return tuple_factory(result)
+    elif isinstance(obj, tuple) and hasattr(obj, "_fields"):
+        return type(obj)(*[_astuple_inner(v, tuple_factory) for v in obj])
     elif isinstance(obj, (list, tuple)):
-        return type(obj)(_astuple_inner(v) for v in obj)
+        return type(obj)(_astuple_inner(v, tuple_factory) for v in obj)
     elif isinstance(obj, dict):
-        return {_astuple_inner(k): _astuple_inner(v) for k, v in obj.items()}
+        return type(obj)((_astuple_inner(k, tuple_factory),
+                          _astuple_inner(v, tuple_factory))
+                         for k, v in obj.items())
     else:
-        return obj
+        return _copy.deepcopy(obj)
 
 
 def replace(obj, /, **changes):
     """Return a new object of the same type, replacing the given fields."""
-    if isinstance(obj, type) or not is_dataclass(obj):
+    if not _is_dataclass_instance(obj):
         raise TypeError("replace() should be called on dataclass instances")
-    kwargs = {}
-    for f in fields(obj):
-        if not f.init:
+    all_fields = getattr(obj, _FIELDS)
+    items = all_fields.values() if isinstance(all_fields, dict) else all_fields
+    for f in items:
+        if f._field_type is _FIELD_CLASSVAR:
             continue
-        if f.name in changes:
-            kwargs[f.name] = changes[f.name]
+        if not f.init:
+            if f.name in changes:
+                raise ValueError(
+                    "field %s is declared with init=False, "
+                    "it cannot be specified with replace()" % f.name)
+            continue
+        if f.name not in changes:
+            if f._field_type is _FIELD_INITVAR and f.default is MISSING:
+                raise ValueError(
+                    "InitVar %r must be specified with replace()" % f.name)
+            if f._field_type is _FIELD:
+                changes[f.name] = getattr(obj, f.name)
+    return obj.__class__(**changes)
+
+
+def make_dataclass(cls_name, fields, *, bases=(), namespace=None, init=True,
+                   repr=True, eq=True, order=False, unsafe_hash=False,
+                   frozen=False, match_args=True, kw_only=False, slots=False,
+                   weakref_slot=False, module=None):
+    """Return a new dynamically created dataclass."""
+    if namespace is None:
+        namespace = {}
+    else:
+        namespace = dict(namespace)
+
+    seen = set()
+    annotations = {}
+    defaults = {}
+    typing_mod = None
+    for item in fields:
+        if isinstance(item, str):
+            name = item
+            if typing_mod is None:
+                import typing as typing_mod
+            tp = typing_mod.Any
+        elif isinstance(item, tuple) and len(item) == 2:
+            name, tp = item
+        elif isinstance(item, tuple) and len(item) == 3:
+            name, tp, spec = item
+            defaults[name] = spec
         else:
-            kwargs[f.name] = getattr(obj, f.name)
-    return obj.__class__(**kwargs)
+            raise TypeError("Invalid field: %r" % (item,))
+
+        if not isinstance(name, str) or not name.isidentifier():
+            raise TypeError("Field names must be valid identifiers: %r" % (name,))
+        if name in _KEYWORDS:
+            raise TypeError("Field names must not be keywords: %r" % (name,))
+        if name in seen:
+            raise TypeError("Field name duplicated: %r" % (name,))
+        seen.add(name)
+        annotations[name] = tp
+
+    namespace["__annotations__"] = annotations
+    for name, value in defaults.items():
+        namespace[name] = value
+
+    if module is None:
+        try:
+            module = _sys._getframe(1).f_globals.get("__name__", "__main__")
+        except (AttributeError, ValueError):
+            module = "__main__"
+    if module is not None:
+        namespace["__module__"] = module
+
+    cls = type(cls_name, bases, namespace)
+    return dataclass(
+        cls,
+        init=init,
+        repr=repr,
+        eq=eq,
+        order=order,
+        unsafe_hash=unsafe_hash,
+        frozen=frozen,
+        match_args=match_args,
+        kw_only=kw_only,
+        slots=slots,
+        weakref_slot=weakref_slot,
+    )
