@@ -420,6 +420,19 @@ pyrust_builtin_modules! {
     // `FileType`, help formatters, groups, subparsers, …) injected from
     // `argparse_py.py`.
     argparse @inject,
+    // `urllib.parse` and `urllib` (issue #3149): pure-Python RFC 3986 URL
+    // parsing, joining, quoting, and query-string encoding/decoding injected
+    // from `urllib_parse_py.py`, exposed as `urllib.parse` on the `urllib`
+    // parent package.
+    "urllib.parse" as urllib_parse @inject,
+    urllib,
+    // `html.entities`, `html.parser`, and `html` (issue #3149): static HTML4 /
+    // HTML5 character reference tables in `html_entities.rs`, `escape` /
+    // `unescape` injected from `html_py.py`, and streaming `HTMLParser`
+    // injected from `html_parser_py.py`.
+    "html.entities" as html_entities,
+    "html.parser" as html_parser @inject,
+    html @inject,
 }
 
 include!("finalization.rs");
