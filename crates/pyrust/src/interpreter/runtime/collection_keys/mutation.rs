@@ -243,6 +243,15 @@ impl Interpreter {
                 set.iter()
                     .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
             }
+            PyKey::Bytes(_) => {
+                let py_hash = pyrust_core::py_hash_pykey(&key) as u64;
+                !collect_object_hash_bucket_keys_set(
+                    set,
+                    py_hash,
+                    |k| matches!(k, PyKey::Object { hash, .. } if *hash == py_hash),
+                )
+                .is_empty()
+            }
             _ => false,
         };
         if needs_dedup && self.set_lookup_in(set, &key)?.is_some() {

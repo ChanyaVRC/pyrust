@@ -123,6 +123,7 @@ pub enum BuiltinTypeClassTag {
     Enumerate,
     Slice,
     Reversed,
+    MemoryView,
 }
 
 #[derive(Debug, Clone)]

@@ -117,6 +117,9 @@ fn try_extract_bytes_like(val: &Value) -> Option<Vec<u8>> {
     if let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(val) {
         return Some(snap);
     }
+    if pyrust_builtins::memoryview::is_memoryview(val) {
+        return pyrust_builtins::memoryview::to_bytes_checked(val).ok();
+    }
     if let Some(backing) = builtin_data_backing(val) {
         if let ValueKind::Bytes(rc) = backing.kind() {
             return Some(rc.as_ref().clone());

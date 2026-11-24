@@ -3,7 +3,7 @@
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{ExpandedCallArg, Interpreter};
-use crate::value::{Value, ValueKind};
+use crate::value::Value;
 
 use super::bytes_buffer;
 use super::open_helpers::{
@@ -11,7 +11,11 @@ use super::open_helpers::{
     require_no_args, require_one_arg, user_at_most_one,
 };
 
-pub(super) fn init(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+pub(super) fn init(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
     let inst = expect_self(args, fn_name)?;
     let user = &args[1..];
     if user.len() > 1 {
@@ -24,9 +28,9 @@ pub(super) fn init(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
         ));
     }
     let initial: Vec<u8> = match user.first() {
-        Some(a) => match a.value.kind() {
-            ValueKind::Bytes(b) => b.to_vec(),
-            _ => {
+        Some(a) => match crate::interpreter::try_extract_buffer_bytes(interp, &a.value)? {
+            Some(bytes) => bytes,
+            None => {
                 return Err(PyError::named(
                     "TypeError",
                     format!(
@@ -68,12 +72,17 @@ pub(super) fn readlines(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value
     Ok(Value::list(lines))
 }
 
-pub(super) fn write(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+pub(super) fn write(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
     let inst = open_self_dot(args, fn_name)?;
     require_one_arg(args, fn_name)?;
-    let data: Vec<u8> = match args[1].value.kind() {
-        ValueKind::Bytes(b) => b.to_vec(),
-        _ => {
+    let data: Vec<u8> = match crate::interpreter::try_extract_buffer_bytes(interp, &args[1].value)?
+    {
+        Some(bytes) => bytes,
+        None => {
             return Err(PyError::named(
                 "TypeError",
                 format!("{fn_name}() argument must be bytes-like object"),
@@ -88,6 +97,38 @@ pub(super) fn getvalue(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value>
     let inst = open_self_dot(args, fn_name)?;
     require_no_args(args, fn_name)?;
     Ok(Value::bytes(bytes_buffer::contents(&inst, fn_name)?))
+}
+
+pub(super) fn getbuffer(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let inst = open_self_dot(args, fn_name)?;
+    require_no_args(args, fn_name)?;
+    let (data, exports) = bytes_buffer::buffer_handle(&inst, fn_name)?;
+    pyrust_builtins::memoryview::from_mutable_buffer(
+        data,
+        Some(exports),
+        Value::py_instance(inst),
+        "B",
+        false,
+    )
+}
+
+pub(super) fn close(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    require_no_args(args, fn_name)?;
+    bytes_buffer::check_no_exports(&inst)?;
+    inst.borrow_mut()
+        .attrs
+        .insert_slot("_closed", Value::bool_(true));
+    Ok(Value::none())
+}
+
+pub(super) fn exit(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    bytes_buffer::check_no_exports(&inst)?;
+    inst.borrow_mut()
+        .attrs
+        .insert_slot("_closed", Value::bool_(true));
+    Ok(Value::bool_(false))
 }
 
 pub(super) fn seek(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
@@ -116,46 +157,46 @@ pub(super) fn writelines(
     // element mid-iterable leaves the written prefix in the buffer.
     let items = interp.collect_iterable(&args[1].value)?;
     for item in &items {
-        match item.kind() {
-            ValueKind::Bytes(b) => {
-                bytes_buffer::write(&inst, b)?;
-            }
-            _ => match pyrust_builtins::bytearray::as_bytearray_snapshot(item) {
-                Some(b) => {
-                    bytes_buffer::write(&inst, &b)?;
-                }
-                None => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "a bytes-like object is required, not '{}'",
-                            pyrust_core::builtin_type_name(item)
-                        ),
-                    ));
-                }
-            },
-        }
+        let bytes = crate::interpreter::extract_buffer_bytes(interp, item)?;
+        bytes_buffer::write(&inst, &bytes)?;
     }
     Ok(Value::none())
 }
 
-pub(super) fn readinto(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+pub(super) fn readinto(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
     let inst = open_self_dot(args, fn_name)?;
     require_one_arg(args, fn_name)?;
-    let target = match pyrust_builtins::bytearray::as_bytearray_rc(&args[1].value) {
-        Some(rc) => rc,
-        None => {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "readinto() argument must be read-write bytes-like object, not {}",
-                    pyrust_core::builtin_type_name(&args[1].value)
-                ),
-            ));
-        }
+    let target =
+        crate::interpreter::acquire_writable_buffer(interp, &args[1].value).map_err(|e| {
+            if e.class_name_is("TypeError")
+                && e.to_string().contains("read-write bytes-like object")
+            {
+                PyError::named(
+                    "TypeError",
+                    format!(
+                        "readinto() argument must be read-write bytes-like object, not {}",
+                        pyrust_core::builtin_type_name(&args[1].value)
+                    ),
+                )
+            } else {
+                e
+            }
+        })?;
+    let read_res = {
+        let mut dst = target.data.borrow_mut();
+        bytes_buffer::read_into(
+            &inst,
+            &mut dst[target.offset..target.offset + target.len],
+            fn_name,
+        )
     };
-    let mut dst = target.borrow_mut();
-    let n = bytes_buffer::read_into(&inst, &mut dst, fn_name)?;
+    let rel_res = target.release(interp);
+    let n = read_res?;
+    rel_res?;
     Ok(Value::int(n as i64))
 }
 

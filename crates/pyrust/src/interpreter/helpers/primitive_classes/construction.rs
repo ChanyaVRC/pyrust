@@ -444,6 +444,11 @@ fn builtin_type_instance_probe(obj: &Value) -> BuiltinTypeInstanceProbe {
         ValueKind::BuiltinObject { ops, .. } if pyrust_builtins::slice::is_slice_ops(ops) => {
             BuiltinTypeInstanceProbe::Exact(BuiltinTypeClass::Slice)
         }
+        ValueKind::BuiltinObject { ops, .. }
+            if pyrust_builtins::memoryview::is_memoryview_ops(ops) =>
+        {
+            BuiltinTypeInstanceProbe::Exact(BuiltinTypeClass::MemoryView)
+        }
         _ => BuiltinTypeInstanceProbe::FixedOther,
     }
 }

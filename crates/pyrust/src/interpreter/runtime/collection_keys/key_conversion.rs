@@ -96,6 +96,13 @@ impl Interpreter {
                 value: value.clone(),
             });
         }
+        if pyrust_builtins::memoryview::is_memoryview(value) {
+            let hash = hash_value_with_interp(self, value)? as u64;
+            return Ok(PyKey::Object {
+                hash,
+                value: value.clone(),
+            });
+        }
         if let Some(k) = value.to_key() {
             return Ok(k);
         }

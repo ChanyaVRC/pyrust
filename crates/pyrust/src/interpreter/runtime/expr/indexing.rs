@@ -113,6 +113,7 @@ impl Interpreter {
                 ValueKind::BuiltinObject { ops, .. }
                     if ops.canonical_class_tag()
                         == Some(pyrust_core::CanonicalClassTag::Bytearray)
+                        || pyrust_builtins::memoryview::is_memoryview_ops(ops)
             );
             if target_is_sequence_like {
                 let borrow = state.borrow();

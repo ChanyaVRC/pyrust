@@ -528,6 +528,9 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                 } else {
                     NativeIterFrame::live_keys(v.clone(), kind.live_cursor_code(), iter_type_name)
                 }
+            } else if pyrust_builtins::memoryview::is_memoryview(v) {
+                let items = pyrust_builtins::memoryview::iter_elements(v)?;
+                NativeIterFrame::new(items, "iterator")
             } else {
                 let items = iter_values(v).map_err(|_| {
                     PyError::named(

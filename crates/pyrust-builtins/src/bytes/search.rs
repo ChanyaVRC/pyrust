@@ -5,6 +5,9 @@
 fn extract_bytes_or_int_arg(arg: &Value) -> Result<std::borrow::Cow<'_, [u8]>> {
     match arg.kind() {
         ValueKind::Bytes(rc) => Ok(std::borrow::Cow::Borrowed(rc.as_slice())),
+        ValueKind::BuiltinObject { ops, .. } if crate::memoryview::is_memoryview_ops(ops) => Ok(
+            std::borrow::Cow::Owned(crate::memoryview::to_bytes_checked(arg)?),
+        ),
         ValueKind::Int(n) => {
             let b = u8::try_from(n).map_err(|_| {
                 PyError::named("ValueError", "byte must be in range(0, 256)".to_string())

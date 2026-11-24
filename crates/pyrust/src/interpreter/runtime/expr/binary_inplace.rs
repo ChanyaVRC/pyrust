@@ -275,12 +275,24 @@ impl Interpreter {
                     return Ok(Some(left.clone()));
                 }
                 BinaryOp::Mul => {
+                    let exports =
+                        pyrust_builtins::bytearray::as_bytearray_buffer(left).map(|(_, exp)| exp);
                     if let Some(n) = int_repeat_count(right) {
+                        if let Some(ref exp) = exports
+                            && (n != 1 && !data_rc.borrow().is_empty())
+                        {
+                            pyrust_builtins::bytearray::check_resizable(exp)?;
+                        }
                         bytearray_repeat_in_place(&data_rc, n)?;
                         return Ok(Some(left.clone()));
                     }
                     return match self.resolve_inplace_repeat_slow(left, right)? {
                         InPlaceRepeat::Count(n) => {
+                            if let Some(ref exp) = exports
+                                && (n != 1 && !data_rc.borrow().is_empty())
+                            {
+                                pyrust_builtins::bytearray::check_resizable(exp)?;
+                            }
                             bytearray_repeat_in_place(&data_rc, n)?;
                             Ok(Some(left.clone()))
                         }
@@ -542,12 +554,24 @@ impl Interpreter {
                     return Ok(Some(left.clone()));
                 }
                 BinaryOp::Mul => {
+                    let exports =
+                        pyrust_builtins::bytearray::as_bytearray_buffer(left).map(|(_, exp)| exp);
                     if let Some(n) = int_repeat_count(right) {
+                        if let Some(ref exp) = exports
+                            && (n != 1 && !data_rc.borrow().is_empty())
+                        {
+                            pyrust_builtins::bytearray::check_resizable(exp)?;
+                        }
                         bytearray_repeat_in_place(&data_rc, n)?;
                         return Ok(Some(left.clone()));
                     }
                     return match self.resolve_inplace_repeat_slow(left, right)? {
                         InPlaceRepeat::Count(n) => {
+                            if let Some(ref exp) = exports
+                                && (n != 1 && !data_rc.borrow().is_empty())
+                            {
+                                pyrust_builtins::bytearray::check_resizable(exp)?;
+                            }
                             bytearray_repeat_in_place(&data_rc, n)?;
                             Ok(Some(left.clone()))
                         }
@@ -727,6 +751,12 @@ pub(super) fn bytearray_iadd_in_place(
     left: &Value,
     right: &Value,
 ) -> Result<()> {
+    let lhs_exports = pyrust_builtins::bytearray::as_bytearray_buffer(left)
+        .or_else(|| {
+            builtin_data_backing(left)
+                .and_then(|b| pyrust_builtins::bytearray::as_bytearray_buffer(&b))
+        })
+        .map(|(_, exp)| exp);
     // The RHS may itself be a bytes/bytearray subclass instance, so unwrap its
     // backing before inspecting buffer identity or extracting bytes.
     let rhs_val = coerce_operand_backing(right);
@@ -741,11 +771,31 @@ pub(super) fn bytearray_iadd_in_place(
             return Ok(());
         }
         let rhs = rhs_rc.borrow().clone();
+        if !rhs.is_empty()
+            && let Some(ref exp) = lhs_exports
+        {
+            pyrust_builtins::bytearray::check_resizable(exp)?;
+        }
         data_rc.borrow_mut().extend_from_slice(&rhs);
         return Ok(());
     }
     if let ValueKind::Bytes(rc) = rhs_val.kind() {
+        if !rc.is_empty()
+            && let Some(ref exp) = lhs_exports
+        {
+            pyrust_builtins::bytearray::check_resizable(exp)?;
+        }
         data_rc.borrow_mut().extend_from_slice(rc.as_slice());
+        return Ok(());
+    }
+    if pyrust_builtins::memoryview::is_memoryview(&rhs_val) {
+        let rhs = pyrust_builtins::memoryview::to_bytes_checked(&rhs_val)?;
+        if !rhs.is_empty()
+            && let Some(ref exp) = lhs_exports
+        {
+            pyrust_builtins::bytearray::check_resizable(exp)?;
+        }
+        data_rc.borrow_mut().extend_from_slice(&rhs);
         return Ok(());
     }
     let lhs_name = value_type_name_str(left);

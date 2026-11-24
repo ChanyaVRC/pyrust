@@ -48,6 +48,13 @@ pyrust_module! {
                     Ok(Value::bytes(vec![0u8; b as usize]))
                 }
                 ValueKind::Bytes(rc) => Ok(Value::bytes((**rc).clone())),
+                ValueKind::BuiltinObject { ops, .. }
+                    if pyrust_builtins::memoryview::is_memoryview_ops(ops) =>
+                {
+                    Ok(Value::bytes(pyrust_builtins::memoryview::to_bytes_checked(
+                        &args[0].value,
+                    )?))
+                }
                 ValueKind::Str(_) => Err(PyError::named(
                     "TypeError",
                     "string argument without an encoding".to_string(),
@@ -127,6 +134,13 @@ pyrust_module! {
                     // CPython's constructor protocol priority.
                     if let Some(snapshot) = builtin_subclass_bytes_snapshot(&self_val) {
                         return Ok(Value::bytes(snapshot));
+                    }
+                    // PEP 688 / buffer protocol (`array.array`, custom `__buffer__`):
+                    // takes priority over `__iter__`, matching CPython 3.12.
+                    if let Some(buf_bytes) =
+                        crate::interpreter::try_extract_buffer_bytes(_interp, &self_val)?
+                    {
+                        return Ok(Value::bytes(buf_bytes));
                     }
                     // Otherwise fall through to the iterable path.
                     let type_name = value_type_name_str(&args[0].value).to_string();
@@ -267,6 +281,13 @@ pyrust_module! {
                         .unwrap_or_default();
                     Ok(pyrust_builtins::bytearray::bytearray(snap))
                 }
+                ValueKind::BuiltinObject { ops, .. }
+                    if pyrust_builtins::memoryview::is_memoryview_ops(ops) =>
+                {
+                    Ok(pyrust_builtins::bytearray::bytearray(
+                        pyrust_builtins::memoryview::to_bytes_checked(&args[0].value)?,
+                    ))
+                }
                 ValueKind::Str(_) => Err(PyError::named(
                     "TypeError",
                     "string argument without an encoding".to_string(),
@@ -288,6 +309,11 @@ pyrust_module! {
                     // count-form priority above.
                     if let Some(snapshot) = builtin_subclass_bytes_snapshot(&args[0].value) {
                         return Ok(pyrust_builtins::bytearray::bytearray(snapshot));
+                    }
+                    if let Some(buf_bytes) =
+                        crate::interpreter::try_extract_buffer_bytes(_interp, &args[0].value)?
+                    {
+                        return Ok(pyrust_builtins::bytearray::bytearray(buf_bytes));
                     }
                     let type_name = pyrust_core::builtin_type_name(&args[0].value).into_owned();
                     let items = _interp.collect_iterable(&args[0].value).map_err(|e| {

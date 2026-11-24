@@ -333,6 +333,29 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
                 .iter()
                 .map(|name| (*name).to_string())
                 .collect(),
+            "memoryview" => {
+                let mut names: Vec<String> = pyrust_builtins::memoryview::METHODS
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect();
+                for attr in [
+                    "obj",
+                    "nbytes",
+                    "readonly",
+                    "format",
+                    "itemsize",
+                    "ndim",
+                    "shape",
+                    "strides",
+                    "suboffsets",
+                    "c_contiguous",
+                    "f_contiguous",
+                    "contiguous",
+                ] {
+                    names.push(attr.to_string());
+                }
+                names
+            }
             _ => Vec::new(),
         },
     };
@@ -450,6 +473,9 @@ fn builtin_object_method_names(ops: &dyn pyrust_core::BuiltinTypeOps) -> Vec<Str
         Some(pyrust_core::CanonicalClassTag::Frozenset) => builtin_method_names("frozenset"),
         Some(pyrust_core::CanonicalClassTag::MappingProxy) => builtin_method_names("mappingproxy"),
         _ if pyrust_builtins::slice::is_slice_ops(ops) => builtin_method_names("slice"),
+        _ if pyrust_builtins::memoryview::is_memoryview_ops(ops) => {
+            builtin_method_names("memoryview")
+        }
         _ => Vec::new(),
     }
 }

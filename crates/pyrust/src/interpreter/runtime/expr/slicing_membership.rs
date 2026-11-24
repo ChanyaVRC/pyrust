@@ -132,7 +132,9 @@ impl Interpreter {
                     .expect("object mappingproxy state");
                 return self.eval_slice(&owner, lo, hi, st);
             }
-            if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) {
+            if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray)
+                || pyrust_builtins::memoryview::is_memoryview_ops(ops)
+            {
                 let lo = self.resolve_slice_bound_val(lo)?;
                 let hi = self.resolve_slice_bound_val(hi)?;
                 let st = self.resolve_slice_bound_val(st)?;
@@ -518,6 +520,14 @@ impl Interpreter {
                         sub.is_empty()
                             || rc.windows(sub.len()).any(|w| w == sub.as_ref().as_slice()),
                     )),
+                    ValueKind::BuiltinObject { ops, .. }
+                        if pyrust_builtins::memoryview::is_memoryview_ops(ops) =>
+                    {
+                        let sub = pyrust_builtins::memoryview::to_bytes_checked(&item)?;
+                        Ok(Value::bool_(
+                            sub.is_empty() || rc.windows(sub.len()).any(|w| w == sub.as_slice()),
+                        ))
+                    }
                     _ => Err(pyrust_core::type_err!(
                         "a bytes-like object is required, not '{}'",
                         value_type_name_str(&item)

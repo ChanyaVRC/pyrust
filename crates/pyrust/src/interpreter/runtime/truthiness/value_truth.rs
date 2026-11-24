@@ -58,6 +58,8 @@ impl Interpreter {
                     let owner = pyrust_builtins::mapping_proxy::owner_from_state(state)
                         .expect("object mappingproxy state");
                     Ok(self.object_len(&owner)? != 0)
+                } else if pyrust_builtins::memoryview::is_memoryview_ops(ops) {
+                    pyrust_builtins::memoryview::truthy_checked(value)
                 } else {
                     Ok(ops.truthy(state))
                 }

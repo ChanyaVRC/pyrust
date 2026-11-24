@@ -21,6 +21,7 @@ pub mod iter_helpers;
 pub mod list;
 pub mod mapping_proxy;
 pub mod member_descriptor;
+pub mod memoryview;
 pub mod method_signature;
 pub mod mutable_sequence;
 pub mod native_builtin_callable;
@@ -63,6 +64,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         bound_method::TYPE_NAME => Some(bound_method::BOUND_METHOD_OPS),
         instance_dict::TYPE_NAME => Some(instance_dict::INSTANCE_DICT_OPS),
         mapping_proxy::TYPE_NAME => Some(mapping_proxy::MAPPING_PROXY_OPS),
+        memoryview::TYPE_NAME => Some(memoryview::MEMORYVIEW_OPS),
         slice::TYPE_NAME => Some(slice::SLICE_OPS),
         classmethod::CLASS_TYPE_NAME => Some(classmethod::CLASS_METHOD_ANY_OPS),
         classmethod::NATIVE_CLASS_METHOD_DESCRIPTOR_TYPE_NAME => {

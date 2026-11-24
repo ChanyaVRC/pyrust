@@ -33,6 +33,9 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
             if let Some(elems) = pyrust_builtins::bytearray::iter_elements(value) {
                 return Ok(elems);
             }
+            if pyrust_builtins::memoryview::is_memoryview(value) {
+                return pyrust_builtins::memoryview::iter_elements(value);
+            }
             if let Some(keys) = pyrust_builtins::instance_dict::iter_visible_keys(value) {
                 return Ok(keys);
             }

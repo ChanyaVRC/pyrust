@@ -185,6 +185,11 @@ pub fn call_prevalidated(
     call_on_slice(method, bytes, args, kwargs)
 }
 
+/// Shared `hex(sep=..., bytes_per_sep=1)` helper reused by `memoryview.hex()`.
+pub(crate) fn hex_bytes(bytes: &[u8], args: &[Value], kwargs: &PyDict) -> Result<Value> {
+    bytes_hex(bytes, args, kwargs)
+}
+
 /// Dispatch a bytes method on a raw `&[u8]` slice.  Used by `bytearray` to
 /// reuse bytes read-method implementations without constructing a temporary
 /// `Value::bytes`.  Results that produce new bytes values (upper, lower, etc.)

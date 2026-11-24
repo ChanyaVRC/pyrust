@@ -124,9 +124,12 @@ pub fn bytes_maketrans(args: &[Value]) -> Result<Value> {
             format!("maketrans expected 2 arguments, got {}", args.len()),
         ));
     }
-    // Accept any bytes-like object (bytes, bytearray, subclasses) per CPython.
+    // Accept any bytes-like object (bytes, bytearray, memoryview, subclasses) per CPython.
     let from_owned: std::borrow::Cow<'_, [u8]> = match args[0].kind() {
         ValueKind::Bytes(rc) => std::borrow::Cow::Borrowed(rc.as_slice()),
+        ValueKind::BuiltinObject { ops, .. } if crate::memoryview::is_memoryview_ops(ops) => {
+            std::borrow::Cow::Owned(crate::memoryview::to_bytes_checked(&args[0])?)
+        }
         _ => match crate::bytearray::as_bytearray_snapshot(&args[0]) {
             Some(data) => std::borrow::Cow::Owned(data),
             None => {
@@ -142,6 +145,9 @@ pub fn bytes_maketrans(args: &[Value]) -> Result<Value> {
     };
     let to_owned: std::borrow::Cow<'_, [u8]> = match args[1].kind() {
         ValueKind::Bytes(rc) => std::borrow::Cow::Borrowed(rc.as_slice()),
+        ValueKind::BuiltinObject { ops, .. } if crate::memoryview::is_memoryview_ops(ops) => {
+            std::borrow::Cow::Owned(crate::memoryview::to_bytes_checked(&args[1])?)
+        }
         _ => match crate::bytearray::as_bytearray_snapshot(&args[1]) {
             Some(data) => std::borrow::Cow::Owned(data),
             None => {

@@ -9,6 +9,46 @@ impl Interpreter {
         let ValueKind::BuiltinObject { ops, state } = receiver.kind() else {
             unreachable!("receiver family checked by bound method dispatcher");
         };
+        if pyrust_builtins::memoryview::is_memoryview_ops(ops) {
+            match method {
+                "__enter__" => {
+                    if !kw.is_empty() || !pos.is_empty() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "memoryview.__enter__() takes no arguments".to_string(),
+                        ));
+                    }
+                    if pyrust_builtins::memoryview::is_released(receiver) {
+                        return Err(pyrust_builtins::memoryview::released_error());
+                    }
+                    return Ok(receiver.clone());
+                }
+                "release" => {
+                    if !kw.is_empty() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "memoryview.release() takes no keyword arguments".to_string(),
+                        ));
+                    }
+                    if !pos.is_empty() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "memoryview.release() takes no arguments ({} given)",
+                                pos.len()
+                            ),
+                        ));
+                    }
+                    crate::interpreter::release_memoryview_with_interp(self, receiver)?;
+                    return Ok(Value::none());
+                }
+                "__exit__" => {
+                    crate::interpreter::release_memoryview_with_interp(self, receiver)?;
+                    return Ok(Value::none());
+                }
+                _ => {}
+            }
+        }
         if pyrust_builtins::mapping_proxy::is_object_proxy_ops(ops)
             && matches!(
                 method,

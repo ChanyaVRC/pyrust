@@ -46,11 +46,18 @@ impl Interpreter {
                     return Ok(pyrust_builtins::bytearray::bytearray(out));
                 }
                 (Some(a), None) => {
-                    // bytearray + bytes (or bytes subclass) → bytearray
+                    // bytearray + bytes / memoryview (or bytes subclass) → bytearray
                     let rhs_coerced = coerce_operand_backing(&right);
                     if let ValueKind::Bytes(rc) = rhs_coerced.kind() {
                         let mut out = a;
                         out.extend_from_slice(rc);
+                        return Ok(pyrust_builtins::bytearray::bytearray(out));
+                    }
+                    if pyrust_builtins::memoryview::is_memoryview(&rhs_coerced) {
+                        let rhs_bytes =
+                            pyrust_builtins::memoryview::to_bytes_checked(&rhs_coerced)?;
+                        let mut out = a;
+                        out.extend_from_slice(&rhs_bytes);
                         return Ok(pyrust_builtins::bytearray::bytearray(out));
                     }
                     return Err(pyrust_core::type_err!(
@@ -83,6 +90,16 @@ impl Interpreter {
                     return Err(pyrust_core::type_err!(err_msg));
                 }
                 (None, None) => unreachable!(),
+            }
+        }
+        // bytes + memoryview → bytes (CPython 3.12 parity)
+        if pyrust_builtins::memoryview::is_memoryview(&right) {
+            let lhs_coerced = coerce_operand_backing(&left);
+            if let ValueKind::Bytes(rc) = lhs_coerced.kind() {
+                let rhs_bytes = pyrust_builtins::memoryview::to_bytes_checked(&right)?;
+                let mut out = rc.as_ref().clone();
+                out.extend_from_slice(&rhs_bytes);
+                return Ok(Value::bytes(out));
             }
         }
         // Issue #1939: list/tuple subclasses inherit `__add__`, so `L([1]) +

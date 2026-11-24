@@ -1,9 +1,6 @@
 //! Numeric coercion, buffer extraction, IEEE-754 binary16 conversion, and
 //! buffer offset validation for `struct`.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use crate::error::{PyError, Result};
 use crate::interpreter::{
     Interpreter, builtin_data_backing, invoke_class_method, lookup_value_special_method,
@@ -105,60 +102,17 @@ pub(super) fn value_to_struct_float(
     }
 }
 
-fn try_extract_bytes_like(val: &Value) -> Option<Vec<u8>> {
-    if let ValueKind::Bytes(rc) = val.kind() {
-        return Some(rc.as_ref().clone());
-    }
-    if let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(val) {
-        return Some(snap);
-    }
-    if let Some(backing) = builtin_data_backing(val) {
-        if let ValueKind::Bytes(rc) = backing.kind() {
-            return Some(rc.as_ref().clone());
-        }
-        if let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(&backing) {
-            return Some(snap);
-        }
-    }
-    None
-}
-
-pub(super) fn extract_readonly_bytes(val: &Value) -> Result<Vec<u8>> {
-    try_extract_bytes_like(val).ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            format!(
-                "a bytes-like object is required, not '{}'",
-                value_type_name_str(val)
-            ),
-        )
-    })
-}
-
-pub(super) fn extract_writable_bytearray(val: &Value) -> Result<Rc<RefCell<Vec<u8>>>> {
-    if let Some(rc) = pyrust_builtins::bytearray::as_bytearray_rc(val) {
-        return Ok(rc);
-    }
-    if let Some(backing) = builtin_data_backing(val)
-        && let Some(rc) = pyrust_builtins::bytearray::as_bytearray_rc(&backing)
-    {
-        return Ok(rc);
-    }
-    Err(PyError::named(
-        "TypeError",
-        format!(
-            "argument must be read-write bytes-like object, not {}",
-            value_type_name_str(val)
-        ),
-    ))
+pub(super) fn extract_readonly_bytes(interp: &mut Interpreter, val: &Value) -> Result<Vec<u8>> {
+    crate::interpreter::extract_buffer_bytes(interp, val)
 }
 
 pub(super) fn extract_bytes_for_s_or_p(
+    interp: &mut Interpreter,
     val: &Value,
     fmt_char: char,
     error_cls: &Value,
 ) -> Result<Vec<u8>> {
-    try_extract_bytes_like(val).ok_or_else(|| {
+    crate::interpreter::try_extract_buffer_bytes(interp, val)?.ok_or_else(|| {
         raise_struct_error(
             error_cls,
             format!("argument for '{fmt_char}' must be a bytes object"),

@@ -750,6 +750,29 @@ impl Interpreter {
             let result = r?;
             return self.truthy_value(&result);
         }
+        // PEP 3118 / PEP 688: `memoryview == obj` / `obj == memoryview` where
+        // `obj` is a buffer exporter (e.g. `array.array` or custom `__buffer__`)
+        // whose `__eq__` returned `NotImplemented`.
+        if pyrust_builtins::memoryview::is_memoryview(a)
+            && !pyrust_builtins::memoryview::is_released(a)
+            && matches!(b.kind(), ValueKind::PyInstance(_))
+            && let Ok(b_mv) =
+                crate::interpreter::acquire_buffer_view(self, b, crate::interpreter::BUF_FULL_RO)
+        {
+            let eq = a == &b_mv;
+            let _ = crate::interpreter::release_memoryview_with_interp(self, &b_mv);
+            return Ok(eq);
+        }
+        if pyrust_builtins::memoryview::is_memoryview(b)
+            && !pyrust_builtins::memoryview::is_released(b)
+            && matches!(a.kind(), ValueKind::PyInstance(_))
+            && let Ok(a_mv) =
+                crate::interpreter::acquire_buffer_view(self, a, crate::interpreter::BUF_FULL_RO)
+        {
+            let eq = &a_mv == b;
+            let _ = crate::interpreter::release_memoryview_with_interp(self, &a_mv);
+            return Ok(eq);
+        }
         // Issue #1204: if a PyInstance has a scalar primitive backing
         // (e.g. MyInt subclass) and no user __eq__ was found, compare the
         // backing values so `MyInt(5) == 5` returns True.

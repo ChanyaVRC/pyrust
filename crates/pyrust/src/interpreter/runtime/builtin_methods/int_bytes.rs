@@ -31,6 +31,9 @@ impl Interpreter {
         if let Some(data) = pyrust_builtins::bytearray::as_bytearray_snapshot(source) {
             return Ok(data);
         }
+        if pyrust_builtins::memoryview::is_memoryview(source) {
+            return pyrust_builtins::memoryview::to_bytes_checked(source);
+        }
         match source.kind() {
             ValueKind::Bytes(bytes) => Ok((**bytes).clone()),
             ValueKind::Str(_) | ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {

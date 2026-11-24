@@ -113,11 +113,15 @@ pub(super) fn unpack_from_slice(compiled: &CompiledFormat, buf: &[u8]) -> Value 
     Value::tuple(results)
 }
 
-pub(super) fn unpack_entry(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value> {
+pub(super) fn unpack_entry(
+    interp: &mut Interpreter,
+    fn_name: &str,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
     reject_keyword_args_expanded(fn_name, args)?;
     let error_cls = &args[0].value;
     let compiled = compile_format(&args[1].value, error_cls)?;
-    let buf = extract_readonly_bytes(&args[2].value)?;
+    let buf = extract_readonly_bytes(interp, &args[2].value)?;
     if buf.len() != compiled.size {
         return Err(raise_struct_error(
             error_cls,
@@ -135,7 +139,7 @@ pub(super) fn unpack_from_entry(
     reject_keyword_args_expanded(fn_name, args)?;
     let error_cls = &args[0].value;
     let compiled = compile_format(&args[1].value, error_cls)?;
-    let buf = extract_readonly_bytes(&args[2].value)?;
+    let buf = extract_readonly_bytes(interp, &args[2].value)?;
     let start = resolve_offset(
         interp,
         &args[3].value,
@@ -150,11 +154,15 @@ pub(super) fn unpack_from_entry(
     ))
 }
 
-pub(super) fn check_iter_unpack_entry(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value> {
+pub(super) fn check_iter_unpack_entry(
+    interp: &mut Interpreter,
+    fn_name: &str,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
     reject_keyword_args_expanded(fn_name, args)?;
     let error_cls = &args[0].value;
     let compiled = compile_format(&args[1].value, error_cls)?;
-    let buf = extract_readonly_bytes(&args[2].value)?;
+    let buf = extract_readonly_bytes(interp, &args[2].value)?;
     if compiled.size == 0 {
         return Err(raise_struct_error(
             error_cls,

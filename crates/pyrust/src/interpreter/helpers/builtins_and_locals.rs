@@ -32,6 +32,7 @@ pub(crate) fn builtin_class_doc(name: &str) -> Option<&'static str> {
         "bytes" => {
             "bytes(iterable_of_ints) -> bytes\nbytes(string, encoding[, errors]) -> bytes\nbytes(bytes_or_buffer) -> immutable copy of bytes_or_buffer\nbytes(int) -> bytes object of size given by the parameter initialized with null bytes\nbytes() -> empty bytes object\n\nConstruct an immutable array of bytes from:\n  - an iterable yielding integers in range(256)\n  - a text string encoded using the specified encoding\n  - any object implementing the buffer API.\n  - an integer"
         }
+        "memoryview" => "Create a new memoryview object which references the given object.",
         "float" => "Convert a string or number to a floating point number, if possible.",
         "bool" => {
             "bool(x) -> bool\n\nReturns True when the argument x is true, False otherwise.\nThe builtins True and False are the only two instances of the class bool.\nThe class bool is a subclass of the class int, and cannot be subclassed."

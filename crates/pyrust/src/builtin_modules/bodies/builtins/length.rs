@@ -50,6 +50,8 @@ pyrust_module! {
                     let owner = pyrust_builtins::mapping_proxy::owner_from_state(state)
                         .expect("object mappingproxy state");
                     _interp.object_len(&owner)?
+                } else if pyrust_builtins::memoryview::is_memoryview_ops(ops) {
+                    pyrust_builtins::memoryview::len_checked(value)? as i64
                 } else {
                     match ops.len(state) {
                         Some(n) => n as i64,

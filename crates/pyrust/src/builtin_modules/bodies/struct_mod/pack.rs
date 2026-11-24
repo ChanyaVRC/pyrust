@@ -9,9 +9,8 @@ use crate::interpreter::{
 use crate::value::{Value, ValueKind};
 
 use super::coercion::{
-    check_signed_range, check_unsigned_range, extract_bytes_for_s_or_p, extract_writable_bytearray,
-    f64_to_f16_bits, parse_offset_i128, validate_offset_i128, value_to_struct_float,
-    value_to_struct_int,
+    check_signed_range, check_unsigned_range, extract_bytes_for_s_or_p, f64_to_f16_bits,
+    parse_offset_i128, validate_offset_i128, value_to_struct_float, value_to_struct_int,
 };
 use super::format::{CompiledFormat, Endian, FormatCode, compile_format, raise_struct_error};
 
@@ -66,13 +65,13 @@ pub(super) fn pack_into_vec(
         match item.code {
             FormatCode::Pad => {}
             FormatCode::Bytes => {
-                let raw = extract_bytes_for_s_or_p(&values[arg_idx], 's', error_cls)?;
+                let raw = extract_bytes_for_s_or_p(interp, &values[arg_idx], 's', error_cls)?;
                 arg_idx += 1;
                 let copy_len = raw.len().min(item.repeat);
                 out[cursor..cursor + copy_len].copy_from_slice(&raw[..copy_len]);
             }
             FormatCode::PascalBytes => {
-                let raw = extract_bytes_for_s_or_p(&values[arg_idx], 'p', error_cls)?;
+                let raw = extract_bytes_for_s_or_p(interp, &values[arg_idx], 'p', error_cls)?;
                 arg_idx += 1;
                 if item.repeat > 0 {
                     let max_data = item.repeat - 1;
@@ -273,31 +272,43 @@ pub(super) fn pack_into_entry(
     reject_keyword_args_expanded(fn_name, args)?;
     let error_cls = &args[0].value;
     let compiled = compile_format(&args[1].value, error_cls)?;
-    let target = extract_writable_bytearray(&args[2].value)?;
-    let values: Vec<Value> = match args[4].value.kind() {
-        ValueKind::Tuple(items) => items.to_vec(),
-        _ => Vec::new(),
-    };
-    if values.len() != compiled.num_values {
-        return Err(raise_struct_error(
-            error_cls,
-            format!(
-                "pack_into expected {} items for packing (got {})",
-                compiled.num_values,
-                values.len()
-            ),
-        ));
-    }
-    let offset_i128 = parse_offset_i128(interp, &args[3].value, true)?;
-    let initial_len = target.borrow().len();
-    let _ = validate_offset_i128(offset_i128, initial_len, compiled.size, true, error_cls)?;
-    // Pack into a scratch Vec before borrowing the bytearray mutably so
-    // user `__index__`/`__bool__`/`__float__` cannot alias the borrow or
-    // leave a partially written buffer on error.
-    let packed = pack_into_vec(interp, &compiled, &values, error_cls)?;
-    let final_len = target.borrow().len();
-    let start = validate_offset_i128(offset_i128, final_len, compiled.size, true, error_cls)?;
-    let mut dst = target.borrow_mut();
-    dst[start..start + compiled.size].copy_from_slice(&packed);
-    Ok(Value::none())
+    let target = crate::interpreter::acquire_writable_buffer(interp, &args[2].value)?;
+    let result = (|| -> Result<Value> {
+        let values: Vec<Value> = match args[4].value.kind() {
+            ValueKind::Tuple(items) => items.to_vec(),
+            _ => Vec::new(),
+        };
+        if values.len() != compiled.num_values {
+            return Err(raise_struct_error(
+                error_cls,
+                format!(
+                    "pack_into expected {} items for packing (got {})",
+                    compiled.num_values,
+                    values.len()
+                ),
+            ));
+        }
+        let offset_i128 = parse_offset_i128(interp, &args[3].value, true)?;
+        let initial_len = target.len;
+        let _ = validate_offset_i128(offset_i128, initial_len, compiled.size, true, error_cls)?;
+        // Pack into a scratch Vec before borrowing the buffer mutably so
+        // user `__index__`/`__bool__`/`__float__` cannot alias the borrow or
+        // leave a partially written buffer on error.
+        let packed = pack_into_vec(interp, &compiled, &values, error_cls)?;
+        let final_len = target
+            .data
+            .borrow()
+            .len()
+            .saturating_sub(target.offset)
+            .min(target.len);
+        let start = validate_offset_i128(offset_i128, final_len, compiled.size, true, error_cls)?;
+        let mut dst = target.data.borrow_mut();
+        let abs_start = target.offset + start;
+        dst[abs_start..abs_start + compiled.size].copy_from_slice(&packed);
+        Ok(Value::none())
+    })();
+    let rel_res = target.release(interp);
+    let out = result?;
+    rel_res?;
+    Ok(out)
 }
