@@ -2,11 +2,11 @@
 
 mod program_execution {
     use super::{
-        CallDepthGuard, EnvRef, Environment, FrameKind, HashMap, IntMaxStrDigitsExecutionGuard,
-        Interpreter, PyDict, PyError, PyKey, Rc, RegSlice, RegsBuf, Result, Stmt, StrKey, Value,
-        ValueKind, VmFrameView, cached_builtins_module, exception_str_with_dispatch,
-        format_exc_chain_prefix, format_exception_group_traceback, intern_string,
-        is_exception_group_value, module_env, render_instance_repr, smallvec,
+        CallDepthGuard, CellSlice, EnvRef, Environment, FrameKind, HashMap,
+        IntMaxStrDigitsExecutionGuard, Interpreter, PyDict, PyError, PyKey, Rc, RegSlice, RegsBuf,
+        Result, Stmt, StrKey, Value, ValueKind, VmFrameView, cached_builtins_module,
+        exception_str_with_dispatch, format_exc_chain_prefix, format_exception_group_traceback,
+        intern_string, is_exception_group_value, module_env, render_instance_repr, smallvec,
     };
     include!("runtime/program_execution.rs");
 }
@@ -81,14 +81,15 @@ pub(crate) use call_state::{
 mod calls {
     use super::classes::{PrimitiveLayout, classify_primitive_layout, primitive_layout_for_class};
     use super::{
-        CallDepthGuard, EnvRef, ExcHandlersBuf, ExpandedArgBuf, ExpandedCallArg, FnCode, FrameKind,
-        GeneratorFrame, GeneratorKind, HandledExcBuf, InstanceAttrs, Interpreter, PyClass, PyDict,
-        PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result, UserFunction, Value,
-        ValueKind, VmFrameView, bind_class_level_method_wrapper, call_depth, call_descriptor_get,
-        call_slot_value_unbound, class_chain_new_slot_wrapped, class_is_subclass_of,
-        invoke_class_method, is_exception_class, is_primitive_class, lookup_class_attr,
-        mapping_entries_for_expansion, max_call_depth, object_class_singleton, slot_is_descriptor,
-        smallvec, type_class_singleton, value_type_name_str,
+        CallDepthGuard, CellSlice, CellsBuf, ExcHandlersBuf, ExpandedArgBuf, ExpandedCallArg,
+        FnCode, FrameKind, GeneratorFrame, GeneratorKind, HandledExcBuf, InstanceAttrs,
+        Interpreter, PyClass, PyDict, PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf,
+        Result, UserFunction, Value, ValueKind, VmFrameView, allocate_frame_cells,
+        bind_class_level_method_wrapper, call_depth, call_descriptor_get, call_slot_value_unbound,
+        class_chain_new_slot_wrapped, class_is_subclass_of, invoke_class_method,
+        is_exception_class, is_primitive_class, lookup_class_attr, mapping_entries_for_expansion,
+        max_call_depth, object_class_singleton, slot_is_descriptor, smallvec, type_class_singleton,
+        value_type_name_str,
     };
     include!("runtime/calls.rs");
 }
@@ -107,13 +108,13 @@ mod call_dispatch {
 
 mod classes {
     use super::{
-        ActiveClassAnnotationScopes, EnvRef, Environment, ExpandedArgBuf, ExpandedCallArg,
-        FrameKind, HashMap, HashSet, IndexMap, Interpreter, PrimitiveClassKind, PyClass, PyDict,
-        PyError, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result, UserFunction, UserFunctionParam,
-        Value, ValueKind, VmFrameView, Weak, class_is_subclass_of, class_mro_items,
-        has_local_binding_in_current_or_ancestor, invoke_class_method, lookup_class_attr,
-        make_slot_member_descriptor, metaclass_of, object_class_singleton, primitive_class_kind,
-        smallvec, type_class_singleton, value_type_name_str, vm_read,
+        ActiveClassAnnotationScopes, CellSlice, CellsBuf, EnvRef, Environment, ExpandedArgBuf,
+        ExpandedCallArg, FrameKind, HashMap, HashSet, IndexMap, Interpreter, PrimitiveClassKind,
+        PyClass, PyDict, PyError, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result, UserFunction,
+        UserFunctionParam, Value, ValueKind, VmFrameView, Weak, class_is_subclass_of,
+        class_mro_items, invoke_class_method, lookup_class_attr, make_slot_member_descriptor,
+        metaclass_of, object_class_singleton, primitive_class_kind, smallvec, type_class_singleton,
+        value_type_name_str, vm_read,
     };
     include!("runtime/classes.rs");
 }
@@ -194,7 +195,7 @@ mod fast_path {
     };
     use super::execution::vm_read;
     use super::{
-        BigRangeState, BinaryOp, CallBuiltinCacheEntry, ExpandedCallArg, GeneratorKind,
+        BigRangeState, BinaryOp, CallBuiltinCacheEntry, CellSlice, ExpandedCallArg, GeneratorKind,
         GlobalCacheEntry, GlobalResolutionCache, Interpreter, IterState, LiveDictViewItem, MemoKey,
         NativeClassMethodCachePlan, OrderedIterationWatch, PyDict, PyError, PyKey, Rc,
         ReadAttributeCachePlan, ReadMethodCachePlan, RegSlice, Result, StrKey, UserFunction, Value,
@@ -202,7 +203,8 @@ mod fast_path {
         bind_cached_native_class_method, comp_read_is_free, float_divmod, indexed_sequence_item,
         invoke_class_method, live_collection_len, live_dict_view_item,
         ordered_mapping_guard_outcome, py_mod_i64, read_attribute_cache_plan,
-        read_method_cache_plan, value_from_bigint, write_attribute_cache_class,
+        read_method_cache_plan, unbound_binding_error, value_from_bigint,
+        write_attribute_cache_class,
     };
     include!("runtime/fast_path.rs");
 }
@@ -263,17 +265,17 @@ use attributes::{class_direct_subclasses, class_mro_items};
 
 mod namespaces {
     use super::{
-        CachedImportModuleRegistry, CachedModuleClass, CollectionMutationState, ENV_POOL_MAX,
-        EnvRef, Environment, ExpandedCallArg, FrameKind, HashMap, InstanceAttrs, Interpreter,
-        MODULE_CLASS_CACHE_SLOT_COUNT, ModuleClassCache, ModuleClassCacheSlot, ModuleMutationState,
-        PathBuf, PyClass, PyDict, PyError, PyInstance, PyKey, PyModule, Rc, RefCell, RegSlice,
-        Result, StrKey, Value, ValueKind, active_live_class_namespace, cached_builtins_module,
-        call_del_if_last_binding, call_del_if_last_binding_in_env, env_assign_local,
-        find_enclosing_local_env_for_name, get_int_max_str_digits, invoke_class_method,
-        is_cached_builtins_module, lookup_class_attr, lookup_name_in_enclosing_local_env,
-        lookup_name_in_env, lookup_name_in_env_as_free, lookup_name_in_module,
+        CachedImportModuleRegistry, CachedModuleClass, CellSlice, CollectionMutationState,
+        ENV_POOL_MAX, EnvRef, Environment, ExpandedCallArg, FrameKind, HashMap, InstanceAttrs,
+        Interpreter, MODULE_CLASS_CACHE_SLOT_COUNT, ModuleClassCache, ModuleClassCacheSlot,
+        ModuleMutationState, PathBuf, PyClass, PyDict, PyError, PyInstance, PyKey, PyModule, Rc,
+        RefCell, RegSlice, Result, StrKey, Value, ValueKind, active_live_class_namespace,
+        cached_builtins_module, call_del_if_last_binding, call_del_if_last_binding_in_env,
+        env_assign_local, get_int_max_str_digits, invoke_class_method, is_cached_builtins_module,
+        lookup_class_attr, lookup_name_in_env, lookup_name_in_env_as_free, lookup_name_in_module,
         lookup_value_special_method, module_env, module_type_singleton, object_class_singleton,
-        set_int_max_str_digits, value_type_name_str, values_are_identical, vm_read,
+        set_int_max_str_digits, unbound_binding_error, value_type_name_str, values_are_identical,
+        vm_read,
     };
     include!("runtime/namespaces.rs");
 }
@@ -374,14 +376,14 @@ mod execution {
         try_scalar_truthiness_fast, try_tagged_int_unary, value_is_builtin_len,
     };
     use super::{
-        CallDepthGuard, EnvRef, FrameKind, GeneratorCell, HashMap, Interpreter, IterCacheBuf,
+        CallDepthGuard, CellSlice, EnvRef, FrameKind, GeneratorCell, Interpreter, IterCacheBuf,
         IterState, ItersBuf, KwCallMappingMerge, LoopIteratorAdvance, MemoKey, PyError, Rc,
         RegSlice, Result, Value, ValueKind, VmFrameCache, VmFrameView, bump_global_struct_version,
         call_depth, callable_error_name, duplicate_keyword_error, extract_stop_iteration_value,
         initialize_typevar_attr, intern_string_value, is_stop_iteration_error,
         keyword_mapping_operand_error, lookup_class_attr, make_slice_value,
         make_type_alias_from_syntax, make_typevar_from_syntax, max_call_depth, star_operand_error,
-        value_class_object, value_type_name_str,
+        unbound_binding_error, value_class_object, value_type_name_str,
     };
     include!("runtime/vm.rs");
     include!("runtime/vm/tests.rs");

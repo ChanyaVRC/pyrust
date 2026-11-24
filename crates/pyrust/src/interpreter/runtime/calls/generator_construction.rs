@@ -3,7 +3,7 @@ impl Interpreter {
     fn build_generator_value(
         code: &Rc<crate::bytecode::FnCode>,
         regs: RegsBuf,
-        saved_env: EnvRef,
+        cells: CellsBuf,
         function: &Rc<UserFunction>,
     ) -> Value {
         let num_iters = code.num_iters as usize;
@@ -25,18 +25,22 @@ impl Interpreter {
             name: std::sync::Arc::clone(&fn_name),
             qualname,
         }));
+        let boxed_cells: Box<[pyrust_core::CellSlot]> = if cells.is_empty() {
+            Box::new([])
+        } else {
+            cells.into_vec().into_boxed_slice()
+        };
         let frame = GeneratorFrame {
             code: Rc::clone(code),
             regs: regs.into_vec(),
+            cells: boxed_cells,
             iters: smallvec![None; num_iters],
             exc_handlers: ExcHandlersBuf::new(),
             pc: 0,
             done: false,
-            saved_env,
             handled_exc_slice: HandledExcBuf::new(),
             active_exception: None,
             exc_saved_active_slice: Vec::new(),
-            local_index: Rc::clone(&function.local_index),
             yield_dst: 0,
             suspended_line: 0,
             last_return_value: None,

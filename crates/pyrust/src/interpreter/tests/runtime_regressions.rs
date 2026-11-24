@@ -415,7 +415,11 @@ fn backingless_builtin_subclass_instances_raise_runtime_error_without_stack_over
             class: Rc::clone(class_rc),
             attrs: InstanceAttrs::new(),
         })));
-        interp.env.borrow_mut().values.insert(var_name, inst);
+        interp
+            .env
+            .borrow_mut()
+            .namespace_values_mut()
+            .insert(var_name, inst);
     };
 
     for (cls, var) in [

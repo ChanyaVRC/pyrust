@@ -382,9 +382,12 @@ mod tests {
         let root = Environment::new(None);
         {
             let mut root = root.borrow_mut();
-            root.values.insert("__name__", Value::string("__main__"));
-            root.values.insert("captured", Value::int(1));
-            root.values.insert("from_function", Value::int(2));
+            root.namespace_values_mut()
+                .insert("__name__", Value::string("__main__"));
+            root.namespace_values_mut()
+                .insert("captured", Value::int(1));
+            root.namespace_values_mut()
+                .insert("from_function", Value::int(2));
         }
         // Registers are allocated in source binding order; `captured` is a
         // module-level cell variable whose value lives in the env instead.
@@ -493,7 +496,7 @@ mod tests {
                 "__cached__",
             ] {
                 root.record_namespace_env_binding(dunder);
-                root.values.insert(dunder, Value::none());
+                root.namespace_values_mut().insert(dunder, Value::none());
             }
         }
         let delta_mask = super::namespace_name_interest_mask("delta");
@@ -518,15 +521,21 @@ mod tests {
         assert!(
             !root
                 .borrow_mut()
-                .values
+                .namespace_values_mut()
                 .update_if_present("delta", Value::int(2))
         );
-        assert!(root.borrow().values.get("delta").is_none());
+        assert!(root.borrow().namespace_values().get("delta").is_none());
 
         // Subsequent write-back in slot order preserves `alpha` before `delta`.
-        root.borrow_mut().values.insert("alpha", Value::int(1));
-        root.borrow_mut().values.insert("delta", Value::int(2));
-        root.borrow_mut().values.insert("gamma", Value::int(3));
+        root.borrow_mut()
+            .namespace_values_mut()
+            .insert("alpha", Value::int(1));
+        root.borrow_mut()
+            .namespace_values_mut()
+            .insert("delta", Value::int(2));
+        root.borrow_mut()
+            .namespace_values_mut()
+            .insert("gamma", Value::int(3));
         let user_names: Vec<String> = root
             .borrow()
             .namespace_materialization_snapshot()
@@ -545,7 +554,8 @@ mod tests {
         let root = Environment::new(None);
         {
             let mut root = root.borrow_mut();
-            root.values.insert("__name__", Value::string("__main__"));
+            root.namespace_values_mut()
+                .insert("__name__", Value::string("__main__"));
         }
         let local_index = Rc::new(HashMap::from([
             ("a".to_string(), 0_u32),
@@ -575,7 +585,9 @@ mod tests {
         // Out-of-slot `global g_only = 42` lands before `e = 5`.
         root.borrow()
             .record_namespace_binding_order_insert("g_only");
-        root.borrow_mut().values.insert("g_only", Value::int(42));
+        root.borrow_mut()
+            .namespace_values_mut()
+            .insert("g_only", Value::int(42));
         regs[3] = Value::int(5);
         root.borrow().record_namespace_binding_order_insert("e");
 
@@ -592,7 +604,7 @@ mod tests {
     fn binding_order_journal_initializes_for_global_only_write() {
         let root = Environment::new(None);
         root.borrow_mut()
-            .values
+            .namespace_values_mut()
             .insert("__name__", Value::string("__main__"));
         let local_index = Rc::new(HashMap::from([
             ("d".to_string(), 0_u32),
@@ -609,7 +621,9 @@ mod tests {
         // Binding `g_only` while `d` is live and `e` is still unset must place
         // `g_only` between `d` and `e`.
         root.borrow().record_namespace_out_of_order_insert("g_only");
-        root.borrow_mut().values.insert("g_only", Value::int(42));
+        root.borrow_mut()
+            .namespace_values_mut()
+            .insert("g_only", Value::int(42));
         regs[1] = Value::int(5);
         root.borrow().record_namespace_binding_order_insert("e");
 
@@ -676,5 +690,41 @@ mod tests {
         // Exposing globals forces sync unconditionally.
         let _globals = root.borrow().expose_namespace_globals();
         assert!(root.borrow().needs_namespace_module_write_sync(0b1100));
+    }
+
+    #[test]
+    fn cell_slot_shares_mutable_state_and_tracks_identity() {
+        let cell = super::CellSlot::new_empty();
+        let alias = cell.clone();
+        let distinct = super::CellSlot::new_empty();
+        assert!(!cell.is_bound());
+        assert!(cell.get().is_none());
+        assert!(cell.ptr_eq(&alias));
+        assert!(!cell.ptr_eq(&distinct));
+        assert_eq!(cell.as_ptr(), alias.as_ptr());
+
+        cell.set(Value::int(42));
+        assert!(alias.is_bound());
+        assert_eq!(alias.get().and_then(|v| v.as_int()), Some(42));
+
+        let taken = alias.take();
+        assert_eq!(taken.and_then(|v| v.as_int()), Some(42));
+        assert!(!cell.is_bound());
+        assert!(cell.take().is_none());
+    }
+
+    #[test]
+    fn environment_storage_is_mutually_exclusive_namespace_or_cells() {
+        let root = Environment::new(None);
+        assert!(root.borrow().try_namespace_values().is_some());
+        assert!(root.borrow().cells().is_none());
+
+        let slot = super::CellSlot::new(Value::int(7));
+        let mut cells = smallvec::SmallVec::new();
+        cells.push(slot.clone());
+        let cell_env = Environment::new_cells(Some(root.clone()), cells);
+        assert!(cell_env.borrow().try_namespace_values().is_none());
+        assert_eq!(cell_env.borrow().cells().map(<[_]>::len), Some(1));
+        assert!(cell_env.borrow().cells().unwrap()[0].ptr_eq(&slot));
     }
 }

@@ -51,6 +51,8 @@ impl Compiler {
                             let name_idx = self.intern_name(name);
                             self.emit(Insn::SyncModuleGlobal(reg, name_idx));
                         }
+                    } else if let Some(cell_idx) = self.resolve_cell_slot_for_write(name) {
+                        self.emit(Insn::StoreCell(cell_idx, val_reg));
                     } else {
                         let name_idx = self.intern_name(name);
                         self.emit(Insn::StoreGlobal(name_idx, val_reg));

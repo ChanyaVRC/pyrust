@@ -212,7 +212,7 @@ impl Interpreter {
             let catch_env = catch_func
                 .as_ref()
                 .map(|func| &func.env)
-                .or_else(|| catch_gen_frame.map(|gframe| &gframe.saved_env))
+                .or_else(|| catch_gen_frame.map(|gframe| &gframe.function.env))
                 .or_else(|| last_view.and_then(|view| view.env.as_ref()))
                 .unwrap_or(&self.env);
             let catch_globals = pyrust_core::FrameGlobals::for_environment(catch_env);

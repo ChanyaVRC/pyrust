@@ -23,8 +23,11 @@ impl Compiler {
         // runtime attach that provider to the alias thunk without changing
         // method closure semantics.
         let needs_annotation_env = !type_params.is_empty() || self.is_class_body;
+        let shadowed_before = self.shadowed_type_params.len();
         if needs_annotation_env {
             self.emit(Insn::PushTypeParamEnv);
+            self.shadowed_type_params
+                .extend(type_params.iter().map(|tp| Symbol::intern(&tp.name)));
         }
         // Phase 1: create every TypeVar (unbounded) and bind its name, so the RHS
         // and any bound/constraint can reference every parameter by name.
@@ -112,6 +115,7 @@ impl Compiler {
         // (reachable from `__type_params__`), so a later `__bound__` access can
         // still resolve a forward/self reference.
         if needs_annotation_env {
+            self.shadowed_type_params.truncate(shadowed_before);
             self.emit(Insn::PopTypeParamEnv);
         }
 
@@ -130,19 +134,7 @@ impl Compiler {
 
         // ── Step 6: store the alias under `name` ─────────────────────────────
         let target = crate::ast::AssignTarget::Name(Symbol::intern(name));
-        if let Some(reg) = self.local_reg(name) {
-            if reg != dst {
-                self.emit(Insn::Move(reg, dst));
-            }
-            self.maybe_record_class_store(reg);
-            if self.is_module_scope {
-                let name_idx = self.intern_name(name);
-                self.emit(Insn::SyncModuleGlobal(reg, name_idx));
-            }
-        } else {
-            let name_idx = self.intern_name(name);
-            self.emit(Insn::StoreGlobal(name_idx, dst));
-        }
+        self.compile_store_name(name, dst);
         self.free_temp(dst);
         self.mark_target_def(&target);
     }

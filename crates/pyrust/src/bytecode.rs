@@ -19,7 +19,10 @@ pub(crate) use cache::{
 };
 pub use code::FnCode;
 pub(crate) use code::{EXC_NO_HANDLER, MAX_FRAME_REGS};
-pub use function::{CellVar, FnParamSpec, FnProto, compute_param_binds, compute_self_bind};
+pub use function::{
+    CaptureSource, CellSlotMeta, CellVar, FnParamSpec, FnProto, compute_param_binds,
+    compute_self_bind,
+};
 pub use instruction::{
     DictKeyKindHint, Insn, IntRangeExactGuard, KwCallName, NO_CLASS_LOCAL, NO_KWARGS, Reg,
 };

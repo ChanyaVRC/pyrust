@@ -1,19 +1,38 @@
 // globals/locals namespace operations.
 impl Interpreter {
-    /// Resolve a cell/free-variable read, including its CPython error class and
-    /// the module/builtins fallback for a deleted binding.
-    pub(crate) fn resolve_cell_value(
+    /// Delete a cell-slot binding in O(1) (`Insn::DeleteCell`, issues #452 / #2348).
+    ///
+    /// When `raise_if_missing` is true (source `del x`), an already-empty slot
+    /// raises `UnboundLocalError` (for an own cell) or free-variable `NameError`
+    /// (for a `nonlocal` / freevar cell). When false (PEP 3110 `except E as e:`
+    /// cleanup), clearing an empty slot is an idempotent no-op.
+    pub(crate) fn exec_delete_cell(
         &mut self,
         code: &crate::bytecode::FnCode,
-        name: &str,
-    ) -> Result<Value> {
-        let is_cell_local = code.cell_vars.iter().any(|cell| cell == name);
-        let is_free = !is_cell_local && comp_read_is_free(code, name);
-        let namespace = self.prepare_global_namespace(name);
-        match self.lookup_name_inner(name, is_free)? {
-            Some(value) => Ok(value),
-            None => self.resolve_cell_miss(name, &namespace),
-        }
+        regs: &RegSlice,
+        cells: CellSlice,
+        cell_idx: u16,
+        raise_if_missing: bool,
+    ) -> Result<()> {
+        let deleted = cells.as_slice()[cell_idx as usize].take();
+        let Some(deleted) = deleted else {
+            if raise_if_missing {
+                let meta = code.cell_slots[cell_idx as usize];
+                return Err(unbound_binding_error(
+                    meta.name.as_str(),
+                    meta.is_free_error,
+                ));
+            }
+            return Ok(());
+        };
+        call_del_if_last_binding_in_env(
+            self,
+            deleted,
+            &self.env.clone(),
+            regs,
+            code.num_locals as usize,
+        );
+        Ok(())
     }
 
     /// Validate a fast-local read without exposing scope-specific name errors
@@ -242,7 +261,7 @@ impl Interpreter {
             let env_value = if write_target.is_none() && !synchronize_siblings {
                 module_env(&self.env)
                     .borrow_mut()
-                    .values
+                    .namespace_values_mut()
                     .update_if_present(name, value);
                 return Ok(());
             } else {
@@ -250,7 +269,7 @@ impl Interpreter {
             };
             module_env(&self.env)
                 .borrow_mut()
-                .values
+                .namespace_values_mut()
                 .update_if_present(name, env_value);
         }
         if let Some(target) = write_target {
@@ -283,11 +302,13 @@ impl Interpreter {
         let root = module_env(&self.env);
         {
             let root_ref = root.borrow();
-            if root_ref.values.get(name).is_some() || root_ref.namespace_has_binding_order() {
+            if root_ref.namespace_values().get(name).is_some()
+                || root_ref.namespace_has_binding_order()
+            {
                 root_ref.record_namespace_binding_order_delete(name);
             }
         }
-        let from_env = root.borrow_mut().values.remove(name);
+        let from_env = root.borrow_mut().namespace_values_mut().remove(name);
         let locals = self
             .explicit_locals_for_environment(&self.env)
             .unwrap_or_else(|| self.active_globals_dict());
@@ -431,43 +452,13 @@ impl Interpreter {
                 code.names.len()
             ))
         })?;
-        let (is_global, is_nonlocal) = {
-            let env = self.env.borrow();
-            (
-                env.global_names.contains(name.as_str()),
-                env.nonlocal_names.contains(name.as_str()),
-            )
-        };
-        if is_nonlocal {
-            let target_env =
-                find_enclosing_local_env_for_name(&self.env, name).ok_or_else(|| {
-                    PyError::Runtime(format!("no binding for nonlocal '{}' found", name))
-                })?;
-            let deleted = target_env.borrow_mut().values.remove(name.as_str());
-            let Some(deleted) = deleted else {
-                return Err(PyError::named(
-                    "NameError",
-                    format!(
-                        "cannot access free variable '{}' where it is not associated with a value in enclosing scope",
-                        name
-                    ),
-                ));
-            };
-            call_del_if_last_binding_in_env(
-                self,
-                deleted,
-                &target_env,
-                regs,
-                code.num_locals as usize,
-            );
-            return Ok(());
-        }
+        let is_global = self.active_frame_declares_global(name.as_str());
         if is_global {
             let me = module_env(&self.env);
             let (in_env, from_mirror) = {
                 let me_ref = me.borrow();
                 (
-                    me_ref.values.get(name.as_str()).is_some(),
+                    me_ref.namespace_values().get(name.as_str()).is_some(),
                     me_ref.namespace_fastlocal_value(name.as_str()),
                 )
             };
@@ -486,7 +477,7 @@ impl Interpreter {
             }
             me.borrow()
                 .record_namespace_binding_order_delete(name.as_str());
-            let from_env = me.borrow_mut().values.remove(name.as_str());
+            let from_env = me.borrow_mut().namespace_values_mut().remove(name.as_str());
             let from_dict = globals
                 .dict_shift_remove(&PyKey::str_from(name.as_str()))
                 .ok()
@@ -509,7 +500,9 @@ impl Interpreter {
                 let is_module_scope = env_ref.parent.is_none();
                 (
                     is_module_scope,
-                    env_ref.values.get(name.as_str()).is_some(),
+                    env_ref
+                        .try_namespace_values()
+                        .is_some_and(|values| values.get(name.as_str()).is_some()),
                     if is_module_scope {
                         env_ref.namespace_fastlocal_value(name.as_str())
                     } else {
@@ -538,7 +531,11 @@ impl Interpreter {
                     .borrow()
                     .record_namespace_binding_order_delete(name.as_str());
             }
-            let from_env = self.env.borrow_mut().values.remove(name.as_str());
+            let from_env = self
+                .env
+                .borrow_mut()
+                .try_namespace_values_mut()
+                .and_then(|values| values.remove(name.as_str()));
             let from_dict = globals.and_then(|globals| {
                 globals
                     .dict_shift_remove(&PyKey::str_from(name.as_str()))

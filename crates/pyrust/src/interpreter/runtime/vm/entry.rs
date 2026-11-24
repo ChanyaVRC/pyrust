@@ -14,9 +14,19 @@ impl Interpreter {
         code: &crate::bytecode::FnCode,
         regs: RegSlice,
     ) -> Result<Value> {
+        self.run_bytecode_with_cells(code, regs, CellSlice::empty())
+    }
+
+    pub(super) fn run_bytecode_with_cells(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: RegSlice,
+        cells: CellSlice,
+    ) -> Result<Value> {
         match self.run_bytecode_inner(
             code,
             regs,
+            cells,
             smallvec::smallvec![None; code.num_iters as usize],
             ExcHandlersBuf::new(),
             0,
@@ -46,34 +56,28 @@ impl Interpreter {
     fn push_generator_frame_view(
         &mut self,
         frame: &mut GeneratorFrame,
-    ) -> (std::ptr::NonNull<Value>, usize) {
-        let gen_nonlocal_names = {
-            let env = frame.saved_env.borrow();
-            if env.nonlocal_names.is_empty() {
-                None
-            } else {
-                Some(Rc::clone(&env.nonlocal_names))
-            }
-        };
-        let gen_env_opt = if gen_nonlocal_names.is_some() {
-            Some(Rc::clone(&frame.saved_env))
-        } else {
+    ) -> (std::ptr::NonNull<Value>, usize, CellSlice) {
+        let gen_nonlocal_names = if frame.function.nonlocal_names.is_empty() {
             None
+        } else {
+            Some(Rc::clone(&frame.function.nonlocal_names))
         };
         let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(frame.regs.as_mut_ptr()) };
         let regs_len = frame.regs.len();
+        let cells_slice = CellSlice::from_slice(&frame.cells);
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Function,
             regs_ptr,
             regs_len,
-            local_index: Rc::clone(&frame.local_index),
+            cells: cells_slice,
+            local_index: Rc::clone(&frame.function.local_index),
             nonlocal_names: gen_nonlocal_names,
-            env: gen_env_opt,
+            env: None,
             is_class_method: frame.code.is_class_method,
             function: None,
             gen_frame: Some(std::ptr::NonNull::from(&*frame)),
         });
-        (regs_ptr, regs_len)
+        (regs_ptr, regs_len, cells_slice)
     }
 
     /// Resume a generator with an explicit sent value, optionally injecting
@@ -139,7 +143,7 @@ impl Interpreter {
             let sent_reg = *sent_reg;
             let result_reg = *result_reg;
             let iter_val = frame.regs[iter_reg as usize].clone();
-            let previous_env = std::mem::replace(&mut self.env, Rc::clone(&frame.saved_env));
+            let previous_env = std::mem::replace(&mut self.env, Rc::clone(&frame.function.env));
             self.push_generator_frame_view(frame);
             let forward_result = self.yield_from_throw_forward(&iter_val, exc.clone());
             self.sync_top_generator_frame_cache_if_present();
@@ -187,7 +191,7 @@ impl Interpreter {
         }
 
         // Swap the saved env in.
-        let previous_env = std::mem::replace(&mut self.env, Rc::clone(&frame.saved_env));
+        let previous_env = std::mem::replace(&mut self.env, Rc::clone(&frame.function.env));
 
         // PEP 3134: hand the generator's persisted exception state into
         // `run_bytecode_inner`, which will push it onto
@@ -201,7 +205,7 @@ impl Interpreter {
 
         // Issue #483/#486/#547: publish this generator's `VmFrameView` before
         // constructing `RegSlice`.
-        let (regs_ptr, regs_len) = self.push_generator_frame_view(frame);
+        let (regs_ptr, regs_len, cells_slice) = self.push_generator_frame_view(frame);
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
         // frame.regs (which outlives this call).  No &mut [Value] referencing
         // frame.regs is held while the dispatch loop runs; RegSlice (raw
@@ -219,6 +223,7 @@ impl Interpreter {
         let result = self.run_bytecode_inner(
             &frame.code,
             regs_slice,
+            cells_slice,
             std::mem::take(&mut frame.iters),
             std::mem::take(&mut frame.exc_handlers),
             frame.pc,
@@ -249,7 +254,9 @@ impl Interpreter {
                     lineno: tb_lineno,
                     source_line: None,
                     funcname: frame.fn_name.clone(),
-                    globals: Some(pyrust_core::FrameGlobals::for_environment(&frame.saved_env)),
+                    globals: Some(pyrust_core::FrameGlobals::for_environment(
+                        &frame.function.env,
+                    )),
                     // PEP 657 (#2904): the generator body just escaped, so the
                     // published anchor is the col span of the instruction that
                     // propagated the error inside it (the `1/0` BinOp of `yield 1/0`,
@@ -320,6 +327,7 @@ impl Interpreter {
         &mut self,
         code: &crate::bytecode::FnCode,
         regs: RegSlice,
+        cells: CellSlice,
         iters_init: ItersBuf,
         exc_handlers_init: ExcHandlersBuf,
         start_pc: usize,
@@ -367,6 +375,7 @@ impl Interpreter {
         let result = self.run_bytecode_inner_impl(
             code,
             regs,
+            cells,
             iters_init,
             exc_handlers_init,
             start_pc,
@@ -432,27 +441,21 @@ impl Interpreter {
         }
         let gen_regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(gframe.regs.as_mut_ptr()) };
         let gen_regs_len = gframe.regs.len();
+        let gen_cells_slice = CellSlice::from_slice(&gframe.cells);
         // Publish the generator's frame view (mirrors `resume_generator_with_exc`).
-        let gen_nonlocal_names = {
-            let env = gframe.saved_env.borrow();
-            if env.nonlocal_names.is_empty() {
-                None
-            } else {
-                Some(Rc::clone(&env.nonlocal_names))
-            }
-        };
-        let gen_env_opt = if gen_nonlocal_names.is_some() {
-            Some(Rc::clone(&gframe.saved_env))
-        } else {
+        let gen_nonlocal_names = if gframe.function.nonlocal_names.is_empty() {
             None
+        } else {
+            Some(Rc::clone(&gframe.function.nonlocal_names))
         };
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Function,
             regs_ptr: gen_regs_ptr,
             regs_len: gen_regs_len,
-            local_index: Rc::clone(&gframe.local_index),
+            cells: gen_cells_slice,
+            local_index: Rc::clone(&gframe.function.local_index),
             nonlocal_names: gen_nonlocal_names,
-            env: gen_env_opt,
+            env: None,
             is_class_method: gframe.code.is_class_method,
             function: None,
             // Issue #2445/#2471: see the matching site in
@@ -473,7 +476,7 @@ impl Interpreter {
         let gen_pc = gframe.pc;
         let gen_iters = std::mem::take(&mut gframe.iters);
         let gen_exc_handlers = std::mem::take(&mut gframe.exc_handlers);
-        let gen_env = Rc::clone(&gframe.saved_env);
+        let gen_env = Rc::clone(&gframe.function.env);
         let gen_iters_len = gen_iters.len();
         let gen_iter_cache = if gen_iters_len == 0 {
             IterCacheBuf::new()
@@ -487,6 +490,7 @@ impl Interpreter {
             saved_regs: std::mem::replace(st.regs, unsafe {
                 RegSlice::from_raw(gen_regs_ptr.as_ptr(), gen_regs_len)
             }),
+            saved_cells: std::mem::replace(st.cells, gen_cells_slice),
             saved_pc: *st.pc,
             exit_pc,
             dst,
@@ -581,6 +585,7 @@ impl Interpreter {
                 let view = self.detach_vm_frame_view();
                 st.tramp_arena.truncate(*st.tramp_active_base);
                 *st.tramp_active_base = saved.saved_base;
+                *st.cells = saved.saved_cells;
                 if let Some(saved_env) = saved.saved_env {
                     self.env = saved_env;
                 }
@@ -646,7 +651,7 @@ impl Interpreter {
                     source_line: None,
                     funcname: gd.gframe.fn_name.clone(),
                     globals: Some(pyrust_core::FrameGlobals::for_environment(
-                        &gd.gframe.saved_env,
+                        &gd.gframe.function.env,
                     )),
                     // PEP 657 (#2904): `innermost_col` now holds the anchor of the
                     // instruction that propagated the error inside the generator
@@ -662,6 +667,7 @@ impl Interpreter {
             // Restore the consumer frame.
             let foriter_pc = gd.saved_pc.wrapping_sub(1);
             *st.regs = gd.saved_regs;
+            *st.cells = gd.saved_cells;
             line = gd.saved_cur_line;
             *st.code_ptr = gd.saved_code_ptr;
             *st.active_code_rc = gd.saved_active_code_rc;

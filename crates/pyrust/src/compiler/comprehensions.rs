@@ -281,7 +281,10 @@ impl Compiler {
         } else {
             None
         };
+        let enclosing_cells = self.child_enclosing_cell_names(&[]);
+        sub.init_function_cells(enclosing_cells, &inner_global_rc, &inner_nonlocal_rc);
         sub.compile_block(&fn_body);
+        sub.ensure_lexical_free_cells(&fn_body);
         let mut inner_code = match sub.finish() {
             Ok(c) => c,
             Err(e) => {
@@ -304,6 +307,7 @@ impl Compiler {
             &inner_index_rc,
             &inner_global_rc,
         );
+        let closure_capture_map = self.build_capture_map(&inner_code);
 
         if self.fn_protos.len() >= u16::MAX as usize {
             self.failed = true;
@@ -326,10 +330,13 @@ impl Compiler {
         let param_binds = Rc::new(crate::bytecode::compute_param_binds(
             &param_spec,
             &inner_index_rc,
-            &inner_code.cell_vars,
+            inner_code.own_cell_slots(),
         ));
-        let self_bind =
-            crate::bytecode::compute_self_bind(&display, &inner_index_rc, &inner_code.cell_vars);
+        let self_bind = crate::bytecode::compute_self_bind(
+            &display,
+            &inner_index_rc,
+            inner_code.own_cell_slots(),
+        );
         self.fn_protos.push(FnProto {
             name: Rc::from(display.as_str()),
             qualname: Rc::from(display.as_str()),
@@ -346,6 +353,7 @@ impl Compiler {
             annotation_keys: SmallVec::new(),
             docstring: None,
             class_kwarg_names: SmallVec::new(),
+            closure_capture_map,
         });
 
         // Emit MakeFunction + Call, same layout as compile_gen_exp.
@@ -763,6 +771,8 @@ impl Compiler {
             sub.outer_locals.push(Rc::clone(&self.local_index));
         }
         sub.is_function_scope = true;
+        let enclosing_cells = self.child_enclosing_cell_names(&[]);
+        sub.init_function_cells(enclosing_cells, &inner_global_rc, &inner_nonlocal_rc);
         sub.future_annotations = self.future_annotations;
         // An async generator expression (`(x async for x in ait)`): the bare
         // `yield elt` plus `is_async_function` makes the synthesized function an
@@ -772,6 +782,7 @@ impl Compiler {
         sub.first_lineno = effective_first_lineno;
         sub.set_lineno(effective_first_lineno);
         sub.compile_block_with_linenos(&body, &body_linenos);
+        sub.ensure_lexical_free_cells(&body);
         let mut inner_code = match sub.finish() {
             Ok(c) => c,
             Err(e) => {
@@ -794,6 +805,7 @@ impl Compiler {
             &inner_index_rc,
             &inner_global_rc,
         );
+        let closure_capture_map = self.build_capture_map(&inner_code);
 
         if self.fn_protos.len() >= u16::MAX as usize {
             self.failed = true;
@@ -815,10 +827,13 @@ impl Compiler {
         let param_binds = Rc::new(crate::bytecode::compute_param_binds(
             &param_spec,
             &inner_index_rc,
-            &inner_code.cell_vars,
+            inner_code.own_cell_slots(),
         ));
-        let self_bind =
-            crate::bytecode::compute_self_bind("<genexpr>", &inner_index_rc, &inner_code.cell_vars);
+        let self_bind = crate::bytecode::compute_self_bind(
+            "<genexpr>",
+            &inner_index_rc,
+            inner_code.own_cell_slots(),
+        );
         self.fn_protos.push(FnProto {
             name: Rc::from("<genexpr>"),
             qualname: Rc::from(genexpr_qualname.as_str()),
@@ -835,6 +850,7 @@ impl Compiler {
             annotation_keys: SmallVec::new(),
             docstring: None,
             class_kwarg_names: SmallVec::new(),
+            closure_capture_map,
         });
 
         // Allocate a temp for the function value, emit MakeFunction (no

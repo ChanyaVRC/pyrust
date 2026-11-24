@@ -5,10 +5,12 @@ impl Interpreter {
     /// Extracted from the `MakeFunction` VM dispatch arm so that changes to
     /// function-construction semantics (annotations, defaults, etc.) only
     /// require touching this method rather than vm.rs.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn exec_make_function(
         &mut self,
         code: &crate::bytecode::FnCode,
         regs: &RegSlice,
+        cells: CellSlice,
         num_locals: crate::bytecode::Reg,
         proto_idx: u16,
         defs_base: crate::bytecode::Reg,
@@ -34,6 +36,18 @@ impl Interpreter {
         let annotation_keys = proto.annotation_keys.clone();
         let is_memo_pure = proto.is_memo_pure;
         let proto_doc = proto.docstring.as_ref().map(|s| Value::string(s.clone()));
+        let mut closure_cells: smallvec::SmallVec<[pyrust_core::CellSlot; 2]> =
+            smallvec::SmallVec::with_capacity(proto.closure_capture_map.len());
+        if !proto.closure_capture_map.is_empty() {
+            let active_cells = cells.as_slice();
+            for src in &proto.closure_capture_map {
+                match *src {
+                    crate::bytecode::CaptureSource::EnclosingCell(idx) => {
+                        closure_cells.push(active_cells[idx as usize].clone());
+                    }
+                }
+            }
+        }
 
         let mut params = Vec::with_capacity(param_spec.names.len());
         let mut def_slot = 0u32;
@@ -76,15 +90,6 @@ impl Interpreter {
         } else {
             Value::dict(annotations_map)
         };
-        for name in proto_nonlocal_names.iter() {
-            if !has_local_binding_in_current_or_ancestor(&self.env, name) {
-                return Err(pyrust_core::py_err!(
-                    "SyntaxError",
-                    "no binding for nonlocal '{}' found",
-                    name
-                ));
-            }
-        }
         let func = Rc::new(UserFunction {
             id: crate::value::next_fn_id(),
             kind: crate::value::UserFunctionKind::Regular,
@@ -111,6 +116,7 @@ impl Interpreter {
             global_names: proto_global_names,
             nonlocal_names: proto_nonlocal_names,
             env: Rc::clone(&self.env),
+            closure_cells,
             is_memo_pure,
             iterable_coroutine: std::cell::Cell::new(false),
             precompiled_code: Some(proto_code),
@@ -135,6 +141,7 @@ impl Interpreter {
         &mut self,
         code: &crate::bytecode::FnCode,
         regs: &RegSlice,
+        cells: CellSlice,
         num_locals: crate::bytecode::Reg,
         proto_idx: u16,
         bases_base: crate::bytecode::Reg,
@@ -170,6 +177,17 @@ impl Interpreter {
         let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
         let class_docstring = proto.docstring.clone();
         let class_kwarg_names = proto.class_kwarg_names.clone();
+        let mut class_cells = CellsBuf::with_capacity(proto.closure_capture_map.len());
+        if !proto.closure_capture_map.is_empty() {
+            let active_cells = cells.as_slice();
+            for src in &proto.closure_capture_map {
+                match *src {
+                    crate::bytecode::CaptureSource::EnclosingCell(idx) => {
+                        class_cells.push(active_cells[idx as usize].clone());
+                    }
+                }
+            }
+        }
 
         // PEP 560: resolve `__mro_entries__` on any non-class base before any
         // other base inspection.  `resolved_bases` is the flattened list that
@@ -208,6 +226,7 @@ impl Interpreter {
                 kwargs,
                 class_code,
                 local_index,
+                class_cells,
                 proto_qualname,
                 proto_global_names,
                 proto_nonlocal_names,
@@ -223,6 +242,7 @@ impl Interpreter {
         } = self.run_class_body(
             &class_code,
             &local_index,
+            class_cells,
             &proto_qualname,
             proto_global_names,
             proto_nonlocal_names,
@@ -293,7 +313,7 @@ impl Interpreter {
         }
         class_env_rc
             .borrow_mut()
-            .values
+            .namespace_values_mut()
             .insert("__class__", Value::py_class(Rc::clone(&class)));
         Self::bind_class_annotation_owner(&annotation_scopes, &class);
 
@@ -322,6 +342,7 @@ impl Interpreter {
         &mut self,
         code: &crate::bytecode::FnCode,
         regs: &RegSlice,
+        cells: CellSlice,
         num_locals: crate::bytecode::Reg,
         proto_idx: u16,
         bases_base: crate::bytecode::Reg,
@@ -357,6 +378,17 @@ impl Interpreter {
         let proto_global_names = Rc::clone(&proto.global_names);
         let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
         let class_kwarg_names = proto.class_kwarg_names.clone();
+        let mut class_cells = CellsBuf::with_capacity(proto.closure_capture_map.len());
+        if !proto.closure_capture_map.is_empty() {
+            let active_cells = cells.as_slice();
+            for src in &proto.closure_capture_map {
+                match *src {
+                    crate::bytecode::CaptureSource::EnclosingCell(idx) => {
+                        class_cells.push(active_cells[idx as usize].clone());
+                    }
+                }
+            }
+        }
 
         let metaclass = vm_read(regs, meta_reg, num_locals)?;
 
@@ -393,6 +425,7 @@ impl Interpreter {
             kwargs,
             class_code,
             local_index,
+            class_cells,
             proto_qualname,
             proto_global_names,
             proto_nonlocal_names,

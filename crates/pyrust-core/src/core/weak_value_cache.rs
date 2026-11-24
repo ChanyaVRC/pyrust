@@ -228,6 +228,7 @@ mod weak_value_cache_tests {
             global_names: Rc::new(HashSet::new()),
             nonlocal_names: Rc::new(HashSet::new()),
             env: Environment::new(None),
+            closure_cells: smallvec::SmallVec::new(),
             is_memo_pure: false,
             iterable_coroutine: std::cell::Cell::new(false),
             precompiled_code: None,

@@ -265,7 +265,7 @@ impl Interpreter {
         macro_rules! seed_env {
             ($name:literal, $val:expr) => {{
                 me.record_namespace_env_binding($name);
-                me.values.get_or_insert_with($name, || $val)
+                me.namespace_values_mut().get_or_insert_with($name, || $val)
             }};
         }
         // Seeding order is Python-visible (`list(globals())` / `list(vars(mod))`,
@@ -326,7 +326,7 @@ impl Interpreter {
             let has_key = module_globals
                 .dict_with(|d| d.contains_key(&StrKey(name)))
                 .unwrap_or(false);
-            if !has_key && let Some(v) = me.values.get(name).cloned() {
+            if !has_key && let Some(v) = me.namespace_values().get(name).cloned() {
                 let key = PyKey::str_from(name);
                 let _ = module_globals.dict_insert(key, v);
             }
@@ -457,6 +457,7 @@ impl Interpreter {
             // this stack frame; it is popped before `regs` is dropped.
             regs_ptr,
             regs_len,
+            cells: CellSlice::empty(),
             local_index: Rc::clone(&local_index),
             // Script frames have no enclosing function scope, so there
             // are no nonlocal bindings to resolve.

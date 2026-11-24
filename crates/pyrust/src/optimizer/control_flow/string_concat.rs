@@ -403,11 +403,13 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         LoadConst(..)
         | LoadGlobal(..)
         | LoadCell(..)
+        | LoadClassDeref(..)
         | LoadNone(..)
         | LoadNoneRange { .. }
         | LoadExc(..)
         | ImportModule(..)
         | DeleteName(..)
+        | DeleteCell(..)
         | PushTypeParamEnv
         | PopTypeParamEnv
         | DeleteLocal(..)

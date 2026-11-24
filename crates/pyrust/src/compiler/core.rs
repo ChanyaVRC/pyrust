@@ -13,6 +13,12 @@ impl Compiler {
         Self {
             local_index,
             cell_vars: cell_set,
+            cell_slots: SmallVec::new(),
+            own_cell_count: 0,
+            cell_slot_map: HashMap::new(),
+            enclosing_cell_names: HashSet::new(),
+            global_names: HashSet::new(),
+            shadowed_type_params: SmallVec::new(),
             nonlocal_names: HashSet::new(),
             class_direct_env_names: HashSet::new(),
             insns: Vec::new(),
@@ -302,22 +308,222 @@ impl Compiler {
         }
     }
 
-    /// True if `name` is a cell variable (lives in env, not registers).
-    fn is_cell(&self, name: &str) -> bool {
-        !self.cell_vars.is_empty() && self.cell_vars.contains(&Symbol::intern(name))
+    /// Initialize compile-time cell slots for a function / lambda /
+    /// comprehension / genexpr scope (issues #452 / #2339 / #2348).
+    ///
+    /// Populates `0..own_cell_count` with this function's own cells in
+    /// lexicographical order (`co_cellvars`) and eagerly reserves freevar slots
+    /// for all `nonlocal` declarations so even unread/unwritten `nonlocal`
+    /// names appear in `co_freevars` and `__closure__`.
+    fn init_function_cells(
+        &mut self,
+        enclosing_cells: HashSet<Symbol>,
+        globals: &HashSet<String>,
+        nonlocals: &HashSet<String>,
+    ) {
+        let mut own: Vec<Symbol> = self.cell_vars.iter().copied().collect();
+        own.sort_unstable_by_key(|sym| sym.as_str());
+        for sym in own {
+            let idx = self.cell_slots.len() as u16;
+            self.cell_slots.push(CellSlotMeta {
+                name: sym,
+                is_own_cell: true,
+                is_free_error: false,
+            });
+            self.cell_slot_map.insert(sym, idx);
+        }
+        self.own_cell_count = self.cell_slots.len() as u16;
+        self.enclosing_cell_names = enclosing_cells;
+        self.global_names = globals.iter().map(|s| Symbol::intern(s)).collect();
+        self.nonlocal_names = nonlocals.clone();
+        let mut sorted_nonlocals: Vec<&String> = nonlocals.iter().collect();
+        sorted_nonlocals.sort();
+        for name in sorted_nonlocals {
+            self.ensure_free_cell(Symbol::intern(name));
+        }
     }
 
-    /// True when a non-register name is guaranteed to resolve to a
-    /// **function-scope cell** — either a cell var owned by this scope or a
-    /// `nonlocal x` declared here, which binds to an enclosing function's cell
-    /// (issue #2339).  Such a name never resolves to a module global or builtin,
-    /// so its read/write can use the dedicated `LoadCell`/`StoreCell` opcodes
-    /// that skip the `LoadGlobal` inline cache and the module-globals-dict
-    /// fallback.  Restricted to function scope: module scope has no cells worth
-    /// special-casing, and class bodies keep the name-keyed namespace path
-    /// (which `vars()`/`dir()` expose) and the #384 resolution rules untouched.
-    fn is_function_cell(&self, name: &str) -> bool {
-        self.is_function_scope && (self.is_cell(name) || self.nonlocal_names.contains(name))
+    /// Initialize compile-time cell slots for a class body. Class bodies own no
+    /// cells (`own_cell_count == 0`), but capture enclosing function cells for
+    /// class-body `LoadClassDeref`, `nonlocal` statements, and transitive
+    /// pass-through to nested methods/classes.
+    fn init_class_cells(
+        &mut self,
+        enclosing_cells: HashSet<Symbol>,
+        globals: &HashSet<String>,
+        nonlocals: &HashSet<String>,
+    ) {
+        self.own_cell_count = 0;
+        self.enclosing_cell_names = enclosing_cells;
+        self.global_names = globals.iter().map(|s| Symbol::intern(s)).collect();
+        self.nonlocal_names = nonlocals.clone();
+        let mut sorted_nonlocals: Vec<&String> = nonlocals.iter().collect();
+        sorted_nonlocals.sort();
+        for name in sorted_nonlocals {
+            self.ensure_free_cell(Symbol::intern(name));
+        }
+    }
+
+    /// Compute the set of enclosing-function cell names visible to a child scope
+    /// compiled inside `self`, excluding any `extra_shadowed` (e.g. PEP 695
+    /// type parameters of the child) and any currently active
+    /// `self.shadowed_type_params`.
+    fn child_enclosing_cell_names(&self, extra_shadowed: &[Symbol]) -> HashSet<Symbol> {
+        if self.is_module_scope {
+            return HashSet::new();
+        }
+        let mut visible = self.enclosing_cell_names.clone();
+        if self.is_function_scope {
+            // Non-captured local variables of `self` shadow outer cells of the
+            // same name; captured locals (`own_cell_slots`) replace them.
+            for local in self.local_index.keys() {
+                let sym = Symbol::intern(local);
+                if !self.cell_vars.contains(&sym) {
+                    visible.remove(&sym);
+                }
+            }
+            for meta in &self.cell_slots[..self.own_cell_count as usize] {
+                visible.insert(meta.name);
+            }
+        }
+        for sym in &self.shadowed_type_params {
+            visible.remove(sym);
+        }
+        for sym in extra_shadowed {
+            visible.remove(sym);
+        }
+        visible
+    }
+
+    /// Ensure `sym` has a cell slot in `self.cell_slots` (returning an existing
+    /// own-cell or freevar slot if already present, otherwise allocating a new
+    /// freevar slot).
+    fn ensure_free_cell(&mut self, sym: Symbol) -> u16 {
+        if let Some(&idx) = self.cell_slot_map.get(&sym) {
+            return idx;
+        }
+        if self.cell_slots.len() >= u16::MAX as usize {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("too many closure cells in one scope (max 65535)".to_string());
+            }
+            return 0;
+        }
+        let is_free_error = !(self.is_inlined_comp
+            && self
+                .comp_enclosing_locals
+                .as_ref()
+                .is_some_and(|locals| locals.contains(&sym)));
+        let idx = self.cell_slots.len() as u16;
+        self.cell_slots.push(CellSlotMeta {
+            name: sym,
+            is_own_cell: false,
+            is_free_error,
+        });
+        self.cell_slot_map.insert(sym, idx);
+        idx
+    }
+
+    /// Ensure every lexically referenced enclosing cell in `body` (including
+    /// inside compile-time-false branches like `if False: return x`) receives a
+    /// freevar slot so `co_freevars` and `__closure__` match CPython 3.12.
+    fn ensure_lexical_free_cells(&mut self, body: &[Stmt]) {
+        if self.enclosing_cell_names.is_empty() {
+            return;
+        }
+        let mut lexical_free_names = HashSet::new();
+        collect_free_var_reads_in_stmts(body, &mut lexical_free_names);
+        collect_transitive_free_vars_in_stmts(body, &mut lexical_free_names);
+        let mut sorted: Vec<String> = lexical_free_names.into_iter().collect();
+        sorted.sort();
+        for candidate in sorted {
+            if self.local_index.contains_key(&candidate) {
+                continue;
+            }
+            let sym = Symbol::intern(&candidate);
+            if self.global_names.contains(&sym) || !self.enclosing_cell_names.contains(&sym) {
+                continue;
+            }
+            self.ensure_free_cell(sym);
+        }
+    }
+
+    /// Resolve a child's `free_var_slots()` against `self`, allocating
+    /// transitive pass-through freevar slots in `self` whenever the child
+    /// captures an ancestor's cell that `self` itself did not touch.
+    fn build_capture_map(&mut self, child_code: &FnCode) -> SmallVec<[CaptureSource; 4]> {
+        let mut map = SmallVec::with_capacity(child_code.free_var_slots().len());
+        for meta in child_code.free_var_slots() {
+            let parent_slot = if let Some(&idx) = self.cell_slot_map.get(&meta.name) {
+                idx
+            } else {
+                self.ensure_free_cell(meta.name)
+            };
+            map.push(CaptureSource::EnclosingCell(parent_slot));
+        }
+        map
+    }
+
+    /// Resolve `name` to a cell slot index for a bare variable **read** inside a
+    /// function scope. Returns `None` for module globals, builtins, and PEP 695
+    /// type parameters (which must use `LoadGlobal`).
+    fn resolve_cell_slot_for_read(&mut self, name: &str) -> Option<u16> {
+        if !self.is_function_scope {
+            return None;
+        }
+        let sym = Symbol::intern(name);
+        if self.global_names.contains(&sym) || self.shadowed_type_params.contains(&sym) {
+            return None;
+        }
+        if let Some(&idx) = self.cell_slot_map.get(&sym) {
+            return Some(idx);
+        }
+        if self.enclosing_cell_names.contains(&sym) && !self.local_index.contains_key(name) {
+            return Some(self.ensure_free_cell(sym));
+        }
+        None
+    }
+
+    /// Resolve `name` to a cell slot index for a **write** or **delete**
+    /// (own cell in a function, or `nonlocal` in a function or class body).
+    fn resolve_cell_slot_for_write(&mut self, name: &str) -> Option<u16> {
+        let sym = Symbol::intern(name);
+        if self.is_function_scope {
+            if self.global_names.contains(&sym) || self.shadowed_type_params.contains(&sym) {
+                return None;
+            }
+            if let Some(&idx) = self.cell_slot_map.get(&sym)
+                && (idx < self.own_cell_count || self.nonlocal_names.contains(name))
+            {
+                return Some(idx);
+            }
+            None
+        } else if self.is_class_body && self.nonlocal_names.contains(name) {
+            self.cell_slot_map.get(&sym).copied()
+        } else {
+            None
+        }
+    }
+
+    /// Resolve `name` for a class-body `LOAD_CLASSDEREF` (reading a captured
+    /// enclosing function cell without a class-local slot or `global`/`nonlocal`).
+    fn resolve_class_body_deref(&mut self, name: &str) -> Option<u16> {
+        if !self.is_class_body {
+            return None;
+        }
+        let sym = Symbol::intern(name);
+        if self.enclosing_cell_names.contains(&sym) && !self.shadowed_type_params.contains(&sym) {
+            Some(self.ensure_free_cell(sym))
+        } else {
+            None
+        }
+    }
+
+    /// True if `name` is kept off fastlocal registers (own cell var in function
+    /// scope, or env-backed var at module scope).
+    fn is_cell(&self, name: &str) -> bool {
+        !self.cell_vars.is_empty() && self.cell_vars.contains(&Symbol::intern(name))
     }
 
     /// Register index for a local variable, or None if the name is global/nonlocal/cell.
@@ -379,6 +585,9 @@ impl Compiler {
                 if (register as usize) < 64 {
                     self.def_set &= !(1u64 << register);
                 }
+            }
+            Some(ExceptAsVarDel::Cell(cell_idx)) => {
+                self.emit(Insn::DeleteCell(cell_idx, false));
             }
             Some(ExceptAsVarDel::Name(name_index)) => {
                 self.emit(Insn::DeleteName(name_index));
@@ -543,7 +752,7 @@ impl Compiler {
         }
     }
 
-    fn finish(self) -> Result<FnCode, PyError> {
+    fn finish(mut self) -> Result<FnCode, PyError> {
         if self.failed {
             let msg = self
                 .error_msg
@@ -565,6 +774,49 @@ impl Compiler {
             return Err(PyError::Runtime(format!(
                 "function uses too many registers ({num_regs}); max is {MAX_FRAME_REGS}"
             )));
+        }
+        // Sort the free-variable tail of `cell_slots` (`own_cell_count..`)
+        // lexicographically by name so `co_freevars` and `__closure__` match
+        // CPython's sorted order without any runtime sorting, remapping every
+        // emitted cell index and child capture map accordingly.
+        let own_n = self.own_cell_count as usize;
+        if self.cell_slots.len() > own_n + 1 {
+            let free_count = self.cell_slots.len() - own_n;
+            let mut order: SmallVec<[usize; 4]> = (0..free_count).collect();
+            order.sort_unstable_by_key(|&i| self.cell_slots[own_n + i].name.as_str());
+            let already_sorted = order.iter().enumerate().all(|(pos, &orig)| pos == orig);
+            if !already_sorted {
+                let mut remap: SmallVec<[u16; 8]> = (0..self.cell_slots.len() as u16).collect();
+                let mut new_free: SmallVec<[CellSlotMeta; 4]> = SmallVec::with_capacity(free_count);
+                for (new_offset, &old_offset) in order.iter().enumerate() {
+                    let old_idx = own_n + old_offset;
+                    let new_idx = (own_n + new_offset) as u16;
+                    remap[old_idx] = new_idx;
+                    new_free.push(self.cell_slots[old_idx]);
+                }
+                self.cell_slots.truncate(own_n);
+                self.cell_slots.extend(new_free);
+                for insn in &mut self.insns {
+                    match insn {
+                        Insn::LoadCell(_, idx)
+                        | Insn::StoreCell(idx, _)
+                        | Insn::DeleteCell(idx, _)
+                        | Insn::LoadClassDeref(_, idx) => {
+                            *idx = remap[*idx as usize];
+                        }
+                        _ => {}
+                    }
+                }
+                for proto in &mut self.fn_protos {
+                    for src in &mut proto.closure_capture_map {
+                        match src {
+                            CaptureSource::EnclosingCell(idx) => {
+                                *idx = remap[*idx as usize];
+                            }
+                        }
+                    }
+                }
+            }
         }
         // A function is a generator if it contains any `Yield` or `YieldFrom`
         // instruction OR if any `yield`/`yield from` appears in a dead branch
@@ -610,7 +862,8 @@ impl Compiler {
             num_iters: self.max_iter,
             num_locals: self.base_temp,
             fn_protos: self.fn_protos,
-            cell_vars: self.cell_vars.into_iter().collect(),
+            cell_slots: self.cell_slots,
+            own_cell_count: self.own_cell_count,
             free_var_candidates: std::cell::OnceCell::new(),
             is_generator,
             is_coroutine: self.is_async_function,
@@ -665,13 +918,20 @@ impl Compiler {
     // ── Store helpers ─────────────────────────────────────────────────────────
 
     /// Emit the appropriate store for `name` from register `src`.
-    /// If `container_expr` is a global/cell variable name, write `obj_reg` back
+    /// If `container_expr` is a global variable name, write `obj_reg` back
     /// to the env.  Called after SetItem/SetSlice on a container that was loaded
     /// via LoadGlobal (which creates a copy, so the mutation must be committed).
+    /// Cells hold `Rc`-backed containers directly, so cell-slot containers do
+    /// not need a writeback (and must never spill into module globals).
     fn writeback_container_if_global(&mut self, container_expr: &Expr, obj_reg: Reg) {
         if let Expr::Var(name, _) = container_expr
             && self.local_reg(name).is_none()
         {
+            if self.resolve_cell_slot_for_read(name).is_some()
+                || self.resolve_class_body_deref(name).is_some()
+            {
+                return;
+            }
             let name_idx = self.intern_name(name);
             self.emit(Insn::StoreGlobal(name_idx, obj_reg));
         }
@@ -695,13 +955,11 @@ impl Compiler {
                 let name_idx = self.intern_name(name);
                 self.emit(Insn::SyncModuleGlobal(reg, name_idx));
             }
+        } else if let Some(cell_idx) = self.resolve_cell_slot_for_write(name) {
+            self.emit(Insn::StoreCell(cell_idx, src));
         } else {
             let idx = self.intern_name(name);
-            if self.is_function_cell(name) {
-                self.emit(Insn::StoreCell(idx, src));
-            } else {
-                self.emit(Insn::StoreGlobal(idx, src));
-            }
+            self.emit(Insn::StoreGlobal(idx, src));
         }
     }
 

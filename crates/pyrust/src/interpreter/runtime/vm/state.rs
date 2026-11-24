@@ -27,13 +27,16 @@ pub(crate) struct GeneratorFrame {
     /// this buffer — so a `Vec` needs no per-resume conversion; the one-time tight
     /// allocation is paid at generator creation.
     pub(crate) regs: Vec<Value>,
+    /// Indexed cell slots (`0..own_cell_count` own cells + `own_cell_count..`
+    /// captured closure cells) persisted across generator suspensions (#452).
+    /// Stored as a tight `Box<[CellSlot]>` (16 bytes, zero heap allocation when
+    /// empty) rather than an inline `SmallVec` so `GeneratorFrame` stays compact.
+    pub(crate) cells: Box<[pyrust_core::CellSlot]>,
     pub(crate) iters: ItersBuf,
     pub(crate) exc_handlers: ExcHandlersBuf,
     /// Program counter for the NEXT instruction to execute on resumption.
     pub(crate) pc: usize,
     pub(crate) done: bool,
-    /// The environment (closure captures) active when the generator was created.
-    pub(crate) saved_env: EnvRef,
     /// PEP 3134 per-frame exception state snapshot, persisted across a
     /// `yield` and re-installed on resume.  Stores the slice of
     /// `Interpreter::handled_exc_stack` that belongs to *this* generator
@@ -51,15 +54,6 @@ pub(crate) struct GeneratorFrame {
     /// blocks within this generator frame.  Split off at yield time
     /// (alongside `handled_exc_slice`) and re-extended on resume.
     pub(crate) exc_saved_active_slice: Vec<Option<Value>>,
-    /// Name -> fastlocal register slot for this generator's body, cloned
-    /// from the originating `UserFunction`.  Published to
-    /// `Interpreter::vm_frame_views` for the duration of each resume so
-    /// that `locals()` invoked inside the generator body sees the
-    /// generator's own fastlocals rather than the caller's frame
-    /// (issue #483 review: PR #483 originally pushed function frame
-    /// views only in `call_user_function_expanded`, leaving generators
-    /// to fall back to the caller's view).
-    pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
     /// The destination register of the most recent `Yield` instruction.
     /// On the next resumption this register receives the sent value
     /// (`Value::none()` for `next()`, the caller's argument for `send()`).
@@ -212,6 +206,8 @@ struct TrampFrame {
     /// Caller's register slice (raw pointer into its own — stable — register
     /// buffer; valid until this frame is restored).
     saved_regs: RegSlice,
+    /// Caller's cell slice (restored when the trampolined callee returns).
+    saved_cells: CellSlice,
     /// Caller's resume pc (already advanced past the call instruction).
     saved_pc: usize,
     /// Caller register that receives the call's result.
@@ -258,6 +254,8 @@ struct GenDriveFrame {
     gframe: Box<GeneratorFrame>,
     /// Consumer's register slice (stable buffer; restored on switch-back).
     saved_regs: RegSlice,
+    /// Consumer's cell slice (restored on switch-back).
+    saved_cells: CellSlice,
     /// Consumer pc after the `ForIter` (resume point on a yield).
     saved_pc: usize,
     /// Consumer's `ForIter` loop-exit pc (jumped to on a generator return).
@@ -286,6 +284,7 @@ struct GenDriveFrame {
 /// stack on deep non-trampolined recursion).
 struct UnwindState<'a> {
     regs: &'a mut RegSlice,
+    cells: &'a mut CellSlice,
     /// Used by `vm_enter_gen_drive` (saved as the consumer resume pc, then set to
     /// the generator's pc); the unwinder reports its resume pc via `Resume`
     /// instead and leaves this untouched.

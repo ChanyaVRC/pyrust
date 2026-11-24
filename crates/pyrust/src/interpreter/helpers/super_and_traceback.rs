@@ -576,12 +576,24 @@ pub(crate) fn call_del_if_last_binding(
             return; // another named local still holds the instance
         }
     }
-    // Scan env.values for a Python-level binding (globals / nonlocals / cells).
-    for v in interp.env.borrow().values.values() {
-        if let Some(other_rc) = v.as_py_instance_rc()
-            && Rc::ptr_eq(other_rc, del_rc)
-        {
-            return; // a global/nonlocal/cell var still holds the instance
+    // Scan env namespace bindings and active frame cells for another binding.
+    if let Some(values) = interp.env.borrow().try_namespace_values() {
+        for v in values.values() {
+            if let Some(other_rc) = v.as_py_instance_rc()
+                && Rc::ptr_eq(other_rc, del_rc)
+            {
+                return; // a global/namespace binding still holds the instance
+            }
+        }
+    }
+    if let Some(top_view) = interp.vm_frame_views.last() {
+        for slot in top_view.cells.as_slice() {
+            if slot.with_value(|opt| {
+                opt.and_then(Value::as_py_instance_rc)
+                    .is_some_and(|other_rc| Rc::ptr_eq(other_rc, del_rc))
+            }) {
+                return; // an active cell slot still holds the instance
+            }
         }
     }
     // No other Python-visible binding — invoke __del__.
@@ -635,6 +647,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
         target_alias_is_visible: &mut bool,
         visible_owner_worklist: &mut Vec<Rc<GeneratorCell>>,
         discovered_owner_ids: &mut HashSet<*const GeneratorCell>,
+        visited_functions: &mut HashSet<*const pyrust_core::UserFunction>,
     ) {
         if value.is_unset() {
             return;
@@ -645,10 +658,54 @@ pub(crate) fn call_del_if_last_binding_in_env(
         {
             *target_alias_is_visible = true;
         }
-        if let ValueKind::Generator(owner) = value.kind()
-            && discovered_owner_ids.insert(Rc::as_ptr(owner))
-        {
-            visible_owner_worklist.push(Rc::clone(owner));
+        match value.kind() {
+            ValueKind::Generator(owner) => {
+                if discovered_owner_ids.insert(Rc::as_ptr(owner)) {
+                    visible_owner_worklist.push(Rc::clone(owner));
+                }
+            }
+            ValueKind::UserFunction(func) => {
+                if !func.closure_cells.is_empty() && visited_functions.insert(Rc::as_ptr(func)) {
+                    for slot in &func.closure_cells {
+                        slot.with_value(|opt| {
+                            if let Some(cell_val) = opt {
+                                observe_direct_binding(
+                                    cell_val,
+                                    del_rc,
+                                    target_alias_is_visible,
+                                    visible_owner_worklist,
+                                    discovered_owner_ids,
+                                    visited_functions,
+                                );
+                            }
+                        });
+                    }
+                }
+            }
+            ValueKind::BoundMethod { function, receiver } => {
+                if Rc::ptr_eq(receiver, del_rc) {
+                    *target_alias_is_visible = true;
+                }
+                if !function.closure_cells.is_empty()
+                    && visited_functions.insert(Rc::as_ptr(function))
+                {
+                    for slot in &function.closure_cells {
+                        slot.with_value(|opt| {
+                            if let Some(cell_val) = opt {
+                                observe_direct_binding(
+                                    cell_val,
+                                    del_rc,
+                                    target_alias_is_visible,
+                                    visible_owner_worklist,
+                                    discovered_owner_ids,
+                                    visited_functions,
+                                );
+                            }
+                        });
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -659,6 +716,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
         visible_owner_worklist: &mut Vec<Rc<GeneratorCell>>,
         discovered_owner_ids: &mut HashSet<*const GeneratorCell>,
         visited_environments: &mut HashSet<*const RefCell<Environment>>,
+        visited_functions: &mut HashSet<*const pyrust_core::UserFunction>,
     ) {
         let mut current = Some(Rc::clone(root));
         while let Some(env) = current {
@@ -668,14 +726,33 @@ pub(crate) fn call_del_if_last_binding_in_env(
                 break;
             }
             let bindings = env.borrow();
-            for value in bindings.values.values() {
-                observe_direct_binding(
-                    value,
-                    del_rc,
-                    target_alias_is_visible,
-                    visible_owner_worklist,
-                    discovered_owner_ids,
-                );
+            if let Some(values) = bindings.try_namespace_values() {
+                for value in values.values() {
+                    observe_direct_binding(
+                        value,
+                        del_rc,
+                        target_alias_is_visible,
+                        visible_owner_worklist,
+                        discovered_owner_ids,
+                        visited_functions,
+                    );
+                }
+            }
+            if let Some(cells) = bindings.cells() {
+                for slot in cells {
+                    slot.with_value(|opt| {
+                        if let Some(value) = opt {
+                            observe_direct_binding(
+                                value,
+                                del_rc,
+                                target_alias_is_visible,
+                                visible_owner_worklist,
+                                discovered_owner_ids,
+                                visited_functions,
+                            );
+                        }
+                    });
+                }
             }
             current = bindings.parent.clone();
         }
@@ -692,6 +769,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
     let mut visible_owner_worklist = Vec::new();
     let mut discovered_owner_ids = HashSet::new();
     let mut visited_environments = HashSet::new();
+    let mut visited_functions = HashSet::new();
 
     scan_environment_chain(
         target_env,
@@ -700,6 +778,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
         &mut visible_owner_worklist,
         &mut discovered_owner_ids,
         &mut visited_environments,
+        &mut visited_functions,
     );
     scan_environment_chain(
         &interp.env,
@@ -708,6 +787,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
         &mut visible_owner_worklist,
         &mut discovered_owner_ids,
         &mut visited_environments,
+        &mut visited_functions,
     );
     for view in &interp.vm_frame_views {
         if let Some(env) = view.env.as_ref() {
@@ -718,6 +798,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
                 &mut visible_owner_worklist,
                 &mut discovered_owner_ids,
                 &mut visited_environments,
+                &mut visited_functions,
             );
         }
         if let Some(gen_frame) = view.gen_frame {
@@ -727,12 +808,13 @@ pub(crate) fn call_del_if_last_binding_in_env(
             // GeneratorFrame can move or be dropped.
             let gen_frame = unsafe { gen_frame.as_ref() };
             scan_environment_chain(
-                &gen_frame.saved_env,
+                &gen_frame.function.env,
                 del_rc,
                 &mut target_alias_is_visible,
                 &mut visible_owner_worklist,
                 &mut discovered_owner_ids,
                 &mut visited_environments,
+                &mut visited_functions,
             );
         }
     }
@@ -745,9 +827,24 @@ pub(crate) fn call_del_if_last_binding_in_env(
             &mut target_alias_is_visible,
             &mut visible_owner_worklist,
             &mut discovered_owner_ids,
+            &mut visited_functions,
         );
     }
     for view in &interp.vm_frame_views {
+        for slot in view.cells.as_slice() {
+            slot.with_value(|opt| {
+                if let Some(value) = opt {
+                    observe_direct_binding(
+                        value,
+                        del_rc,
+                        &mut target_alias_is_visible,
+                        &mut visible_owner_worklist,
+                        &mut discovered_owner_ids,
+                        &mut visited_functions,
+                    );
+                }
+            });
+        }
         for register in view.local_index.values() {
             let index = *register as usize;
             if index >= view.regs_len {
@@ -762,6 +859,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
                 &mut target_alias_is_visible,
                 &mut visible_owner_worklist,
                 &mut discovered_owner_ids,
+                &mut visited_functions,
             );
         }
     }
@@ -788,6 +886,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
                 &mut target_alias_is_visible,
                 &mut visible_owner_worklist,
                 &mut discovered_owner_ids,
+                &mut visited_functions,
             );
             observe_direct_binding(
                 &anext_aw.default_value,
@@ -795,6 +894,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
                 &mut target_alias_is_visible,
                 &mut visible_owner_worklist,
                 &mut discovered_owner_ids,
+                &mut visited_functions,
             );
             if target_alias_is_visible {
                 return;
@@ -809,14 +909,29 @@ pub(crate) fn call_del_if_last_binding_in_env(
         }
 
         scan_environment_chain(
-            &frame.saved_env,
+            &frame.function.env,
             del_rc,
             &mut target_alias_is_visible,
             &mut visible_owner_worklist,
             &mut discovered_owner_ids,
             &mut visited_environments,
+            &mut visited_functions,
         );
-        for register in frame.local_index.values() {
+        for slot in &frame.cells {
+            slot.with_value(|opt| {
+                if let Some(value) = opt {
+                    observe_direct_binding(
+                        value,
+                        del_rc,
+                        &mut target_alias_is_visible,
+                        &mut visible_owner_worklist,
+                        &mut discovered_owner_ids,
+                        &mut visited_functions,
+                    );
+                }
+            });
+        }
+        for register in frame.function.local_index.values() {
             if let Some(value) = frame.regs.get(*register as usize) {
                 observe_direct_binding(
                     value,
@@ -824,6 +939,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
                     &mut target_alias_is_visible,
                     &mut visible_owner_worklist,
                     &mut discovered_owner_ids,
+                    &mut visited_functions,
                 );
             }
         }

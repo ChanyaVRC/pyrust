@@ -115,17 +115,20 @@ impl Interpreter {
             .unwrap_or_else(|| "<unknown>".to_string());
 
         // co_cellvars: cell variables this function defines (locals captured by
-        // a nested scope), in CPython's sorted order.  Also used to exclude
-        // those names from co_varnames.
+        // a nested scope), already sorted in `FnCode::own_cell_slots()`.
         let cellvar_set: std::collections::HashSet<pyrust_core::Symbol> = fncode
             .as_ref()
-            .map(|c| c.cell_vars.iter().copied().collect())
+            .map(|c| c.own_cell_slots().iter().map(|slot| slot.name).collect())
             .unwrap_or_default();
-        let cellvars: Vec<Value> = {
-            let mut v: Vec<&str> = cellvar_set.iter().map(|s| s.as_str()).collect();
-            v.sort();
-            v.into_iter().map(Value::string).collect()
-        };
+        let cellvars: Vec<Value> = fncode
+            .as_ref()
+            .map(|c| {
+                c.own_cell_slots()
+                    .iter()
+                    .map(|slot| Value::string(slot.name.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Body locals appended to co_varnames: every name in the function's
         // `local_index` that is not a parameter and not a cell variable, in
@@ -186,11 +189,10 @@ impl Interpreter {
             flags |= code_obj::CO_ITERABLE_COROUTINE;
         }
 
-        // co_freevars: the names this function reads from an enclosing function
-        // scope, in CPython's sorted order (issue #2106).  Reuses the same
-        // free-variable analysis that powers `__closure__`.
+        // co_freevars: the names this function captures from an enclosing scope,
+        // in CPython's sorted order (issues #2106 / #452).
         let freevars: Vec<Value> = self
-            .closure_free_vars(function)
+            .closure_free_var_cells(function)
             .into_iter()
             .map(|(name, _)| Value::string(name))
             .collect();
@@ -219,19 +221,18 @@ impl Interpreter {
         code
     }
 
-    /// Compute the function's free variables (the names it reads from an
-    /// enclosing *function* scope, i.e. its `__closure__` cells), paired with
-    /// their captured values, in CPython's `co_freevars` order (sorted by name).
+    /// Return the function's free variables paired with their live [`CellSlot`]s
+    /// in CPython's sorted `co_freevars` order (issues #2106 / #452).
     ///
-    /// pyrust has no per-function free-var list: free variables are resolved at
-    /// runtime through the captured `env` chain.  We recover the set from the
-    /// code object's [`FnCode::free_var_candidates`] — the names it reads
-    /// through the environment — and keep those that actually resolve to a
-    /// binding in a *non-module* enclosing env, exactly CPython's definition of
-    /// a free variable (bound in an enclosing function scope, not a module
-    /// global).  Names the function declares `global`/`local` are excluded so an
-    /// explicit `global x` is never mistaken for a closure cell.
-    pub(crate) fn closure_free_vars(&self, function: &UserFunction) -> Vec<(String, Value)> {
+    /// Enclosing-function captures come directly from `fncode.free_var_slots()`
+    /// zipped with `function.closure_cells` (live, mutable, including empty
+    /// cells). When the function was defined inside a non-root `Namespace`
+    /// (class body for `__class__` or PEP 695 `TypeParamEnv` for type params),
+    /// any non-cell free candidate resolved from that namespace is merged in.
+    pub(crate) fn closure_free_var_cells(
+        &self,
+        function: &UserFunction,
+    ) -> Vec<(String, pyrust_core::CellSlot)> {
         let Some(rc) = function.precompiled_code.as_ref() else {
             return Vec::new();
         };
@@ -239,33 +240,43 @@ impl Interpreter {
             return Vec::new();
         };
 
-        let mut found: Vec<(String, Value)> = Vec::new();
-        for &name in fncode.free_var_candidates() {
-            let name_str = name.as_str();
-            // An explicit `global`/`nonlocal` mismatch or own local is not a
-            // closure free var.  `global` names target the module env;
-            // own-local names never reach `LoadGlobal` for a free read.
-            if function.global_names.contains(name_str) || function.local_names.contains(name_str) {
-                continue;
+        let mut found: Vec<(String, pyrust_core::CellSlot)> = fncode
+            .free_var_slots()
+            .iter()
+            .zip(function.closure_cells.iter())
+            .map(|(meta, slot)| (meta.name.to_string(), slot.clone()))
+            .collect();
+
+        if function.env.borrow().parent.is_some() {
+            let mut added_namespace_var = false;
+            for &name in fncode.free_var_candidates() {
+                let name_str = name.as_str();
+                if function.global_names.contains(name_str)
+                    || function.local_names.contains(name_str)
+                    || found.iter().any(|(existing, _)| existing == name_str)
+                {
+                    continue;
+                }
+                if let Some(value) = lookup_enclosing_function_value(&function.env, name_str) {
+                    found.push((name_str.to_owned(), pyrust_core::CellSlot::new(value)));
+                    added_namespace_var = true;
+                }
             }
-            if let Some(value) = lookup_enclosing_function_value(&function.env, name_str) {
-                found.push((name_str.to_owned(), value));
+            if added_namespace_var {
+                found.sort_by(|a, b| a.0.cmp(&b.0));
             }
         }
-        // CPython reports `co_freevars` (and orders `__closure__` cells) sorted
-        // by name.
-        found.sort_by(|a, b| a.0.cmp(&b.0));
         found
     }
 
-    /// Build `function.__closure__`: a tuple of `cell` objects, one per free
-    /// variable (in `co_freevars` order), or `None` for a function with no free
-    /// variables (issue #2106).
+    /// Build `function.__closure__`: a tuple of live `cell` objects, one per
+    /// free variable (in `co_freevars` order), or `None` for a function with no
+    /// free variables (issues #2106 / #452).
     pub(crate) fn build_closure(&self, function: &UserFunction) -> Value {
         let cells: Vec<Value> = self
-            .closure_free_vars(function)
+            .closure_free_var_cells(function)
             .into_iter()
-            .map(|(_, value)| pyrust_builtins::cell::cell(value))
+            .map(|(_, slot)| pyrust_builtins::cell::cell(slot))
             .collect();
         if cells.is_empty() {
             Value::none()

@@ -269,35 +269,19 @@ impl Interpreter {
                 return Err(self.recursion_limit_error()?);
             }
 
-            // Create a local env when the function uses globals, nonlocals, or cell vars.
-            let needs_local_env = !function.global_names.is_empty()
-                || !function.nonlocal_names.is_empty()
-                || !code.cell_vars.is_empty();
-
-            let previous_env = if needs_local_env {
-                let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
-                {
-                    let mut e = local_env.borrow_mut();
-                    e.local_names = Rc::clone(&function.local_names);
-                    e.global_names = Rc::clone(&function.global_names);
-                    e.nonlocal_names = Rc::clone(&function.nonlocal_names);
-                    // Store cell var params in the env so inner closures can
-                    // capture them.  Move out of `param_vals` (the reg loop above
-                    // only consumed the `Reg`-bound entries, so cell entries are
-                    // still intact) to avoid the redundant clone.
-                    for (param_index, bind) in function.param_binds.iter().enumerate() {
-                        if *bind == pyrust_core::ParamBind::Cell {
-                            e.values.insert(
-                                &function.params[param_index].name,
-                                std::mem::replace(&mut param_vals[param_index], Value::unset()),
-                            );
-                        }
-                    }
+            // Build the frame's indexed cell array and bind any cell parameters
+            // directly in O(1); swap straight to the defining namespace env
+            // with zero per-call `Environment` allocation (#452).
+            let cells = allocate_frame_cells(&code, &function.closure_cells);
+            for (param_index, bind) in function.param_binds.iter().enumerate() {
+                if let pyrust_core::ParamBind::Cell(cell_idx) = *bind {
+                    cells[cell_idx as usize].set(std::mem::replace(
+                        &mut param_vals[param_index],
+                        Value::unset(),
+                    ));
                 }
-                std::mem::replace(&mut self.env, local_env)
-            } else {
-                std::mem::replace(&mut self.env, Rc::clone(&function.env))
-            };
+            }
+            let previous_env = std::mem::replace(&mut self.env, Rc::clone(&function.env));
 
             // Issue #488: variadic generator functions (`def g(*args):
             // yield ...` and friends) must also be wrapped in a
@@ -306,40 +290,31 @@ impl Interpreter {
             // so the body's `yield` isn't observed as a runtime error.
             // Coroutines (`async def`, issue #1039) take the same path.
             if code.is_generator || code.is_coroutine {
-                let gen_env = std::mem::replace(&mut self.env, previous_env);
-                return Ok(Self::build_generator_value(&code, regs, gen_env, &function));
+                self.env = previous_env;
+                return Ok(Self::build_generator_value(&code, regs, cells, &function));
             }
 
-            // Issue #389: publish a function frame view (see the
-            // matching push in the simple-path branch above).
-            // Issue #486: nonlocal_names + env for nonlocal resolution.
             let nonlocal_names_opt = if function.nonlocal_names.is_empty() {
                 None
             } else {
                 Some(Rc::clone(&function.nonlocal_names))
-            };
-            // Issue #3024: a frame with cell vars must publish its env too —
-            // the cells live in the local env created above, not in the
-            // register file, so `locals()` can only reach them through here.
-            let env_opt = if function.nonlocal_names.is_empty() && code.cell_vars.is_empty() {
-                None
-            } else {
-                Some(Rc::clone(&self.env))
             };
             // Capture the raw pointer and length BEFORE constructing RegSlice
             // so both the VmFrameView and the dispatch loop share the same raw
             // pointer with no &mut [Value] in scope (issue #547 / PR #646).
             let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
             let regs_len = regs.len();
+            let cells_slice = CellSlice::from_slice(&cells);
             self.vm_frame_views.push(VmFrameView {
                 kind: FrameKind::Function,
                 // SAFETY: SmallVec / Vec allocation is always non-null.
-                // Popped before `regs` is dropped (see above).
+                // Popped before `regs` / `cells` are dropped.
                 regs_ptr,
                 regs_len,
+                cells: cells_slice,
                 local_index: Rc::clone(&function.local_index),
                 nonlocal_names: nonlocal_names_opt,
-                env: env_opt,
+                env: None,
                 is_class_method: code.is_class_method,
                 function: Some(Rc::clone(&function)),
                 gen_frame: None,
@@ -350,7 +325,7 @@ impl Interpreter {
             // runs; RegSlice (raw pointer + len) is used instead, removing
             // the LLVM noalias constraint (issue #547).
             let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
-            let vm_result = self.run_bytecode(&code, regs_slice);
+            let vm_result = self.run_bytecode_with_cells(&code, regs_slice, cells_slice);
             // Lazy traceback: only build + record this frame's `FrameInfo`
             // when the body actually errored (see the simple-call path above).
             if vm_result.is_err() {
@@ -382,10 +357,8 @@ impl Interpreter {
             }
             self.detach_vm_frame_view();
             drop(regs);
-            let used_env = std::mem::replace(&mut self.env, previous_env);
-            if needs_local_env {
-                self.free_env(used_env);
-            }
+            drop(cells);
+            self.env = previous_env;
             self.finish_pop_vm_frame_view();
             return vm_result;
         }

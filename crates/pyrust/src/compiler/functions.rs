@@ -17,6 +17,7 @@ impl Compiler {
         def_lineno: u32,
         return_annotation: Option<&Expr>,
         is_async: bool,
+        type_param_names: &[Symbol],
     ) -> Option<(u16, bool, bool)> {
         // Build inner function's scope metadata.
         let inner_global = crate::interpreter::collect_global_names(body);
@@ -166,9 +167,10 @@ impl Compiler {
             sub.outer_locals.push(Rc::clone(&self.local_index));
         }
         sub.is_function_scope = true;
-        // Names declared `nonlocal` in this body resolve to an enclosing cell;
-        // record them so reads/writes emit LoadCell/StoreCell (issue #2339).
-        sub.nonlocal_names = (*inner_nonlocal_rc).clone();
+        // Initialize compile-time indexed cell slots (`0..own_cell_count` = own
+        // cells, `own_cell_count..` = freevars/nonlocals) (issues #452 / #2339 / #2348).
+        let enclosing_cells = self.child_enclosing_cell_names(type_param_names);
+        sub.init_function_cells(enclosing_cells, &inner_global_rc, &inner_nonlocal_rc);
         sub.is_async_function = is_async;
         // An `async def` whose body contains a bare `yield` is an async
         // generator (#2280); `return <value>` inside it is a SyntaxError.
@@ -208,6 +210,7 @@ impl Compiler {
         // FnCode (issue #2185).
         sub.first_lineno = def_lineno;
         sub.compile_block_with_linenos(body, body_linenos);
+        sub.ensure_lexical_free_cells(body);
         let mut inner_code = match sub.finish() {
             Ok(c) => c,
             Err(e) => {
@@ -225,6 +228,7 @@ impl Compiler {
             }
         };
         merge_lexical_free_var_candidates(&mut inner_code, body, &inner_index_rc, &inner_global_rc);
+        let closure_capture_map = self.build_capture_map(&inner_code);
 
         if self.fn_protos.len() >= u16::MAX as usize {
             self.failed = true;
@@ -261,10 +265,10 @@ impl Compiler {
         let param_binds = Rc::new(crate::bytecode::compute_param_binds(
             &param_spec,
             &inner_index_rc,
-            &inner_code.cell_vars,
+            inner_code.own_cell_slots(),
         ));
         let self_bind =
-            crate::bytecode::compute_self_bind(name, &inner_index_rc, &inner_code.cell_vars);
+            crate::bytecode::compute_self_bind(name, &inner_index_rc, inner_code.own_cell_slots());
         self.fn_protos.push(FnProto {
             name: Rc::from(name),
             qualname: Rc::from(fn_qualname.as_str()),
@@ -280,6 +284,7 @@ impl Compiler {
             annotation_keys,
             docstring: fn_docstring,
             class_kwarg_names: SmallVec::new(),
+            closure_capture_map,
         });
 
         Some((proto_idx, is_memo_pure, has_kwonly_params))
@@ -473,6 +478,10 @@ impl Compiler {
             return;
         }
 
+        let type_param_names: SmallVec<[Symbol; 4]> = type_params
+            .iter()
+            .map(|tp| Symbol::intern(&tp.name))
+            .collect();
         let (proto_idx, is_memo_pure, has_kwonly_params) = match self.build_def_proto(
             name,
             params,
@@ -481,6 +490,7 @@ impl Compiler {
             def_lineno,
             return_annotation,
             is_async,
+            &type_param_names,
         ) {
             Some(v) => v,
             None => return,
@@ -507,16 +517,23 @@ impl Compiler {
         // `__type_params__` below to preserve object identity.  The block sits
         // below `dst`, so the `next_temp = dst + 1` watermark reset after
         // `MakeFunction` keeps it live until the tuple is built.
+        let shadowed_before = self.shadowed_type_params.len();
         if !type_params.is_empty() {
             self.emit(Insn::PushTypeParamEnv);
+            self.shadowed_type_params
+                .extend(type_param_names.iter().copied());
         }
         let (tp_base, tp_n) = self.emit_bind_type_params(type_params);
 
         let (annots_base, annots_n) =
             match self.emit_def_annotation_values(params, return_annotation) {
                 Some(v) => v,
-                None => return,
+                None => {
+                    self.shadowed_type_params.truncate(shadowed_before);
+                    return;
+                }
             };
+        self.shadowed_type_params.truncate(shadowed_before);
 
         let dst = self.alloc_temp();
         self.emit(Insn::MakeFunction(

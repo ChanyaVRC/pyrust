@@ -1281,7 +1281,10 @@ fn pass_int_loop_version(
             insns.iter().any(|insn| {
                 matches!(
                     insn,
-                    Insn::DeleteModuleGlobal(_) | Insn::DeleteName(_) | Insn::DeleteLocal(..)
+                    Insn::DeleteModuleGlobal(_)
+                        | Insn::DeleteName(_)
+                        | Insn::DeleteCell(..)
+                        | Insn::DeleteLocal(..)
                 )
             })
         };

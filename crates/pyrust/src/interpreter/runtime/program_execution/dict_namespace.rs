@@ -64,6 +64,7 @@ impl Interpreter {
             kind: FrameKind::Script,
             regs_ptr,
             regs_len,
+            cells: CellSlice::empty(),
             local_index: Rc::clone(&local_index),
             nonlocal_names: None,
             env: Some(Rc::clone(&self.env)),
@@ -111,6 +112,7 @@ impl Interpreter {
             kind: FrameKind::Script,
             regs_ptr,
             regs_len,
+            cells: CellSlice::empty(),
             local_index: Rc::clone(&local_index),
             nonlocal_names: None,
             env: Some(Rc::clone(&self.env)),
@@ -153,6 +155,7 @@ impl Interpreter {
                     kind: FrameKind::Script,
                     regs_ptr,
                     regs_len,
+                    cells: CellSlice::empty(),
                     local_index: Rc::clone(&local_index),
                     nonlocal_names: None,
                     env: Some(Rc::clone(&self.env)),
@@ -199,6 +202,7 @@ impl Interpreter {
                     kind: FrameKind::Script,
                     regs_ptr,
                     regs_len,
+                    cells: CellSlice::empty(),
                     local_index: Rc::clone(&local_index),
                     nonlocal_names: None,
                     env: Some(Rc::clone(&self.env)),
@@ -256,7 +260,7 @@ impl Interpreter {
                 {
                     let mut environment = exec_env.borrow_mut();
                     environment.record_namespace_env_binding(s);
-                    environment.values.insert(s, v.clone());
+                    environment.namespace_values_mut().insert(s, v.clone());
                 }
             }
         });
@@ -272,7 +276,7 @@ impl Interpreter {
                     {
                         let mut environment = exec_env.borrow_mut();
                         environment.record_namespace_env_binding(s);
-                        environment.values.insert(s, v.clone());
+                        environment.namespace_values_mut().insert(s, v.clone());
                     }
                 }
             });
@@ -304,7 +308,9 @@ impl Interpreter {
             {
                 let mut environment = self.env.borrow_mut();
                 environment.record_namespace_env_binding(name);
-                environment.values.insert(name, value.clone());
+                environment
+                    .namespace_values_mut()
+                    .insert(name, value.clone());
             }
             let _ = write_target.dict_insert(PyKey::str_from(name), value.clone());
         }

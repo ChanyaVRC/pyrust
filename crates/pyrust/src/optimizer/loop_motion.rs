@@ -326,6 +326,7 @@ fn for_each_write(insn: &Insn, mut f: impl FnMut(u32)) {
         | LoadGlobal(r, _)
         | LoadClassName(r, _, _)
         | LoadCell(r, _)
+        | LoadClassDeref(r, _)
         | LoadNone(r)
         | LoadExc(r)
         | LoadExcTraceback(r, _)
@@ -420,6 +421,7 @@ fn for_each_write(insn: &Insn, mut f: impl FnMut(u32)) {
         | DeleteAttr(..)
         | DeleteItem(..)
         | DeleteName(..)
+        | DeleteCell(..)
         | PushTypeParamEnv
         | PopTypeParamEnv
         | GetIter(..)
@@ -643,6 +645,7 @@ fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
         if matches!(insn, Insn::LoadConst(dst, _) | Insn::LoadNone(dst) | Insn::LoadGlobal(dst, _)
                          | Insn::LoadClassName(dst, _, _)
                          | Insn::LoadCell(dst, _)
+                         | Insn::LoadClassDeref(dst, _)
                          | Insn::Move(dst, _) | Insn::CopyReg(dst, _) if *dst == r)
         {
             return false;

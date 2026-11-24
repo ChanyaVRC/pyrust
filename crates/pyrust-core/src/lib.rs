@@ -41,8 +41,8 @@ pub use class_epoch::{
 };
 pub use cycle_guards::{CycleGuard, enter_repr_cycle_guard};
 pub use environment::{
-    EnvRef, EnvValues, Environment, NameSet, NamespaceFastLocalCacheSource, NamespaceMirrorGuard,
-    namespace_name_interest_mask,
+    CellSlot, EnvRef, EnvValues, Environment, EnvironmentStorage, NameSet,
+    NamespaceFastLocalCacheSource, NamespaceMirrorGuard, namespace_name_interest_mask,
 };
 pub use errors::{PyError, Result};
 pub use numeric_ops::{

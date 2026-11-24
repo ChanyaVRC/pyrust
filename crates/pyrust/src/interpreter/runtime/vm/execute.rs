@@ -13,6 +13,7 @@ impl Interpreter {
         &mut self,
         code: &crate::bytecode::FnCode,
         mut regs: RegSlice,
+        mut cells: CellSlice,
         iters_init: ItersBuf,
         exc_handlers_init: ExcHandlersBuf,
         start_pc: usize,
@@ -160,6 +161,7 @@ impl Interpreter {
                     self.sync_top_generator_frame_cache_if_present();
                     self.vm_frame_views.pop();
                     regs = __gd.saved_regs;
+                    cells = __gd.saved_cells;
                     pc = __gd.exit_pc;
                     cur_line = __gd.saved_cur_line;
                     code_ptr = __gd.saved_code_ptr;
@@ -193,6 +195,7 @@ impl Interpreter {
                         tramp_arena.truncate(tramp_active_base);
                         tramp_active_base = __saved.saved_base;
                         regs = __saved.saved_regs;
+                        cells = __saved.saved_cells;
                         pc = __saved.saved_pc;
                         cur_line = __saved.saved_cur_line;
                         // Restore the caller's code / locals / env BEFORE
@@ -297,6 +300,7 @@ impl Interpreter {
                     // `vm_unwind_error` so this expansion stays tiny at every site.
                     let mut __st = UnwindState {
                         regs: &mut regs,
+                        cells: &mut cells,
                         pc: &mut pc,
                         cur_line: &mut cur_line,
                         code_ptr: &mut code_ptr,
@@ -372,7 +376,6 @@ impl Interpreter {
                 let f = $fb;
                 if !matches!(f.kind, pyrust_core::UserFunctionKind::Regular)
                     || !f.global_names.is_empty()
-                    || !f.nonlocal_names.is_empty()
                 {
                     break $lt;
                 }
@@ -416,7 +419,7 @@ impl Interpreter {
                     || callee_code.is_coroutine
                     || callee_code.num_iters != 0
                     || callee_code.has_exc_handlers
-                    || !callee_code.cell_vars.is_empty()
+                    || callee_code.has_own_cells()
                 {
                     // A coroutine function (`async def`, issue #1039) must
                     // build a coroutine object instead of executing inline,
@@ -459,9 +462,19 @@ impl Interpreter {
                     Some(std::mem::replace(&mut self.env, Rc::clone(&f.env)))
                 };
                 let callee_local_index = Rc::clone(&f.local_index);
+                // Freevar-only closures (`own_cell_count == 0`) borrow `f.closure_cells`
+                // directly with zero allocation; `VmFrameView::function` keeps `f` alive
+                // until `tramp_return!` restores `saved_cells` (#452 / #2348).
+                let callee_cells = CellSlice::from_slice(&f.closure_cells);
+                let callee_nonlocal_names = if f.nonlocal_names.is_empty() {
+                    None
+                } else {
+                    Some(Rc::clone(&f.nonlocal_names))
+                };
                 tramp_stack.push(TrampFrame {
                     _depth_guard: depth_guard,
                     saved_regs: regs,
+                    saved_cells: cells,
                     saved_pc: pc,
                     dst: $dst,
                     saved_base: tramp_active_base,
@@ -482,8 +495,9 @@ impl Interpreter {
                     // valid (no realloc) until this frame's view is popped.
                     regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(new_ptr) },
                     regs_len: num_regs,
+                    cells: callee_cells,
                     local_index: callee_local_index,
-                    nonlocal_names: None,
+                    nonlocal_names: callee_nonlocal_names,
                     env: None,
                     is_class_method: callee_is_class_method,
                     function: Some($view_fn),
@@ -493,6 +507,7 @@ impl Interpreter {
                 code_ptr = callee_code_ptr;
                 num_locals = callee_num_locals;
                 regs = unsafe { RegSlice::from_raw(new_ptr, num_regs) };
+                cells = callee_cells;
                 pc = 0;
                 continue 'vm;
             }};
@@ -674,18 +689,38 @@ impl Interpreter {
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
                     self.assign_name(name, val);
                 }
-                Insn::LoadCell(dst, name_idx) => {
-                    let name = pool_get!(code.names, *name_idx, "name");
-                    regs[*dst as usize] = vm_try!(self.resolve_cell_value(code, name));
+                Insn::LoadCell(dst, cell_idx) => {
+                    // O(1) indexed cell read (#452 / #2339 / #2348): direct
+                    // slot access with zero env borrow, zero parent walk, and
+                    // zero name hashing.
+                    let slot = &cells.as_slice()[*cell_idx as usize];
+                    match slot.get() {
+                        Some(val) => regs[*dst as usize] = val,
+                        None => {
+                            let meta = code.cell_slots[*cell_idx as usize];
+                            vm_try!(Err(unbound_binding_error(
+                                meta.name.as_str(),
+                                meta.is_free_error,
+                            )));
+                        }
+                    }
                 }
-                Insn::StoreCell(name_idx, src) => {
-                    // Function-scope cell / nonlocal write (issue #2339).  Reuses
-                    // `assign_name`, whose nonlocal arm walks to the enclosing
-                    // owning env and whose cell arm writes the current env — the
-                    // shared mutable slot siblings and suspended frames observe.
-                    let name = pool_get!(code.names, *name_idx, "name");
+                Insn::StoreCell(cell_idx, src) => {
+                    // O(1) indexed cell write (#452 / #2339 / #2348).
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
-                    self.assign_name(name, val);
+                    cells.as_slice()[*cell_idx as usize].set(val);
+                }
+                Insn::DeleteCell(cell_idx, raise_if_missing) => {
+                    vm_try!(self.exec_delete_cell(
+                        code,
+                        &regs,
+                        cells,
+                        *cell_idx,
+                        *raise_if_missing,
+                    ));
+                }
+                Insn::LoadClassDeref(dst, cell_idx) => {
+                    regs[*dst as usize] = vm_try!(self.load_class_deref(code, cells, *cell_idx));
                 }
                 Insn::LoadNone(dst) => {
                     regs[*dst as usize] = Value::none();
@@ -1798,6 +1833,7 @@ impl Interpreter {
                         self.vm_frame_views.pop();
                         let dst_reg = gd.dst as usize;
                         regs = gd.saved_regs;
+                        cells = gd.saved_cells;
                         pc = gd.saved_pc;
                         cur_line = gd.saved_cur_line;
                         code_ptr = gd.saved_code_ptr;
@@ -2044,6 +2080,7 @@ impl Interpreter {
                         let exit_pc = jump_pc!(*offset);
                         let mut st = UnwindState {
                             regs: &mut regs,
+                            cells: &mut cells,
                             pc: &mut pc,
                             cur_line: &mut cur_line,
                             code_ptr: &mut code_ptr,
@@ -2072,6 +2109,7 @@ impl Interpreter {
                     let r = self.exec_make_function(
                         code,
                         &regs,
+                        cells,
                         num_locals,
                         *proto_idx,
                         *defs_base,
@@ -2091,6 +2129,7 @@ impl Interpreter {
                     let r = self.exec_make_class(
                         code,
                         &regs,
+                        cells,
                         num_locals,
                         *proto_idx,
                         *bases_base,
@@ -2114,6 +2153,7 @@ impl Interpreter {
                     let r = self.exec_make_class_meta(
                         code,
                         &regs,
+                        cells,
                         num_locals,
                         *proto_idx,
                         *bases_base,

@@ -218,6 +218,8 @@ impl Compiler {
                     if self.is_module_scope {
                         self.emit(Insn::DeleteModuleGlobal(name_idx));
                     }
+                } else if let Some(cell_idx) = self.resolve_cell_slot_for_write(name) {
+                    self.emit(Insn::DeleteCell(cell_idx, true));
                 } else {
                     let name_idx = self.intern_name(name);
                     self.emit(Insn::DeleteName(name_idx));

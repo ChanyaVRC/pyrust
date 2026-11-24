@@ -215,6 +215,11 @@ impl Interpreter {
                     )),
                 }
             }
+            ValueKind::BuiltinObject { .. }
+                if name == "cell_contents" && pyrust_builtins::cell::is_cell(&target) =>
+            {
+                pyrust_builtins::cell::set_cell_contents(&target, value)
+            }
             _ => {
                 let type_name = pyrust_core::builtin_type_name(&target);
                 let data_descriptor_owner = dict_view_mapping_descriptor_owner(&target, name);
