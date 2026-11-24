@@ -170,6 +170,8 @@ fn install_materialized_frame_cache(
             *slot = Some(Box::new(VmFrameCache {
                 object: Some(object),
                 traced_frame: None,
+                trace_last_line: 0,
+                trace_last_pc: 0,
                 function_locals,
                 persistent_function_locals: None,
                 function_local_names,
@@ -493,6 +495,8 @@ impl Interpreter {
                 Box::new(VmFrameCache {
                     object: None,
                     traced_frame: None,
+                    trace_last_line: 0,
+                    trace_last_pc: 0,
                     function_locals: None,
                     persistent_function_locals: None,
                     function_local_names: Vec::new(),
@@ -560,6 +564,8 @@ impl Interpreter {
                         *slot = Some(Box::new(VmFrameCache {
                             object: None,
                             traced_frame: None,
+                            trace_last_line: 0,
+                            trace_last_pc: 0,
                             function_locals: Some(weak_locals),
                             persistent_function_locals: None,
                             function_local_names,
@@ -676,6 +682,8 @@ impl Interpreter {
                 *slot = Some(Box::new(VmFrameCache {
                     object: None,
                     traced_frame: None,
+                    trace_last_line: 0,
+                    trace_last_pc: 0,
                     function_locals: Some(weak_locals),
                     persistent_function_locals: Some(locals),
                     function_local_names,
@@ -711,15 +719,34 @@ impl Interpreter {
     }
 
     /// Resolve `(frame, local_trace)` for a `'line'` trace event on
-    /// `view_index` when `f_trace` is non-`None` and `f_trace_lines` is `true`,
-    /// updating `frame.f_lineno` to `cur_line`.
+    /// `view_index` when `cur_line` changed or looped back (`pc < trace_last_pc`)
+    /// and `f_trace` is non-`None` with `f_trace_lines == true`, updating
+    /// `trace_last_line`, `trace_last_pc`, and `frame.f_lineno`.
     pub(crate) fn prepare_line_trace_frame(
-        &self,
+        &mut self,
         view_index: usize,
         cur_line: u32,
+        pc: usize,
     ) -> Option<(Value, Value)> {
-        let frame = self.cached_frame_object_for_trace(view_index)?;
-        if !frame_obj::get_trace_lines(&frame) {
+        let mut should_emit = false;
+        let frame = with_frame_cache_mut(self, view_index, |slot| {
+            let cache = slot.as_deref_mut()?;
+            let frame = cache.traced_frame.clone().or_else(|| {
+                cache
+                    .object
+                    .as_ref()
+                    .and_then(pyrust_core::WeakValueCache::upgrade)
+            })?;
+            if cur_line != 0 && (cur_line != cache.trace_last_line || pc < cache.trace_last_pc) {
+                cache.trace_last_line = cur_line;
+                cache.trace_last_pc = pc;
+                should_emit = true;
+            } else {
+                cache.trace_last_pc = pc;
+            }
+            Some(frame)
+        })?;
+        if !should_emit || !frame_obj::get_trace_lines(&frame) {
             return None;
         }
         let local_trace = frame_obj::get_trace(&frame)?;
@@ -1098,6 +1125,8 @@ impl Interpreter {
                 *cache = Some(Box::new(VmFrameCache {
                     object: Some(object),
                     traced_frame: None,
+                    trace_last_line: 0,
+                    trace_last_pc: 0,
                     function_locals: Some(function_locals),
                     persistent_function_locals: None,
                     function_local_names: Vec::new(),

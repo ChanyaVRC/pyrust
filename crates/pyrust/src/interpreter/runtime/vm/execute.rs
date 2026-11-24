@@ -50,8 +50,6 @@ impl Interpreter {
         let tramp_base: usize = self.tramp_stack.len();
         let gen_base: usize = self.gen_drive_stack.len();
         let mut tramp_active_base: usize = usize::MAX;
-        let mut last_traced_line: u32 = 0;
-        let mut last_traced_pc: usize = 0;
 
         'vm: loop {
             // Re-derive the active frame's `code` from `code_ptr` (updated on a
@@ -262,10 +260,9 @@ impl Interpreter {
                 vm_try!(self.vm_dispatch_step_hooks(
                     code,
                     pc,
-                    &mut regs,
+                    regs.non_null_ptr(),
+                    regs.len(),
                     num_locals,
-                    &mut last_traced_line,
-                    &mut last_traced_pc,
                 ));
             }
             pc += 1;
@@ -465,16 +462,6 @@ impl Interpreter {
                             pc - 1,
                             PositionalCallCacheProbe::Probed(BuiltinCallProbe::Uncacheable),
                         ));
-                        if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0 {
-                            self.vm_clear_call_arg_temps(
-                                code,
-                                pc,
-                                &mut regs,
-                                *func_reg + 1,
-                                u32::from(*argc),
-                                num_locals,
-                            );
-                        }
                         continue 'vm;
                     }
                     let probe = {
@@ -519,16 +506,6 @@ impl Interpreter {
                             let base = (*func_reg + 1) as usize;
                             let res = dispatch(self, &(*regs)[base..(base + *argc as usize)]);
                             regs[*func_reg as usize] = vm_try!(res);
-                            if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0 {
-                                self.vm_clear_call_arg_temps(
-                                    code,
-                                    pc,
-                                    &mut regs,
-                                    *func_reg + 1,
-                                    u32::from(*argc),
-                                    num_locals,
-                                );
-                            }
                             continue 'vm;
                         }
                         PlainCallProbe::Slow {
@@ -561,16 +538,6 @@ impl Interpreter {
                         pc - 1,
                         PositionalCallCacheProbe::Probed(cache_probe),
                     ));
-                    if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0 {
-                        self.vm_clear_call_arg_temps(
-                            code,
-                            pc,
-                            &mut regs,
-                            *func_reg + 1,
-                            u32::from(*argc),
-                            num_locals,
-                        );
-                    }
                 }
 
                 Insn::CallMemo(func_reg, argc) => {
@@ -617,16 +584,6 @@ impl Interpreter {
                         pc - 1,
                     );
                     regs[*dst as usize] = vm_try!(r);
-                    if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0 {
-                        self.vm_clear_call_arg_temps(
-                            code,
-                            pc,
-                            &mut regs,
-                            *args_base,
-                            u32::from(*nargs),
-                            num_locals,
-                        );
-                    }
                 }
 
                 // ── Hot returns, append, yield & iteration ───────────────

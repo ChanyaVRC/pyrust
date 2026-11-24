@@ -553,14 +553,17 @@ impl Interpreter {
         &mut self,
         code: &crate::bytecode::FnCode,
         pc: usize,
-        regs: &mut RegSlice,
+        regs_ptr: std::ptr::NonNull<Value>,
+        regs_len: usize,
         num_locals: u32,
     ) {
         if pyrust_core::has_live_weakrefs() {
             let start = num_locals as usize;
-            let len = regs.len();
-            for idx in start..len {
-                let v = &regs[idx];
+            // SAFETY: `regs_ptr`/`regs_len` come directly from the active
+            // `RegSlice` of the suspended VM loop frame; no aliasing `&mut [Value]`
+            // exists concurrently.
+            let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr.as_ptr(), regs_len) };
+            for (idx, v) in regs.iter_mut().enumerate().skip(start) {
                 if !v.is_unset()
                     && !matches!(
                         v.kind(),
@@ -572,7 +575,7 @@ impl Interpreter {
                     )
                     && !is_temp_reg_live_at(code, pc, idx as u32)
                 {
-                    regs[idx] = Value::unset();
+                    *v = Value::unset();
                 }
             }
         }
@@ -581,39 +584,6 @@ impl Interpreter {
         }
         if !pyrust_core::has_live_weakrefs() && !pyrust_core::has_pending_weakref_callbacks() {
             self.vm_hooks_flags &= !VM_HOOK_WEAKREF;
-        }
-    }
-
-    /// Clear dead positional call argument temporary registers right after a
-    /// call returns when weakrefs are active, so temporaries like
-    /// `weakref.ref(A())` die immediately rather than lingering in arg slots.
-    /// Always checks `is_temp_reg_live_at` so optimizer-coalesced temporaries
-    /// that are still read after the call are never clobbered.
-    #[cold]
-    #[inline(never)]
-    pub(crate) fn vm_clear_call_arg_temps(
-        &mut self,
-        code: &crate::bytecode::FnCode,
-        pc: usize,
-        regs: &mut RegSlice,
-        first_arg_reg: u32,
-        count: u32,
-        num_locals: u32,
-    ) {
-        let len = regs.len();
-        for offset in 0..count {
-            let reg = first_arg_reg + offset;
-            let idx = reg as usize;
-            if idx >= num_locals as usize
-                && idx < len
-                && !regs[idx].is_unset()
-                && !is_temp_reg_live_at(code, pc, reg)
-            {
-                regs[idx] = Value::unset();
-            }
-        }
-        if pyrust_core::has_pending_weakref_callbacks() {
-            self.drain_pending_weakref_callbacks();
         }
     }
 
@@ -705,37 +675,34 @@ impl Interpreter {
         &mut self,
         code: &crate::bytecode::FnCode,
         pc: usize,
-        regs: &mut RegSlice,
+        regs_ptr: std::ptr::NonNull<Value>,
+        regs_len: usize,
         num_locals: u32,
-        last_traced_line: &mut u32,
-        last_traced_pc: &mut usize,
     ) -> Result<()> {
         if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0 {
-            self.vm_scrub_dead_weakref_temps(code, pc, regs, num_locals);
+            self.vm_scrub_dead_weakref_temps(code, pc, regs_ptr, regs_len, num_locals);
         }
 
         if self.vm_hooks_flags & VM_HOOK_TRACE != 0 && !code.is_inlined_comp {
             let cur_line = code.line_at(pc);
-            if cur_line != 0 && (cur_line != *last_traced_line || pc < *last_traced_pc) {
-                *last_traced_line = cur_line;
-                *last_traced_pc = pc;
-                self.vm_emit_line_trace(cur_line)?;
-            } else {
-                *last_traced_pc = pc;
+            if cur_line != 0 {
+                self.vm_emit_line_trace(cur_line, pc)?;
             }
         }
         Ok(())
     }
 
     /// Emit a `'line'` trace event for the innermost active frame if it has a
-    /// non-`None` `f_trace` and `f_trace_lines == true`.
+    /// non-`None` `f_trace` and `f_trace_lines == true` and the line changed
+    /// (or jumped backward in a loop).
     #[cold]
     #[inline(never)]
-    fn vm_emit_line_trace(&mut self, cur_line: u32) -> Result<()> {
+    fn vm_emit_line_trace(&mut self, cur_line: u32, pc: usize) -> Result<()> {
         let Some(view_index) = self.visible_view_index_for_depth(0) else {
             return Ok(());
         };
-        let Some((frame, local_trace)) = self.prepare_line_trace_frame(view_index, cur_line) else {
+        let Some((frame, local_trace)) = self.prepare_line_trace_frame(view_index, cur_line, pc)
+        else {
             return Ok(());
         };
         pyrust_core::set_current_vm_line(cur_line);

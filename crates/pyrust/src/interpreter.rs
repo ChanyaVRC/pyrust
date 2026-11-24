@@ -713,6 +713,10 @@ pub(crate) struct VmFrameCache {
     /// `f_trace` callback so `f_trace` / `f_trace_lines` survive between lines
     /// even when the trace callback does not store `frame` externally.
     pub(crate) traced_frame: Option<Value>,
+    /// Last line number and bytecode PC emitted by `sys.settrace` for this
+    /// activation (cold; zero stack footprint in the VM hot loop).
+    pub(crate) trace_last_line: u32,
+    pub(crate) trace_last_pc: usize,
     /// Weak handle to this activation's function-locals mapping. Retaining
     /// only `frame.f_locals` must make later frame lookups reuse and refresh
     /// that dict without making the activation cache a new owner itself.
