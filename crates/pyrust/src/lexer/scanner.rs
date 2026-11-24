@@ -217,8 +217,7 @@ impl Lexer {
             pos = content_start; // reset to after-indent start
             let _ = line_start; // silence unused-variable warning
             let new_depth;
-            (pos, new_depth) =
-                self.lex_line_tokens(&chars, pos, paren_depth, suppress_newlines)?;
+            (pos, new_depth) = self.lex_line_tokens(&chars, pos, paren_depth, suppress_newlines)?;
             paren_depth = new_depth;
         }
 
