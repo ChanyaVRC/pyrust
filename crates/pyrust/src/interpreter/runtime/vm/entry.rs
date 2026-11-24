@@ -229,38 +229,11 @@ impl Interpreter {
         // exception propagated out of the body (issue #908).  On yield
         // (Ok(Yielded)) the body suspended successfully — nothing to record.
         if result.is_err() {
-            if frame.code.is_inlined_comp {
-                // PEP 709 (#2993): async collection comprehensions are inlined
-                // into their enclosing async function frame.
-                self.cold.inlined_comp_escaped_span = Some(pyrust_core::get_current_vm_col_span());
-            } else {
-                // Generator's own code-object filename (#2438): a generator defined
-                // in an imported module reports its module's source file.
-                let tb_filename = frame.code.filename.clone();
-                let tb_lineno = match pyrust_core::get_current_vm_line() {
-                    0 => None,
-                    n => Some(n),
-                };
-                let (tb_locals, tb_frame) = self.capture_unwinding_traceback_frame(tb_lineno);
-                pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
-                    filename: tb_filename,
-                    lineno: tb_lineno,
-                    source_line: None,
-                    funcname: frame.fn_name.clone(),
-                    globals: Some(pyrust_core::FrameGlobals::for_environment(
-                        &frame.function.env,
-                    )),
-                    // PEP 657 (#2904): the generator body just escaped, so the
-                    // published anchor is the col span of the instruction that
-                    // propagated the error inside it (the `1/0` BinOp of `yield 1/0`,
-                    // the `f()` Call of `yield f()`, …) — exactly the same rule the
-                    // plain-function frame uses in `calls::user_frame`.  Generator
-                    // frames used to hardcode `None` here and stayed caret-free.
-                    col_span: pyrust_core::get_current_vm_col_span(),
-                    locals: tb_locals,
-                    frame: tb_frame,
-                });
-            }
+            self.record_escaped_vm_frame_traceback(
+                &frame.code,
+                &frame.function,
+                Some(&frame.fn_name),
+            );
         } else {
             self.sync_top_generator_frame_cache_if_present();
         }

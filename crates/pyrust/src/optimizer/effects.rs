@@ -24,7 +24,6 @@ fn may_invalidate_named_locals(insn: &crate::bytecode::Insn) -> bool {
             | LoadClassName(..)
             | LoadCell(..)
             | LoadNone(..)
-            | LoadNoneRange { .. }
             | Move(..)
             | CheckLocal(..)
             // These builders only clone already-evaluated values into
@@ -118,7 +117,6 @@ fn insn_may_raise(insn: &Insn) -> bool {
         insn,
         Insn::LoadConst(..)
             | Insn::LoadNone(..)
-            | Insn::LoadNoneRange { .. }
             | Insn::Move(..)
             | Insn::Jump(..)
             | Insn::SetupExcept(..)

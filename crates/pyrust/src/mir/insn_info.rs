@@ -65,7 +65,6 @@ pub(crate) fn insn_may_invalidate_named_locals(insn: &Insn) -> bool {
             | LoadClassName(..)
             | LoadCell(..)
             | LoadNone(..)
-            | LoadNoneRange { .. }
             | Move(..)
             | CheckLocal(..)
             | BuildList(..)
@@ -156,9 +155,6 @@ macro_rules! dispatch_insn_operands {
             | LoadExc(d)
             | MakeTypeVar(d, _, _) => {
                 $v.write_reg(d);
-            }
-            LoadNoneRange { start, count } => {
-                $v.write_window(start, *count as u32);
             }
 
             DeleteName(..)

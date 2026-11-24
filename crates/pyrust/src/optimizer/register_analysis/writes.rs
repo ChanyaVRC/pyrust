@@ -119,11 +119,6 @@ fn for_each_write(insn: &Insn, descs: &[InsnDesc], mut f: impl FnMut(u32)) {
             f(desc.src_group); // src_group is updated to remaining
             f(desc.matched_dst); // matched_dst gets the sub-group
         }
-        LoadNoneRange { start, count } => {
-            for i in 0..*count as u32 {
-                f(start + i);
-            }
-        }
         CallMethod { dst, .. } | Yield { dst, .. } => f(*dst),
         YieldFrom {
             result_reg,

@@ -87,7 +87,7 @@ impl Interpreter {
             };
             let num_regs = code.num_regs as usize;
             let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
-            let cells = allocate_frame_cells(&code, &function.closure_cells);
+            let mut cells = allocate_frame_cells(&code, &function.closure_cells);
 
             let nparams = function.params.len();
             // Exact-arity positional fast bind: the dominant call shape — every
@@ -308,118 +308,12 @@ impl Interpreter {
                 )?;
             }
 
-            // Arguments are already bound directly into `regs` / `local_env`
-            // above (#2123).  Run the register-VM path.
-            //
-            // NOTE: this body is kept inline (not routed through
-            // `run_bound_user_frame`) — extracting it regressed the positional
-            // fast path ~3.5% (the hot user-function call path; see CLAUDE.md's
-            // frame-setup landmine and the #2382 PR bench table).  The kw
-            // fast-bind path (`call_user_function_kw_cached`) uses the extracted
-            // copy instead, where the regression doesn't apply.
-            {
-                let _depth_guard = CallDepthGuard::enter();
-                if call_depth() > max_call_depth(self) {
-                    return Err(self.recursion_limit_error()?);
-                }
-
-                // Swap in the function's defining namespace env (zero per-call
-                // `Environment` allocation — cells live in `cells`, #452).
-                let previous_env = std::mem::replace(&mut self.env, Rc::clone(&function.env));
-
-                // Self-reference for recursive calls (only if not a cell var) —
-                // bind slot precomputed at compile time (#1918).
-                if let Some(slot) = function.self_bind {
-                    if slot as usize >= num_regs {
-                        return Err(pyrust_core::py_err!(
-                            "SystemError",
-                            "self-reference register index {} out of range (num_regs={})",
-                            slot,
-                            num_regs
-                        ));
-                    }
-                    regs[slot as usize] = Value::user_function(Rc::clone(&function));
-                }
-
-                // Generator or coroutine function: create a frame rather than
-                // executing.  An `async def` body (issue #1039) is always a
-                // suspendable frame — even with no `await` — so it returns a
-                // coroutine object instead of running synchronously.
-                if code.is_generator || code.is_coroutine {
-                    self.env = previous_env;
-                    return Ok(Self::build_generator_value(&code, regs, cells, &function));
-                }
-
-                // Capture the raw pointer and length BEFORE constructing RegSlice
-                // so both the VmFrameView and the dispatch loop share the same raw
-                // pointer with no &mut [Value] in scope (issue #547 / PR #646).
-                let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
-                let regs_len = regs.len();
-                let cells_slice = CellSlice::from_slice(&cells);
-                // SAFETY: SmallVec / Vec allocation is always non-null.
-                // Popped before `regs` / `cells` are dropped.
-                self.vm_frame_views.push(VmFrameView::function_frame(
-                    regs_ptr,
-                    regs_len,
-                    cells_slice,
-                    Rc::clone(&function),
-                    code.is_class_method,
-                ));
-                // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
-                // of `regs` (a local RegsBuf that outlives this call).  No
-                // &mut [Value] referencing `regs` is held while the dispatch loop
-                // runs; RegSlice (raw pointer + len) is used instead, removing
-                // the LLVM noalias constraint (issue #547).
-                let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
-                let vm_result = self.run_bytecode_with_cells(&code, regs_slice, cells_slice);
-                // Lazy traceback: only build + record this frame's `FrameInfo`
-                // when the body actually errored.  The no-exception common path
-                // does no allocation and touches no traceback thread-local.
-                if vm_result.is_err() {
-                    if code.is_inlined_comp {
-                        // PEP 709 (#2993): suppress `<listcomp>`/`<setcomp>`/`<dictcomp>`
-                        // frame and propagate the inner caret anchor to the caller.
-                        self.cold.inlined_comp_escaped_span =
-                            Some(pyrust_core::get_current_vm_col_span());
-                    } else {
-                        // Callee's own code-object filename (#2438): an imported
-                        // module's function reports its module's source file.
-                        let tb_filename = code.filename.clone();
-                        // Capture the source line in this callee where execution
-                        // stopped (the callee published it via `set_current_vm_line`
-                        // on the way out).  Surfaced to Python as `tb_lineno` /
-                        // `f_lineno`; 0 means "no line table" (kept as `None`).
-                        let tb_lineno = match pyrust_core::get_current_vm_line() {
-                            0 => None,
-                            n => Some(n),
-                        };
-                        let (tb_locals, tb_frame) =
-                            self.capture_unwinding_traceback_frame(tb_lineno);
-                        pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
-                            filename: tb_filename,
-                            lineno: tb_lineno,
-                            source_line: None,
-                            funcname: std::sync::Arc::from(&function.name[..]),
-                            globals: Some(pyrust_core::FrameGlobals::for_environment(
-                                &function.env,
-                            )),
-                            // This callee just escaped, so the published anchor
-                            // (#2411) is the col span of the instruction that
-                            // propagated the error within this frame.
-                            col_span: pyrust_core::get_current_vm_col_span(),
-                            locals: tb_locals,
-                            frame: tb_frame,
-                        });
-                    }
-                }
-                self.detach_vm_frame_view();
-                drop(regs);
-                drop(cells);
-                self.env = previous_env;
-                self.finish_pop_vm_frame_view();
-                let value = vm_result?;
-                return Ok(value);
-            }
+            // Arguments are already bound directly into `regs` / `cells`
+            // above (#2123).  Routed through `#[inline(always)]`
+            // `run_bound_user_frame_inline` to keep positional-fast-path codegen
+            // identical while sharing frame setup, cold traceback recording, and
+            // teardown (#3163).
+            return self.run_bound_user_frame_inline(&function, &code, &mut regs, &mut cells);
         }
 
         // Variadic path (*args / **kwargs) lives in a helper to keep this

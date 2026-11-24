@@ -48,7 +48,6 @@ mod cross_jump;
 mod elimination;
 mod inlining;
 mod int_loop_versioning;
-mod load_none_merging;
 mod loop_motion;
 mod metadata;
 mod pre;

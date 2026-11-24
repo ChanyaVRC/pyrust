@@ -346,12 +346,6 @@ fn pre_step_types(
             types.insert(*dst, PreExactType::NoneType);
             (true, false)
         }
-        Insn::LoadNoneRange { start, count } => {
-            for offset in 0..*count as u32 {
-                types.insert(start + offset, PreExactType::NoneType);
-            }
-            (true, false)
-        }
         Insn::Move(dst, src) => {
             match types.get(src).copied() {
                 Some(t) => {
