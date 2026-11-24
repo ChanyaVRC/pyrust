@@ -103,6 +103,11 @@ pub struct FnCode {
     /// functions or in functions nested inside methods.  Used by
     /// `resolve_zero_arg_super` to identify the correct enclosing frame.
     pub(crate) is_class_method: bool,
+    /// True when this code object is a Python function/lambda/comprehension
+    /// body (not a module script, `exec`/`eval` frame, or class body).
+    /// Function fastlocals (`0..num_locals`) cannot be externally mutated by
+    /// module `globals()` or class `locals()` namespace mirrors (issue #457).
+    pub(crate) is_function_scope: bool,
     /// True when this code object is the implicit body of a list / set / dict
     /// comprehension — a scope CPython 3.12 inlines into the enclosing frame
     /// (PEP 709).  pyrust runs it as a separate frame, but for error parity an

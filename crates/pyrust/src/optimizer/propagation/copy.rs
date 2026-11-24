@@ -255,6 +255,18 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             let hi = dst_base + *before as u32 + 1 + *after;
             copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
         }
+        // MatchClassPositional writes dst_base..dst_base+n; kill the entire range.
+        if let Insn::MatchClassPositional { dst_base, n, .. } = &insn {
+            let lo = *dst_base;
+            let hi = dst_base + *n;
+            copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
+        }
+        // LoadNoneRange writes start..start+count; kill the entire range.
+        if let Insn::LoadNoneRange { start, count } = &insn {
+            let lo = *start;
+            let hi = start + *count as u32;
+            copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
+        }
         // Move(dst, src): kill stale aliases THEN record the new copy.
         // Killing is necessary because overwriting `dst` invalidates any
         // existing alias that names `dst` as its source (e.g. `x → dst`).
