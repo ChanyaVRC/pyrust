@@ -621,6 +621,10 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     // "io.UnsupportedOperation" (the dotted name used by raise sites) and
     // "UnsupportedOperation" (the bare name printed in tracebacks).
     let unsupported_operation = mk("UnsupportedOperation", Some(Rc::clone(&os_error)));
+    unsupported_operation
+        .borrow_mut()
+        .attrs
+        .insert("__module__".to_string(), Value::string("io"));
     // Python 3.3+: IOError and EnvironmentError are aliases for OSError.
     let io_error = Rc::clone(&os_error);
     let environment_error = Rc::clone(&os_error);

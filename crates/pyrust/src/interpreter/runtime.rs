@@ -244,7 +244,7 @@ mod attributes {
         is_type_alias_class, is_typevar_class, lookup_class_attr, metaclass_dunder, metaclass_of,
         mro_has_unslotted_ancestor, mro_slot_allows, native_iterator_class, object_class_singleton,
         primitive_owned_object_dunder, replace_instance_dict, type_alias_readonly_attr_error,
-        typevar_readonly_attr_error, value_class, value_type_name_str,
+        type_class_singleton, typevar_readonly_attr_error, value_class, value_type_name_str,
     };
     include!("runtime/attributes.rs");
 }

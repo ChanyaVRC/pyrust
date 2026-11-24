@@ -392,6 +392,7 @@ impl Interpreter {
             return Err(error);
         }
         if Rc::ptr_eq(class, &object_class_singleton())
+            || Rc::ptr_eq(class, &type_class_singleton())
             || crate::interpreter::is_primitive_class(class)
         {
             let class_name = class.borrow().name.clone();
@@ -408,12 +409,28 @@ impl Interpreter {
             ));
         }
         // Class metadata is implemented by type-level descriptors in CPython.
-        // None of these four slots can be deleted, even on a mutable heap type.
-        if matches!(name, "__module__" | "__name__" | "__qualname__" | "__doc__") {
+        // `__name__` and `__qualname__` are always non-deletable descriptors on
+        // `type`.  `__module__` and `__doc__` are also non-deletable on plain
+        // `type` classes, EXCEPT when a custom metaclass shadows them with a
+        // non-descriptor entry in its own class dict (e.g. `Meta.__module__`):
+        // in CPython `type_setattro` finds that non-descriptor and deletes the
+        // key from `cls.__dict__` instead of invoking `type`'s descriptor
+        // (#2929).
+        if matches!(name, "__name__" | "__qualname__") {
             let n = class.borrow().name.clone();
             return Err(pyrust_core::type_err!(
                 "cannot delete '{name}' attribute of immutable type '{n}'"
             ));
+        }
+        if matches!(name, "__module__" | "__doc__") {
+            let shadowed_by_metaclass = metaclass_dunder(class, name)
+                .is_some_and(|meta_val| !is_data_descriptor(&meta_val));
+            if !shadowed_by_metaclass {
+                let n = class.borrow().name.clone();
+                return Err(pyrust_core::type_err!(
+                    "cannot delete '{name}' attribute of immutable type '{n}'"
+                ));
+            }
         }
         // Issue #737: `del Cls.__annotations__` must raise
         // `AttributeError` when no annotations dict has been

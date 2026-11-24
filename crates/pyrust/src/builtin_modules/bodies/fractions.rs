@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::Interpreter;
-use crate::value::{PyDict, PyKey, Value, ValueKind};
+use crate::value::{PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 /// Python-source definitions for every public `fractions` member.  Exec'd once
@@ -41,7 +41,7 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<Option<Value>> {
-    let ns = Value::dict(PyDict::default());
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     // Pre-seed the exec namespace with the modules `fractions_py.py` depends on
     // (`math`, `functools`, `operator`, `re`).  We can't rely on module-level
     // `import` statements inside the exec'd source: a top-level `import X` in an

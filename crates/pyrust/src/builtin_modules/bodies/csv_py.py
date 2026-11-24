@@ -17,7 +17,7 @@ QUOTE_NONE = 3
 
 
 class Error(Exception):
-    pass
+    __module__ = "_csv"
 
 
 # --- dialects ---------------------------------------------------------------

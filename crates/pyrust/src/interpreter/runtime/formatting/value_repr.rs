@@ -40,6 +40,8 @@ pub(crate) fn format_oct_i64(v: i64) -> String {
 fn value_needs_interp_repr(v: &Value) -> bool {
     match v.kind() {
         ValueKind::PyInstance(_)
+        | ValueKind::BoundMethod { .. }
+        | ValueKind::ClassBoundMethod { .. }
         | ValueKind::BuiltinObject { .. }
         | ValueKind::List(_)
         | ValueKind::Tuple(_)
@@ -438,6 +440,18 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
         //   - everything else (map/filter/zip/enumerate/list_iterator/…):
         //         `<{type_name} object at 0x...>`
         ValueKind::Generator(_) => Ok(generator_repr(value)),
+        ValueKind::BoundMethod { function, receiver } => {
+            let qualname = function.effective_qualname();
+            let receiver_val = Value::py_instance(Rc::clone(receiver));
+            let receiver_repr = render_value_repr(interp, &receiver_val)?;
+            Ok(format!("<bound method {qualname} of {receiver_repr}>"))
+        }
+        ValueKind::ClassBoundMethod { function, class } => {
+            let qualname = function.effective_qualname();
+            let class_val = Value::py_class(Rc::clone(class));
+            let class_repr = render_value_repr(interp, &class_val)?;
+            Ok(format!("<bound method {qualname} of {class_repr}>"))
+        }
         // Issue #2771: `repr(cls)` dispatches `type(cls).__repr__(cls)` when the
         // class's metaclass defines a user `__repr__`.  `dispatch_metaclass_repr_str`
         // returns `None` for an ordinary class (metatype is the built-in `type`),

@@ -26,7 +26,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::Interpreter;
-use crate::value::{PyDict, PyKey, Value, ValueKind};
+use crate::value::{PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 /// Python-source definitions for every public `decimal` member.  Exec'd once at
@@ -113,11 +113,7 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<Option<Value>> {
-    let ns = Value::dict(PyDict::default());
-    // `decimal_py.py` reads `__name__` (it does `__xname__ = __name__` before
-    // overriding `__name__ = 'decimal'`).  The exec namespace has no implicit
-    // `__name__`, so seed it.
-    ns.dict_insert(PyKey::str_from("__name__"), Value::string("decimal"))?;
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     // Pre-seed module dependencies.  `import` statements executed through this
     // injection path do not bind their target names in the exec namespace, so
     // seed every module `decimal_py.py` references at runtime under the name the

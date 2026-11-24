@@ -281,9 +281,26 @@ impl Value {
                 }
             },
             ValueKind::UserFunction(func) => match func.kind {
-                UserFunctionKind::ClassMethod => format!("<classmethod '{}'>", func.name),
-                UserFunctionKind::StaticMethod => format!("<staticmethod '{}'>", func.name),
-                UserFunctionKind::Regular => format!("<function {}>", func.name),
+                UserFunctionKind::ClassMethod => {
+                    let inner = func.wrapped_func.as_ref().unwrap_or(func);
+                    let addr = Rc::as_ptr(inner) as usize;
+                    format!(
+                        "<classmethod(<function {} at 0x{addr:x}>)>",
+                        inner.effective_qualname()
+                    )
+                }
+                UserFunctionKind::StaticMethod => {
+                    let inner = func.wrapped_func.as_ref().unwrap_or(func);
+                    let addr = Rc::as_ptr(inner) as usize;
+                    format!(
+                        "<staticmethod(<function {} at 0x{addr:x}>)>",
+                        inner.effective_qualname()
+                    )
+                }
+                UserFunctionKind::Regular => {
+                    let addr = Rc::as_ptr(func) as usize;
+                    format!("<function {} at 0x{addr:x}>", func.effective_qualname())
+                }
                 // Builtins are surfaced via `ValueKind::BuiltinFunction` by
                 // `kind()`, so we never reach this arm — but the match is
                 // total either way.
@@ -327,8 +344,11 @@ impl Value {
                 out
             }
             ValueKind::BoundMethod { function, receiver } => {
-                let class_name = receiver.borrow().class.borrow().name.clone();
-                format!("<bound method {class_name}.{}>", function.name)
+                let receiver_repr = Value::py_instance(Rc::clone(receiver)).repr_raw();
+                format!(
+                    "<bound method {} of {receiver_repr}>",
+                    function.effective_qualname()
+                )
             }
             ValueKind::PyModule(m) => format!("<module '{}'>", m.borrow().name),
             ValueKind::Tuple(items) => {
@@ -357,7 +377,11 @@ impl Value {
                 }
             }
             ValueKind::ClassBoundMethod { function, class } => {
-                format!("<bound method {}.{}>", class.borrow().name, function.name)
+                let class_repr = Value::py_class(Rc::clone(class)).repr_raw();
+                format!(
+                    "<bound method {} of {class_repr}>",
+                    function.effective_qualname()
+                )
             }
             ValueKind::SuperProxy { class, instance } => {
                 let class_name = class.borrow().name.clone();

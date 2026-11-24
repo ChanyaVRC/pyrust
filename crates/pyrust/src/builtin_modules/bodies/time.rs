@@ -28,7 +28,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{ExpandedCallArg, Interpreter, reject_keyword_args_expanded};
-use crate::value::{PyDict, PyKey, Value, ValueKind};
+use crate::value::{PyKey, Value, ValueKind};
 use num_traits::ToPrimitive;
 use pyrust_derive::pyrust_module;
 
@@ -51,7 +51,7 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<Option<Value>> {
-    let ns = Value::dict(PyDict::default());
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     // Pre-seed `namedtuple` from `collections` so the Python source can use it
     // by bare name without a top-level `import` (whose binding does not survive
     // the exec-with-globals path used for module injection).
