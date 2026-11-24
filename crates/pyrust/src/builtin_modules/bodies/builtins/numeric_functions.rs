@@ -63,10 +63,10 @@ pyrust_module! {
                     &[],
                 );
             }
-            // Issue #1204: fall through to the scalar backing value for
-            // primitive subclasses (MyInt, MyFloat, …) that have no user
-            // __abs__ defined.
-            if let Some(backing) = instance_builtin_data(&inst_rc) {
+            // Issue #1204/#2386: fall through to the validated backing value
+            // for numeric subclasses (MyInt, MyFloat, MyComplex, …) that have
+            // no user __abs__ defined.
+            if let Some(backing) = effective_builtin_receiver(&val, &[]) {
                 match backing.kind() {
                     ValueKind::Int(v) => {
                         // i64::MIN.checked_abs() returns None because
@@ -87,6 +87,7 @@ pyrust_module! {
                     }
                     ValueKind::Float(v) => return Ok(Value::float(v.abs())),
                     ValueKind::Bool(b) => return Ok(Value::int(if b { 1 } else { 0 })),
+                    ValueKind::Complex(re, im) => return Ok(Value::float(re.hypot(im))),
                     _ => {}
                 }
             }
@@ -333,8 +334,17 @@ pyrust_module! {
         let mod_opt = r#mod.as_value().filter(|v| !v.is_none());
         if let Some(mod_val) = mod_opt {
 
-            // User-defined type as base: dispatch __pow__(exp, mod) first.
-            if let ValueKind::PyInstance(inst) = base_val.kind() {
+            // Builtin-subclass normalization (#2386): an inherited builtin
+            // `__pow__` (e.g. `class I(int): pass`) delegates to the primitive
+            // backing, while any user-defined `__pow__` override still runs
+            // with the original receiver.
+            let base_backing = effective_builtin_receiver(base_val, &["__pow__"]);
+
+            // User-defined type as base (or subclass overriding `__pow__`):
+            // dispatch __pow__(exp, mod) first.
+            if base_backing.is_none()
+                && let ValueKind::PyInstance(inst) = base_val.kind()
+            {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
                 if let Some(method) = lookup_class_attr(&class, "__pow__") {
@@ -349,16 +359,22 @@ pyrust_module! {
                 }
             }
 
+            // Normalize builtin subclasses (e.g. `int` subclasses in any of
+            // the three positions) through the substitutability boundary.
+            let base_eff = base_backing.unwrap_or_else(|| base_val.clone());
+            let exp_eff = effective_builtin_receiver(exp_val, &[]).unwrap_or_else(|| exp_val.clone());
+            let mod_eff = effective_builtin_receiver(mod_val, &[]).unwrap_or_else(|| mod_val.clone());
+
             // Fall through to built-in integer modpow.
             //
             // CPython distinguishes two TypeError messages for 3-arg pow:
-            //   - If any argument is a user-defined type (PyInstance): the
+            //   - If any argument is a non-builtin user-defined type: the
             //     "unsupported operand type(s)" format (three type names).
-            //   - Otherwise (e.g. float args): "3rd argument not allowed unless
-            //     all arguments are integers".
-            let any_instance = matches!(base_val.kind(), ValueKind::PyInstance(_))
-                || matches!(exp_val.kind(), ValueKind::PyInstance(_))
-                || matches!(mod_val.kind(), ValueKind::PyInstance(_));
+            //   - Otherwise (e.g. float or float-subclass args): "3rd argument
+            //     not allowed unless all arguments are integers".
+            let any_instance = matches!(base_eff.kind(), ValueKind::PyInstance(_))
+                || matches!(exp_eff.kind(), ValueKind::PyInstance(_))
+                || matches!(mod_eff.kind(), ValueKind::PyInstance(_));
             if any_instance {
                 return Err(PyError::named(
                     "TypeError",
@@ -377,23 +393,23 @@ pyrust_module! {
             // Promote to BigInt when any argument is a BigInt so that values
             // outside the i64 range are handled correctly.  The i64 fast path
             // is kept for the common case where all three args fit in i64.
-            let any_bigint = matches!(base_val.kind(), ValueKind::BigInt(_))
-                || matches!(exp_val.kind(), ValueKind::BigInt(_))
-                || matches!(mod_val.kind(), ValueKind::BigInt(_));
+            let any_bigint = matches!(base_eff.kind(), ValueKind::BigInt(_))
+                || matches!(exp_eff.kind(), ValueKind::BigInt(_))
+                || matches!(mod_eff.kind(), ValueKind::BigInt(_));
             if any_bigint {
-                let base_big: PyBigInt = match base_val.kind() {
+                let base_big: PyBigInt = match base_eff.kind() {
                     ValueKind::Int(v) => PyBigInt::from(v),
                     ValueKind::Bool(b) => PyBigInt::from(b as i64),
                     ValueKind::BigInt(b) => (*b).clone(),
                     _ => return Err(three_arg_type_error()),
                 };
-                let exp_big: PyBigInt = match exp_val.kind() {
+                let exp_big: PyBigInt = match exp_eff.kind() {
                     ValueKind::Int(v) => PyBigInt::from(v),
                     ValueKind::Bool(b) => PyBigInt::from(b as i64),
                     ValueKind::BigInt(b) => (*b).clone(),
                     _ => return Err(three_arg_type_error()),
                 };
-                let mod_big: PyBigInt = match mod_val.kind() {
+                let mod_big: PyBigInt = match mod_eff.kind() {
                     ValueKind::Int(v) => PyBigInt::from(v),
                     ValueKind::Bool(b) => PyBigInt::from(b as i64),
                     ValueKind::BigInt(b) => (*b).clone(),
@@ -444,17 +460,17 @@ pyrust_module! {
                 }
                 return Ok(modpow_bigint(&base_big, &exp_big, &mod_big));
             }
-            let base = match base_val.kind() {
+            let base = match base_eff.kind() {
                 ValueKind::Int(v) => v,
                 ValueKind::Bool(b) => b as i64,
                 _ => return Err(three_arg_type_error()),
             };
-            let exp = match exp_val.kind() {
+            let exp = match exp_eff.kind() {
                 ValueKind::Int(v) => v,
                 ValueKind::Bool(b) => b as i64,
                 _ => return Err(three_arg_type_error()),
             };
-            let modulus = match mod_val.kind() {
+            let modulus = match mod_eff.kind() {
                 ValueKind::Int(v) => v,
                 ValueKind::Bool(b) => b as i64,
                 _ => return Err(three_arg_type_error()),

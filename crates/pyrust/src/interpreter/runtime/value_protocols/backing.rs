@@ -239,6 +239,7 @@ pub(crate) fn coerce_operand_backing(v: &Value) -> Value {
             ValueKind::Int(_)
                 | ValueKind::BigInt(_)
                 | ValueKind::Float(_)
+                | ValueKind::Complex(_, _)
                 | ValueKind::Str(_)
                 | ValueKind::Bytes(_)
                 | ValueKind::List(_)

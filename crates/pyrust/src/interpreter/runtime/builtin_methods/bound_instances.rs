@@ -48,21 +48,9 @@ impl Interpreter {
         let is_primitive_builtin_method = match method_val.kind() {
             ValueKind::BuiltinFunction(fn_name) => {
                 inherited_primitive_richcmp
-                    || fn_name.split_once('.').is_some_and(|(t, _)| {
-                        matches!(
-                            t,
-                            "dict"
-                                | "list"
-                                | "set"
-                                | "frozenset"
-                                | "tuple"
-                                | "str"
-                                | "int"
-                                | "float"
-                                | "bytes"
-                                | "bytearray"
-                        )
-                    })
+                    || fn_name
+                        .split_once('.')
+                        .is_some_and(|(t, _)| is_subclassable_builtin_type_name(t))
             }
             _ => false,
         };
@@ -150,6 +138,7 @@ impl Interpreter {
                 Str,
                 Int,
                 Float,
+                Complex,
                 Bytes,
                 Bytearray,
                 Other,
@@ -178,6 +167,7 @@ impl Interpreter {
                 ValueKind::Str(_) => BkKind::Str,
                 ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => BkKind::Int,
                 ValueKind::Float(_) => BkKind::Float,
+                ValueKind::Complex(_, _) => BkKind::Complex,
                 ValueKind::Bytes(_) => BkKind::Bytes,
                 _ => BkKind::Other,
             };
@@ -355,6 +345,14 @@ impl Interpreter {
                         ));
                     }
                     pyrust_builtins::float::call(method, f, &args_vec)
+                }
+                BkKind::Complex => {
+                    if !kw.is_empty() {
+                        return Err(pyrust_core::type_err!(
+                            "complex.{method}() takes no keyword arguments"
+                        ));
+                    }
+                    pyrust_builtins::complex::call(method, &backing, args_vec)
                 }
                 BkKind::Bytes => {
                     // Accept bytes-subclass / bytearray args

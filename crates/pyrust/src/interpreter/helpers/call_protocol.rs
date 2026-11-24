@@ -469,7 +469,7 @@ pub(crate) fn invoke_class_method(
                 // into `dispatch_builtin_protocol_dunder`, which re-enters the
                 // same dunder until the native stack overflows.
                 if let ValueKind::PyInstance(inst) = instance.kind() {
-                    let Some(backing) = instance_builtin_data(inst)
+                    let Some(backing) = effective_builtin_receiver(&instance, &[])
                         .filter(|backing| !matches!(backing.kind(), ValueKind::PyInstance(_)))
                     else {
                         let class_name = inst.borrow().class.borrow().name.clone();
@@ -726,7 +726,7 @@ pub(crate) fn visit_mapping_pairs_via_protocol(
         // Concrete builtin backing dict (e.g. OrderedDict) — snapshot before
         // calling `visit`.  In particular, `dict.update` may be updating this
         // exact backing through a subclass receiver.
-        if let Some(backing) = instance_builtin_data(&inst)
+        if let Some(backing) = effective_builtin_receiver(value, &[])
             && let Some(map) = backing.as_dict()
         {
             let pairs: Vec<(PyKey, Value)> = map.clone().into_iter().collect();

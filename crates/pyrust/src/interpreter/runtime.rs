@@ -30,10 +30,10 @@ use value_protocols::{coerce_operand_backing, is_not_implemented};
 
 mod formatting {
     use super::{
-        ExpandedCallArg, HashMap, Interpreter, PyBigInt, PyError, PyInstance, PyKey, Rc, RefCell,
-        Result, Value, ValueKind, ascii_repr_interp, bigint_to_float_or_overflow,
-        builtin_data_backing, exception_str_with_dispatch, extract_str_value, float_to_bigint,
-        full_type_name_str, instance_builtin_data, intern_string, invoke_class_method,
+        ExpandedCallArg, HashMap, Interpreter, PyBigInt, PyClass, PyError, PyInstance, PyKey, Rc,
+        RefCell, Result, Value, ValueKind, ascii_repr_interp, bigint_to_float_or_overflow,
+        builtin_data_backing, effective_builtin_receiver, exception_str_with_dispatch,
+        extract_str_value, float_to_bigint, full_type_name_str, intern_string, invoke_class_method,
         is_exception_class, is_percent_format_mapping, is_str_or_str_subclass, lookup_class_attr,
         lookup_class_attr_owner, lookup_value_special_method, metaclass_dunder_for_call,
         native_iterator_class, normalize_float_slot_result, object_class_singleton,
@@ -43,7 +43,8 @@ mod formatting {
 }
 pub(crate) use formatting::{
     CallBuiltinCacheEntry, FmtSpecCacheEntry, apply_format_spec, apply_format_spec_named,
-    format_bin_i64, format_oct_i64, render_instance_str, render_key_repr, render_value_repr,
+    format_bin_i64, format_oct_i64, render_builtin_subclass_repr, render_instance_str,
+    render_key_repr, render_value_repr,
 };
 use formatting::{format_dunder_owner, format_dunder_spec_arg};
 
@@ -139,13 +140,15 @@ mod builtin_methods {
         coerce_str_subclass_method_args, coerce_subclass_backing, dict_view_class_by_name,
         dispatch_property_method, effective_builtin_receiver, eval_builtin_unary,
         extract_optional_string, format_dunder_owner, format_dunder_spec_arg, full_type_name_str,
-        hash_value_with_interp, instance_builtin_data, invoke_class_method, is_getitem_iterator,
-        is_ordered_dict_class_or_subclass, is_primitive_class, is_reversed_iterator,
-        is_stop_iteration_error, lookup_class_attr, make_iterator, native_iterator_class,
-        native_iterator_object_method_arity, object_class_singleton, ordered_dict_owner,
-        primitive_class_by_name, primitive_class_kind, reject_keyword_args_expanded,
-        render_instance_repr, type_class_singleton, value_class, value_from_bigint,
-        value_is_canonical_slot, value_to_bigint, value_type_name_str, values_are_identical,
+        hash_value_with_interp, invoke_class_method, is_getitem_iterator,
+        is_mutable_container_builtin_type_name, is_ordered_dict_class_or_subclass,
+        is_primitive_class, is_reversed_iterator, is_stop_iteration_error,
+        is_subclassable_builtin_type_name, is_unhashable_builtin_type_name, lookup_class_attr,
+        make_iterator, native_iterator_class, native_iterator_object_method_arity,
+        object_class_singleton, ordered_dict_owner, primitive_class_by_name, primitive_class_kind,
+        reject_keyword_args_expanded, render_builtin_subclass_repr, render_instance_repr,
+        type_class_singleton, value_class, value_from_bigint, value_is_canonical_slot,
+        value_to_bigint, value_type_name_str, values_are_identical,
     };
     include!("runtime/builtin_methods.rs");
 }
@@ -243,12 +246,12 @@ mod attributes {
         builtin_callable_metadata, builtin_class_doc, call_slot_value_unbound,
         canonical_class_by_tag, class_chain_new_slot_wrapped, class_hash_inherits_builtin_none,
         class_is_subclass_of, class_suppresses_instance_dict, descriptor_get_slot_raw_call,
-        effective_builtin_receiver, exception_slot_policy, full_type_name_str,
-        instance_builtin_data, invoke_class_method, is_exception_class, is_type_alias_class,
-        is_typevar_class, lookup_class_attr, metaclass_dunder, metaclass_of,
-        mro_has_unslotted_ancestor, mro_slot_allows, native_iterator_class, object_class_singleton,
-        primitive_owned_object_dunder, replace_instance_dict, type_alias_readonly_attr_error,
-        type_class_singleton, typevar_readonly_attr_error, value_class, value_type_name_str,
+        effective_builtin_receiver, exception_slot_policy, full_type_name_str, invoke_class_method,
+        is_exception_class, is_type_alias_class, is_typevar_class, lookup_class_attr,
+        metaclass_dunder, metaclass_of, mro_has_unslotted_ancestor, mro_slot_allows,
+        native_iterator_class, object_class_singleton, primitive_owned_object_dunder,
+        replace_instance_dict, type_alias_readonly_attr_error, type_class_singleton,
+        typevar_readonly_attr_error, value_class, value_type_name_str,
     };
     include!("runtime/attributes.rs");
 }

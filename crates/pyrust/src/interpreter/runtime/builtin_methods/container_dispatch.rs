@@ -72,14 +72,14 @@ impl Interpreter {
         };
         let (primitive_type, primitive_method) = function_name
             .split_once('.')
-            .filter(|(type_name, _)| matches!(*type_name, "dict" | "list" | "set"))?;
-        let backing = instance_builtin_data(instance)?;
+            .filter(|(type_name, _)| is_mutable_container_builtin_type_name(type_name))?;
+        let receiver = Value::py_instance(Rc::clone(instance));
+        let backing = effective_builtin_receiver(&receiver, &[])?;
         let ordered = is_ordered_dict_class_or_subclass(&instance.borrow().class);
         if primitive_method.starts_with("__")
             && is_protocol_dunder(primitive_type, primitive_method)
         {
             if is_mutable_builtin_inplace_dunder(primitive_method) {
-                let receiver = Value::py_instance(Rc::clone(instance));
                 return Some(self.dispatch_builtin_subclass_protocol_dunder(
                     primitive_method,
                     &receiver,
@@ -232,8 +232,7 @@ impl Interpreter {
             // Issue #2070: `__hash__` on an unhashable built-in (list/dict/set/
             // bytearray) resolves to `None` in CPython, so `[1].__hash__()`
             // raises `'NoneType' object is not callable` — not `AttributeError`.
-            if method == "__hash__" && matches!(&*type_name, "list" | "dict" | "set" | "bytearray")
-            {
+            if method == "__hash__" && is_unhashable_builtin_type_name(&type_name) {
                 return Err(pyrust_core::type_err!("'NoneType' object is not callable"));
             }
             // A protocol-dunder name that is valid for *other* types but not

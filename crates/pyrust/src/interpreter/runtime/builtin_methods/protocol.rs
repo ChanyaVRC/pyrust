@@ -156,50 +156,13 @@ impl Interpreter {
         if method == "__repr__" {
             let self_val = &self_arg.value;
             if let ValueKind::PyInstance(inst_rc) = self_val.kind() {
-                let inst_rc = Rc::clone(inst_rc);
-                if let Some(backing) = instance_builtin_data(&inst_rc) {
-                    let class = Rc::clone(&inst_rc.borrow().class);
-                    let s = if backing.is_list() || backing.is_dict() || backing.is_tuple() {
-                        crate::interpreter::render_value_repr(self, &backing)?
-                    } else if let Some(is_empty) = backing.set_len().map(|len| len == 0) {
-                        let class_name = class.borrow().name.clone();
-                        if is_empty {
-                            format!("{class_name}()")
-                        } else {
-                            let inner = crate::interpreter::render_value_repr(self, &backing)?;
-                            format!("{class_name}({inner})")
-                        }
-                    } else {
-                        match backing.kind() {
-                            ValueKind::Str(_)
-                            | ValueKind::Int(_)
-                            | ValueKind::BigInt(_)
-                            | ValueKind::Bool(_)
-                            | ValueKind::Float(_)
-                            | ValueKind::Complex(_, _)
-                            | ValueKind::Bytes(_) => backing.repr_raw(),
-                            ValueKind::BuiltinObject { ops, .. }
-                                if ops.canonical_class_tag()
-                                    == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
-                            {
-                                let class_name = class.borrow().name.clone();
-                                let items = pyrust_builtins::frozenset::as_items(&backing);
-                                let is_empty = items.as_ref().is_none_or(|rc| rc.is_empty());
-                                if is_empty {
-                                    format!("{class_name}()")
-                                } else {
-                                    let snapshot: Vec<_> = items.unwrap().iter().cloned().collect();
-                                    let mut parts = Vec::with_capacity(snapshot.len());
-                                    for k in &snapshot {
-                                        parts.push(crate::interpreter::render_key_repr(self, k)?);
-                                    }
-                                    format!("{class_name}({{{}}})", parts.join(", "))
-                                }
-                            }
-                            _ => crate::interpreter::render_value_repr(self, &backing)?,
-                        }
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(backing) = effective_builtin_receiver(self_val, &[]) {
+                    let rendered = match render_builtin_subclass_repr(self, &class, &backing)? {
+                        Some(s) => s,
+                        None => crate::interpreter::render_value_repr(self, &backing)?,
                     };
-                    return Ok(Value::string(s));
+                    return Ok(Value::string(rendered));
                 }
             }
             return Ok(Value::string(crate::interpreter::render_value_repr(
@@ -305,6 +268,45 @@ impl Interpreter {
                 return dispatch(self, &call_args);
             }
             return self.int_round_dunder(&receiver, args.pop());
+        }
+        // `int`/`bool`/`float`/`complex`.`__pow__(exp[, mod])` accepts an
+        // optional modulus argument (CPython's `ternaryfunc` `nb_power`).
+        // With 1 arg (or `mod=None`) fall through to the 2-arg binary path;
+        // with a non-None modulus, check numeric operand acceptance and
+        // delegate to the `pow` builtin so `(2).__pow__(5, 7)` and
+        // `int.__pow__(MyInt(2), 5, 7)` match CPython 3.12.
+        if method == "__pow__"
+            && matches!(&*type_name, "int" | "bool" | "float" | "complex")
+            && args.len() == 2
+        {
+            let mod_val = args.pop().unwrap();
+            if !mod_val.is_none() {
+                let exp_val = args.pop().unwrap();
+                if !numeric_operand_accepted(&receiver, &exp_val)
+                    || !numeric_operand_accepted(&receiver, &mod_val)
+                {
+                    return Ok(Value::not_implemented());
+                }
+                let dispatch =
+                    crate::builtin_registry::lookup("pow").expect("pow must be in the registry");
+                return dispatch(
+                    self,
+                    &[
+                        ExpandedCallArg {
+                            name: None,
+                            value: receiver,
+                        },
+                        ExpandedCallArg {
+                            name: None,
+                            value: exp_val,
+                        },
+                        ExpandedCallArg {
+                            name: None,
+                            value: mod_val,
+                        },
+                    ],
+                );
+            }
         }
         // Arity check up front so the error matches CPython 3.12's slot-wrapper
         // messages rather than a downstream operator error.  CPython's wording

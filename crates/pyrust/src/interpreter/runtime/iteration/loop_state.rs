@@ -332,7 +332,9 @@ impl Interpreter {
             ResolvedIterSlot::Missing => None,
         };
 
-        if let Some(backing) = lookup_failed_backing.or_else(|| instance_builtin_data(&instance)) {
+        if let Some(backing) =
+            lookup_failed_backing.or_else(|| effective_builtin_receiver(&source, &[]))
+        {
             if matches!(backing.kind(), ValueKind::List(_) | ValueKind::Tuple(_)) {
                 return Ok(IterState::ValueIndexed {
                     value: backing,

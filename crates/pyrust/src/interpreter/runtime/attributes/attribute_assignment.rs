@@ -648,16 +648,7 @@ fn class_name_assignment_text(value: &Value) -> Option<String> {
     if let ValueKind::Str(text) = value.kind() {
         return Some(text.to_string());
     }
-    let instance = match value.kind() {
-        ValueKind::PyInstance(instance) => Rc::clone(instance),
-        _ => return None,
-    };
-    let class = Rc::clone(&instance.borrow().class);
-    let str_class = canonical_class_by_tag(pyrust_core::CanonicalClassTag::Str);
-    if !class_is_subclass_of(&class, &str_class) {
-        return None;
-    }
-    let backing = instance_builtin_data(&instance)?;
+    let backing = effective_builtin_receiver(value, &[])?;
     let text = match backing.kind() {
         ValueKind::Str(text) => text.to_string(),
         _ => return None,

@@ -276,56 +276,6 @@ impl Interpreter {
                     .collect();
                 self.call_generator_method(self_val, method, pos)
             }
-            // float instance methods via descriptor call: `float.is_integer(x)`.
-            // The float call fn takes an `f64` receiver directly, so this arm
-            // is separate from the generic str/list/… arm below.  Rich-
-            // comparison slots are excluded: they need the generic protocol
-            // dispatcher so float-subclass backing is accepted (#2847).
-            ValueKind::BuiltinFunction(name)
-                if name.split_once('.').is_some_and(|(t, method)| {
-                    t == "float"
-                        && !matches!(
-                            method,
-                            "__eq__" | "__ne__" | "__lt__" | "__le__" | "__gt__" | "__ge__"
-                        )
-                }) =>
-            {
-                let (_, method) = name.split_once('.').unwrap();
-                // Issue #2760: `__getnewargs__` takes no keyword arguments; the
-                // unbound float arm below drops kwargs silently otherwise.
-                if method == "__getnewargs__" && args.iter().any(|a| a.name.is_some()) {
-                    return Err(pyrust_core::type_err!(
-                        "float.__getnewargs__() takes no keyword arguments"
-                    ));
-                }
-                let self_val = args
-                    .first()
-                    .map(|a| a.value.clone())
-                    .ok_or_else(|| pyrust_core::descriptor_needs_arg!(method, "float", method))?;
-                let f = match self_val.kind() {
-                    ValueKind::Float(f) => f,
-                    _ => {
-                        let actual = pyrust_core::builtin_type_name(&self_val);
-                        return Err(pyrust_core::type_err!(
-                            "descriptor '{method}' for 'float' objects doesn't apply to a '{actual}' object",
-                        ));
-                    }
-                };
-                // Issue #2767: float method_descriptors take no keyword
-                // arguments; the receiver-only `float::call` discards them, so
-                // guard here before delegating.
-                if args[1..].iter().any(|a| a.name.is_some()) {
-                    return Err(pyrust_core::type_err!(
-                        "float.{method}() takes no keyword arguments"
-                    ));
-                }
-                let pos: Vec<Value> = args[1..]
-                    .iter()
-                    .filter(|a| a.name.is_none())
-                    .map(|a| a.value.clone())
-                    .collect();
-                pyrust_builtins::float::call(method, f, &pos)
-            }
             // PEP 585: `__class_getitem__` classmethods on built-in collection
             // types.  Sentinel names follow the pattern
             // `"<type>.__class_getitem__"` (declared by provider metadata and
@@ -676,20 +626,7 @@ impl Interpreter {
                 // need this AFTER backing normalisation erases it (#2436:
                 // the bound `dict.keys` route lost the odict tag).
                 let mut receiver_ordered = false;
-                let self_val = if matches!(
-                    type_name,
-                    "dict"
-                        | "list"
-                        | "set"
-                        | "frozenset"
-                        | "tuple"
-                        | "str"
-                        | "int"
-                        | "float"
-                        | "bytes"
-                        | "bytearray"
-                        | "complex"
-                ) {
+                let self_val = if is_subclassable_builtin_type_name(type_name) {
                     // Extract the Rc before kind() drops its borrow.
                     let maybe_inst = if let ValueKind::PyInstance(inst) = self_val.kind() {
                         Some(Rc::clone(inst))
@@ -826,6 +763,18 @@ impl Interpreter {
                     "int" => {
                         self.resolve_to_bytes_length(method, &mut pos, &mut kw)?;
                         pyrust_builtins::int::call(method, &self_val, &pos, &kw)
+                    }
+                    "float" => {
+                        if !kw.is_empty() {
+                            return Err(pyrust_core::type_err!(
+                                "float.{method}() takes no keyword arguments"
+                            ));
+                        }
+                        let f = match self_val.kind() {
+                            ValueKind::Float(f) => f,
+                            _ => unreachable!("kind_ok guard above"),
+                        };
+                        pyrust_builtins::float::call(method, f, &pos)
                     }
                     "bytes" => {
                         // Accept bytes-subclass / bytearray args (#1928);
