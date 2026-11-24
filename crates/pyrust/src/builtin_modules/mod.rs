@@ -398,6 +398,23 @@ pyrust_builtin_modules! {
     // `shlex` (issue #3147): pure-Python shell-like lexical analyzer (`shlex`,
     // `split`, `join`, `quote`) injected from `shlex_py.py`.
     shlex @inject,
+    // `fnmatch` (issue #3148): pure-Python Unix shell-style filename pattern
+    // matching (`fnmatch`, `fnmatchcase`, `filter`, `translate`) injected from
+    // `fnmatch_py.py` by the `@inject` post-load hook.
+    fnmatch @inject,
+    // `glob` (issue #3148): pure-Python pathname pattern expansion (`glob`,
+    // `iglob`, `escape`, `has_magic`, `glob0`, `glob1`) injected from
+    // `glob_py.py` by the `@inject` post-load hook.
+    glob @inject,
+    // `shutil` (issue #3148): high-level file/directory copy, move, rmtree,
+    // `which`, and `get_terminal_size` injected from `shutil_py.py` backed by
+    // minimal native OS helpers in `shutil.rs`.
+    shutil @inject,
+    // `tempfile` (issue #3148): `gettempdir*`, `mkstemp`, `mkdtemp`,
+    // `TemporaryFile`, `NamedTemporaryFile`, `SpooledTemporaryFile`, and
+    // `TemporaryDirectory` injected from `tempfile_py.py` backed by atomic
+    // exclusive creation and seekable file streams in `tempfile.rs`.
+    tempfile @inject,
 }
 
 include!("finalization.rs");

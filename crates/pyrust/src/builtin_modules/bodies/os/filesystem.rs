@@ -3,12 +3,56 @@
 //! This module owns path-consuming I/O and recursive traversal. It does not
 //! construct Python-facing result classes or access process-environment state.
 
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{LazyLock, Mutex};
+
 use crate::error::{PyError, Result};
-use crate::interpreter::{ExpandedCallArg, reject_keyword_args_expanded};
-use crate::value::Value;
+use crate::interpreter::{ExpandedCallArg, reject_keyword_args_expanded, value_type_name_str};
+use crate::value::{Value, ValueKind};
 
 use super::arguments::{require_int, require_str, single_path_arg, value_is_truthy};
 use super::result_types::make_stat_result;
+
+/// Process-local table of open OS file handles backing integer file descriptors
+/// returned by `tempfile.mkstemp()` and consumed by `os.read` / `os.write` /
+/// `os.close`.
+static FD_TABLE: LazyLock<Mutex<HashMap<i64, std::fs::File>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_FD: AtomicI64 = AtomicI64::new(3);
+
+/// Register an open `std::fs::File` in the descriptor table and return its fd.
+pub(crate) fn register_fd(file: std::fs::File) -> i64 {
+    let fd = NEXT_FD.fetch_add(1, Ordering::Relaxed);
+    let mut table = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+    table.insert(fd, file);
+    fd
+}
+
+/// Remove and drop an fd from the descriptor table, returning `EBADF` if absent.
+pub(crate) fn close_fd_raw(fd: i64) -> std::io::Result<()> {
+    let file = {
+        let mut table = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+        table.remove(&fd)
+    };
+    if file.is_some() {
+        Ok(())
+    } else {
+        Err(ebadf_error())
+    }
+}
+
+fn ebadf_error() -> std::io::Error {
+    #[cfg(unix)]
+    {
+        std::io::Error::from_raw_os_error(libc::EBADF)
+    }
+    #[cfg(not(unix))]
+    {
+        std::io::Error::from_raw_os_error(9)
+    }
+}
 
 pub(super) fn getcwd(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
     reject_keyword_args_expanded(fn_name, args)?;
@@ -63,12 +107,26 @@ pub(super) fn mkdir(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
         ));
     }
     let path = require_str(fn_name, &args[0].value, "path")?;
-    // `mode` remains accepted and ignored. Applying it correctly requires a
-    // platform-specific implementation that honors umask semantics.
-    if let Some(mode) = args.get(1) {
-        require_int(fn_name, &mode.value, "mode")?;
+    let mode = match args.get(1) {
+        Some(mode) => Some(require_int(fn_name, &mode.value, "mode")?),
+        None => None,
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        if let Some(m) = mode {
+            builder.mode((m & 0o7777) as u32);
+        }
+        builder
+            .create(&path)
+            .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
     }
-    std::fs::create_dir(&path).map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        std::fs::create_dir(&path).map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+    }
     Ok(Value::none())
 }
 
@@ -189,6 +247,256 @@ pub(super) fn stat(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
     let metadata =
         std::fs::metadata(&path).map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
     Ok(make_stat_result(&metadata))
+}
+
+pub(super) fn lstat(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let path = single_path_arg(fn_name, args)?;
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+    Ok(make_stat_result(&metadata))
+}
+
+pub(super) fn close(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    reject_keyword_args_expanded(fn_name, args)?;
+    if args.len() != 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "{fn_name}() takes exactly 1 argument ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let fd = require_int(fn_name, &args[0].value, "fd")?;
+    close_fd_raw(fd).map_err(|error| PyError::from_io_error(&error, None))?;
+    Ok(Value::none())
+}
+
+pub(super) fn read_fd(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    reject_keyword_args_expanded(fn_name, args)?;
+    if args.len() != 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "{fn_name}() takes exactly 2 arguments ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let fd = require_int(fn_name, &args[0].value, "fd")?;
+    let n = require_int(fn_name, &args[1].value, "n")?;
+    if n < 0 {
+        return Err(PyError::named("OSError", "Invalid argument".to_string()));
+    }
+    let mut table = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+    let file = table
+        .get_mut(&fd)
+        .ok_or_else(|| PyError::from_io_error(&ebadf_error(), None))?;
+    let mut buf = vec![0u8; n as usize];
+    let count = file
+        .read(&mut buf)
+        .map_err(|error| PyError::from_io_error(&error, None))?;
+    buf.truncate(count);
+    Ok(Value::bytes(buf))
+}
+
+pub(super) fn write_fd(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    reject_keyword_args_expanded(fn_name, args)?;
+    if args.len() != 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "{fn_name}() takes exactly 2 arguments ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let fd = require_int(fn_name, &args[0].value, "fd")?;
+    let data: Vec<u8> = match args[1].value.kind() {
+        ValueKind::Bytes(b) => b.as_ref().clone(),
+        _ => {
+            if let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(&args[1].value) {
+                snap
+            } else {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "a bytes-like object is required, not '{}'",
+                        value_type_name_str(&args[1].value)
+                    ),
+                ));
+            }
+        }
+    };
+    let mut table = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+    let file = table
+        .get_mut(&fd)
+        .ok_or_else(|| PyError::from_io_error(&ebadf_error(), None))?;
+    let written = file
+        .write(&data)
+        .map_err(|error| PyError::from_io_error(&error, None))?;
+    Ok(Value::int(written as i64))
+}
+
+pub(super) fn access(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    reject_keyword_args_expanded(fn_name, args)?;
+    if args.len() != 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "{fn_name}() takes exactly 2 arguments ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let path = require_str(fn_name, &args[0].value, "path")?;
+    let mode = require_int(fn_name, &args[1].value, "mode")?;
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        let Ok(cpath) = CString::new(path) else {
+            return Ok(Value::bool_(false));
+        };
+        // SAFETY: `cpath` is a NUL-terminated string valid for the call.
+        let ok = unsafe { libc::access(cpath.as_ptr(), mode as libc::c_int) == 0 };
+        Ok(Value::bool_(ok))
+    }
+    #[cfg(not(unix))]
+    {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return Ok(Value::bool_(false));
+        };
+        // W_OK == 2: non-directory files marked read-only fail W_OK on Windows.
+        if (mode & 2) != 0 && !meta.is_dir() && meta.permissions().readonly() {
+            return Ok(Value::bool_(false));
+        }
+        Ok(Value::bool_(true))
+    }
+}
+
+pub(super) fn chmod(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    if args.len() < 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "{fn_name}() takes at least 2 arguments ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let path = require_str(fn_name, &args[0].value, "path")?;
+    let mode = require_int(fn_name, &args[1].value, "mode")?;
+    let mut follow_symlinks = true;
+    for arg in args.iter().skip(2) {
+        match arg.name.as_deref() {
+            Some("follow_symlinks") => follow_symlinks = value_is_truthy(&arg.value),
+            Some(other) => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{fn_name}() got an unexpected keyword argument '{other}'"),
+                ));
+            }
+            None => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{fn_name}() takes at most 2 positional arguments"),
+                ));
+            }
+        }
+    }
+    let _ = follow_symlinks;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode((mode & 0o7777) as u32);
+        std::fs::set_permissions(&path, perms)
+            .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let meta = std::fs::metadata(&path)
+            .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+        let mut perms = meta.permissions();
+        perms.set_readonly((mode & 0o200) == 0);
+        std::fs::set_permissions(&path, perms)
+            .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+    }
+    Ok(Value::none())
+}
+
+pub(super) fn symlink(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    if args.len() < 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "{fn_name}() takes at least 2 arguments ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let src = require_str(fn_name, &args[0].value, "src")?;
+    let dst = require_str(fn_name, &args[1].value, "dst")?;
+    let mut target_is_directory = false;
+    for (idx, arg) in args.iter().enumerate().skip(2) {
+        match arg.name.as_deref() {
+            Some("target_is_directory") => target_is_directory = value_is_truthy(&arg.value),
+            Some(other) => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{fn_name}() got an unexpected keyword argument '{other}'"),
+                ));
+            }
+            None if idx == 2 => target_is_directory = value_is_truthy(&arg.value),
+            None => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{fn_name}() takes at most 3 arguments"),
+                ));
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        let _ = target_is_directory;
+        std::os::unix::fs::symlink(&src, &dst)
+            .map_err(|error| PyError::from_io_error2(&error, Some(&src), Some(&dst)))?;
+    }
+    #[cfg(windows)]
+    {
+        let is_dir = target_is_directory || {
+            let candidate = if std::path::Path::new(&src).is_absolute() {
+                std::path::PathBuf::from(&src)
+            } else {
+                std::path::Path::new(&dst)
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(&src)
+            };
+            candidate.is_dir()
+        };
+        let res = if is_dir {
+            std::os::windows::fs::symlink_dir(&src, &dst)
+        } else {
+            std::os::windows::fs::symlink_file(&src, &dst)
+        };
+        res.map_err(|error| PyError::from_io_error2(&error, Some(&src), Some(&dst)))?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (src, dst, target_is_directory);
+        return Err(PyError::named(
+            "NotImplementedError",
+            "symlink is not supported on this platform".to_string(),
+        ));
+    }
+    Ok(Value::none())
+}
+
+pub(super) fn readlink(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let path = single_path_arg(fn_name, args)?;
+    let target =
+        std::fs::read_link(&path).map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+    Ok(Value::string(target.to_string_lossy()))
 }
 
 /// Recursive eager traversal used by the current `os.walk` implementation.

@@ -26,6 +26,7 @@ mod arguments;
 mod environment;
 #[path = "os/filesystem.rs"]
 mod filesystem;
+pub(crate) use filesystem::register_fd;
 #[path = "os/path_protocol.rs"]
 mod path_protocol;
 #[path = "os/result_types.rs"]
@@ -76,6 +77,10 @@ pyrust_module! {
             }
         },
         "devnull" => Value::string(if cfg!(windows) { "nul" } else { "/dev/null" }),
+        "F_OK" => Value::int(0),
+        "R_OK" => Value::int(4),
+        "W_OK" => Value::int(2),
+        "X_OK" => Value::int(1),
         // Struct-sequence classes are process-canonical, just like CPython's
         // `posix.stat_result` / `os.terminal_size` exports.  Host factories and
         // direct Python construction share these exact class objects.
@@ -176,6 +181,38 @@ pyrust_module! {
     /// Return filesystem metadata as an `os.stat_result`.
     fn stat(args) -> Result<Value> {
         filesystem::stat(args, FN_NAME)
+    }
+
+    fn lstat(args) -> Result<Value> {
+        filesystem::lstat(args, FN_NAME)
+    }
+
+    fn close(args) -> Result<Value> {
+        filesystem::close(args, FN_NAME)
+    }
+
+    fn read(args) -> Result<Value> {
+        filesystem::read_fd(args, FN_NAME)
+    }
+
+    fn write(args) -> Result<Value> {
+        filesystem::write_fd(args, FN_NAME)
+    }
+
+    fn access(args) -> Result<Value> {
+        filesystem::access(args, FN_NAME)
+    }
+
+    fn chmod(args) -> Result<Value> {
+        filesystem::chmod(args, FN_NAME)
+    }
+
+    fn symlink(args) -> Result<Value> {
+        filesystem::symlink(args, FN_NAME)
+    }
+
+    fn readlink(args) -> Result<Value> {
+        filesystem::readlink(args, FN_NAME)
     }
 
     /// Present an `os.terminal_size` result.
@@ -315,8 +352,8 @@ mod boundary_tests {
     fn registration_facade_stays_small_and_complete() {
         let environ_registration = concat!("#[py_", "name = \"_Environ.");
         assert!(
-            OWNER.lines().count() <= 340,
-            "os registration facade grew beyond its 340-line budget"
+            OWNER.lines().count() <= 380,
+            "os registration facade grew beyond its 380-line budget"
         );
         assert_eq!(OWNER.matches(environ_registration).count(), 11);
         assert_eq!(ENVIRON_METHODS.len(), 11);

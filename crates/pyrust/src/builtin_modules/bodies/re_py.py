@@ -668,6 +668,9 @@ def _fixed_width(node, group_nodes=None, groupindex=None, max_group=None,
     if tag == 'scoped':
         return _fixed_width(node[2], group_nodes, groupindex, max_group,
                             resolving, width_cache)
+    if tag == 'atomic':
+        return _fixed_width(node[1], group_nodes, groupindex, max_group,
+                            resolving, width_cache)
     if tag == 'alt':
         width = None
         variable = False
@@ -889,6 +892,16 @@ class _Matcher:
                     return r
             self.groups = saved
             return None
+        if tag == 'atomic':
+            saved = list(self.groups)
+            end = self._m(node[1], pos, lambda p: p)
+            if end is None:
+                self.groups = saved
+                return None
+            r = cont(end)
+            if r is None:
+                self.groups = saved
+            return r
         if tag == 'lookbehind':
             positive = node[1]
             width = node[3]
