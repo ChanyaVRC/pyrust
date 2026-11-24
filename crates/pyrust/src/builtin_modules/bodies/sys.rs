@@ -1744,6 +1744,14 @@ fn approximate_sizeof(value: &Value) -> i64 {
 // class carries only a `__repr__` so that `repr(sys.flags)` produces a
 // recognisable string.
 
+// Thread-local justification:
+// (a) Why `thread_local!`: `PyClass` and its attribute `Value`s are
+//     `!Send + !Sync`, so per-thread singletons for `sys.flags` and
+//     `sys.version_info` classes cannot live in a process-global `OnceLock`.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share the `sys.flags` and `sys.version_info` class objects (each
+//     module gets fresh `PyInstance` objects); separate threads build
+//     independent class objects.
 thread_local! {
     static FLAGS_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs = indexmap::IndexMap::new();
@@ -1755,52 +1763,7 @@ thread_local! {
             attrs,
         )))
     };
-}
 
-/// Build the `sys.flags` singleton value.
-fn make_flags() -> Value {
-    FLAGS_CLASS.with(|class| {
-        let mut attrs = InstanceAttrs::new();
-        // Fields and their defaults match CPython's sys.flags for a normal run
-        // with no command-line options (all optimization / debug flags are 0).
-        // <https://docs.python.org/3/library/sys.html#sys.flags>
-        attrs.insert("debug", Value::int(0));
-        attrs.insert("inspect", Value::int(0));
-        attrs.insert("interactive", Value::int(0));
-        attrs.insert("optimize", Value::int(0));
-        attrs.insert("dont_write_bytecode", Value::int(0));
-        attrs.insert("no_user_site", Value::int(0));
-        attrs.insert("no_site", Value::int(0));
-        attrs.insert("ignore_environment", Value::int(0));
-        attrs.insert("verbose", Value::int(0));
-        attrs.insert("bytes_warning", Value::int(0));
-        attrs.insert("quiet", Value::int(0));
-        attrs.insert("hash_randomization", Value::int(0));
-        attrs.insert("isolated", Value::int(0));
-        attrs.insert("dev_mode", Value::bool_(false));
-        attrs.insert("utf8_mode", Value::int(0));
-        attrs.insert("warn_default_encoding", Value::int(0));
-        attrs.insert("safe_path", Value::bool_(false));
-        // This records the startup configuration and intentionally does not
-        // change after sys.set_int_max_str_digits(), matching CPython.
-        attrs.insert(
-            "int_max_str_digits",
-            Value::int(pyrust_core::INT_MAX_STR_DIGITS_DEFAULT as i64),
-        );
-        Value::py_instance(Rc::new(RefCell::new(PyInstance {
-            class: Rc::clone(class),
-            attrs,
-        })))
-    })
-}
-
-// ── version_info class singleton ─────────────────────────────────────────────
-//
-// The class is built once per thread.  `BuiltinFunction` attrs point to the
-// functions registered above in `pyrust_module!` so pyrust's existing
-// `try_dunder_binary` / `get_attr` / subscript dispatch picks them up.
-
-thread_local! {
     static VERSION_INFO_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
         attrs.insert("__module__".to_string(), Value::string("sys"));
@@ -1850,6 +1813,49 @@ thread_local! {
         )))
     };
 }
+
+/// Build the `sys.flags` singleton value.
+fn make_flags() -> Value {
+    FLAGS_CLASS.with(|class| {
+        let mut attrs = InstanceAttrs::new();
+        // Fields and their defaults match CPython's sys.flags for a normal run
+        // with no command-line options (all optimization / debug flags are 0).
+        // <https://docs.python.org/3/library/sys.html#sys.flags>
+        attrs.insert("debug", Value::int(0));
+        attrs.insert("inspect", Value::int(0));
+        attrs.insert("interactive", Value::int(0));
+        attrs.insert("optimize", Value::int(0));
+        attrs.insert("dont_write_bytecode", Value::int(0));
+        attrs.insert("no_user_site", Value::int(0));
+        attrs.insert("no_site", Value::int(0));
+        attrs.insert("ignore_environment", Value::int(0));
+        attrs.insert("verbose", Value::int(0));
+        attrs.insert("bytes_warning", Value::int(0));
+        attrs.insert("quiet", Value::int(0));
+        attrs.insert("hash_randomization", Value::int(0));
+        attrs.insert("isolated", Value::int(0));
+        attrs.insert("dev_mode", Value::bool_(false));
+        attrs.insert("utf8_mode", Value::int(0));
+        attrs.insert("warn_default_encoding", Value::int(0));
+        attrs.insert("safe_path", Value::bool_(false));
+        // This records the startup configuration and intentionally does not
+        // change after sys.set_int_max_str_digits(), matching CPython.
+        attrs.insert(
+            "int_max_str_digits",
+            Value::int(pyrust_core::INT_MAX_STR_DIGITS_DEFAULT as i64),
+        );
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(class),
+            attrs,
+        })))
+    })
+}
+
+// ── version_info class singleton ─────────────────────────────────────────────
+//
+// The class is built once per thread.  `BuiltinFunction` attrs point to the
+// functions registered above in `pyrust_module!` so pyrust's existing
+// `try_dunder_binary` / `get_attr` / subscript dispatch picks them up.
 
 /// Build the `sys.version_info` singleton value.  Called once per
 /// `sys.module()` invocation (which the interpreter memoises in the module

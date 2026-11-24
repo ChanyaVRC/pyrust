@@ -35,6 +35,12 @@ const NAN_IDENTITY_BIT: u64 = 1 << 47;
 /// Counter bits available below [`NAN_IDENTITY_BIT`] (2^47 distinct identities).
 const NAN_IDENTITY_MASK: u64 = NAN_IDENTITY_BIT - 1;
 
+// Thread-local justification:
+// (a) Why `thread_local!`: `Value` is thread-confined (`!Send + !Sync`), so a
+//     non-atomic `Cell` mints NaN identities without atomic contention.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread draw disjoint 47-bit payloads from the same monotonic counter;
+//     separate threads maintain independent counters without cross-thread sync.
 thread_local! {
     /// Per-thread source of NaN object identities (#2911).  Values are
     /// thread-confined, so a non-atomic `Cell` matches the ownership model.
@@ -157,7 +163,7 @@ unsafe fn str_refcount_decrement(header: *mut u32) -> bool {
 const STR_OFFSET_STRIDE: usize = 32;
 const STR_OWNED_HEADER_SIZE: usize = 16;
 const STR_MAX_BYTE_LEN: usize = u32::MAX as usize;
-const STR_SLICE_LAYOUT_SIZE: usize = 32;
+pub(crate) const STR_SLICE_LAYOUT_SIZE: usize = 32;
 const STR_SLICE_CACHE_OFFSET: usize = 24;
 const STR_CODEPOINT_LEN_TAG: usize = 1;
 const STR_CODEPOINT_INDEX_SEEN: usize = 2;

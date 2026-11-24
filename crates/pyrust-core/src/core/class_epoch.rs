@@ -10,6 +10,14 @@ use std::cell::Cell;
 // invalidate inline caches after class mutations.  `u64::MAX` is a saturated
 // sentinel: once reached, class-dependent caches remain disabled rather than
 // wrapping to an older stamp and accepting a stale entry (ABA).
+// Thread-local justification:
+// (a) Why `thread_local!`: `PyClass` is `!Send + !Sync` and inline-cache
+//     validation checks this epoch on every cached attribute load, so a
+//     non-atomic `Cell<u64>` avoids cross-thread atomic contention.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share the monotonic counter (at worst causing conservative cache
+//     misses after another interpreter mutates a class); separate threads run
+//     independently with zero synchronization.
 thread_local! {
     static CLASS_MUTATION_EPOCH: Cell<u64> = const { Cell::new(0) };
 }

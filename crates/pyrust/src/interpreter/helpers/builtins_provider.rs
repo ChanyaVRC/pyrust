@@ -1,3 +1,11 @@
+// Thread-local justification:
+// (a) Why `thread_local!`: Holds a `!Send` NaN-boxed `Value` (`Rc<RefCell<PyModule>>`)
+//     for the `builtins` module so script startup clones one `Rc` instead of
+//     rebuilding ~136 entries.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share the cached `builtins` module attrs map unless a script
+//     replaces `__builtins__`; separate threads own independent `builtins`
+//     modules.
 thread_local! {
     /// Per-thread cache of the `builtins` module value.
     /// `seed_module_dunders` clones this `Value` (one `Rc` increment) instead

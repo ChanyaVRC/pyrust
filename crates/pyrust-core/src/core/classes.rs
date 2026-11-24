@@ -393,6 +393,13 @@ mod cache_version_tests {
     }
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Stores `!Send` `Rc<str>` keys shared by
+//     thread-confined `PyInstance` attribute maps without atomic refcounts or
+//     mutex contention on instance construction.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share bounded immutable string allocations (no observable semantic
+//     bleed); each thread maintains its own capped table.
 thread_local! {
     /// Per-thread interner for instance attribute-name keys.
     ///

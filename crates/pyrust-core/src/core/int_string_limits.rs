@@ -4,6 +4,14 @@ pub const INT_MAX_STR_DIGITS_DEFAULT: usize = 4300;
 /// The smallest non-zero limit `sys.set_int_max_str_digits` accepts.
 pub const INT_MAX_STR_DIGITS_MIN: usize = 640;
 
+// Thread-local justification:
+// (a) Why `thread_local!`: `pyrust-core` formatting/parsing helpers do not take
+//     an `&Interpreter`, so the active interpreter installs its configured
+//     limit dynamically via `scoped_int_max_str_digits` for the duration of an
+//     execution entry.
+// (b) Multi-interpreter / multi-threaded impact: Nested interpreters on the
+//     same thread save/restore this cell via RAII `IntMaxStrDigitsGuard`;
+//     separate threads maintain independent limits without synchronization.
 thread_local! {
     /// The active integer string-conversion length limit (decimal/non-power-of-2
     /// base conversions only). 0 means "no limit". This is a dynamic adapter

@@ -80,226 +80,31 @@ pub enum ValueKind<'a> {
     },
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Thread-local free lists for fixed-size allocations
-// ─────────────────────────────────────────────────────────────────────────────
-
-type FreeListState = (*mut u8, usize);
-
-/// Test-only accounting keyed by the thread whose TLS pool was drained.
-///
-/// A process-wide before/after counter cannot attribute a drain to one test:
-/// libtest may terminate another worker inside that measurement window.  Keep
-/// the production pool path free of synchronization while making the teardown
-/// assertion deterministic under parallel tests.
-#[cfg(test)]
-#[derive(Default)]
-struct ThreadExitDrainCounts {
-    pool_b: usize,
-    pool_opaque: usize,
-}
-
-#[cfg(test)]
-static THREAD_EXIT_DRAIN_COUNTS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<std::thread::ThreadId, ThreadExitDrainCounts>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-
-#[cfg(test)]
-fn record_thread_exit_drains(update: impl FnOnce(&mut ThreadExitDrainCounts)) {
-    let mut drains = THREAD_EXIT_DRAIN_COUNTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    update(drains.entry(std::thread::current().id()).or_default());
-}
-
-#[cfg(test)]
-fn take_thread_exit_drains(thread_id: std::thread::ThreadId) -> ThreadExitDrainCounts {
-    THREAD_EXIT_DRAIN_COUNTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&thread_id)
-        .unwrap_or_default()
-}
-
-/// Deallocate every block currently retained by one thread-local free list.
-///
-/// The state is cleared before deallocation so a later destructor cannot
-/// observe pointers that have already been released.
-unsafe fn drain_free_list(state: &Cell<FreeListState>, layout: Layout) -> usize {
-    let (mut head, expected_len) = state.replace((std::ptr::null_mut(), 0));
-    let mut drained = 0;
-    while !head.is_null() {
-        let next = unsafe { *(head as *const *mut u8) };
-        unsafe { dealloc(head, layout) };
-        head = next;
-        drained += 1;
-    }
-    debug_assert_eq!(
-        drained, expected_len,
-        "free-list length disagrees with linked blocks"
-    );
-    drained
-}
-
-struct PoolB(Cell<FreeListState>);
-
-impl PoolB {
-    const fn new() -> Self {
-        Self(Cell::new((std::ptr::null_mut(), 0)))
-    }
-}
-
-impl Drop for PoolB {
-    fn drop(&mut self) {
-        let layout = Layout::from_size_align(STR_SLICE_LAYOUT_SIZE, 8)
-            .expect("valid string-slice pool layout");
-        let _drained = unsafe { drain_free_list(&self.0, layout) };
-        #[cfg(test)]
-        record_thread_exit_drains(|counts| counts.pool_b += _drained);
-    }
-}
-
-// Each free slot stores a *mut u8 to the next free slot in its first 8 bytes.
-thread_local! {
-    static POOL_B: PoolB = const { PoolB::new() };
-}
-
-const POOL_B_CAP: usize = 64;
-
-#[inline(always)]
-unsafe fn pool_b_alloc() -> *mut u8 {
-    let layout =
-        Layout::from_size_align(STR_SLICE_LAYOUT_SIZE, 8).expect("valid string-slice pool layout");
-    POOL_B
-        .try_with(|c| {
-            let (head, len) = c.0.get();
-            if len > 0 {
-                let next = unsafe { *(head as *const *mut u8) };
-                c.0.set((next, len - 1));
-                head
-            } else {
-                unsafe { alloc_or_handle(layout) }
-            }
-        })
-        // A destructor from another TLS key may allocate after this pool has
-        // already been destroyed. It cannot re-enter the free list, but a
-        // matched direct allocation remains valid for the rest of that drop.
-        .unwrap_or_else(|_| unsafe { alloc_or_handle(layout) })
-}
-
-#[inline(always)]
-unsafe fn pool_b_dealloc(ptr: *mut u8) {
-    let layout =
-        Layout::from_size_align(STR_SLICE_LAYOUT_SIZE, 8).expect("valid string-slice pool layout");
-    if POOL_B
-        .try_with(|c| {
-            let (head, len) = c.0.get();
-            // In debug builds catch double-free: a block already in the pool has its first
-            // 8 bytes overwritten with the next-pointer, so it cannot equal any live
-            // allocation's first word.  Check ptr != head as a lightweight guard; a full
-            // traversal is too expensive for a hot path.
-            debug_assert!(
-                ptr != head || head.is_null(),
-                "pool_b_dealloc: double-free detected (ptr == head)"
-            );
-            if len < POOL_B_CAP {
-                unsafe { *(ptr as *mut *mut u8) = head };
-                c.0.set((ptr, len + 1));
-            } else {
-                unsafe { dealloc(ptr, layout) };
-            }
-        })
-        .is_err()
-    {
-        // TLS keys are destroyed in reverse initialization order. A value kept
-        // by an older key can therefore outlive this pool and must bypass it.
-        unsafe { dealloc(ptr, layout) };
-    }
-}
-
 /// Refcounted slab payload for [`TAG_OPAQUE`].
 ///
 /// `Value` itself remains one NaN-boxed word.  Clones point at the same slot and
 /// increment `strong`, avoiding both a slab allocation and a clone of the
 /// `Opaque` enum (including its nested `Value`s).  Values are confined to the
-/// interpreter thread (opaque variants contain `Rc` and the slab pool is
-/// thread-local), so a non-atomic `Cell` matches the existing ownership model.
+/// interpreter thread (opaque variants contain `Rc` and the slab pool in
+/// [`crate::pool`] is thread-local), so a non-atomic `Cell` matches the
+/// existing ownership model.
 #[repr(C)]
 struct OpaqueSlot {
     strong: Cell<usize>,
     value: Opaque,
 }
 
-// Pool for `OpaqueSlot` allocations (#281).  The fixed-size slabs are recycled
-// after the final aliased `Value` is dropped.  The pool is per-thread and
-// bounded, so unused capacity cannot grow without limit.
-const POOL_OPAQUE_CAP: usize = 128;
-
-struct PoolOpaque(Cell<FreeListState>);
-
-impl PoolOpaque {
-    const fn new() -> Self {
-        Self(Cell::new((std::ptr::null_mut(), 0)))
-    }
-}
-
-impl Drop for PoolOpaque {
-    fn drop(&mut self) {
-        let _drained = unsafe { drain_free_list(&self.0, opaque_layout()) };
-        #[cfg(test)]
-        record_thread_exit_drains(|counts| counts.pool_opaque += _drained);
-    }
-}
-
-thread_local! {
-    static POOL_OPAQUE: PoolOpaque = const { PoolOpaque::new() };
-}
-
 #[inline(always)]
-fn opaque_layout() -> Layout {
+pub(crate) fn opaque_layout() -> Layout {
     Layout::new::<OpaqueSlot>()
-}
-
-#[inline(always)]
-unsafe fn pool_opaque_alloc() -> *mut u8 {
-    let layout = opaque_layout();
-    POOL_OPAQUE
-        .try_with(|c| {
-            let (head, len) = c.0.get();
-            if len > 0 {
-                let next = unsafe { *(head as *const *mut u8) };
-                c.0.set((next, len - 1));
-                head
-            } else {
-                unsafe { alloc_or_handle(layout) }
-            }
-        })
-        .unwrap_or_else(|_| unsafe { alloc_or_handle(layout) })
-}
-
-#[inline(always)]
-unsafe fn pool_opaque_dealloc(ptr: *mut u8) {
-    let layout = opaque_layout();
-    if POOL_OPAQUE
-        .try_with(|c| {
-            let (head, len) = c.0.get();
-            if len < POOL_OPAQUE_CAP {
-                unsafe { *(ptr as *mut *mut u8) = head };
-                c.0.set((ptr, len + 1));
-            } else {
-                unsafe { dealloc(ptr, layout) };
-            }
-        })
-        .is_err()
-    {
-        unsafe { dealloc(ptr, layout) };
-    }
 }
 
 // The pre-#2268 `Vec<Value>` struct-header pool (32-byte slab, manual obj_id at
 // offset 24) backed heap tuples.  Tuples moved to an `Rc<TupleInner>` payload in
 // #2268 (matching the list `Rc<ListInner>` move from #305) so `Value::clone` is
 // an O(1) refcount bump rather than a deep copy; the pool is gone with it.
+// Remaining fixed-size slab pools (`POOL_B` and `POOL_OPAQUE`) live in
+// `crate::pool`.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Value — NaN-boxed u64

@@ -121,6 +121,12 @@ macro_rules! abc_class {
     }};
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Stores `!Send` `Rc<RefCell<PyClass>>` singletons
+//     for `collections.abc` abstract base classes.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share the `collections.abc` class objects (e.g. `ABC_SEQUENCE`);
+//     separate threads construct independent class singletons.
 thread_local! {
     static ABC_CONTAINER:        Rc<RefCell<PyClass>> = abc_class!("Container");
     static ABC_HASHABLE:         Rc<RefCell<PyClass>> = abc_class!("Hashable");

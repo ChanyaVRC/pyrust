@@ -160,6 +160,13 @@ struct WarningClassGeneration {
     catch_warnings: WeakPyClass,
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Holds `!Send` `Rc`/`Weak<RefCell<PyClass>>`
+//     generation pairs linking each `warnings.catch_warnings` class to its
+//     sibling `warnings.WarningMessage` class.
+// (b) Multi-interpreter / multi-threaded impact: Weak `catch_warnings` keys
+//     isolate distinct `warnings` imports across interpreters on one thread
+//     and prune dead generations; separate threads are isolated.
 thread_local! {
     /// Tracks the class pair created for every still-live catch_warnings
     /// generation.

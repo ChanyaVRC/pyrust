@@ -40,17 +40,6 @@ fn nanbox_owned_string_layout(byte_len: usize) -> Layout {
     }
 }
 
-/// Allocate a fresh NaN-box payload and apply Rust's standard allocation-error
-/// policy before any caller can dereference the returned pointer.
-#[inline(always)]
-unsafe fn alloc_or_handle(layout: Layout) -> *mut u8 {
-    let ptr = unsafe { alloc(layout) };
-    if ptr.is_null() {
-        std::alloc::handle_alloc_error(layout);
-    }
-    ptr
-}
-
 /// Validate the numeric part independently from a real pointer so boundary
 /// behaviour can be unit-tested without constructing an invalid pointer.
 #[inline(always)]

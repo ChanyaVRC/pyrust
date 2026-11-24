@@ -16,6 +16,12 @@ const INTERN_MAX_BYTES: usize = 40;
 /// (e.g. programs that generate lots of distinct short keys).
 const INTERN_MAX_ENTRIES: usize = 1024;
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Stores `!Send` NaN-boxed `Value` strings backed by
+//     non-atomic refcounts so constant-pool interning is a lock-free lookup.
+// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
+//     thread share immutable interned string values (matching CPython string
+//     interning); separate threads own independent capped tables.
 thread_local! {
     /// Per-thread cache mapping short string byte slices to their `Value`.
     ///

@@ -161,6 +161,13 @@ impl CanonicalSlot {
     }
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Stores `!Send` `Value` handles copied from
+//     thread-local canonical class dicts so hot repr/hash/comparison dispatch
+//     compares slot identity without cloning `Rc`s or hashing attribute names.
+// (b) Multi-interpreter / multi-threaded impact: Values are immutable builtin
+//     descriptors shared across interpreters on the same thread; separate
+//     threads initialize their own slot table once.
 thread_local! {
     /// Canonical values resolved from owner dictionaries once per interpreter
     /// thread.  Canonical classes are immutable, so hot repr/hash/comparison

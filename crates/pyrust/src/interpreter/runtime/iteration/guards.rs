@@ -177,6 +177,14 @@ impl<T> SnapshotBufferPool<T> {
     }
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Pools reusable `Vec<PyKey>`, `Vec<Value>`, and
+//     `Box<LiveKeysGuardedState>` scratch buffers containing `!Send` `Value` /
+//     `PyKey` elements to eliminate per-loop heap allocations without locking.
+// (b) Multi-interpreter / multi-threaded impact: Buffers are cleared before
+//     returning to the pool, so sharing across interpreters on one thread
+//     recycles capacity only (no semantic state leaks); separate threads own
+//     independent bounded pools.
 thread_local! {
     static KEY_SNAPSHOT_BUFFERS: SnapshotBufferPool<PyKey> =
         const { SnapshotBufferPool::new() };

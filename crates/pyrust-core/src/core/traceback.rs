@@ -94,6 +94,14 @@ pub struct FrameInfo {
     pub frame: Option<Value>,
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: `CAPTURED_ERROR_FRAMES` holds `!Send` `Value` frame
+//     references and tracks the active thread's unwinding call stack alongside
+//     the innermost VM source line/column span without threading extra state
+//     through every `Result` return path.
+// (b) Multi-interpreter / multi-threaded impact: Separate threads unwind
+//     independently; re-entrant execution on one thread resets these slots at
+//     top-level entry and exception-handler boundaries.
 thread_local! {
     /// The traceback frame chain for the error currently unwinding through the
     /// call stack, built **lazily** as the error propagates outward.

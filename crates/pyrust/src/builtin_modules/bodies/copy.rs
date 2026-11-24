@@ -97,12 +97,26 @@ pub(crate) fn inject_python_members(
 
 // ── copy.Error class generations ──────────────────────────────────────────────
 
+// Thread-local justification:
+// (a) Why `thread_local!`: `COPY_ERROR_CLASSES` holds `!Send`
+//     `Weak<RefCell<PyClass>>` generations and `DEEPCOPY_DEPTH` tracks the
+//     active native call-stack recursion depth for `copy.deepcopy` on the
+//     current OS thread.
+// (b) Multi-interpreter / multi-threaded impact: Weak `copy.Error` entries
+//     isolate distinct import generations across interpreters on the same
+//     thread; `DEEPCOPY_DEPTH` guards total native stack depth across nested
+//     calls on one thread while separate threads are completely independent.
 thread_local! {
     /// `copy` is a Python module in CPython, so each fresh import generation
     /// owns a distinct Error class. Weak storage keeps old classes alive only
     /// while an old module/class/instance still references them.
     static COPY_ERROR_CLASSES: RefCell<Vec<Weak<RefCell<PyClass>>>> =
         const { RefCell::new(Vec::new()) };
+
+    /// Active `copy.deepcopy` recursion depth, guarding against unbounded
+    /// native recursion on unmemoized pre-construction cycles such as a
+    /// self-referential `Counter` (#2968).
+    static DEEPCOPY_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
 fn new_copy_error_class_value() -> Value {
@@ -798,13 +812,6 @@ fn detach_internal_storage_shallow(
         new_rc.borrow_mut().attrs.insert_slot(name.as_ref(), copied);
     }
     Ok(())
-}
-
-thread_local! {
-    /// Active `copy.deepcopy` recursion depth, guarding against unbounded
-    /// native recursion on unmemoized pre-construction cycles such as a
-    /// self-referential `Counter` (#2968).
-    static DEEPCOPY_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
 struct DeepCopyDepthGuard;

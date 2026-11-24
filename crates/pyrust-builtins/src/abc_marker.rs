@@ -19,6 +19,13 @@ struct AbcEntry {
     kind: AbcKind,
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Stores `!Send` `Weak<RefCell<PyClass>>` identities
+//     for `collections.abc` classes so native membership/subclass checks avoid
+//     name matching.
+// (b) Multi-interpreter / multi-threaded impact: Weak entries prune dead
+//     generations automatically; multiple interpreters on one thread share the
+//     weak registry keyed by `Rc::ptr_eq`, while separate threads are isolated.
 thread_local! {
     static ABC_CLASSES: RefCell<Vec<AbcEntry>> = const { RefCell::new(Vec::new()) };
 }

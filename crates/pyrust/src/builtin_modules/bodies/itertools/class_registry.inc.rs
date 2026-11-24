@@ -32,6 +32,13 @@ const ITERTOOLS_ERROR_NAMES: [(&str, &str); 19] = [
     ("batched", "itertools.batched"),
 ];
 
+// Thread-local justification:
+// (a) Why `thread_local!`: Tracks `!Send` `Rc`/`Weak<RefCell<PyClass>>`
+//     generation pairs (`groupby` -> `_grouper`) and weak unpicklable class
+//     identities (`pairwise`, `batched`).
+// (b) Multi-interpreter / multi-threaded impact: Weak generation tracking
+//     isolates distinct `itertools` imports across interpreters on one thread
+//     and avoids leaking old modules; separate threads are isolated.
 thread_local! {
     /// Every still-live imported `groupby` → `_grouper` class generation.
     ///
