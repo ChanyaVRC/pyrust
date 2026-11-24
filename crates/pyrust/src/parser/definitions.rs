@@ -391,10 +391,16 @@ impl Parser {
                     // bare * separator: keyword-only follows
                 } else {
                     let name = self.expect_ident("args parameter name")?;
-                    // *args can have an annotation; retain it.
+                    // *args can have an annotation, including a PEP 646 starred
+                    // annotation (`*args: *Ts`), which is only valid on varargs.
                     let annotation = if self.is(&Token::Colon) {
                         self.bump();
-                        Some(self.parse_expr()?)
+                        if self.is(&Token::Star) {
+                            self.bump();
+                            Some(Expr::Starred(Box::new(self.parse_expr()?)))
+                        } else {
+                            Some(self.parse_expr()?)
+                        }
                     } else {
                         None
                     };

@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::Interpreter;
-use crate::value::{PyKey, PyModule, Value, ValueKind};
+use crate::value::{PyKey, PyModule, Value};
 
 /// Python-source definitions for runtime helpers and special-form markers.
 const TYPING_PY_SOURCE: &str = include_str!("../typing_py.py");
@@ -34,10 +34,7 @@ const TYPING_PY_EXPORTS: &[&str] = &[
     "Required",
     "NotRequired",
     "TypeGuard",
-    "ParamSpec",
-    "ParamSpecArgs",
-    "ParamSpecKwargs",
-    "TypeVarTuple",
+    "_UnpackGenericAlias",
 ];
 
 /// Execute `typing_py.py` and copy its supported names onto `module`.
@@ -56,17 +53,29 @@ pub(crate) fn inject_python_members(
 
     // The macro-generated class only owns the `typing.TypeVar.__init__`
     // registry body.  Python-visible identity belongs to the runtime
-    // singleton so PEP 695 parameters, manual construction, retained
+    // singletons so PEP 695 parameters, manual construction, retained
     // factories, and a re-imported `typing` module all agree.
-    module.borrow_mut().insert_attr(
-        "TypeVar".to_string(),
-        Value::py_class(crate::interpreter::typevar_class_singleton()),
-    );
+    let typevar_cls = Value::py_class(crate::interpreter::typevar_class_singleton());
+    let paramspec_cls = Value::py_class(crate::interpreter::paramspec_class_singleton());
+    let paramspec_args_cls = Value::py_class(crate::interpreter::paramspec_args_class_singleton());
+    let paramspec_kwargs_cls =
+        Value::py_class(crate::interpreter::paramspec_kwargs_class_singleton());
+    let typevartuple_cls = Value::py_class(crate::interpreter::typevartuple_class_singleton());
+    let type_alias_cls = Value::py_class(crate::interpreter::type_alias_class_singleton());
 
-    module.borrow_mut().insert_attr(
-        "TypeAliasType".to_string(),
-        Value::py_class(crate::interpreter::type_alias_class_singleton()),
-    );
+    {
+        let mut mod_ref = module.borrow_mut();
+        mod_ref.insert_attr("TypeVar".to_string(), typevar_cls.clone());
+        mod_ref.insert_attr("ParamSpec".to_string(), paramspec_cls.clone());
+        mod_ref.insert_attr("ParamSpecArgs".to_string(), paramspec_args_cls);
+        mod_ref.insert_attr("ParamSpecKwargs".to_string(), paramspec_kwargs_cls);
+        mod_ref.insert_attr("TypeVarTuple".to_string(), typevartuple_cls.clone());
+        mod_ref.insert_attr("TypeAliasType".to_string(), type_alias_cls);
+    }
+
+    ns.dict_insert(PyKey::str_from("TypeVar"), typevar_cls)?;
+    ns.dict_insert(PyKey::str_from("ParamSpec"), paramspec_cls)?;
+    ns.dict_insert(PyKey::str_from("TypeVarTuple"), typevartuple_cls)?;
 
     interp.exec_source(TYPING_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
@@ -84,14 +93,6 @@ pub(crate) fn inject_python_members(
         if let Some(value) = dict.get(&PyKey::str_from(name)) {
             if name == "Annotated" {
                 super::generation::register_annotated_marker(value);
-            }
-            if matches!(name, "ParamSpecArgs" | "ParamSpecKwargs")
-                && let ValueKind::PyClass(class) = value.kind()
-            {
-                class
-                    .borrow_mut()
-                    .attrs
-                    .insert("__module__".to_string(), Value::string("typing"));
             }
             module
                 .borrow_mut()

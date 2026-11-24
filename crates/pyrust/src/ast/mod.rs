@@ -10,4 +10,4 @@ pub use expr::{
 };
 pub use pattern::{AssignTarget, MatchArm, Pattern};
 pub use span::{CaretSpan, MULTILINE_FULL_END};
-pub use stmt::{ExceptHandler, Stmt, TypeParam, TypeParamBound};
+pub use stmt::{ExceptHandler, Stmt, TypeParam, TypeParamBound, TypeParamKind};

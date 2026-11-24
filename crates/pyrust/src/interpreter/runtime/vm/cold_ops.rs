@@ -276,8 +276,8 @@ impl Interpreter {
                     *meta_reg,
                 )?;
             }
-            Insn::MakeTypeVar(dst, name_idx) => {
-                regs[*dst as usize] = Self::exec_make_typevar(code, *name_idx)?;
+            Insn::MakeTypeVar(dst, name_idx, kind) => {
+                regs[*dst as usize] = Self::exec_make_typevar(code, *name_idx, *kind)?;
             }
             Insn::MakeTypeAlias(dst, name_idx, value_reg, params_reg) => {
                 regs[*dst as usize] = self.exec_make_type_alias(
@@ -577,9 +577,13 @@ impl Interpreter {
         Ok(())
     }
 
-    fn exec_make_typevar(code: &crate::bytecode::FnCode, name_idx: u16) -> Result<Value> {
+    fn exec_make_typevar(
+        code: &crate::bytecode::FnCode,
+        name_idx: u16,
+        kind: crate::ast::TypeParamKind,
+    ) -> Result<Value> {
         let name_val = vm_pool_get(&code.consts, name_idx, "const")?;
-        make_typevar_from_syntax(name_val)
+        make_type_param_from_syntax(name_val, kind)
     }
 
     fn exec_make_type_alias(

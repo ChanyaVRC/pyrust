@@ -6,7 +6,7 @@ use smallvec::SmallVec;
 
 use crate::ast::{
     AssignTarget, BinaryOp, CallArg, CompClause, DictItem, Expr, FStringPart, FunctionParam,
-    MatchArm, Pattern, Stmt, Symbol, TypeParam, TypeParamBound, UnaryOp,
+    MatchArm, Pattern, Stmt, Symbol, TypeParam, TypeParamBound, TypeParamKind, UnaryOp,
 };
 use crate::bytecode::{
     CaptureSource, CellSlotMeta, CellVar, DictKeyKindHint, FnCode, FnParamSpec, FnProto, Insn,

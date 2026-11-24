@@ -56,8 +56,13 @@ fn stringify_annotation(expr: &Expr) -> String {
         }
         Expr::Index { target, index, .. } => {
             // In subscript position, a tuple is rendered without outer parens:
-            // `dict[str, int]` not `dict[(str, int)]`.
+            // `dict[str, int]` not `dict[(str, int)]`.  A single starred
+            // element (`tuple[*Ts]`) retains the trailing comma in CPython 3.12's
+            // AST unparser (`tuple[*Ts,]`).
             let index_str = match index.as_ref() {
+                Expr::Tuple(elts) if elts.len() == 1 && matches!(elts[0], Expr::Starred(_)) => {
+                    format!("{},", stringify_annotation(&elts[0]))
+                }
                 Expr::Tuple(elts) => {
                     let parts: Vec<String> = elts.iter().map(stringify_annotation).collect();
                     parts.join(", ")
@@ -66,6 +71,7 @@ fn stringify_annotation(expr: &Expr) -> String {
             };
             format!("{}[{}]", stringify_annotation(target), index_str)
         }
+        Expr::Starred(inner) => format!("*{}", stringify_annotation(inner)),
         Expr::List(elts) => {
             let parts: Vec<String> = elts.iter().map(stringify_annotation).collect();
             format!("[{}]", parts.join(", "))

@@ -572,9 +572,20 @@ fn collect_parameters(args: &Value) -> Value {
                     }
                 }
             }
-            // A TypeVar is a PyInstance with a `__name__` attribute.
+            // A TypeVar / ParamSpec / TypeVarTuple is a PyInstance with a `__name__` attribute.
             ValueKind::PyInstance(inst_rc) if inst_rc.borrow().attrs.get("__name__").is_some() => {
                 push_unique(&mut out, item.clone());
+            }
+            // Wrapper aliases such as `typing._UnpackGenericAlias` expose their
+            // collected parameters via `__parameters__`.
+            ValueKind::PyInstance(inst_rc) => {
+                if let Some(params) = inst_rc.borrow().attrs.get("__parameters__")
+                    && let ValueKind::Tuple(nested) = params.kind()
+                {
+                    for p in nested.iter() {
+                        push_unique(&mut out, p.clone());
+                    }
+                }
             }
             _ => {}
         }

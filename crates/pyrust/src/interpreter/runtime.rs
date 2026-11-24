@@ -247,11 +247,13 @@ mod attributes {
         canonical_class_by_tag, class_chain_new_slot_wrapped, class_hash_inherits_builtin_none,
         class_is_subclass_of, class_suppresses_instance_dict, descriptor_get_slot_raw_call,
         effective_builtin_receiver, exception_slot_policy, full_type_name_str, invoke_class_method,
-        is_exception_class, is_type_alias_class, is_typevar_class, lookup_class_attr,
+        is_exception_class, is_paramspec_args_class, is_paramspec_class, is_paramspec_kwargs_class,
+        is_type_alias_class, is_typevar_class, is_typevartuple_class, lookup_class_attr,
         metaclass_dunder, metaclass_of, mro_has_unslotted_ancestor, mro_slot_allows,
-        native_iterator_class, object_class_singleton, primitive_owned_object_dunder,
-        replace_instance_dict, type_alias_readonly_attr_error, type_class_singleton,
-        typevar_readonly_attr_error, value_class, value_type_name_str,
+        native_iterator_class, object_class_singleton, paramspec_proxy_readonly_attr_error,
+        paramspec_readonly_attr_error, primitive_owned_object_dunder, replace_instance_dict,
+        type_alias_readonly_attr_error, type_class_singleton, typevar_readonly_attr_error,
+        typevartuple_readonly_attr_error, value_class, value_type_name_str,
     };
     include!("runtime/attributes.rs");
 }
@@ -354,10 +356,15 @@ mod type_objects {
 }
 pub(crate) use pyrust_builtins::ordered_mapping::owner as ordered_dict_owner;
 pub(crate) use type_objects::{
-    full_type_name_str, initialize_typevar_attr, is_type_alias_class, is_typevar_class,
-    make_slot_member_descriptor, make_type_alias_from_syntax, make_typevar_from_syntax,
-    type_alias_class_singleton, type_alias_readonly_attr_error, typevar_class_singleton,
-    typevar_readonly_attr_error, value_class, value_class_object,
+    full_type_name_str, initialize_typevar_attr, is_paramspec_args_class, is_paramspec_class,
+    is_paramspec_kwargs_class, is_type_alias_class, is_typevar_class, is_typevartuple_class,
+    make_paramspec_args_instance, make_paramspec_kwargs_instance, make_slot_member_descriptor,
+    make_type_alias_from_syntax, make_type_param_from_syntax, paramspec_args_class_singleton,
+    paramspec_class_singleton, paramspec_kwargs_class_singleton,
+    paramspec_proxy_readonly_attr_error, paramspec_readonly_attr_error, type_alias_class_singleton,
+    type_alias_readonly_attr_error, typevar_class_singleton, typevar_readonly_attr_error,
+    typevartuple_class_singleton, typevartuple_readonly_attr_error, value_class,
+    value_class_object,
 };
 
 #[inline]
@@ -381,8 +388,8 @@ mod execution {
         callable_error_name, duplicate_keyword_error, extract_stop_iteration_value,
         initialize_typevar_attr, intern_string_value, is_stop_iteration_error,
         keyword_mapping_operand_error, lookup_class_attr, make_slice_value,
-        make_type_alias_from_syntax, make_typevar_from_syntax, max_call_depth, star_operand_error,
-        unbound_binding_error, value_class_object, value_type_name_str,
+        make_type_alias_from_syntax, make_type_param_from_syntax, max_call_depth,
+        star_operand_error, unbound_binding_error, value_class_object, value_type_name_str,
     };
     include!("runtime/vm.rs");
     include!("runtime/vm/tests.rs");

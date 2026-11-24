@@ -33,6 +33,100 @@ fn active_generic_alias_class(interp: &mut Interpreter) -> Result<Rc<RefCell<PyC
     interp.cached_module_class(GENERIC_ALIAS_CLASS_CACHE, "typing", "_GenericAlias")
 }
 
+fn is_paramspec_value(value: &Value) -> bool {
+    matches!(
+        value.kind(),
+        ValueKind::PyInstance(inst)
+            if crate::interpreter::is_paramspec_class(&inst.borrow().class)
+    )
+}
+
+/// Extract declared type parameters for a generic class from `__type_params__`
+/// (PEP 695) or from `Generic[...]` in `__orig_bases__`.
+fn class_declared_type_params(origin: &Value) -> Vec<Value> {
+    let ValueKind::PyClass(class) = origin.kind() else {
+        return Vec::new();
+    };
+    if Rc::ptr_eq(class, &generation::stable_generic_class())
+        || generation::is_protocol_marker_class(class)
+    {
+        return Vec::new();
+    }
+    let borrowed = class.borrow();
+    if let Some(tp) = borrowed.attrs.get("__type_params__")
+        && let ValueKind::Tuple(items) = tp.kind()
+        && !items.is_empty()
+    {
+        return items.to_vec();
+    }
+    if let Some(orig_bases) = borrowed.attrs.get("__orig_bases__")
+        && let ValueKind::Tuple(bases) = orig_bases.kind()
+    {
+        for base in bases.iter() {
+            if let ValueKind::PyInstance(inst) = base.kind()
+                && let Some(base_origin) = inst.borrow().attrs.get("__origin__")
+                && let ValueKind::PyClass(base_cls) = base_origin.kind()
+                && Rc::ptr_eq(base_cls, &generation::stable_generic_class())
+                && let Some(base_args) = inst.borrow().attrs.get("__args__")
+                && let ValueKind::Tuple(args) = base_args.kind()
+            {
+                return args.to_vec();
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Normalize subscript arguments for a generic class, applying CPython 3.12's
+/// `ParamSpec` preparation rules when the class declares `ParamSpec` parameters.
+fn normalize_generic_subscript(
+    interp: &mut Interpreter,
+    origin: &Value,
+    subscript: Value,
+) -> Result<Value> {
+    let params = class_declared_type_params(origin);
+    if params.len() == 1 && is_paramspec_value(&params[0]) {
+        return match subscript.kind() {
+            ValueKind::Tuple([]) => {
+                let origin_repr = crate::interpreter::render_value_repr(interp, origin)?;
+                Err(pyrust_core::type_err!(
+                    "Too few arguments for {origin_repr}"
+                ))
+            }
+            ValueKind::Ellipsis => Ok(Value::tuple(vec![subscript.clone()])),
+            _ if is_paramspec_value(&subscript) => Ok(Value::tuple(vec![subscript.clone()])),
+            ValueKind::List(items) => Ok(Value::tuple(vec![Value::tuple(items.to_vec())])),
+            ValueKind::Tuple(_) => Ok(Value::tuple(vec![subscript.clone()])),
+            _ => Ok(Value::tuple(vec![Value::tuple(vec![subscript.clone()])])),
+        };
+    }
+    if params.iter().any(is_paramspec_value) {
+        let raw: Vec<Value> = match subscript.kind() {
+            ValueKind::Tuple(items) => items.to_vec(),
+            _ => vec![subscript.clone()],
+        };
+        let normalized = raw
+            .into_iter()
+            .map(|item| {
+                let list_items = match item.kind() {
+                    ValueKind::List(items) => Some(items.to_vec()),
+                    _ => None,
+                };
+                match list_items {
+                    Some(items) => Value::tuple(items),
+                    None => item,
+                }
+            })
+            .collect();
+        return Ok(Value::tuple(normalized));
+    }
+    if matches!(subscript.kind(), ValueKind::Tuple(_)) {
+        Ok(subscript)
+    } else {
+        Ok(Value::tuple(vec![subscript]))
+    }
+}
+
 /// Construct a `_GenericAlias` instance wrapping `origin` and `subscript`.
 ///
 /// `Generic` is intentionally process-stable (matching CPython), so its
@@ -46,20 +140,104 @@ pub(super) fn make_generic_alias(
     subscript: Value,
 ) -> Result<Value> {
     let class = active_generic_alias_class(interp)?;
-    let args_tuple = if matches!(subscript.kind(), ValueKind::Tuple(_)) {
-        subscript.clone()
-    } else {
-        Value::tuple(vec![subscript.clone()])
-    };
+    let args_tuple = normalize_generic_subscript(interp, &origin, subscript)?;
     let mut attrs = InstanceAttrs::with_capacity(4);
     attrs.insert("_origin", origin.clone());
-    attrs.insert("_args", subscript);
+    attrs.insert("_args", args_tuple.clone());
     attrs.insert("__origin__", origin);
     attrs.insert("__args__", args_tuple);
     Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
         class,
         attrs,
     }))))
+}
+
+/// Render a `_GenericAlias`'s argument tuple matching CPython 3.12's
+/// `_GenericAlias.__repr__` (including `ParamSpec` tuple args as `[int, str]`,
+/// empty tuples as `()`, and `Ellipsis` as `...`).
+pub(super) fn generic_alias_args_repr(interp: &mut Interpreter, sub: &Value) -> Result<String> {
+    match sub.kind() {
+        ValueKind::Tuple([]) => Ok("()".to_string()),
+        ValueKind::Tuple(items) => {
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items.iter() {
+                match item.kind() {
+                    ValueKind::Tuple(inner) => {
+                        let rendered = inner
+                            .iter()
+                            .map(|v| generic_arg_repr(interp, v))
+                            .collect::<Result<Vec<_>>>()?
+                            .join(", ");
+                        parts.push(format!("[{rendered}]"));
+                    }
+                    _ => parts.push(generic_arg_repr(interp, item)?),
+                }
+            }
+            Ok(parts.join(", "))
+        }
+        _ => generic_arg_repr(interp, sub),
+    }
+}
+
+/// Resolve `__mro_entries__(self, bases)` for `typing._GenericAlias`, enforcing
+/// CPython 3.12's duplicate-`Generic` and implicit PEP 695 `Protocol` /
+/// `NamedTuple` / `TypedDict` rules.
+pub(super) fn resolve_generic_alias_mro_entries(
+    instance: &Rc<RefCell<PyInstance>>,
+    bases_arg: Option<&Value>,
+) -> Result<Value> {
+    let (origin, is_pep695_implicit) = {
+        let borrow = instance.borrow();
+        let origin =
+            borrow.attrs.get("_origin").cloned().ok_or_else(|| {
+                PyError::runtime("typing._GenericAlias has no origin".to_string())
+            })?;
+        let implicit = borrow
+            .attrs
+            .get("_pep695_implicit")
+            .is_some_and(Value::truthy_raw);
+        (origin, implicit)
+    };
+    let origin_is_generic = matches!(
+        origin.kind(),
+        ValueKind::PyClass(cls) if Rc::ptr_eq(cls, &generation::stable_generic_class())
+    );
+    if origin_is_generic
+        && let Some(bases_val) = bases_arg
+        && let ValueKind::Tuple(bases) = bases_val.kind()
+    {
+        for base in bases.iter() {
+            if let ValueKind::PyInstance(other) = base.kind()
+                && Rc::ptr_eq(other, instance)
+            {
+                continue;
+            }
+            if let ValueKind::PyClass(cls) = base.kind() {
+                if Rc::ptr_eq(cls, &generation::stable_generic_class()) {
+                    return Err(pyrust_core::type_err!("duplicate base class Generic"));
+                }
+                if is_pep695_implicit
+                    && (generation::is_protocol_marker_class(cls)
+                        || pyrust_builtins::typing_marker::classify(cls).is_some())
+                {
+                    return Ok(Value::tuple(vec![]));
+                }
+            } else if let ValueKind::PyInstance(other) = base.kind()
+                && let Some(other_origin) = other.borrow().attrs.get("__origin__").cloned()
+                && let ValueKind::PyClass(other_cls) = other_origin.kind()
+            {
+                if Rc::ptr_eq(other_cls, &generation::stable_generic_class()) {
+                    return Err(pyrust_core::type_err!(
+                        "Cannot inherit from Generic[...] multiple times."
+                    ));
+                }
+                if is_pep695_implicit && generation::is_protocol_marker_class(other_cls) {
+                    return Ok(Value::tuple(vec![]));
+                }
+            }
+        }
+    }
+    Ok(Value::tuple(vec![origin]))
 }
 
 /// Render an alias origin with CPython's `_type_repr` spelling.
@@ -88,13 +266,25 @@ pub(super) fn generic_origin_repr(origin: &Value) -> String {
 
 /// Render one `_GenericAlias` argument with CPython's `_type_repr` spelling.
 pub(super) fn generic_arg_repr(interp: &mut Interpreter, value: &Value) -> Result<String> {
-    if let ValueKind::PyClass(class) = value.kind() {
-        return pyrust_builtins::generic_alias::repr_class_type_arg_with(
-            class,
-            pyrust_builtins::generic_alias::ClassTypeArgReprStyle::Typing,
-            interp,
-            Interpreter::render_value_as_str,
-        );
+    match value.kind() {
+        ValueKind::Ellipsis => return Ok("...".to_string()),
+        ValueKind::PyClass(class) => {
+            return pyrust_builtins::generic_alias::repr_class_type_arg_with(
+                class,
+                pyrust_builtins::generic_alias::ClassTypeArgReprStyle::Typing,
+                interp,
+                Interpreter::render_value_as_str,
+            );
+        }
+        ValueKind::List(items) => {
+            let inner = items
+                .iter()
+                .map(|v| generic_arg_repr(interp, v))
+                .collect::<Result<Vec<_>>>()?
+                .join(", ");
+            return Ok(format!("[{inner}]"));
+        }
+        _ => {}
     }
     if let Some(rendered) = pyrust_builtins::generic_alias::typevar_arg_repr(value) {
         return Ok(rendered);

@@ -208,7 +208,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
                 || (*kwarg_n > 0 && r >= *kwarg_base && r < *kwarg_base + *kwarg_n)
         }
         MakeTypeAlias(_, _, value_reg, params_reg) => *value_reg == r || *params_reg == r,
-        MakeTypeVar(_, _) => false,
+        MakeTypeVar(_, _, _) => false,
 
         // Yield reads src and writes dst.
         Yield { src, dst: _ } => *src == r,
@@ -487,7 +487,7 @@ fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
             f(*value_reg);
             f(*params_reg);
         }
-        MakeTypeVar(_, _) => {}
+        MakeTypeVar(_, _, _) => {}
         Yield { src, .. } => f(*src),
         YieldFrom {
             iter_reg, sent_reg, ..

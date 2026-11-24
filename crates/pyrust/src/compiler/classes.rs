@@ -225,16 +225,21 @@ impl Compiler {
     }
 
     /// Compile the base-class expressions and PEP 487 keyword-argument values
-    /// into two contiguous register windows.  Returns
-    /// `(bases_base, bases_n, kwarg_base, kwarg_n)`, or `None` on register
-    /// overflow (error already recorded).
+    /// into two contiguous register windows.  When `tp_n > 0` (PEP 695 generic
+    /// class), appends an implicit `typing.Generic[...]` base produced from
+    /// `R[tp_base..tp_base+tp_n]` so the class inherits from `typing.Generic`
+    /// and validates conflicting explicit `Generic` bases, matching CPython 3.12.
+    /// Returns `(bases_base, bases_n, kwarg_base, kwarg_n)`, or `None` on
+    /// register overflow (error already recorded).
     fn emit_class_bases_and_keywords(
         &mut self,
         bases: &[Expr],
         keywords: &[(Symbol, Expr)],
+        tp_base: Reg,
+        tp_n: Reg,
     ) -> Option<(Reg, u32, Reg, u32)> {
-        // Compile base class expressions.
-        let bases_n = match u32::try_from(bases.len()) {
+        // Compile base class expressions (+1 implicit Generic[...] base for PEP 695).
+        let explicit_bases_n = match u32::try_from(bases.len()) {
             Ok(count) => count,
             Err(_) => {
                 self.failed = true;
@@ -243,6 +248,20 @@ impl Compiler {
                 }
                 return None;
             }
+        };
+        let bases_n = if tp_n > 0 {
+            match explicit_bases_n.checked_add(1) {
+                Some(count) => count,
+                None => {
+                    self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("too many base classes".to_string());
+                    }
+                    return None;
+                }
+            }
+        } else {
+            explicit_bases_n
         };
         let bases_base = self.next_temp;
         if bases_n > 0 {
@@ -263,6 +282,20 @@ impl Compiler {
                 if r != bases_base + i {
                     self.emit(Insn::Move(bases_base + i, r));
                 }
+                self.next_temp = saved;
+            }
+            if tp_n > 0 {
+                let saved = self.next_temp;
+                let fn_reg = self.alloc_temp();
+                let arg_reg = self.alloc_temp();
+                debug_assert_eq!(arg_reg, fn_reg + 1);
+                let helper_const = self.intern_const(crate::value::Value::builtin_function(
+                    "builtins._pep695_generic_base",
+                ));
+                self.emit(Insn::LoadConst(fn_reg, helper_const));
+                self.emit(Insn::BuildTuple(arg_reg, tp_base, tp_n));
+                self.emit(Insn::Call(fn_reg, 1));
+                self.emit(Insn::Move(bases_base + explicit_bases_n, fn_reg));
                 self.next_temp = saved;
             }
         }
@@ -350,7 +383,7 @@ impl Compiler {
         let (tp_base, tp_n) = self.emit_bind_type_params(type_params);
 
         let (bases_base, bases_n, kwarg_base, kwarg_n) =
-            match self.emit_class_bases_and_keywords(bases, keywords) {
+            match self.emit_class_bases_and_keywords(bases, keywords, tp_base, tp_n) {
                 Some(v) => v,
                 None => {
                     self.shadowed_type_params.truncate(shadowed_before);

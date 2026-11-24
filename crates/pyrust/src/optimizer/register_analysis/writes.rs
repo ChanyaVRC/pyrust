@@ -49,7 +49,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | MakeClass(r, _, _, _, _, _, _)
         | MakeClassMeta(r, _, _, _, _, _, _, _)
         | MakeTypeAlias(r, _, _, _)
-        | MakeTypeVar(r, _) => Some(*r),
+        | MakeTypeVar(r, _, _) => Some(*r),
         CallMethod { dst, .. }
         | CallMethodKw { dst, .. }
         | CallMethodExpanded { dst, .. }
@@ -81,7 +81,7 @@ fn for_each_write(insn: &Insn, mut f: impl FnMut(u32)) {
         | MakeClass(r, _, _, _, _, _, _)
         | MakeClassMeta(r, _, _, _, _, _, _, _)
         | MakeTypeAlias(r, _, _, _)
-        | MakeTypeVar(r, _)
+        | MakeTypeVar(r, _, _)
         | BuildList(r, _, _)
         | BuildListReserve(r, _)
         | BuildTuple(r, _, _)

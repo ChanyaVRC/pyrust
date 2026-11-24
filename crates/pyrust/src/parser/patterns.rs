@@ -16,65 +16,118 @@ impl Parser {
         })
     }
 
-    /// Parse an optional PEP 695 type parameter list `[T, U, ...]`.
-    /// Returns the list of type parameter names (bounds are parsed and discarded).
+    /// Parse an optional PEP 695 type parameter list `[T, *Ts, **P, ...]`.
     /// Consumes `[` through the matching `]`; returns an empty `Vec` if no `[`
-    /// is present.  Used by `parse_def` and `parse_class`.
+    /// is present.  Used by `parse_def`, `parse_class`, and `parse_type_alias`.
     fn parse_type_params(&mut self, ctx: &str) -> Result<Vec<TypeParam>> {
         if !self.is(&Token::LBracket) {
             return Ok(vec![]);
         }
         self.bump(); // consume `[`
+        if self.is(&Token::RBracket) {
+            return Err(PyError::parse(format!(
+                "empty type parameter list in {ctx}"
+            )));
+        }
         let mut params: Vec<TypeParam> = Vec::new();
         loop {
-            match self.current() {
+            let (kind, param_name) = match self.current() {
                 None | Some(Token::Eof) => {
                     return Err(PyError::parse(format!(
                         "unterminated type parameter list in {ctx}"
                     )));
                 }
+                Some(Token::StarStar) => {
+                    self.bump(); // consume `**`
+                    let name = self.expect_ident("ParamSpec name")?;
+                    (TypeParamKind::ParamSpec, name)
+                }
+                Some(Token::Star) => {
+                    self.bump(); // consume `*`
+                    let name = self.expect_ident("TypeVarTuple name")?;
+                    (TypeParamKind::TypeVarTuple, name)
+                }
+                Some(Token::Ident(_)) => {
+                    let name = self.expect_ident("type parameter name")?;
+                    (TypeParamKind::TypeVar, name)
+                }
+                other => {
+                    return Err(PyError::parse(format!(
+                        "invalid syntax in type parameter list in {ctx}: {other:?}"
+                    )));
+                }
+            };
+
+            if params.iter().any(|p| p.name == param_name) {
+                return Err(PyError::parse(format!(
+                    "duplicate type parameter '{param_name}'"
+                )));
+            }
+
+            // Optional bound/constraints: `: expr`.  CPython 3.12 allows a bound
+            // or constraints tuple ONLY on `TypeVar`, rejecting both on
+            // `ParamSpec` and `TypeVarTuple` with specific SyntaxErrors.
+            let bound = if self.is(&Token::Colon) {
+                self.bump(); // consume `:`
+                let expr = self.parse_expr()?;
+                match kind {
+                    TypeParamKind::TypeVar => Some(match expr {
+                        // A parenthesised non-empty tuple (`T: (int, str)`) is
+                        // constraints; the empty tuple `T: ()` is treated as a
+                        // degenerate bound value matching CPython 3.12.
+                        Expr::Tuple(elems) if !elems.is_empty() => {
+                            TypeParamBound::Constraints(elems)
+                        }
+                        other => TypeParamBound::Bound(other),
+                    }),
+                    TypeParamKind::ParamSpec => {
+                        let msg = if matches!(expr, Expr::Tuple(_)) {
+                            "cannot use constraints with ParamSpec"
+                        } else {
+                            "cannot use bound with ParamSpec"
+                        };
+                        return Err(PyError::parse(msg.to_string()));
+                    }
+                    TypeParamKind::TypeVarTuple => {
+                        let msg = if matches!(expr, Expr::Tuple(_)) {
+                            "cannot use constraints with TypeVarTuple"
+                        } else {
+                            "cannot use bound with TypeVarTuple"
+                        };
+                        return Err(PyError::parse(msg.to_string()));
+                    }
+                }
+            } else {
+                None
+            };
+
+            params.push(TypeParam {
+                name: param_name,
+                kind,
+                bound,
+            });
+
+            match self.current() {
+                Some(Token::Comma) => {
+                    self.bump(); // consume `,`
+                    if self.is(&Token::RBracket) {
+                        self.bump(); // allow trailing comma
+                        break;
+                    }
+                }
                 Some(Token::RBracket) => {
                     self.bump(); // consume `]`
                     break;
                 }
-                Some(Token::Comma) => {
-                    self.bump(); // consume `,`
+                None | Some(Token::Eof) => {
+                    return Err(PyError::parse(format!(
+                        "unterminated type parameter list in {ctx}"
+                    )));
                 }
-                Some(Token::Ident(_)) => {
-                    let param_name = self.expect_ident("type parameter name")?;
-                    if params.iter().any(|p| p.name == param_name) {
-                        return Err(PyError::parse(format!(
-                            "duplicate type parameter '{param_name}'"
-                        )));
-                    }
-                    // Optional bound/constraints: `: expr`.  `parse_expr` stops at
-                    // the top-level `,` / `]`, so it captures exactly the bound
-                    // expression.  A parenthesised tuple (`T: (int, str)`) parses
-                    // to `Expr::Tuple` and is treated as constraints, matching
-                    // CPython; any other expression is a single upper bound.  The
-                    // empty tuple `T: ()` is the sole exception: CPython treats it
-                    // as a (degenerate) bound value, leaving `__constraints__` ==
-                    // `()` and `__bound__` == `()`, so we route it through `Bound`.
-                    let bound = if self.is(&Token::Colon) {
-                        self.bump(); // consume `:`
-                        let expr = self.parse_expr()?;
-                        Some(match expr {
-                            Expr::Tuple(elems) if !elems.is_empty() => {
-                                TypeParamBound::Constraints(elems)
-                            }
-                            other => TypeParamBound::Bound(other),
-                        })
-                    } else {
-                        None
-                    };
-                    params.push(TypeParam {
-                        name: param_name,
-                        bound,
-                    });
-                }
-                _ => {
-                    // Skip unexpected token (e.g. `*Ts`, `**P` variance markers).
-                    self.bump();
+                other => {
+                    return Err(PyError::parse(format!(
+                        "expected ',' or ']' in type parameter list in {ctx}, found {other:?}"
+                    )));
                 }
             }
         }
