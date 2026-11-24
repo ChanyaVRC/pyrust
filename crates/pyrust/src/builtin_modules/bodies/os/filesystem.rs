@@ -203,6 +203,15 @@ pub(super) fn makedirs(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value>
 
 pub(super) fn remove(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
     let path = single_path_arg(fn_name, args)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink_dir()) {
+            std::fs::remove_dir(&path)
+                .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+            return Ok(Value::none());
+        }
+    }
     std::fs::remove_file(&path).map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
     Ok(Value::none())
 }

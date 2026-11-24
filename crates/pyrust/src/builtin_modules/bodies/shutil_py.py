@@ -319,6 +319,13 @@ def rmtree(path, ignore_errors=False, onerror=None, *, onexc=None, dir_fd=None):
     else:
         _onexc = onexc
 
+    if not _WINDOWS:
+        try:
+            os.lstat(path_s)
+        except OSError as err:
+            _onexc(os.lstat, path, err)
+            return
+
     try:
         if os.path.islink(path_s):
             raise OSError("Cannot call rmtree on a symbolic link")
