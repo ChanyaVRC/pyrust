@@ -1,1182 +1,213 @@
 // `contextlib` module — context management utilities.
 //
-// Implements the most-used parts of CPython's `contextlib`:
-//
-// - `suppress(*exceptions)` — context manager that swallows specific exceptions.
-// - `contextmanager` — decorator that turns a generator function into a context
-//   manager; the generator yields exactly once (its yielded value becomes the
-//   `with … as` value), and exceptions thrown into the `with` body are forwarded
-//   to the generator via `.throw()`.
-// - `closing(thing)` — context manager that calls `thing.close()` on exit.
-// - `nullcontext(enter_result=None)` — context manager that is a no-op; useful
-//   as a placeholder.
-// - `ExitStack` — dynamic stack of context managers and callbacks; allows
-//   programmatically managing an arbitrary number of context managers.
-//
-// ## Context manager protocol
-//
-// The VM calls `ctx.__enter__()` at the start of the `with` block and
-// `ctx.__exit__(exc_type, exc_val, traceback)` at the end.  On normal exit,
-// all three arguments are `None`.  On exception exit, `exc_type` is
-// `exc.__class__` (a `PyClass`), `exc_val` is the exception instance, and
-// `traceback` is `None` (pyrust has no traceback objects).  If `__exit__`
-// returns a truthy value the exception is suppressed; otherwise it propagates.
+// This file is the thin Python-registration facade. Concrete context manager
+// implementations, generation tracking, and Python-source injection live in
+// submodules under `bodies/contextlib/`.
 //
 // Reference: <https://docs.python.org/3/library/contextlib.html>
 
-use std::cell::RefCell;
-use std::rc::{Rc, Weak};
-
-use crate::error::{PyError, Result};
+use crate::error::Result;
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::Interpreter;
-use crate::interpreter::{class_is_subclass_of, is_stop_iteration_error};
-use crate::value::{InstanceAttrs, PyClass, PyInstance, PyKey, Value, ValueKind};
+use crate::value::Value;
 use pyrust_derive::pyrust_module;
 
-const INTERNAL_CLASS_NAMES: [&str; 3] = [
-    "_GeneratorContextManager",
-    "_ContextManagerFactory",
-    "_StackCallback",
-];
+#[path = "contextlib/async_exit_stack.rs"]
+mod async_exit_stack;
+#[path = "contextlib/decorators.rs"]
+mod decorators;
+#[path = "contextlib/exit_stack.rs"]
+mod exit_stack;
+#[path = "contextlib/helpers.rs"]
+mod helpers;
+#[path = "contextlib/registry.rs"]
+mod registry;
 
-type WeakPyClass = Weak<RefCell<PyClass>>;
-type InternalClassRegistry = RefCell<Vec<(&'static str, WeakPyClass)>>;
-
-struct ContextManagerClassGeneration {
-    factory: WeakPyClass,
-    // The factory class is the weak lifetime key. Retaining its sibling
-    // strongly lets a decorated factory outlive a removed module without
-    // keeping discarded generations alive after the factory itself dies.
-    manager: Rc<RefCell<PyClass>>,
-}
-
-struct ExitStackClassGeneration {
-    exit_stack: WeakPyClass,
-    // As above, the public receiver class is the weak lifetime key for the
-    // private callback sibling.
-    callback: Rc<RefCell<PyClass>>,
-}
-
-// Thread-local justification:
-// (a) Why `thread_local!`: Stores `!Send` `Rc`/`Weak<RefCell<PyClass>>`
-//     mappings pairing public `contextlib` classes with their internal helper
-//     classes for each still-live import generation.
-// (b) Multi-interpreter / multi-threaded impact: Weak generation tracking
-//     isolates distinct `contextlib` imports across interpreters on one thread
-//     and prunes dead generations; separate threads are completely isolated.
-thread_local! {
-    /// Weak identities for every still-live imported contextlib generation.
-    ///
-    /// A fresh import after deleting `sys.modules["contextlib"]` must create a
-    /// fresh set of classes. Old instances keep their generation alive through
-    /// their strong class reference.
-    static INTERNAL_CLASSES: InternalClassRegistry = const { RefCell::new(Vec::new()) };
-
-    /// Generation-local `_ContextManagerFactory` → `_GeneratorContextManager`
-    /// associations. Calling a retained factory must not switch to the newest
-    /// imported contextlib generation.
-    static CONTEXT_MANAGER_CLASS_GENERATIONS:
-        RefCell<Vec<ContextManagerClassGeneration>> = const { RefCell::new(Vec::new()) };
-
-    /// Generation-local `ExitStack` → `_StackCallback` associations.
-    static EXIT_STACK_CLASS_GENERATIONS:
-        RefCell<Vec<ExitStackClassGeneration>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Finalize and register the concrete classes exported by one imported
-/// `contextlib` module generation.
-pub(crate) fn prepare_module_classes(module: &Value) {
-    let ValueKind::PyModule(module) = module.kind() else {
-        return;
-    };
-    let classes = module
-        .borrow()
-        .attrs
-        .iter()
-        .filter_map(|(name, value)| match value.kind() {
-            ValueKind::PyClass(class) => Some((name.clone(), Rc::clone(class))),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for (_, class) in &classes {
-        class
-            .borrow_mut()
-            .attrs
-            .insert("__module__".to_string(), Value::string("contextlib"));
-    }
-    if let (Some((_, factory)), Some((_, manager))) = (
-        classes
-            .iter()
-            .find(|(name, _)| name == "_ContextManagerFactory"),
-        classes
-            .iter()
-            .find(|(name, _)| name == "_GeneratorContextManager"),
-    ) {
-        register_context_manager_generation(factory, manager);
-    }
-    if let (Some((_, exit_stack)), Some((_, callback))) = (
-        classes.iter().find(|(name, _)| name == "ExitStack"),
-        classes.iter().find(|(name, _)| name == "_StackCallback"),
-    ) {
-        register_exit_stack_generation(exit_stack, callback);
-    }
-    INTERNAL_CLASSES.with(|registry| {
-        let mut registry = registry.borrow_mut();
-        registry.retain(|(_, class)| class.strong_count() > 0);
-        for &name in &INTERNAL_CLASS_NAMES {
-            let Some((_, class)) = classes.iter().find(|(candidate, _)| candidate == name) else {
-                continue;
-            };
-            if !registry.iter().any(|(registered_name, registered)| {
-                *registered_name == name && registered.as_ptr() == Rc::as_ptr(class)
-            }) {
-                registry.push((name, Rc::downgrade(class)));
-            }
-        }
-    });
-}
-
-fn registered_internal_class(name: &str) -> Option<Rc<RefCell<PyClass>>> {
-    INTERNAL_CLASSES.with(|registry| {
-        let mut registry = registry.borrow_mut();
-        registry.retain(|(_, class)| class.strong_count() > 0);
-        registry
-            .iter()
-            .rev()
-            .find(|(registered_name, _)| *registered_name == name)
-            .and_then(|(_, class)| class.upgrade())
-    })
-}
-
-fn register_context_manager_generation(
-    factory: &Rc<RefCell<PyClass>>,
-    manager: &Rc<RefCell<PyClass>>,
-) {
-    CONTEXT_MANAGER_CLASS_GENERATIONS.with(|generations| {
-        let mut generations = generations.borrow_mut();
-        generations.retain(|generation| generation.factory.strong_count() > 0);
-        if generations
-            .iter()
-            .any(|generation| generation.factory.as_ptr() == Rc::as_ptr(factory))
-        {
-            return;
-        }
-        generations.push(ContextManagerClassGeneration {
-            factory: Rc::downgrade(factory),
-            manager: Rc::clone(manager),
-        });
-    });
-}
-
-fn generator_manager_class_for_factory(
-    factory: &Rc<RefCell<PyClass>>,
-) -> Option<Rc<RefCell<PyClass>>> {
-    CONTEXT_MANAGER_CLASS_GENERATIONS.with(|generations| {
-        let mut generations = generations.borrow_mut();
-        generations.retain(|generation| generation.factory.strong_count() > 0);
-        generations.iter().rev().find_map(|generation| {
-            let registered_factory = generation.factory.upgrade()?;
-            class_is_subclass_of(factory, &registered_factory)
-                .then(|| Rc::clone(&generation.manager))
-        })
-    })
-}
-
-fn register_exit_stack_generation(
-    exit_stack: &Rc<RefCell<PyClass>>,
-    callback: &Rc<RefCell<PyClass>>,
-) {
-    EXIT_STACK_CLASS_GENERATIONS.with(|generations| {
-        let mut generations = generations.borrow_mut();
-        generations.retain(|generation| generation.exit_stack.strong_count() > 0);
-        if generations
-            .iter()
-            .any(|generation| generation.exit_stack.as_ptr() == Rc::as_ptr(exit_stack))
-        {
-            return;
-        }
-        generations.push(ExitStackClassGeneration {
-            exit_stack: Rc::downgrade(exit_stack),
-            callback: Rc::clone(callback),
-        });
-    });
-}
-
-fn stack_callback_class_for_exit_stack(
-    exit_stack: &Rc<RefCell<PyClass>>,
-) -> Option<Rc<RefCell<PyClass>>> {
-    EXIT_STACK_CLASS_GENERATIONS.with(|generations| {
-        let mut generations = generations.borrow_mut();
-        generations.retain(|generation| generation.exit_stack.strong_count() > 0);
-        generations.iter().rev().find_map(|generation| {
-            let registered_exit_stack = generation.exit_stack.upgrade()?;
-            class_is_subclass_of(exit_stack, &registered_exit_stack)
-                .then(|| Rc::clone(&generation.callback))
-        })
-    })
-}
-
-/// Python-source definitions for the contextlib members most naturally
-/// expressed in Python (issue #2795): `AbstractContextManager`,
-/// `AbstractAsyncContextManager`, `ContextDecorator`, `AsyncContextDecorator`,
-/// `asynccontextmanager`, `aclosing`, and `AsyncExitStack`.  Exec'd once into a
-/// throwaway namespace at first import and the public names copied onto the
-/// module.  See `inject_python_members`.
-const CONTEXTLIB_PY_SOURCE: &str = include_str!("contextlib_py.py");
-
-/// Public names defined by `CONTEXTLIB_PY_SOURCE` to export onto the module.
-/// `_check_methods` and `_AsyncGeneratorContextManager` are private helpers and
-/// are intentionally omitted.
-const CONTEXTLIB_PY_EXPORTS: [&str; 7] = [
-    "AbstractContextManager",
-    "AbstractAsyncContextManager",
-    "ContextDecorator",
-    "AsyncContextDecorator",
-    "asynccontextmanager",
-    "aclosing",
-    "AsyncExitStack",
-];
-
-/// Exec `CONTEXTLIB_PY_SOURCE` once and copy its public names onto the
-/// `contextlib` module's attribute map.  Called from the `@inject` post-load
-/// hook (`crate::builtin_modules::post_load_inject`).
-pub(crate) fn inject_python_members(
-    interp: &mut Interpreter,
-    module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<Option<Value>> {
-    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
-    // Seed the exec namespace with the names the Python source references at
-    // class-definition time (`ABC`, `abstractmethod`, `wraps`).  pyrust's
-    // `exec(src, globals)` does not make an `import` executed inside `src`
-    // visible to module-level name resolution within the same exec, so a bare
-    // `from abc import ABC` in the source would NameError when used as a class
-    // base; pre-binding the dependencies sidesteps that.
-    seed_dependency(interp, &ns, "abc", &["ABC", "abstractmethod"])?;
-    seed_dependency(interp, &ns, "functools", &["wraps"])?;
-    seed_dependency(interp, &ns, "types", &["GenericAlias"])?;
-    interp.exec_source(CONTEXTLIB_PY_SOURCE, Some(ns.clone()), None)?;
-    let dict = ns
-        .as_dict()
-        .ok_or_else(|| PyError::Runtime("contextlib: exec namespace not a dict".into()))?;
-    for name in CONTEXTLIB_PY_EXPORTS {
-        if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            module
-                .borrow_mut()
-                .attrs
-                .insert(name.to_string(), val.clone());
-            if let ValueKind::PyClass(class) = val.kind() {
-                class
-                    .borrow_mut()
-                    .attrs
-                    .insert("__module__".to_string(), Value::string("contextlib"));
-            }
-        }
-    }
-    Ok(Some(ns.clone()))
-}
-
-/// Import `module_name` and copy the requested attributes into the exec
-/// namespace `ns`, so the Python source can reference them by bare name at
-/// class-definition time.
-fn seed_dependency(
-    interp: &mut Interpreter,
-    ns: &Value,
-    module_name: &str,
-    names: &[&str],
-) -> Result<()> {
-    let module = interp.load_module(module_name)?;
-    let ValueKind::PyModule(m) = module.kind() else {
-        return Err(PyError::Runtime(format!(
-            "contextlib: {module_name} is not a module",
-        )));
-    };
-    for name in names {
-        let val = m
-            .borrow()
-            .get_attr_value(name)
-            .ok_or_else(|| PyError::Runtime(format!("contextlib: {module_name}.{name} missing")))?;
-        ns.dict_insert(PyKey::str_from(name), val)?;
-    }
-    Ok(())
-}
+pub(crate) use self::async_exit_stack::inject_python_members;
+pub(crate) use self::registry::prepare_module_classes;
 
 pyrust_module! {
-    // ── suppress ─────────────────────────────────────────────────────────────
-
     /// CPython: contextlib.suppress(*exceptions).
-    /// Returns a context manager that suppresses any of the given exception
-    /// types raised in the `with` body and resumes execution after the block.
     /// <https://docs.python.org/3/library/contextlib.html#contextlib.suppress>
     class suppress {
         fn __init__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let types: Vec<Value> = args[1..].iter().map(|a| a.value.clone()).collect();
-            inst.borrow_mut()
-                .attrs
-                .insert("_types", Value::list(types));
             let _ = _interp;
-            Ok(Value::none())
+            helpers::suppress_init(args, FN_NAME)
         }
 
         fn __enter__(args) -> Result<Value> {
-            let _ = expect_self(args, FN_NAME)?;
             let _ = _interp;
-            Ok(Value::none())
+            helpers::noop_method(args, FN_NAME)
         }
 
-        /// Returns True (suppress) if the exception type is a subclass of any
-        /// of the stored types; False otherwise.
         fn __exit__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            // args: [self, exc_type, exc_val, traceback]
-            // exc_type is None on normal exit.
-            let exc_type = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
-            if exc_type.is_none() {
-                let _ = _interp;
-                return Ok(Value::none());
-            }
-            let raised_class = match exc_type.kind() {
-                ValueKind::PyClass(c) => Rc::clone(c),
-                _ => {
-                    // An exception is present but exc_type is not a class:
-                    // CPython returns the (falsy) bool, not None.
-                    let _ = _interp;
-                    return Ok(Value::bool_(false));
-                }
-            };
-            let types_val = inst.borrow().attrs.get("_types").cloned().unwrap_or_else(|| Value::list(vec![]));
-            let types = match types_val.kind() {
-                ValueKind::List(items) => items.to_vec(),
-                _ => vec![],
-            };
-            for t in &types {
-                if let ValueKind::PyClass(expected) = t.kind()
-                    && class_is_subclass_of(&raised_class, expected) {
-                        let _ = _interp;
-                        return Ok(Value::bool_(true));
-                    }
-            }
-            // Exception present but no stored type matched: CPython returns the
-            // (falsy) bool result of `issubclass`, i.e. False — not None.
             let _ = _interp;
-            Ok(Value::bool_(false))
+            helpers::suppress_exit(args, FN_NAME)
         }
     }
 
-    // ── _GeneratorContextManager ──────────────────────────────────────────────
-
     /// Internal context manager produced by `@contextmanager`.
-    ///
-    /// `_gen` holds the generator value.  `__enter__` advances the generator to
-    /// its first yield, returning the yielded value.  `__exit__` either closes
-    /// the generator (no exception) or throws the exception into it, suppressing
-    /// the result if the generator raises `StopIteration`.
     class _GeneratorContextManager {
         fn __init__(args) -> Result<Value> {
-            let _inst = expect_self(args, FN_NAME)?;
-            // Private: constructed only by `contextmanager.__call__`.
-            // args beyond self must be empty (the factory seeds attrs directly).
             let _ = _interp;
-            if args.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments"),
-                ));
-            }
-            Ok(Value::none())
+            decorators::gen_cm_init(args, FN_NAME)
         }
 
         fn __enter__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let generator = inst.borrow().attrs.get("_gen").cloned().ok_or_else(|| {
-                PyError::Runtime(format!("internal: {FN_NAME}() _gen missing"))
-            })?;
-            // Advance to the first yield; the yielded value becomes the `with … as` target.
-            match _interp.call_next(&generator, None) {
-                Ok(val) => Ok(val),
-                Err(e) if is_stop_iteration_error(&e) => {
-                    // Generator returned without yielding — protocol violation.
-                    Err(PyError::named(
-                        "RuntimeError",
-                        "generator didn't yield".to_string(),
-                    ))
-                }
-                Err(e) => Err(e),
-            }
+            decorators::gen_cm_enter(_interp, args, FN_NAME)
         }
 
         fn __exit__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let generator = inst.borrow().attrs.get("_gen").cloned().ok_or_else(|| {
-                PyError::Runtime(format!("internal: {FN_NAME}() _gen missing"))
-            })?;
-            // args: [self, exc_type, exc_val, traceback]
-            let exc_type = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
-            let exc_val  = args.get(2).map(|a| a.value.clone()).unwrap_or_else(Value::none);
-            if exc_type.is_none() {
-                // Normal exit: advance the generator past its yield point.
-                // The generator body should run until completion and raise
-                // StopIteration; if it yields again, that is a protocol violation.
-                match _interp.call_next(&generator, None) {
-                    Ok(_) => {
-                        // Generator yielded again — protocol violation.
-                        Err(PyError::named(
-                            "RuntimeError",
-                            "generator didn't stop".to_string(),
-                        ))
-                    }
-                    Err(e) if is_stop_iteration_error(&e) => {
-                        // Generator finished normally — expected.
-                        // CPython's _GeneratorContextManager.__exit__ returns
-                        // `False` here (not None): it falls through to the
-                        // shared `return False` after the no-exception branch.
-                        Ok(Value::bool_(false))
-                    }
-                    Err(e) => Err(e),
-                }
-            } else {
-                // Exception exit: throw into the generator.
-                // `exc_val` may be a PyInstance or None; `exc_type` is a PyClass.
-                // Materialise a concrete exception *instance* to throw, mirroring
-                // CPython's `if value is None: value = typ()`.  Throwing the
-                // instance (not the class) means the same object propagates back
-                // out when the generator re-raises, so the identity check below
-                // can recognise the non-suppressing path.
-                let to_throw = if !exc_val.is_none() {
-                    exc_val
-                } else if let ValueKind::PyClass(c) = exc_type.kind() {
-                    crate::interpreter::instantiate_exception(Rc::clone(c), Vec::new())
-                } else {
-                    exc_type
-                };
-                match _interp.call_generator_method(generator, "throw", vec![to_throw.clone()]) {
-                    Ok(_) => {
-                        // Generator yielded again — that means it caught the exception
-                        // and yielded a new value, which is forbidden by the protocol.
-                        Err(PyError::named(
-                            "RuntimeError",
-                            "generator didn't stop after throw()".to_string(),
-                        ))
-                    }
-                    Err(e) if is_stop_iteration_error(&e) => {
-                        // Generator handled the exception and returned normally — suppress.
-                        Ok(Value::bool_(true))
-                    }
-                    Err(e) => {
-                        // CPython's `_GeneratorContextManager.__exit__` distinguishes
-                        // the generator *re-raising the same exception* (it didn't
-                        // suppress) from it raising a *new* one.  In the first case
-                        // `__exit__` returns `False` (non-suppressing) rather than
-                        // re-raising, so a direct `cm.__exit__(typ, val, tb)` call
-                        // observes `False`; only a genuinely different exception
-                        // propagates.  Match on instance identity (`exc is value`).
-                        if is_same_raised_exception(&e, &to_throw) {
-                            return Ok(Value::bool_(false));
-                        }
-                        // Generator raised a *new* exception — let it propagate.
-                        Err(e)
-                    }
-                }
-            }
+            decorators::gen_cm_exit(_interp, args, FN_NAME)
         }
     }
 
     /// CPython: contextlib.contextmanager(func).
-    /// A decorator that turns a generator function into a factory of context
-    /// managers.  The decorated function must `yield` exactly once.
     /// <https://docs.python.org/3/library/contextlib.html#contextlib.contextmanager>
     fn contextmanager(args) -> Result<Value> {
-        if args.len() != 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes exactly 1 argument"),
-            ));
-        }
-        let func = args[0].value.clone();
         let _ = _interp;
-        Ok(make_cm_factory(func))
+        decorators::contextmanager(args, FN_NAME)
     }
 
-    /// Internal callable returned by `@contextmanager`.  When called with the
-    /// user's arguments it invokes the wrapped generator function, then wraps
-    /// the resulting generator in a `_GeneratorContextManager`.
+    /// Internal callable returned by `@contextmanager`.
     class _ContextManagerFactory {
         fn __init__(args) -> Result<Value> {
             let _ = _interp;
-            // Private — constructed only by `make_cm_factory`.
-            if args.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments"),
-                ));
-            }
-            Ok(Value::none())
+            decorators::factory_init(args, FN_NAME)
         }
 
         fn __call__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let (factory_class, func) = {
-                let factory = inst.borrow();
-                let func = factory.attrs.get("_func").cloned().ok_or_else(|| {
-                    PyError::Runtime(format!("internal: {FN_NAME}() _func missing"))
-                })?;
-                (Rc::clone(&factory.class), func)
-            };
-            let user = &args[1..];
-            // Call the generator function to get a generator object.
-            let generator = _interp.call_function_expanded(func, user)?;
-            // Wrap the generator in the sibling class from this factory's
-            // imported module generation, even if contextlib was re-imported.
-            let mut attrs = InstanceAttrs::new();
-            attrs.insert("_gen", generator);
-            Ok(make_generator_manager_instance(&factory_class, attrs))
+            decorators::factory_call(_interp, args, FN_NAME)
         }
     }
 
-    // ── closing ───────────────────────────────────────────────────────────────
-
     /// CPython: contextlib.closing(thing).
-    /// Context manager that calls `thing.close()` on exit regardless of
-    /// whether an exception occurred.
     /// <https://docs.python.org/3/library/contextlib.html#contextlib.closing>
     class closing {
         fn __init__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let user = &args[1..];
-            if user.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            inst.borrow_mut()
-                .attrs
-                .insert("thing", user[0].value.clone());
             let _ = _interp;
-            Ok(Value::none())
+            helpers::closing_init(args, FN_NAME)
         }
 
         fn __enter__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
             let _ = _interp;
-            Ok(inst.borrow().attrs.get("thing").cloned().unwrap_or_else(Value::none))
+            helpers::closing_enter(args, FN_NAME)
         }
 
         fn __exit__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let thing = inst.borrow().attrs.get("thing").cloned().unwrap_or_else(Value::none);
-            // Call thing.close() with no arguments.
-            let close_method = _interp.get_attr(&thing, "close")?;
-            _interp.call_function_expanded(close_method, &[])?;
-            Ok(Value::none())
+            helpers::closing_exit(_interp, args, FN_NAME)
         }
     }
 
-    // ── nullcontext ───────────────────────────────────────────────────────────
-
     /// CPython: contextlib.nullcontext(enter_result=None).
-    /// Context manager that does nothing.  `with nullcontext(x) as y` binds
-    /// `y = x` and is a no-op on entry and exit.
     /// <https://docs.python.org/3/library/contextlib.html#contextlib.nullcontext>
     class nullcontext {
         fn __init__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let user = &args[1..];
-            let enter_result = match user.first() {
-                Some(a) if a.name.is_none() || a.name.as_deref() == Some("enter_result") => {
-                    a.value.clone()
-                }
-                None => Value::none(),
-                Some(a) => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "{FN_NAME}() got an unexpected keyword argument '{}'",
-                            a.name.as_deref().unwrap_or("")
-                        ),
-                    ));
-                }
-            };
-            inst.borrow_mut()
-                .attrs
-                .insert("enter_result", enter_result);
             let _ = _interp;
-            Ok(Value::none())
+            helpers::nullcontext_init(args, FN_NAME)
         }
 
         fn __enter__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
             let _ = _interp;
-            Ok(inst.borrow().attrs.get("enter_result").cloned().unwrap_or_else(Value::none))
+            helpers::nullcontext_enter(args, FN_NAME)
         }
 
         fn __exit__(args) -> Result<Value> {
-            let _ = expect_self(args, FN_NAME)?;
             let _ = _interp;
-            Ok(Value::none())
+            helpers::noop_method(args, FN_NAME)
         }
     }
 
-    // ── chdir ───────────────────────────────────────────────────────────────────
-
     /// CPython: contextlib.chdir(path).
-    /// Non-reentrant context manager that temporarily changes the current
-    /// working directory to `path`, restoring the previous directory on exit
-    /// (whether or not an exception propagated).
     /// <https://docs.python.org/3/library/contextlib.html#contextlib.chdir>
     class chdir {
         fn __init__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let user = &args[1..];
-            if user.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            inst.borrow_mut().attrs.insert("path", user[0].value.clone());
-            // Stack of saved directories, matching CPython's `_old_cwd` list.
-            inst.borrow_mut().attrs.insert("_old_cwd", Value::list(vec![]));
             let _ = _interp;
-            Ok(Value::none())
+            helpers::chdir_init(args, FN_NAME)
         }
 
         fn __enter__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let path = inst.borrow().attrs.get("path").cloned().unwrap_or_else(Value::none);
-            // Snapshot the current directory, then change to the target.
-            let cwd = os_call(_interp, "getcwd", &[])?;
-            let old_cwd = inst.borrow().attrs.get("_old_cwd").cloned()
-                .unwrap_or_else(|| Value::list(vec![]));
-            old_cwd.list_push(cwd)?;
-            os_call(_interp, "chdir", &[ExpandedCallArg { name: None, value: path }])?;
-            Ok(Value::none())
+            helpers::chdir_enter(_interp, args, FN_NAME)
         }
 
         fn __exit__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let old_cwd = inst.borrow().attrs.get("_old_cwd").cloned()
-                .unwrap_or_else(|| Value::list(vec![]));
-            // Mirror CPython: `os.chdir(self._old_cwd.pop())`. Popping an empty
-            // stack (e.g. __exit__ called without a paired __enter__) raises
-            // IndexError("pop from empty list"), not a chdir(None) TypeError.
-            let restored = match old_cwd.list_len() {
-                Some(n) if n > 0 => old_cwd.list_pop_at(n - 1)?,
-                _ => {
-                    return Err(PyError::named(
-                        "IndexError",
-                        "pop from empty list".to_string(),
-                    ));
-                }
-            };
-            os_call(_interp, "chdir", &[ExpandedCallArg { name: None, value: restored }])?;
-            Ok(Value::bool_(false))
+            helpers::chdir_exit(_interp, args, FN_NAME)
         }
     }
 
-    // ── redirect_stdout / redirect_stderr ──────────────────────────────────────
-
     /// CPython: contextlib.redirect_stdout(new_target).
-    /// Context manager that temporarily redirects `sys.stdout` to `new_target`
-    /// for the duration of the `with` block, restoring the previous value on
-    /// exit.  Reentrant/reusable like CPython's `_RedirectStream`: each
-    /// `__enter__` pushes the saved stream and each `__exit__` pops it.
     /// <https://docs.python.org/3/library/contextlib.html#contextlib.redirect_stdout>
     class redirect_stdout {
         fn __init__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let user = &args[1..];
-            if user.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            inst.borrow_mut().attrs.insert("_new_target", user[0].value.clone());
-            inst.borrow_mut().attrs.insert("_old_targets", Value::list(vec![]));
             let _ = _interp;
-            Ok(Value::none())
+            helpers::redirect_init(args, FN_NAME)
         }
 
         fn __enter__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            redirect_enter(_interp, &inst, "stdout")
+            helpers::redirect_enter(_interp, args, FN_NAME, "stdout")
         }
 
         fn __exit__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            redirect_exit(_interp, &inst, "stdout")
+            helpers::redirect_exit(_interp, args, FN_NAME, "stdout")
         }
     }
 
     /// CPython: contextlib.redirect_stderr(new_target).
-    /// Like `redirect_stdout`, but for `sys.stderr`.
     /// <https://docs.python.org/3/library/contextlib.html#contextlib.redirect_stderr>
     class redirect_stderr {
         fn __init__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let user = &args[1..];
-            if user.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            inst.borrow_mut().attrs.insert("_new_target", user[0].value.clone());
-            inst.borrow_mut().attrs.insert("_old_targets", Value::list(vec![]));
             let _ = _interp;
-            Ok(Value::none())
+            helpers::redirect_init(args, FN_NAME)
         }
 
         fn __enter__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            redirect_enter(_interp, &inst, "stderr")
+            helpers::redirect_enter(_interp, args, FN_NAME, "stderr")
         }
 
         fn __exit__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            redirect_exit(_interp, &inst, "stderr")
+            helpers::redirect_exit(_interp, args, FN_NAME, "stderr")
         }
     }
 
-    // ── ExitStack ─────────────────────────────────────────────────────────────
-
     /// CPython: contextlib.ExitStack().
-    /// Manages a dynamic stack of context managers and callbacks.
     /// <https://docs.python.org/3/library/contextlib.html#contextlib.ExitStack>
     class ExitStack {
         fn __init__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            inst.borrow_mut()
-                .attrs
-                .insert("_callbacks", Value::list(vec![]));
             let _ = _interp;
-            Ok(Value::none())
+            exit_stack::init(args, FN_NAME)
         }
 
         fn __enter__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
             let _ = _interp;
-            Ok(Value::py_instance(inst))
+            exit_stack::enter(args, FN_NAME)
         }
 
         fn __exit__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            // Pop callbacks in LIFO order, call each with (exc_type, exc_val, traceback).
-            // If any callback suppresses the exception (returns truthy), stop propagating.
-            let mut exc_type = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
-            let mut exc_val  = args.get(2).map(|a| a.value.clone()).unwrap_or_else(Value::none);
-            let mut tb       = args.get(3).map(|a| a.value.clone()).unwrap_or_else(Value::none);
-            let cbs = pop_all_callbacks(&inst);
-            let mut suppressed = false;
-            let mut pending_err: Option<PyError> = None;
-            // Walk LIFO (reverse). CPython runs ALL callbacks regardless of
-            // exceptions or suppression; only the final state matters.
-            for cb in cbs.into_iter().rev() {
-                let result = _interp.call_function_expanded(
-                    cb,
-                    &[
-                        ExpandedCallArg { name: None, value: exc_type.clone() },
-                        ExpandedCallArg { name: None, value: exc_val.clone() },
-                        ExpandedCallArg { name: None, value: tb.clone() },
-                    ],
-                );
-                match result {
-                    Ok(v) => {
-                        // Use the interpreter's full truthiness evaluation so that
-                        // containers (empty list/tuple/dict/set = falsy) and custom
-                        // __bool__ / __len__ are handled correctly, matching CPython.
-                        let truthy = match _interp.truthy_value(&v) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                pending_err = Some(e);
-                                suppressed = false;
-                                exc_type = Value::none();
-                                exc_val = Value::none();
-                                tb = Value::none();
-                                continue;
-                            }
-                        };
-                        if !exc_type.is_none() && truthy {
-                            suppressed = true;
-                            // Subsequent callbacks see no active exception.
-                            exc_type = Value::none();
-                            exc_val = Value::none();
-                            tb = Value::none();
-                        }
-                    }
-                    Err(e) => {
-                        // New exception replaces current; subsequent callbacks
-                        // see no exception (we can't round-trip PyError → Value).
-                        pending_err = Some(e);
-                        suppressed = false;
-                        exc_type = Value::none();
-                        exc_val = Value::none();
-                        tb = Value::none();
-                    }
-                }
-            }
-            if let Some(e) = pending_err {
-                return Err(e);
-            }
-            Ok(Value::bool_(suppressed))
+            exit_stack::exit(_interp, args, FN_NAME)
         }
 
-        /// `stack.enter_context(cm)` — calls `cm.__enter__()` and pushes
-        /// `cm.__exit__` onto the callback stack.  Returns the enter result.
         fn enter_context(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let user = &args[1..];
-            if user.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            let cm = user[0].value.clone();
-            // Retrieve __exit__ before calling __enter__ so that if __enter__
-            // fails we don't register a cleanup for a context that never opened.
-            let exit_fn = _interp.get_attr(&cm, "__exit__")?;
-            // Call cm.__enter__() with no arguments.
-            let enter_attr = _interp.get_attr(&cm, "__enter__")?;
-            let enter_result = _interp.call_function_expanded(enter_attr, &[])?;
-            // Push __exit__ onto the callback stack.
-            let callbacks_val = inst.borrow().attrs.get("_callbacks").cloned()
-                .unwrap_or_else(|| Value::list(vec![]));
-            callbacks_val.list_push(exit_fn)?;
-            Ok(enter_result)
+            exit_stack::enter_context(_interp, args, FN_NAME)
         }
 
-        /// `stack.callback(fn, *args, **kwargs)` — push `fn(*args, **kwargs)` as
-        /// a no-argument cleanup callback.  The extra args are bound at push time.
         fn callback(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let exit_stack_class = Rc::clone(&inst.borrow().class);
-            if args.len() < 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes at least 1 argument"),
-                ));
-            }
-            let func = args[1].value.clone();
-            let bound_args: Vec<ExpandedCallArg> = args[2..].to_vec();
-            // Wrap func+bound_args in a no-argument callable (a _StackCallback instance).
-            let mut attrs = InstanceAttrs::new();
-            attrs.insert("_func", func);
-            // Encode bound_args as a list of [name_or_none, value] pairs.
-            let encoded: Vec<Value> = bound_args.iter().map(|a| {
-                Value::tuple(vec![
-                    a.name.as_ref().map(|n| Value::string(n.clone())).unwrap_or_else(Value::none),
-                    a.value.clone(),
-                ])
-            }).collect();
-            attrs.insert("_bound_args", Value::list(encoded));
-            let wrapper = make_stack_callback_instance(&exit_stack_class, attrs);
-            // Push a closure-like value: a _StackCallback that, when called with
-            // (exc_type, exc_val, tb), ignores those and calls func(*bound_args).
-            let callbacks_val = inst.borrow().attrs.get("_callbacks").cloned()
-                .unwrap_or_else(|| Value::list(vec![]));
-            callbacks_val.list_push(wrapper)?;
             let _ = _interp;
-            Ok(Value::none())
+            exit_stack::callback(args, FN_NAME)
         }
 
-        /// `stack.close()` — call all registered callbacks in LIFO order,
-        /// passing `(None, None, None)`.  Exceptions from callbacks propagate.
         fn close(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let cbs = pop_all_callbacks(&inst);
-            let mut pending_err: Option<PyError> = None;
-            for cb in cbs.into_iter().rev() {
-                let result = _interp.call_function_expanded(
-                    cb,
-                    &[
-                        ExpandedCallArg { name: None, value: Value::none() },
-                        ExpandedCallArg { name: None, value: Value::none() },
-                        ExpandedCallArg { name: None, value: Value::none() },
-                    ],
-                );
-                if let Err(e) = result {
-                    pending_err = Some(e);
-                }
-            }
-            if let Some(e) = pending_err {
-                return Err(e);
-            }
-            Ok(Value::none())
+            exit_stack::close(_interp, args, FN_NAME)
         }
     }
 
     /// Internal wrapper for `ExitStack.callback(fn, *args)`.
-    /// When called with `(exc_type, exc_val, traceback)`, it ignores those and
-    /// calls the stored function with the pre-bound arguments.
     class _StackCallback {
         fn __init__(args) -> Result<Value> {
             let _ = _interp;
-            if args.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments"),
-                ));
-            }
-            Ok(Value::none())
+            exit_stack::stack_callback_init(args, FN_NAME)
         }
 
-        /// Called by ExitStack's cleanup loop with (exc_type, exc_val, tb).
-        /// Ignores those and invokes the stored function with pre-bound args.
         fn __call__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let func = inst.borrow().attrs.get("_func").cloned().ok_or_else(|| {
-                PyError::Runtime(format!("internal: {FN_NAME}() _func missing"))
-            })?;
-            let encoded_val = inst.borrow().attrs.get("_bound_args").cloned()
-                .unwrap_or_else(|| Value::list(vec![]));
-            let encoded = match encoded_val.kind() {
-                ValueKind::List(items) => items.to_vec(),
-                _ => vec![],
-            };
-            let mut call_args: Vec<ExpandedCallArg> = Vec::new();
-            for item in &encoded {
-                if let ValueKind::Tuple(pair) = item.kind() {
-                    let pair = pair.to_vec();
-                    let name = match pair.first().map(|v| v.kind()) {
-                        Some(ValueKind::Str(s)) => Some(s.to_string()),
-                        _ => None,
-                    };
-                    let val = pair.get(1).cloned().unwrap_or_else(Value::none);
-                    call_args.push(ExpandedCallArg { name, value: val });
-                }
-            }
-            _interp.call_function_expanded(func, &call_args)?;
-            Ok(Value::bool_(false))
+            exit_stack::stack_callback_call(_interp, args, FN_NAME)
         }
-    }
-}
-
-// ── shared helpers ────────────────────────────────────────────────────────────
-
-fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
-    match args.first().map(|a| a.value.kind()) {
-        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
-        _ => Err(PyError::Runtime(format!(
-            "internal: {fn_name}() self must be a PyInstance",
-        ))),
-    }
-}
-
-/// Resolve the newest live imported generation for receiver-less bootstrap.
-///
-/// Receiver-driven sibling factories use their dedicated generation mappings
-/// above. This lookup remains only for creating the initial
-/// `_ContextManagerFactory` from the module-level decorator and for rebuilding
-/// a dropped fallback module.
-fn module_class(name: &str) -> Option<Rc<RefCell<crate::value::PyClass>>> {
-    if let Some(class) = registered_internal_class(name) {
-        return Some(class);
-    }
-    let module_value = module();
-    prepare_module_classes(&module_value);
-    registered_internal_class(name)
-}
-
-/// Construct a `PyInstance` of `name` with the given attrs, bypassing `__init__`.
-fn make_instance(name: &str, attrs: InstanceAttrs) -> Value {
-    match module_class(name) {
-        Some(class) => Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs }))),
-        None => unreachable!("internal: contextlib module did not register class `{name}`",),
-    }
-}
-
-/// Construct the manager sibling owned by a concrete factory generation.
-fn make_generator_manager_instance(
-    factory_class: &Rc<RefCell<PyClass>>,
-    attrs: InstanceAttrs,
-) -> Value {
-    let class = generator_manager_class_for_factory(factory_class)
-        .or_else(|| module_class("_GeneratorContextManager"))
-        .unwrap_or_else(|| {
-            unreachable!(
-                "internal: contextlib module did not register class `_GeneratorContextManager`"
-            )
-        });
-    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
-}
-
-/// Construct the callback sibling owned by a concrete ExitStack generation.
-fn make_stack_callback_instance(
-    exit_stack_class: &Rc<RefCell<PyClass>>,
-    attrs: InstanceAttrs,
-) -> Value {
-    let class = stack_callback_class_for_exit_stack(exit_stack_class)
-        .or_else(|| module_class("_StackCallback"))
-        .unwrap_or_else(|| {
-            unreachable!("internal: contextlib module did not register class `_StackCallback`")
-        });
-    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
-}
-
-/// Shared `__enter__` for `redirect_stdout`/`redirect_stderr`.  Snapshots the
-/// current `sys.<stream>` onto the instance's `_old_targets` stack, installs the
-/// redirect target, and returns it (the `with … as` value).
-fn redirect_enter(
-    interp: &mut crate::Interpreter,
-    inst: &Rc<RefCell<PyInstance>>,
-    stream: &str,
-) -> Result<Value> {
-    let new_target = inst
-        .borrow()
-        .attrs
-        .get("_new_target")
-        .cloned()
-        .unwrap_or_else(Value::none);
-    let old = interp.current_std_stream(stream)?;
-    let old_targets = inst
-        .borrow()
-        .attrs
-        .get("_old_targets")
-        .cloned()
-        .unwrap_or_else(|| Value::list(vec![]));
-    old_targets.list_push(old)?;
-    interp.set_std_stream(stream, new_target.clone())?;
-    Ok(new_target)
-}
-
-/// Shared `__exit__` for `redirect_stdout`/`redirect_stderr`.  Pops the saved
-/// stream off `_old_targets` and restores it as `sys.<stream>`.  Never
-/// suppresses exceptions (returns `None`, matching CPython where `__exit__`
-/// falls off the end).
-fn redirect_exit(
-    interp: &mut crate::Interpreter,
-    inst: &Rc<RefCell<PyInstance>>,
-    stream: &str,
-) -> Result<Value> {
-    let old_targets = inst
-        .borrow()
-        .attrs
-        .get("_old_targets")
-        .cloned()
-        .unwrap_or_else(|| Value::list(vec![]));
-    let restored = match old_targets.list_len() {
-        Some(n) if n > 0 => old_targets
-            .list_pop_at(n - 1)
-            .unwrap_or_else(|_| Value::none()),
-        _ => Value::none(),
-    };
-    interp.set_std_stream(stream, restored)?;
-    Ok(Value::none())
-}
-
-/// Call `os.<func>(*args)` from the contextlib runtime.  Used by `chdir` to
-/// reach `os.getcwd()` / `os.chdir(path)` without duplicating their logic.
-fn os_call(interp: &mut crate::Interpreter, func: &str, args: &[ExpandedCallArg]) -> Result<Value> {
-    let os_module = interp.load_module("os")?;
-    let callable = interp.get_attr(&os_module, func)?;
-    interp.call_function_expanded(callable, args)
-}
-
-/// Construct a `_ContextManagerFactory` instance seeding `_func`.
-fn make_cm_factory(func: Value) -> Value {
-    let mut attrs = InstanceAttrs::new();
-    attrs.insert("_func", func);
-    make_instance("_ContextManagerFactory", attrs)
-}
-
-/// Drain all callbacks from `_callbacks` into a Vec and clear the stack.
-fn pop_all_callbacks(inst: &Rc<RefCell<PyInstance>>) -> Vec<Value> {
-    let callbacks_val = inst
-        .borrow()
-        .attrs
-        .get("_callbacks")
-        .cloned()
-        .unwrap_or_else(|| Value::list(vec![]));
-    // Collect a snapshot first (list_with drops the Ref before returning),
-    // then clear the underlying list.  Doing both in one `match callbacks_val.kind()`
-    // arm would hold a `Ref` guard while `list_clear()` tries to `borrow_mut()`,
-    // causing a RefCell panic.
-    let result = callbacks_val
-        .list_with(|items| items.clone())
-        .unwrap_or_default();
-    let _ = callbacks_val.list_clear();
-    result
-}
-
-/// True when `err` is a propagated exception whose instance is the *same*
-/// object that was thrown into the generator (`thrown`).  Mirrors CPython's
-/// `_GeneratorContextManager.__exit__` `if exc is value: return False` branch:
-/// the generator re-raised the exact exception it received, which is *not*
-/// suppression, so `__exit__` returns `False` instead of re-raising.
-fn is_same_raised_exception(err: &PyError, thrown: &Value) -> bool {
-    let PyError::Raised(raised) = err else {
-        return false;
-    };
-    match (raised.kind(), thrown.kind()) {
-        (ValueKind::PyInstance(a), ValueKind::PyInstance(b)) => Rc::ptr_eq(a, b),
-        _ => false,
-    }
-}
-
-#[cfg(test)]
-mod generation_tests {
-    use super::*;
-
-    fn test_class(name: &str, base: Option<Rc<RefCell<PyClass>>>) -> Rc<RefCell<PyClass>> {
-        Rc::new(RefCell::new(PyClass {
-            name: name.to_string(),
-            qualname: name.to_string(),
-            base,
-            ..PyClass::default()
-        }))
-    }
-
-    #[test]
-    fn retained_factory_resolves_manager_from_its_own_generation() {
-        let old_factory = test_class("old factory", None);
-        let old_manager = test_class("old manager", None);
-        register_context_manager_generation(&old_factory, &old_manager);
-
-        let new_factory = test_class("new factory", None);
-        let new_manager = test_class("new manager", None);
-        register_context_manager_generation(&new_factory, &new_manager);
-
-        let old_factory_subclass =
-            test_class("old factory subclass", Some(Rc::clone(&old_factory)));
-        assert!(Rc::ptr_eq(
-            &generator_manager_class_for_factory(&old_factory).unwrap(),
-            &old_manager,
-        ));
-        assert!(Rc::ptr_eq(
-            &generator_manager_class_for_factory(&old_factory_subclass).unwrap(),
-            &old_manager,
-        ));
-        assert!(Rc::ptr_eq(
-            &generator_manager_class_for_factory(&new_factory).unwrap(),
-            &new_manager,
-        ));
-    }
-
-    #[test]
-    fn retained_exit_stack_resolves_callback_from_its_own_generation() {
-        let old_stack = test_class("old ExitStack", None);
-        let old_callback = test_class("old callback", None);
-        register_exit_stack_generation(&old_stack, &old_callback);
-
-        let new_stack = test_class("new ExitStack", None);
-        let new_callback = test_class("new callback", None);
-        register_exit_stack_generation(&new_stack, &new_callback);
-
-        let old_stack_subclass = test_class("old stack subclass", Some(Rc::clone(&old_stack)));
-        assert!(Rc::ptr_eq(
-            &stack_callback_class_for_exit_stack(&old_stack).unwrap(),
-            &old_callback,
-        ));
-        assert!(Rc::ptr_eq(
-            &stack_callback_class_for_exit_stack(&old_stack_subclass).unwrap(),
-            &old_callback,
-        ));
-        assert!(Rc::ptr_eq(
-            &stack_callback_class_for_exit_stack(&new_stack).unwrap(),
-            &new_callback,
-        ));
     }
 }
