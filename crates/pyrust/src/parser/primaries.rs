@@ -288,6 +288,16 @@ impl Parser {
         }
     }
 
+    fn parse_seq_item_no_walrus(&mut self) -> Result<Expr> {
+        if self.is(&Token::Star) {
+            self.bump();
+            let inner = self.parse_or()?;
+            Ok(Expr::Starred(Box::new(inner)))
+        } else {
+            self.parse_expr_no_walrus()
+        }
+    }
+
     /// Returns `true` if the current token is the soft keyword `async` and the
     /// next token is `for`.  Used to detect `async for` comprehension clauses.
     fn is_async_for(&self) -> bool {

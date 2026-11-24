@@ -83,7 +83,7 @@ fn lex_fstring(
             let line_offset = count_newlines(chars, content_start, pos);
             pos += 1; // skip '{'
             let (src, conversion, format_spec, debug_text, next) =
-                lex_fstring_expr(chars, pos, content_start)?;
+                lex_fstring_expr(chars, pos, content_start, raw, 0)?;
             // PEP 657 (#2582): record the `{...}` field columns relative to the
             // f-string's source line.  `next - 1` is the closing `}`.  Skip when
             // the field crosses a physical line (multi-line f-string) — the
@@ -225,13 +225,54 @@ fn fstring_conversion_error(chars: &[char], pos: usize, segment: &str) -> PyErro
     }
 }
 
+/// Maximum nesting depth of replacement fields inside format specifiers of a
+/// single f-string, matching CPython 3.12 (`f"{1:{2:{3}}}"` has depth 2 and is
+/// valid; `f"{1:{2:{3:{4}}}}"` exceeds the limit and raises `SyntaxError`).
+const MAX_FORMAT_SPEC_NESTING: usize = 2;
+
+/// Maximum recursive scan depth when copying nested f-strings verbatim inside
+/// an outer f-string expression, preventing native stack overflow on
+/// pathological input.
+const MAX_FSTRING_SCAN_DEPTH: usize = 200;
+
+/// Skip horizontal/vertical whitespace and `# ...` comments up to the next
+/// non-whitespace token inside an f-string replacement field (e.g. between
+/// `!r` and `:` or `}`).
+fn skip_ws_and_comments(chars: &[char], pos: &mut usize) {
+    loop {
+        match chars.get(*pos).copied() {
+            Some(' ' | '\t' | '\n' | '\r') => {
+                *pos += 1;
+            }
+            Some('#') => {
+                while let Some(&c) = chars.get(*pos) {
+                    if c == '\n' {
+                        break;
+                    }
+                    *pos += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+}
+
 /// Parse the expression inside `{...}` of an f-string.
-/// `pos` points to the first character after the opening `{`.
+/// `start` points to the first character after the opening `{`.
+/// `spec_depth` is `0` for a top-level replacement field and increments by 1
+/// for each enclosing format specifier.
 /// Returns `(expr_src, conversion, format_spec, debug_text, next_pos)` where
 /// `next_pos` is just after the closing `}`.  `debug_text` is `Some(...)` for
 /// the Python 3.8 debug form `f"{x=}"` and contains the verbatim source text
-/// of the expression with the trailing `=` (whitespace preserved).
-fn lex_fstring_expr(chars: &[char], start: usize, base: usize) -> Result<FStringExpr> {
+/// of the expression with the trailing `=` (whitespace preserved, comments
+/// stripped, matching CPython 3.12).
+fn lex_fstring_expr(
+    chars: &[char],
+    start: usize,
+    base: usize,
+    raw: bool,
+    spec_depth: usize,
+) -> Result<FStringExpr> {
     let mut pos = start;
     let mut depth = 0usize; // brace depth (for nested dicts/sets in expr)
     let mut src = String::new();
@@ -247,8 +288,7 @@ fn lex_fstring_expr(chars: &[char], start: usize, base: usize) -> Result<FString
             None => return Err(PyError::Lex("unterminated f-string expression".to_string())),
             Some('}') if depth == 0 && paren_depth == 0 => {
                 // End of expression with no conversion or format spec.
-                let expr_src = src.trim().to_string();
-                return Ok((expr_src, None, None, None, pos + 1));
+                return Ok((src, None, None, None, pos + 1));
             }
             Some('{') => {
                 depth += 1;
@@ -270,6 +310,28 @@ fn lex_fstring_expr(chars: &[char], start: usize, base: usize) -> Result<FString
                 src.push(chars[pos]);
                 pos += 1;
             }
+            // PEP 701: `# ...` comments inside multi-line f-string `{...}`
+            // expressions run to the next physical newline.  Stop right before
+            // `\n` so the newline itself is still appended to `src` on the next
+            // iteration (preserving line offsets for tracebacks and matching
+            // CPython's comment-stripped `f"{x # c\n=}"` debug text).
+            Some('#') => {
+                while let Some(&c) = chars.get(pos) {
+                    if c == '\n' {
+                        break;
+                    }
+                    pos += 1;
+                }
+            }
+            // Normalise CR / CRLF to LF in `src` (outside string literals) so
+            // debug text and line tracking are consistent on Windows CRLF.
+            Some('\r') => {
+                pos += 1;
+                if chars.get(pos) == Some(&'\n') {
+                    pos += 1;
+                }
+                src.push('\n');
+            }
             // Python 3.8 debug form: `=` at top level (not `==`, `!=`, `<=`, `>=`).
             // The `=` is preceded by an expression and may be followed by an
             // optional conversion flag and/or format spec, then the closing `}`.
@@ -280,47 +342,61 @@ fn lex_fstring_expr(chars: &[char], start: usize, base: usize) -> Result<FString
                 if depth == 0
                     && paren_depth == 0
                     && chars.get(pos + 1) != Some(&'=')
-                    && !src.is_empty()
+                    && !src.trim().is_empty()
                     && !src
-                        .trim_end_matches([' ', '\t'])
+                        .trim_end_matches([' ', '\t', '\n', '\r'])
                         .ends_with(['!', '<', '>', '=']) =>
             {
                 // Build the verbatim debug-text label: the raw source (with
-                // leading/trailing whitespace preserved) plus the `=` itself,
-                // plus any whitespace that follows `=` (CPython preserves it
-                // in the label, not as a format spec).
+                // leading/trailing whitespace preserved, comments stripped) plus
+                // the `=` itself, plus any whitespace that follows `=` (CPython
+                // preserves it in the label, not as a format spec).
                 let mut debug_text = src.clone();
                 debug_text.push('=');
-                let expr_src = src.trim().to_string();
                 pos += 1; // skip '='
                 while let Some(&c) = chars.get(pos) {
-                    if c == ' ' || c == '\t' {
+                    if c == ' ' || c == '\t' || c == '\n' {
                         debug_text.push(c);
                         pos += 1;
+                    } else if c == '\r' {
+                        pos += 1;
+                        if chars.get(pos) == Some(&'\n') {
+                            pos += 1;
+                        }
+                        debug_text.push('\n');
+                    } else if c == '#' {
+                        while let Some(&cc) = chars.get(pos) {
+                            if cc == '\n' {
+                                break;
+                            }
+                            pos += 1;
+                        }
                     } else {
                         break;
                     }
                 }
                 // Optional conversion flag (!r, !s, !a) after `=` (and any
-                // surrounding whitespace).
+                // surrounding whitespace/comments).
                 let conversion = if chars.get(pos) == Some(&'!') {
                     pos += 1;
                     let segment = lex_conversion_segment(chars, pos);
-                    match segment.as_str() {
+                    let conv = match segment.as_str() {
                         "s" | "r" | "a" => {
                             let conv = segment.chars().next().unwrap();
                             pos += 1;
                             Some(conv)
                         }
                         _ => return Err(fstring_conversion_error(chars, pos, &segment)),
-                    }
+                    };
+                    skip_ws_and_comments(chars, &mut pos);
+                    conv
                 } else {
                     None
                 };
                 // Optional format spec.
                 let format_spec = if chars.get(pos) == Some(&':') {
                     pos += 1;
-                    Some(lex_format_spec(chars, &mut pos, base)?)
+                    Some(lex_format_spec(chars, &mut pos, base, raw, spec_depth)?)
                 } else {
                     None
                 };
@@ -329,11 +405,10 @@ fn lex_fstring_expr(chars: &[char], start: usize, base: usize) -> Result<FString
                         "expected '}' to close f-string expression".to_string(),
                     ));
                 }
-                return Ok((expr_src, conversion, format_spec, Some(debug_text), pos + 1));
+                return Ok((src, conversion, format_spec, Some(debug_text), pos + 1));
             }
             // Conversion flag: !r, !s, !a — only at top level
             Some('!') if depth == 0 && paren_depth == 0 && chars.get(pos + 1) != Some(&'=') => {
-                let expr_src = src.trim().to_string();
                 pos += 1; // skip '!'
                 let segment = lex_conversion_segment(chars, pos);
                 let conv = match segment.as_str() {
@@ -341,10 +416,11 @@ fn lex_fstring_expr(chars: &[char], start: usize, base: usize) -> Result<FString
                     _ => return Err(fstring_conversion_error(chars, pos, &segment)),
                 };
                 pos += 1; // skip conversion char
+                skip_ws_and_comments(chars, &mut pos);
                 // Now check for format spec or closing }
                 let format_spec = if chars.get(pos) == Some(&':') {
                     pos += 1;
-                    Some(lex_format_spec(chars, &mut pos, base)?)
+                    Some(lex_format_spec(chars, &mut pos, base, raw, spec_depth)?)
                 } else {
                     None
                 };
@@ -353,23 +429,27 @@ fn lex_fstring_expr(chars: &[char], start: usize, base: usize) -> Result<FString
                         "expected '}' to close f-string expression".to_string(),
                     ));
                 }
-                return Ok((expr_src, Some(conv), format_spec, None, pos + 1));
+                return Ok((src, Some(conv), format_spec, None, pos + 1));
             }
             // Format spec: : — only at top level
             Some(':') if depth == 0 && paren_depth == 0 => {
-                let expr_src = src.trim().to_string();
                 pos += 1; // skip ':'
-                let spec = lex_format_spec(chars, &mut pos, base)?;
+                let spec = lex_format_spec(chars, &mut pos, base, raw, spec_depth)?;
                 if chars.get(pos) != Some(&'}') {
                     return Err(PyError::Lex(
                         "expected '}' to close f-string expression".to_string(),
                     ));
                 }
-                return Ok((expr_src, None, Some(spec), None, pos + 1));
+                return Ok((src, None, Some(spec), None, pos + 1));
             }
-            // Quoted strings inside the expression (so we don't mis-interpret their contents)
+            // Quoted strings (including nested PEP 701 f-strings) inside the
+            // expression so we don't mis-interpret their contents.
             Some(q @ ('"' | '\'')) => {
-                consume_string_literal(chars, &mut pos, &mut src, q);
+                if is_fstring_prefix(chars, start, pos) {
+                    consume_fstring_literal(chars, &mut pos, &mut src, q, 0)?;
+                } else {
+                    consume_string_literal(chars, &mut pos, &mut src, q);
+                }
             }
             Some(other) => {
                 src.push(other);
@@ -381,19 +461,22 @@ fn lex_fstring_expr(chars: &[char], start: usize, base: usize) -> Result<FString
 
 /// Collect a format spec until we hit `}` (at depth 0), splitting it into a
 /// list of f-string parts so that nested `{expr}` interpolations inside the
-/// spec (e.g. `f"{x:>{width}}"`) are exposed as real sub-expressions instead
-/// of being baked into an opaque string.  On return `*pos` points to the
-/// closing `}` of the outer replacement field.
+/// spec (e.g. `f"{x:>{width}}"`, `f"{1:{2:{3}}}"`) are exposed as real
+/// sub-expressions instead of being baked into an opaque string.  On return
+/// `*pos` points to the closing `}` of the outer replacement field.
 ///
-/// CPython's rule: a nested replacement field inside a format spec cannot
-/// **itself contain another nested replacement field** (`f"{x:>{w:>{n}}}"`
-/// is rejected at parse time).  Conversion flags (`!r`/`!s`/`!a`) on the
-/// nested expression are accepted — this matches CPython and is implemented
-/// in the loop below.  The nested expression also accepts a paren/bracket-
-/// balanced Python expression (e.g. `f"{x:>{f(1)}}"`).  What is not
-/// supported here is a further format spec on the nested field itself
-/// (i.e. no `{w:>{n}:5}`) — that was kept out to bound recursion.
-fn lex_format_spec(chars: &[char], pos: &mut usize, base: usize) -> Result<Vec<FStringPart>> {
+/// Matches CPython 3.12's nesting rule: nested replacement fields inside format
+/// specifiers may themselves carry conversion flags, debug `=`, comments, and
+/// nested format specifiers up to [`MAX_FORMAT_SPEC_NESTING`] (depth 2, so
+/// `f"{1:{2:{3}}}"` and `f"{1:{2:{3:5}}}"` succeed while `f"{1:{2:{3:{4}}}}"`
+/// raises `SyntaxError: f-string: expressions nested too deeply`).
+fn lex_format_spec(
+    chars: &[char],
+    pos: &mut usize,
+    base: usize,
+    raw: bool,
+    spec_depth: usize,
+) -> Result<Vec<FStringPart>> {
     let mut parts: Vec<FStringPart> = Vec::new();
     let mut literal = String::new();
     loop {
@@ -410,101 +493,72 @@ fn lex_format_spec(chars: &[char], pos: &mut usize, base: usize) -> Result<Vec<F
                 }
                 break;
             }
+            Some('\r') => {
+                *pos += 1;
+                if chars.get(*pos) == Some(&'\n') {
+                    *pos += 1;
+                }
+                literal.push('\n');
+            }
             Some('{') => {
+                if spec_depth >= MAX_FORMAT_SPEC_NESTING {
+                    return Err(PyError::Lex(
+                        "f-string: expressions nested too deeply".to_string(),
+                    ));
+                }
                 // Start of a nested interpolation inside the spec.
                 if !literal.is_empty() {
                     parts.push(FStringPart::Literal(std::mem::take(&mut literal)));
                 }
                 // Line offset of this nested field's `{` (issue #2587).
                 let line_offset = count_newlines(chars, base, *pos);
-                *pos += 1;
-                // Collect expression source until matching `}` (no further
-                // *replacement-field* nesting permitted — matching CPython).
-                // We still respect paren / bracket / brace depth so e.g.
-                // `{f(1)}` and `{ {'a':3}['a'] }` (dict/set literals) work,
-                // and we accept a trailing `!r`/`!s`/`!a` conversion flag on
-                // this nested expression below.
-                let mut src = String::new();
-                let mut paren_depth = 0usize;
-                let mut brace_depth = 0usize; // dict/set literals in the nested expr
-                let mut conversion: Option<char> = None;
-                loop {
-                    match chars.get(*pos).copied() {
-                        None => {
-                            return Err(PyError::Lex(
-                                "unterminated nested expression in f-string format spec"
-                                    .to_string(),
-                            ));
-                        }
-                        Some('}') if paren_depth == 0 && brace_depth == 0 => {
-                            *pos += 1;
-                            break;
-                        }
-                        Some('{') => {
-                            brace_depth += 1;
-                            src.push('{');
-                            *pos += 1;
-                        }
-                        Some('}') => {
-                            brace_depth = brace_depth.saturating_sub(1);
-                            src.push('}');
-                            *pos += 1;
-                        }
-                        Some('(') | Some('[') => {
-                            paren_depth += 1;
-                            src.push(chars[*pos]);
-                            *pos += 1;
-                        }
-                        Some(')') | Some(']') => {
-                            paren_depth = paren_depth.saturating_sub(1);
-                            src.push(chars[*pos]);
-                            *pos += 1;
-                        }
-                        // Quoted strings inside the nested expression (including
-                        // nested f-strings) are consumed verbatim so their `{`,
-                        // `}`, `!` and `:` characters aren't mistaken for the end
-                        // of the nested field or a conversion flag. The contents
-                        // are re-lexed when `src` is later parsed as a sub-expr.
-                        Some(q @ ('"' | '\'')) => {
-                            consume_string_literal(chars, pos, &mut src, q);
-                        }
-                        Some('!')
-                            if paren_depth == 0
-                                && brace_depth == 0
-                                && chars.get(*pos + 1) != Some(&'=') =>
-                        {
-                            *pos += 1;
-                            let segment = lex_conversion_segment(chars, *pos);
-                            let conv = match segment.as_str() {
-                                "s" | "r" | "a" => segment.chars().next().unwrap(),
-                                _ => return Err(fstring_conversion_error(chars, *pos, &segment)),
-                            };
-                            conversion = Some(conv);
-                            *pos += 1;
-                            if chars.get(*pos) != Some(&'}') {
-                                return Err(PyError::Lex(
-                                    "expected '}' to close nested f-string expression".to_string(),
-                                ));
-                            }
-                            *pos += 1;
-                            break;
-                        }
-                        Some(c) => {
-                            src.push(c);
-                            *pos += 1;
-                        }
-                    }
-                }
+                *pos += 1; // skip '{'
+                let (src, conversion, format_spec, debug_text, next) =
+                    lex_fstring_expr(chars, *pos, base, raw, spec_depth + 1)?;
+                *pos = next;
                 parts.push(FStringPart::Expr {
-                    src: src.trim().to_string(),
+                    src,
                     conversion,
-                    format_spec: None,
-                    debug_text: None,
+                    format_spec,
+                    debug_text,
                     // Nested fields inside a format spec don't get their own
                     // caret anchor (#2582).
                     field_cols: None,
                     line_offset,
                 });
+            }
+            Some('\\') => {
+                *pos += 1;
+                match chars.get(*pos).copied() {
+                    None => {
+                        return Err(PyError::Lex(
+                            "unterminated escape in f-string format spec".to_string(),
+                        ));
+                    }
+                    // `\` before `{` or `}` never escapes the brace delimiter.
+                    Some('{' | '}') => {
+                        literal.push('\\');
+                    }
+                    Some(next_ch) if raw => {
+                        literal.push('\\');
+                        literal.push(next_ch);
+                        *pos += 1;
+                    }
+                    Some('\n') => {
+                        *pos += 1;
+                    }
+                    Some('\r') => {
+                        *pos += 1;
+                        if chars.get(*pos) == Some(&'\n') {
+                            *pos += 1;
+                        }
+                    }
+                    Some(_) => {
+                        let (s, next_pos) = parse_escape(chars, *pos, base)?;
+                        literal.push_str(&s);
+                        *pos = next_pos;
+                    }
+                }
             }
             Some(c) => {
                 literal.push(c);
@@ -513,6 +567,237 @@ fn lex_format_spec(chars: &[char], pos: &mut usize, base: usize) -> Result<Vec<F
         }
     }
     Ok(parts)
+}
+
+/// Return `true` if `c` can continue a Python identifier.
+fn is_ident_continue_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Return `true` if the quote at `chars[quote_pos]` is immediately preceded
+/// (within `chars[field_start..quote_pos]`) by an f-string prefix
+/// (`f`, `F`, `rf`, `rF`, `Rf`, `RF`, `fr`, `fR`, `Fr`, `FR`).
+fn is_fstring_prefix(chars: &[char], field_start: usize, quote_pos: usize) -> bool {
+    if quote_pos <= field_start {
+        return false;
+    }
+    let prev1 = chars[quote_pos - 1];
+    if matches!(prev1, 'f' | 'F') {
+        if quote_pos == field_start + 1 {
+            return true;
+        }
+        let prev2 = chars[quote_pos - 2];
+        if !is_ident_continue_char(prev2) {
+            return true;
+        }
+        if matches!(prev2, 'r' | 'R') {
+            return quote_pos == field_start + 2 || !is_ident_continue_char(chars[quote_pos - 3]);
+        }
+        return false;
+    }
+    if matches!(prev1, 'r' | 'R') && quote_pos >= field_start + 2 {
+        let prev2 = chars[quote_pos - 2];
+        if matches!(prev2, 'f' | 'F') {
+            return quote_pos == field_start + 2 || !is_ident_continue_char(chars[quote_pos - 3]);
+        }
+    }
+    false
+}
+
+/// Consume a nested f-string literal (single- or triple-quoted) that appears
+/// inside an outer f-string replacement field, appending it verbatim to `src`.
+///
+/// Unlike `consume_string_literal`, this understands nested `{...}` replacement
+/// fields (including PEP 701 same-quote reuse such as `f"{f"{"a"}"}"`, comments
+/// inside multi-line fields, and nested format specs) so a quote or brace
+/// inside an inner replacement field does not prematurely terminate the nested
+/// f-string.
+fn consume_fstring_literal(
+    chars: &[char],
+    pos: &mut usize,
+    src: &mut String,
+    q: char,
+    nesting: usize,
+) -> Result<()> {
+    if nesting >= MAX_FSTRING_SCAN_DEPTH {
+        return Err(PyError::Lex(
+            "f-string: expressions nested too deeply".to_string(),
+        ));
+    }
+    let triple = chars.get(*pos + 1) == Some(&q) && chars.get(*pos + 2) == Some(&q);
+    if triple {
+        src.push(q);
+        src.push(q);
+        src.push(q);
+        *pos += 3;
+    } else {
+        src.push(q);
+        *pos += 1;
+    }
+
+    while let Some(&sc) = chars.get(*pos) {
+        if sc == q {
+            if triple {
+                if chars.get(*pos + 1) == Some(&q) && chars.get(*pos + 2) == Some(&q) {
+                    src.push(q);
+                    src.push(q);
+                    src.push(q);
+                    *pos += 3;
+                    return Ok(());
+                }
+                src.push(sc);
+                *pos += 1;
+                continue;
+            } else {
+                src.push(sc);
+                *pos += 1;
+                return Ok(());
+            }
+        }
+        if sc == '\\' {
+            src.push('\\');
+            *pos += 1;
+            // Don't swallow `{` or `}` after `\` (e.g. `f"\{1}"` has a literal
+            // backslash followed by a real replacement field `{1}`).
+            if let Some(&esc) = chars.get(*pos)
+                && esc != '{'
+                && esc != '}'
+            {
+                src.push(esc);
+                *pos += 1;
+            }
+            continue;
+        }
+        if sc == '{' {
+            if chars.get(*pos + 1) == Some(&'{') {
+                src.push('{');
+                src.push('{');
+                *pos += 2;
+                continue;
+            }
+            src.push('{');
+            *pos += 1;
+            consume_fstring_field_verbatim(chars, pos, src, nesting + 1)?;
+            continue;
+        }
+        if sc == '}' && chars.get(*pos + 1) == Some(&'}') {
+            src.push('}');
+            src.push('}');
+            *pos += 2;
+            continue;
+        }
+        src.push(sc);
+        *pos += 1;
+    }
+    Ok(())
+}
+
+/// Consume the body of a `{...}` replacement field (including optional format
+/// spec and its own nested `{...}` fields) inside a nested f-string, copying it
+/// verbatim into `src` up to and including the matching closing `}`.
+fn consume_fstring_field_verbatim(
+    chars: &[char],
+    pos: &mut usize,
+    src: &mut String,
+    nesting: usize,
+) -> Result<()> {
+    if nesting >= MAX_FSTRING_SCAN_DEPTH {
+        return Err(PyError::Lex(
+            "f-string: expressions nested too deeply".to_string(),
+        ));
+    }
+    let field_start = *pos;
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+    while let Some(&sc) = chars.get(*pos) {
+        match sc {
+            '}' if brace_depth == 0 && paren_depth == 0 => {
+                src.push('}');
+                *pos += 1;
+                return Ok(());
+            }
+            '{' => {
+                brace_depth += 1;
+                src.push('{');
+                *pos += 1;
+            }
+            '}' => {
+                brace_depth -= 1;
+                src.push('}');
+                *pos += 1;
+            }
+            '(' | '[' => {
+                paren_depth += 1;
+                src.push(sc);
+                *pos += 1;
+            }
+            ')' | ']' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                src.push(sc);
+                *pos += 1;
+            }
+            '#' => {
+                // Copy comment verbatim up to newline so quotes/braces inside
+                // the comment don't confuse scanning; the sub-lexer will strip
+                // it when parsing the nested f-string.
+                while let Some(&cc) = chars.get(*pos) {
+                    src.push(cc);
+                    *pos += 1;
+                    if cc == '\n' {
+                        break;
+                    }
+                }
+            }
+            q @ ('"' | '\'') => {
+                if is_fstring_prefix(chars, field_start, *pos) {
+                    consume_fstring_literal(chars, pos, src, q, nesting)?;
+                } else {
+                    consume_string_literal(chars, pos, src, q);
+                }
+            }
+            ':' if brace_depth == 0 && paren_depth == 0 => {
+                // Enter format spec: copy verbatim until matching `}`, recursing
+                // into any nested `{...}` fields inside the spec.
+                src.push(':');
+                *pos += 1;
+                while let Some(&fc) = chars.get(*pos) {
+                    match fc {
+                        '}' => {
+                            src.push('}');
+                            *pos += 1;
+                            return Ok(());
+                        }
+                        '{' => {
+                            src.push('{');
+                            *pos += 1;
+                            consume_fstring_field_verbatim(chars, pos, src, nesting + 1)?;
+                        }
+                        '\\' => {
+                            src.push('\\');
+                            *pos += 1;
+                            if let Some(&esc) = chars.get(*pos)
+                                && esc != '{'
+                                && esc != '}'
+                            {
+                                src.push(esc);
+                                *pos += 1;
+                            }
+                        }
+                        _ => {
+                            src.push(fc);
+                            *pos += 1;
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            _ => {
+                src.push(sc);
+                *pos += 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Consume a quoted string literal (single- or triple-quoted) that appears
