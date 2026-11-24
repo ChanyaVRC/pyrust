@@ -34,8 +34,8 @@ import collections.abc
 import __future__
 names = ["abc", "asyncio", "base64", "binascii", "bisect", "builtins", "collections", "contextlib",
          "copy", "csv", "dataclasses", "decimal", "enum", "errno",
-         "fractions", "functools", "heapq", "io", "itertools", "json", "math",
-         "operator", "os", "pathlib", "pprint", "random", "re", "statistics",
+         "fractions", "functools", "hashlib", "heapq", "hmac", "io", "itertools", "json", "math",
+         "operator", "os", "pathlib", "pprint", "random", "re", "secrets", "statistics",
          "string", "sys", "textwrap", "time", "types", "typing", "warnings"]
 for name in names:
     print(name, list(vars(__import__(name))))

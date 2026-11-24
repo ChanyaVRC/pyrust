@@ -34,9 +34,10 @@ use pyrust_derive::pyrust_module;
 const RANDOM_PY_SOURCE: &str = include_str!("random_py.py");
 
 /// Public names from `RANDOM_PY_SOURCE` exported onto the `random` module.
-const RANDOM_PY_EXPORTS: [&str; 24] = [
+const RANDOM_PY_EXPORTS: [&str; 26] = [
     "__all__",
     "Random",
+    "SystemRandom",
     "seed",
     "random",
     "uniform",
@@ -49,6 +50,7 @@ const RANDOM_PY_EXPORTS: [&str; 24] = [
     "getstate",
     "setstate",
     "getrandbits",
+    "randbytes",
     "gauss",
     "normalvariate",
     "expovariate",
@@ -78,7 +80,7 @@ pub(crate) fn inject_python_members(
             // `Random` renders its repr/qualname via `__module__`; the exec
             // namespace's `__name__` defaults to `__main__`, so override it to
             // `random` so `random.Random` reports the right module.
-            if name == "Random"
+            if matches!(name, "Random" | "SystemRandom")
                 && let ValueKind::PyClass(cls_rc) = val.kind()
             {
                 cls_rc

@@ -365,6 +365,18 @@ pyrust_builtin_modules! {
     // Base85, Ascii85, and RFC 2045 encoders/decoders injected from
     // `base64_py.py` by the `@inject` post-load hook.
     base64 @inject,
+    // `hashlib` (issue #3146): pure-Rust cryptographic hash primitives
+    // (MD5, SHA-1, SHA-2, SHA-3/SHAKE, BLAKE2b/s, PBKDF2-HMAC) in `hashlib.rs`
+    // plus the CPython 3.12 wrapper surface injected from `hashlib_py.py`.
+    hashlib @inject,
+    // `hmac` (issue #3146): constant-time `compare_digest` and native HMAC
+    // fast path in `hmac.rs` plus `HMAC`, `new`, and `digest` injected from
+    // `hmac_py.py`.
+    hmac @inject,
+    // `secrets` (issue #3146): cryptographically strong token and random
+    // helpers built on `base64`, `hmac.compare_digest`, and `random.SystemRandom`
+    // injected from `secrets_py.py`.
+    secrets @inject,
 }
 
 include!("finalization.rs");
