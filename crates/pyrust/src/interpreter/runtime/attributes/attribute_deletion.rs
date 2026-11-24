@@ -184,6 +184,9 @@ impl Interpreter {
                         module.borrow_mut().remove_attr(name);
                         return Ok(());
                     }
+                    if name == "__annotations__" {
+                        return Err(pyrust_core::py_err!("AttributeError", "__annotations__"));
+                    }
                     return Err(pyrust_core::py_err!(
                         "AttributeError",
                         "'module' object has no attribute '{name}'"
@@ -229,6 +232,9 @@ impl Interpreter {
                         return Ok(());
                     }
                     _ => {}
+                }
+                if name == "__annotations__" {
+                    return Err(pyrust_core::py_err!("AttributeError", "__annotations__"));
                 }
                 Err(pyrust_core::py_err!(
                     "AttributeError",

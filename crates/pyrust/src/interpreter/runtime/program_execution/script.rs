@@ -13,6 +13,61 @@ enum ModuleNamespaceStorage {
     SharedGlobals,
 }
 
+/// Whether a module body contains any module-scope annotated assignment
+/// (mirroring CPython's `SETUP_ANNOTATIONS` emission rule — does not descend
+/// into nested `def` or `class` bodies).
+fn stmts_have_module_annotations(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::AnnAssign { .. } => true,
+        Stmt::If {
+            branches,
+            else_branch,
+            ..
+        } => {
+            branches
+                .iter()
+                .any(|(_, body)| stmts_have_module_annotations(body))
+                || else_branch
+                    .as_deref()
+                    .is_some_and(stmts_have_module_annotations)
+        }
+        Stmt::While {
+            body, else_branch, ..
+        }
+        | Stmt::For {
+            body, else_branch, ..
+        } => {
+            stmts_have_module_annotations(body)
+                || else_branch
+                    .as_deref()
+                    .is_some_and(stmts_have_module_annotations)
+        }
+        Stmt::Try {
+            body,
+            handlers,
+            else_branch,
+            finally_branch,
+            ..
+        } => {
+            stmts_have_module_annotations(body)
+                || handlers
+                    .iter()
+                    .any(|handler| stmts_have_module_annotations(&handler.body))
+                || else_branch
+                    .as_deref()
+                    .is_some_and(stmts_have_module_annotations)
+                || finally_branch
+                    .as_deref()
+                    .is_some_and(stmts_have_module_annotations)
+        }
+        Stmt::With { body, .. } => stmts_have_module_annotations(body),
+        Stmt::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| stmts_have_module_annotations(&arm.body)),
+        _ => false,
+    })
+}
+
 impl Interpreter {
     /// Create an interpreter for a named script plus the arguments supplied
     /// after that script on the command line. The resulting context backs
@@ -186,7 +241,7 @@ impl Interpreter {
     /// clobber any existing value.  User assignments made during script
     /// execution override the pre-seeded values naturally via `assign_name`,
     /// which keeps both `env.values` and the root globals backing in sync.
-    fn seed_module_dunders(&mut self) {
+    fn seed_module_dunders(&mut self, is_imported_module: bool, has_module_annotations: bool) {
         // `__builtins__` is the builtins module object in `__main__`.
         // Clone from the thread-local cache (O(1)) instead of rebuilding the
         // builtins module's ~136-entry HashMap on every script invocation.
@@ -211,51 +266,59 @@ impl Interpreter {
                 me.values.get_or_insert_with($name, || $val)
             }};
         }
-        // Seeding order is Python-visible: `list(globals())` starts with these
-        // keys in insertion order (issue #2903).  CPython 3.12 creates
-        // `__main__` with `__name__ __doc__ __package__ __loader__ __spec__`,
-        // then `__annotations__` and `__builtins__`, and the script runner
-        // appends `__file__` / `__cached__` last.
+        // Seeding order is Python-visible (`list(globals())` / `list(vars(mod))`,
+        // issues #2903, #2971):
+        // - Top-level `__main__` script: `__name__`, `__doc__`, `__package__`,
+        //   `__loader__`, `__spec__`, `__annotations__`, `__builtins__`,
+        //   [`__file__`], `__cached__`.
+        // - Imported filesystem module: `__name__`, `__doc__`, `__package__`,
+        //   `__loader__`, `__spec__`, [`__file__`], `__cached__`, `__builtins__`,
+        //   and lazily `__annotations__` ONLY when the module body contains
+        //   module-scope annotations (`SETUP_ANNOTATIONS`).
         seed_env!("__name__", intern_string("__main__"));
         seed_env!("__doc__", Value::none());
         seed_env!("__package__", Value::none());
         seed_env!("__loader__", Value::none());
         seed_env!("__spec__", Value::none());
-        seed_env!("__annotations__", Value::dict(PyDict::default()));
-        seed_env!("__builtins__", builtins_val);
         let script_file = self.script_filename.as_deref().map(Value::string);
         let has_script_file = script_file.is_some();
-        if let Some(file) = script_file {
-            seed_env!("__file__", file);
+        let mut dunders: Vec<&'static str> = Vec::with_capacity(9);
+        dunders.extend_from_slice(&[
+            "__name__",
+            "__doc__",
+            "__package__",
+            "__loader__",
+            "__spec__",
+        ]);
+        if is_imported_module {
+            if let Some(file) = script_file {
+                seed_env!("__file__", file);
+                dunders.push("__file__");
+            }
+            seed_env!("__cached__", Value::none());
+            dunders.push("__cached__");
+            seed_env!("__builtins__", builtins_val);
+            dunders.push("__builtins__");
+            if has_module_annotations {
+                seed_env!("__annotations__", Value::dict(PyDict::default()));
+                dunders.push("__annotations__");
+            }
+        } else {
+            seed_env!("__annotations__", Value::dict(PyDict::default()));
+            dunders.push("__annotations__");
+            seed_env!("__builtins__", builtins_val);
+            dunders.push("__builtins__");
+            if let Some(file) = script_file {
+                seed_env!("__file__", file);
+                dunders.push("__file__");
+            }
+            seed_env!("__cached__", Value::none());
+            dunders.push("__cached__");
         }
-        seed_env!("__cached__", Value::none());
+        let _ = has_script_file;
         // Mirror env values into the root-owned globals backing (issue #706)
         // in the same order.
         // Only insert keys not already present in the dict (REPL re-run safety).
-        let dunders: &[&str] = if has_script_file {
-            &[
-                "__name__",
-                "__doc__",
-                "__package__",
-                "__loader__",
-                "__spec__",
-                "__annotations__",
-                "__builtins__",
-                "__file__",
-                "__cached__",
-            ]
-        } else {
-            &[
-                "__name__",
-                "__doc__",
-                "__package__",
-                "__loader__",
-                "__spec__",
-                "__annotations__",
-                "__builtins__",
-                "__cached__",
-            ]
-        };
         for name in dunders {
             // StrKey probe (issue #506): read check is zero-alloc; owned key
             // is constructed only when an entry is actually missing and must be
@@ -264,7 +327,7 @@ impl Interpreter {
                 .dict_with(|d| d.contains_key(&StrKey(name)))
                 .unwrap_or(false);
             if !has_key && let Some(v) = me.values.get(name).cloned() {
-                let key = PyKey::str_from(*name);
+                let key = PyKey::str_from(name);
                 let _ = module_globals.dict_insert(key, v);
             }
         }
@@ -304,6 +367,7 @@ impl Interpreter {
         // `__code__.co_filename` report the file the code came from, even when an
         // imported module's function is called from a different script (#2438).
         let script_path = self.script_filename.as_deref().unwrap_or("<unknown>");
+        let is_imported_module = matches!(namespace_storage, ModuleNamespaceStorage::SharedGlobals);
         let (local_index, compiled) = match namespace_storage {
             ModuleNamespaceStorage::FastLocals(local_index) => {
                 let compiled = crate::compiler::compile_script_with_linenos(
@@ -335,7 +399,7 @@ impl Interpreter {
         // very first instruction.  User assignments override them naturally
         // (they either update the fastlocal register which shadows the env
         // entry, or call `assign_name` which overwrites the env entry directly).
-        self.seed_module_dunders();
+        self.seed_module_dunders(is_imported_module, stmts_have_module_annotations(program));
         if let Err(err) = self.initialize_script_argv() {
             return Some(Err(err));
         }
@@ -386,16 +450,6 @@ impl Interpreter {
         // through another Interpreter or instance.__dict__) refresh this view.
         let namespace_mirror_guard =
             self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
-        // Issue #712: seed __annotations__ = {} in the module env so that module-level
-        // annotated assignments can do LoadGlobal("__annotations__") and SetItem.
-        {
-            self.env
-                .borrow_mut()
-                .values
-                .get_or_insert_with("__annotations__", || {
-                    crate::value::Value::dict(PyDict::default())
-                });
-        }
         let vm_result = self.run_bytecode(&code, regs_slice);
         if error_mode == ScriptErrorMode::PropagateImport && vm_result.is_err() {
             // Imports are nested execution. Preserve their module frame in the

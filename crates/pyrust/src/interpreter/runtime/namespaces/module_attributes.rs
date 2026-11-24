@@ -1,3 +1,7 @@
+/// CPython 3.12 `types.ModuleType.__doc__` string; also the fallback returned
+/// when reading `mod.__doc__` after `del mod.__doc__` (issue #2971).
+const MODULE_TYPE_DOC: &str = "Create a module object.\n\nThe name must be a string; the optional doc argument can have any type.";
+
 // Module attribute semantics.
 impl Interpreter {
     /// Expose the one live dictionary owned by a filesystem-backed module.
@@ -81,8 +85,13 @@ impl Interpreter {
         };
         if let Some(value) = module.borrow().get_attr_value(name) {
             // A stored Value::unset() is a deletion tombstone written by
-            // delete_attr for synthetic dunders.  Treat it as absent.
+            // delete_attr for synthetic dunders.  Treat it as absent — except
+            // for `__doc__`, which falls back to `type(module).__doc__` in
+            // CPython 3.12 (issue #2971).
             if value.is_unset() {
+                if name == "__doc__" {
+                    return Ok(Value::string(MODULE_TYPE_DOC));
+                }
                 let msg = if name_tombstoned {
                     format!("module has no attribute '{name}'")
                 } else {
@@ -93,10 +102,24 @@ impl Interpreter {
             }
             return Ok(value);
         }
-        // Filesystem modules seed their real dunders directly into the shared
-        // globals dictionary. Missing entries stay missing after deletion;
-        // only built-in modules use the synthetic fallback below.
+        // CPython 3.12: `module.__annotations__` is a getset descriptor on
+        // `types.ModuleType` that lazily creates and stores `{}` in the
+        // module's `__dict__` on first attribute read (issue #2971).
+        if name == "__annotations__" {
+            let empty = Value::dict(PyDict::default());
+            module
+                .borrow_mut()
+                .insert_attr("__annotations__".to_string(), empty.clone());
+            return Ok(empty);
+        }
+        // Filesystem modules and live-namespace modules seed their real dunders
+        // directly into the shared dictionary. Missing entries stay missing
+        // after deletion — except `__doc__`, which falls back to
+        // `type(module).__doc__` (issue #2971).
         if has_explicit_namespace {
+            if name == "__doc__" {
+                return Ok(Value::string(MODULE_TYPE_DOC));
+            }
             let mod_name = module.borrow().name.clone();
             let msg = if name_tombstoned {
                 format!("module has no attribute '{name}'")

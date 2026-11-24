@@ -320,6 +320,13 @@ impl Interpreter {
                 owner,
             ));
         }
+        if func_name == "module" && name == "__doc__" {
+            // CPython 3.12 `types.ModuleType.__doc__` / `type(math).__doc__`
+            // (issue #2971).
+            return Ok(Value::string(
+                "Create a module object.\n\nThe name must be a string; the optional doc argument can have any type.",
+            ));
+        }
         if func_name == "generator" {
             // Issue #1413: type(gen).__iter__ and type(gen).__next__.
             // CPython exposes these as slot wrappers on the generator
