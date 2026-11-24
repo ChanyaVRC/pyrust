@@ -27,6 +27,7 @@ mod vm_tests {
             is_generator: false,
             is_coroutine: false,
             is_class_method: false,
+            is_function_scope: false,
             is_inlined_comp: false,
             comp_enclosing_locals: None,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),

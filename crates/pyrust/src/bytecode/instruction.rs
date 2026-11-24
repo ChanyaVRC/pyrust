@@ -96,6 +96,7 @@ pub enum Insn {
     /// R[dst] = R[src]  — emitted by the CSE pass; semantically identical to Move
     /// but distinguished so that copy-propagation does not chase through it and
     /// confuse subsequent passes that expect Move for named-variable copies.
+    #[allow(dead_code)]
     CopyReg(Reg, Reg),
     /// R[dst] = R[lhs] op R[rhs]
     BinOp(Reg, Reg, BinaryOp, Reg),

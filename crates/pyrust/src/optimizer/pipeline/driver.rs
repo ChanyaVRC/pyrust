@@ -20,6 +20,11 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     if code.insns.iter().any(is_late_stage_guard_insn) {
         return FnCode { fn_protos, ..code };
     }
+    // Re-attach optimized nested prototypes and run the SSA MIR pipeline
+    // (SSA construction -> verify -> 8 SSA passes -> verify -> register bytecode)
+    // before the late-stage bytecode fusion/versioning backend (issue #457).
+    let code = crate::mir::optimize_fncode_via_mir(FnCode { fn_protos, ..code });
+    let fn_protos = code.fn_protos;
     let num_locals = code.num_locals;
     let mut num_regs = code.num_regs;
     let mut consts = code.consts;
@@ -34,14 +39,11 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_thread_jumps(insns);
     let insns = pass_binop_const_fusion(insns, num_locals);
     let insns = pass_fold_const_tuple(insns, num_locals, &mut consts);
-    let insns = pass_const_fold(insns, &mut consts, num_locals);
     let insns = pass_str_method_const_fold(insns, &mut consts, &names, num_locals);
-
-    let insns = pass_unary_fold(insns, num_locals, &mut consts);
-    // `pass_const_branch_elim` remains as a fast pre-fusion peephole for
-    // adjacent `LoadConst + JumpIf*` / `CmpJump*Const` pairs exposed by
-    // `pass_str_method_const_fold` and `pass_unary_fold`; `pass_sccp` below
-    // handles all cross-block, multi-step, diamond, and post-fusion folding.
+    // Keep lightweight pre-fusion branch elimination for constants newly
+    // exposed by `pass_str_method_const_fold` (core SCCP, constant folding,
+    // unary folding, algebraic simplification, CSE, DCE, and #357 reassociation
+    // already ran on SSA MIR above).
     let insns = pass_const_branch_elim(insns, &consts);
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_not_invert(insns, num_locals);
@@ -50,12 +52,10 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // `not (a == b)`, leaving `BinOp(Eq) + JumpIfTrue` ready to fuse into
     // `CmpJumpIfTrue`).
     let insns = pass_cmpjump_fusion(insns, num_locals);
-    let insns = pass_sccp(insns, &mut consts, num_locals);
     let insns = pass_const_reg_prop(insns, num_locals, &consts);
     let insns = pass_concat_merge(insns, num_locals, &mut num_regs, &consts);
     let insns = pass_exit_inline(insns);
     let insns = pass_licm(insns, num_locals);
-    let insns = pass_cse(insns, num_locals);
     let insns = pass_pre(insns, &consts, num_locals, &mut num_regs);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
@@ -77,6 +77,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         remap_lineno_and_col_tables(&original_insns, &original_linenos, &original_cols, &insns);
     let insns = pass_cross_jump(insns, &pre_cj_linenos, &pre_cj_cols);
     let insns = pass_copy_prop(insns, num_locals);
+    let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_loop_inversion(insns);
     let insns = pass_trivial_nop(insns);
     let insns = pass_loadnone_merge(insns);
@@ -155,6 +156,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         is_generator: code.is_generator,
         is_coroutine: code.is_coroutine,
         is_class_method: code.is_class_method,
+        is_function_scope: code.is_function_scope,
         is_inlined_comp: code.is_inlined_comp,
         comp_enclosing_locals: code.comp_enclosing_locals,
         attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),

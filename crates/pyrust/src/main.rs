@@ -6,6 +6,7 @@ mod compiler;
 mod error;
 mod interpreter;
 mod lexer;
+mod mir;
 mod optimizer;
 mod parser;
 mod token;
@@ -192,9 +193,33 @@ fn run_repl() -> Result<()> {
     Ok(())
 }
 
+fn emit_mir_file(path: &str) -> Result<()> {
+    let src = std::fs::read_to_string(path)
+        .map_err(|e| PyError::Runtime(format!("failed to read '{path}': {e}")))?;
+    let rendered = mir::compile_source_to_mir_with_filename(&src, path)?;
+    print!("{rendered}");
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let result = if args.len() > 1 {
+    let result = if args.len() >= 3 && args[1] == "--emit" && args[2] == "mir" {
+        if let Some(path) = args.get(3) {
+            emit_mir_file(path)
+        } else {
+            Err(PyError::Runtime(
+                "usage: pyrust --emit mir <file.py>".to_string(),
+            ))
+        }
+    } else if args.len() >= 2 && args[1] == "--emit=mir" {
+        if let Some(path) = args.get(2) {
+            emit_mir_file(path)
+        } else {
+            Err(PyError::Runtime(
+                "usage: pyrust --emit=mir <file.py>".to_string(),
+            ))
+        }
+    } else if args.len() > 1 {
         run_file(&args[1], &args[2..])
     } else {
         run_repl()

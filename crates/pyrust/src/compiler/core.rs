@@ -868,6 +868,7 @@ impl Compiler {
             is_generator,
             is_coroutine: self.is_async_function,
             is_class_method: self.is_class_method,
+            is_function_scope: self.is_function_scope,
             is_inlined_comp: self.is_inlined_comp,
             comp_enclosing_locals: self.comp_enclosing_locals.clone(),
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
