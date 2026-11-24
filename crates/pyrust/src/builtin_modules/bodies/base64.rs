@@ -60,7 +60,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(BASE64_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("base64: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("base64: exec namespace not a dict".into()))?;
     for name in BASE64_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             module
