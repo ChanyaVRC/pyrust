@@ -157,6 +157,7 @@ impl Interpreter {
                     let mut __gd = gen_drive_stack.pop().unwrap();
                     __gd.gframe.done = true;
                     __gd.gframe.last_return_value = Some($v);
+                    self.sync_top_generator_frame_cache_if_present();
                     self.vm_frame_views.pop();
                     regs = __gd.saved_regs;
                     pc = __gd.exit_pc;
@@ -1734,6 +1735,7 @@ impl Interpreter {
                         // `generator.throw()` reports it (mirrors the native
                         // suspend path in `Insn::Yield`).
                         gd.gframe.suspended_line = cur_line;
+                        self.sync_top_generator_frame_cache_if_present();
                         self.vm_frame_views.pop();
                         let dst_reg = gd.dst as usize;
                         regs = gd.saved_regs;
@@ -1837,6 +1839,7 @@ impl Interpreter {
                                 gd.gframe.yield_dst = *sent_reg;
                                 // Issue #2445: persist the yield-from line.
                                 gd.gframe.suspended_line = cur_line;
+                                self.sync_top_generator_frame_cache_if_present();
                                 self.vm_frame_views.pop();
                                 let dst_reg = gd.dst as usize;
                                 regs = gd.saved_regs;

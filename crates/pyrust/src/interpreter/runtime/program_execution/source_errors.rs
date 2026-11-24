@@ -104,6 +104,8 @@ fn record_exec_string_frame(
             funcname: std::sync::Arc::from("<module>"),
             globals: Some(pyrust_core::FrameGlobals::for_environment(&interp.env)),
             col_span: None,
+            locals: None,
+            frame: None,
         });
     }
 }

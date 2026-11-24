@@ -451,6 +451,8 @@ impl Interpreter {
                             0 => None,
                             n => Some(n),
                         };
+                        let (tb_locals, tb_frame) =
+                            self.capture_unwinding_traceback_frame(tb_lineno);
                         pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
                             filename: tb_filename,
                             lineno: tb_lineno,
@@ -463,6 +465,8 @@ impl Interpreter {
                             // (#2411) is the col span of the instruction that
                             // propagated the error within this frame.
                             col_span: pyrust_core::get_current_vm_col_span(),
+                            locals: tb_locals,
+                            frame: tb_frame,
                         });
                     }
                 }

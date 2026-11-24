@@ -200,11 +200,15 @@ impl Interpreter {
             .insns
             .iter()
             .any(|insn| matches!(insn, crate::bytecode::Insn::MakeTypeAlias(..)));
+        let class_display_name: std::sync::Arc<str> =
+            std::sync::Arc::from(proto_qualname.rsplit('.').next().unwrap_or(proto_qualname));
         self.push_class_annotation_scopes(
             local_index,
             num_class_regs,
             has_type_alias,
             qualname_slot,
+            class_display_name.clone(),
+            class_code.filename.clone(),
         );
 
         // Push a class env so methods capture __class__ (zero-arg super), and a
@@ -239,6 +243,23 @@ impl Interpreter {
         let class_regs_slice =
             unsafe { RegSlice::from_raw(class_regs_ptr.as_ptr(), class_regs_len) };
         let body_result = self.run_bytecode(class_code, class_regs_slice);
+        if body_result.is_err() {
+            let tb_lineno = match pyrust_core::get_current_vm_line() {
+                0 => None,
+                n => Some(n),
+            };
+            let (tb_locals, tb_frame) = self.capture_unwinding_traceback_frame(tb_lineno);
+            pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                filename: class_code.filename.clone(),
+                lineno: tb_lineno,
+                source_line: None,
+                funcname: class_display_name,
+                globals: Some(pyrust_core::FrameGlobals::for_environment(&class_env_rc)),
+                col_span: pyrust_core::get_current_vm_col_span(),
+                locals: tb_locals,
+                frame: tb_frame,
+            });
+        }
         // Always pop both stacks, even on error, to keep them balanced.
         self.detach_vm_frame_view();
         self.env = previous_env;
