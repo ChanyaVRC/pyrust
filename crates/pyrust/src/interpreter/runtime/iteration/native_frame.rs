@@ -431,11 +431,11 @@ impl NativeIterFrame {
             } => {
                 let live_len =
                     pyrust_builtins::instance_dict::iter_visible_len(proxy).ok_or_else(|| {
-                        PyError::Runtime("instance_dict iterator lost its proxy".into())
+                        PyError::runtime("instance_dict iterator lost its proxy".into())
                     })?;
                 if *size_changed || live_len != *recorded_len {
                     *size_changed = true;
-                    return Err(PyError::Runtime(
+                    return Err(PyError::runtime(
                         "dictionary changed size during iteration".to_string(),
                     ));
                 }
@@ -505,12 +505,12 @@ impl NativeIterFrame {
                     pyrust_builtins::dict_views::DictViewKind::Keys => key_to_value(key.clone()),
                     pyrust_builtins::dict_views::DictViewKind::Values => {
                         map.get(key).cloned().ok_or_else(|| {
-                            PyError::Runtime("dictionary keys changed during iteration".to_string())
+                            PyError::runtime("dictionary keys changed during iteration".to_string())
                         })?
                     }
                     pyrust_builtins::dict_views::DictViewKind::Items => {
                         let value = map.get(key).cloned().ok_or_else(|| {
-                            PyError::Runtime("dictionary keys changed during iteration".to_string())
+                            PyError::runtime("dictionary keys changed during iteration".to_string())
                         })?;
                         Value::tuple(vec![key_to_value(key.clone()), value])
                     }
@@ -692,7 +692,7 @@ impl NativeIterFrame {
                 // skips it while its mutation generation stays put.
                 cursor.size_changed = true;
             }
-            return Err(PyError::Runtime(message.to_string()));
+            return Err(PyError::runtime(message.to_string()));
         }
         Ok(())
     }
@@ -806,7 +806,7 @@ impl Interpreter {
             "__next__" => self.call_next(&receiver, None),
             "__length_hint__" => self
                 .builtin_iterator_length_hint_value(&receiver)?
-                .ok_or_else(|| PyError::Runtime("native iterator lost its length hint".into())),
+                .ok_or_else(|| PyError::runtime("native iterator lost its length hint".into())),
             "__reduce__" => native_iterator_reduce(&receiver, expected),
             "__getattribute__" => {
                 let name = rest[0].value.as_str().ok_or_else(|| {

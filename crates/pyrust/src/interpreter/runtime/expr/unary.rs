@@ -53,7 +53,8 @@ impl Interpreter {
         let is_instance = matches!(value.kind(), ValueKind::PyInstance(_));
         let operand = builtin_data_backing(&value).unwrap_or_else(|| value.clone());
         eval_builtin_unary(op, operand).map_err(|err| {
-            if is_instance && matches!(&err, PyError::Named(cls, _) if cls.as_ref() == "TypeError")
+            if is_instance
+                && matches!(err.kind(), pyrust_core::PyErrorKind::Named(cls, _) if cls.as_ref() == "TypeError")
             {
                 let sym = match op {
                     UnaryOp::Neg => "unary -",

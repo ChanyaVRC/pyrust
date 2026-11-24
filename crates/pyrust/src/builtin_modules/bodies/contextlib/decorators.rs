@@ -36,7 +36,7 @@ pub(super) fn gen_cm_enter(
         .attrs
         .get("_gen")
         .cloned()
-        .ok_or_else(|| PyError::Runtime(format!("internal: {fn_name}() _gen missing")))?;
+        .ok_or_else(|| PyError::runtime(format!("internal: {fn_name}() _gen missing")))?;
     match interp.call_next(&generator, None) {
         Ok(val) => Ok(val),
         Err(e) if is_stop_iteration_error(&e) => Err(PyError::named(
@@ -58,7 +58,7 @@ pub(super) fn gen_cm_exit(
         .attrs
         .get("_gen")
         .cloned()
-        .ok_or_else(|| PyError::Runtime(format!("internal: {fn_name}() _gen missing")))?;
+        .ok_or_else(|| PyError::runtime(format!("internal: {fn_name}() _gen missing")))?;
     // args: [self, exc_type, exc_val, traceback]
     let exc_type = args
         .get(1)
@@ -121,7 +121,7 @@ pub(super) fn factory_call(
             .attrs
             .get("_func")
             .cloned()
-            .ok_or_else(|| PyError::Runtime(format!("internal: {fn_name}() _func missing")))?;
+            .ok_or_else(|| PyError::runtime(format!("internal: {fn_name}() _func missing")))?;
         (Rc::clone(&factory.class), func)
     };
     let generator = interp.call_function_expanded(func, &args[1..])?;
@@ -131,7 +131,7 @@ pub(super) fn factory_call(
 }
 
 fn is_same_raised_exception(err: &PyError, thrown: &Value) -> bool {
-    let PyError::Raised(raised) = err else {
+    let pyrust_core::PyErrorKind::Raised(raised) = err.kind() else {
         return false;
     };
     match (raised.kind(), thrown.kind()) {

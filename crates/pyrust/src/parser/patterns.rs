@@ -29,7 +29,7 @@ impl Parser {
         loop {
             match self.current() {
                 None | Some(Token::Eof) => {
-                    return Err(PyError::Parse(format!(
+                    return Err(PyError::parse(format!(
                         "unterminated type parameter list in {ctx}"
                     )));
                 }
@@ -43,7 +43,7 @@ impl Parser {
                 Some(Token::Ident(_)) => {
                     let param_name = self.expect_ident("type parameter name")?;
                     if params.iter().any(|p| p.name == param_name) {
-                        return Err(PyError::Parse(format!(
+                        return Err(PyError::parse(format!(
                             "duplicate type parameter '{param_name}'"
                         )));
                     }
@@ -101,7 +101,7 @@ impl Parser {
                     self.bump(); // consume `case`
                 }
                 other => {
-                    return Err(PyError::Parse(format!(
+                    return Err(PyError::parse(format!(
                         "expected 'case' in match block, found {other:?}"
                     )));
                 }
@@ -126,7 +126,7 @@ impl Parser {
         }
         self.expect(&Token::Dedent)?;
         if arms.is_empty() {
-            return Err(PyError::Parse(
+            return Err(PyError::parse(
                 "match statement has no case arms".to_string(),
             ));
         }
@@ -197,7 +197,7 @@ impl Parser {
                             span: None,
                         }))
                     }
-                    other => Err(PyError::Parse(format!(
+                    other => Err(PyError::parse(format!(
                         "expected number after '-' in pattern, found {other:?}"
                     ))),
                 }
@@ -249,7 +249,7 @@ impl Parser {
                                 attr
                             }
                             other => {
-                                return Err(PyError::Parse(format!(
+                                return Err(PyError::parse(format!(
                                     "expected attribute name after '.' in pattern, found {other:?}"
                                 )));
                             }
@@ -277,7 +277,7 @@ impl Parser {
                                 kwargs.push((attr, pat));
                             } else {
                                 if !kwargs.is_empty() {
-                                    return Err(PyError::Parse(
+                                    return Err(PyError::parse(
                                         "positional patterns follow keyword patterns".into(),
                                     ));
                                 }
@@ -316,7 +316,7 @@ impl Parser {
                             kwargs.push((attr, pat));
                         } else {
                             if !kwargs.is_empty() {
-                                return Err(PyError::Parse(
+                                return Err(PyError::parse(
                                     "positional patterns follow keyword patterns".into(),
                                 ));
                             }
@@ -446,7 +446,7 @@ impl Parser {
                     Ok(first.0)
                 }
             }
-            other => Err(PyError::Parse(format!(
+            other => Err(PyError::parse(format!(
                 "unexpected token in pattern: {other:?}"
             ))),
         }

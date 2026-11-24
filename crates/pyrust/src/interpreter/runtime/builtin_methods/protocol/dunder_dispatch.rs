@@ -86,7 +86,7 @@ impl Interpreter {
         // here would re-enter the exact same slot and overflow the native stack.
         if matches!(receiver.kind(), ValueKind::PyInstance(_)) {
             let type_name = pyrust_core::builtin_type_name(&receiver);
-            return Err(PyError::Runtime(format!(
+            return Err(PyError::runtime(format!(
                 "'{type_name}' object is missing internal builtin backing for '{method}'"
             )));
         }

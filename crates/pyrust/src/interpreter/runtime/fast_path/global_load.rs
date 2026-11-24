@@ -44,7 +44,7 @@ impl Interpreter {
         };
 
         let name = code.names.get(slot).ok_or_else(|| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "bytecode error: name index {name_index} out of range"
             ))
         })?;
@@ -119,7 +119,7 @@ impl Interpreter {
     ) -> Result<Value> {
         if let Some(namespace) = active_live_class_namespace(self) {
             let name = code.names.get(name_index as usize).ok_or_else(|| {
-                PyError::Runtime(format!(
+                PyError::runtime(format!(
                     "bytecode error: name index {name_index} out of range"
                 ))
             })?;
@@ -137,7 +137,7 @@ impl Interpreter {
         }
 
         let value = regs.get(local as usize).ok_or_else(|| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "bytecode error: class local register {local} out of range"
             ))
         })?;

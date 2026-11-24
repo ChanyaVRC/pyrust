@@ -58,7 +58,7 @@ pub(crate) fn deque_extend_in_place(
     iterable: &Value,
 ) -> Result<()> {
     let ValueKind::PyInstance(inst) = target.kind() else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "internal: expected deque instance".to_string(),
         ));
     };
@@ -170,7 +170,7 @@ fn deque_items_data(
 ) -> Result<pyrust_builtins::deque_storage::DequeData> {
     let storage = deque_storage_value(inst)?;
     pyrust_builtins::deque_storage::data(&storage)
-        .ok_or_else(|| PyError::Runtime("internal: deque storage lost its buffer".to_string()))
+        .ok_or_else(|| PyError::runtime("internal: deque storage lost its buffer".to_string()))
 }
 
 fn deque_iterator_frame(
@@ -180,9 +180,9 @@ fn deque_iterator_frame(
 ) -> Result<NativeIterFrame> {
     let storage = deque_storage_value(inst)?;
     let items = pyrust_builtins::deque_storage::data(&storage)
-        .ok_or_else(|| PyError::Runtime("internal: deque storage lost its buffer".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: deque storage lost its buffer".to_string()))?;
     let counter = pyrust_builtins::deque_storage::mutation_state(&storage).ok_or_else(|| {
-        PyError::Runtime("internal: deque storage lost its mutation state".to_string())
+        PyError::runtime("internal: deque storage lost its mutation state".to_string())
     })?;
     Ok(NativeIterFrame::guarded_deque(
         items,
@@ -289,11 +289,11 @@ fn deque_items_snapshot_guarded(
     let storage = deque_storage_value(inst)?;
     let mutation_state =
         pyrust_builtins::deque_storage::mutation_state(&storage).ok_or_else(|| {
-            PyError::Runtime("internal: deque storage lost its mutation state".to_string())
+            PyError::runtime("internal: deque storage lost its mutation state".to_string())
         })?;
     let version = mutation_state.get();
     let items = pyrust_builtins::deque_storage::snapshot(&storage)
-        .ok_or_else(|| PyError::Runtime("internal: deque storage lost its buffer".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: deque storage lost its buffer".to_string()))?;
     Ok((items, mutation_state, version))
 }
 
@@ -307,11 +307,11 @@ fn deque_items_guarded_live(
     let storage = deque_storage_value(inst)?;
     let mutation_state =
         pyrust_builtins::deque_storage::mutation_state(&storage).ok_or_else(|| {
-            PyError::Runtime("internal: deque storage lost its mutation state".to_string())
+            PyError::runtime("internal: deque storage lost its mutation state".to_string())
         })?;
     let version = mutation_state.get();
     let items = pyrust_builtins::deque_storage::data(&storage)
-        .ok_or_else(|| PyError::Runtime("internal: deque storage lost its buffer".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: deque storage lost its buffer".to_string()))?;
     Ok((items, mutation_state, version))
 }
 

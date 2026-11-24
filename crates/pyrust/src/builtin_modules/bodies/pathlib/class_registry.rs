@@ -86,7 +86,7 @@ pub(super) fn expect_self(
 ) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|arg| arg.value.kind()) {
         Some(ValueKind::PyInstance(instance)) => Ok(Rc::clone(instance)),
-        _ => Err(PyError::Runtime(format!(
+        _ => Err(PyError::runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
     }
@@ -137,7 +137,7 @@ pub(super) fn make_path_classmethod_result(
         .map(|arg| arg.value.clone())
         .filter(|value| matches!(value.kind(), ValueKind::PyClass(_)))
         .ok_or_else(|| {
-            PyError::Runtime("internal: pathlib classmethod missing class receiver".to_string())
+            PyError::runtime("internal: pathlib classmethod missing class receiver".to_string())
         })?;
     interp.call_function_expanded(
         class,
@@ -156,7 +156,7 @@ pub(super) fn path_new(args: &[ExpandedCallArg]) -> Result<Value> {
     let requested = match args.first().map(|arg| arg.value.kind()) {
         Some(ValueKind::PyClass(class)) => Rc::clone(class),
         _ => {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "internal: pathlib.Path.__new__ missing class receiver".to_string(),
             ));
         }

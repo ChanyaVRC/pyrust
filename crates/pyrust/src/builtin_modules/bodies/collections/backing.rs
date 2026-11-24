@@ -76,7 +76,7 @@ fn dict_subclass_setitem(
 ) -> Result<Value> {
     expect_self(args, fn_name)?;
     if args.len() != 3 {
-        return Err(PyError::Runtime(format!(
+        return Err(PyError::runtime(format!(
             "{fn_name}() takes exactly 2 arguments",
         )));
     }
@@ -103,7 +103,7 @@ fn dict_subclass_len(args: &[ExpandedCallArg], fn_name: &str, type_name: &str) -
     let backing = collection_backing(args, fn_name, type_name)?;
     let len = backing
         .dict_with(|items| items.len())
-        .ok_or_else(|| PyError::Runtime(format!("internal: {type_name} backing is not a dict")))?;
+        .ok_or_else(|| PyError::runtime(format!("internal: {type_name} backing is not a dict")))?;
     Ok(Value::int(len as i64))
 }
 
@@ -162,7 +162,7 @@ fn make_guarded_dict_subclass_iter(backing: Value) -> Value {
 fn require_key_arg<'a>(args: &'a [ExpandedCallArg], i: usize, fn_name: &str) -> Result<&'a Value> {
     let v = args
         .get(i)
-        .ok_or_else(|| PyError::Runtime(format!("internal: {fn_name}() missing arg {i}")))?;
+        .ok_or_else(|| PyError::runtime(format!("internal: {fn_name}() missing arg {i}")))?;
     Ok(&v.value)
 }
 

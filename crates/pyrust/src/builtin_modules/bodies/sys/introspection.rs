@@ -26,19 +26,19 @@ pub(super) fn exit(
         Some(v) => match v.kind() {
             ValueKind::PyClass(c) => Rc::clone(c),
             _ => {
-                return Err(PyError::Runtime(
+                return Err(PyError::runtime(
                     "built-in exception 'SystemExit' is not defined".to_string(),
                 ));
             }
         },
         None => {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "built-in exception 'SystemExit' is not defined".to_string(),
             ));
         }
     };
     let exc = instantiate_exception(class, vec![arg]);
-    Err(PyError::Raised(exc))
+    Err(PyError::raised(exc))
 }
 
 pub(super) fn exc_info(

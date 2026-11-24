@@ -170,7 +170,7 @@ impl Interpreter {
                 }
                 Some((it.obj.clone(), it.method.clone(), it.index, it.step))
             } else {
-                return Err(PyError::Runtime(
+                return Err(PyError::runtime(
                     "step_getitem_iter on non-GetItemIter state".to_string(),
                 ));
             }
@@ -227,7 +227,7 @@ impl Interpreter {
                 }
                 Some((it.callable.clone(), it.sentinel.clone()))
             } else {
-                return Err(PyError::Runtime(
+                return Err(PyError::runtime(
                     "step_callable_iter on non-CallableIter state".to_string(),
                 ));
             }
@@ -269,7 +269,7 @@ impl Interpreter {
         let (func, sources): (Value, IterSrcBuf) = {
             let borrow = state_rc.borrow();
             let s = borrow.downcast_ref::<MapIter>().ok_or_else(|| {
-                PyError::Runtime("step_map_iter on non-MapIter state".to_string())
+                PyError::runtime("step_map_iter on non-MapIter state".to_string())
             })?;
             if s.done {
                 return Ok(None);
@@ -322,7 +322,7 @@ impl Interpreter {
         let (func_opt, iter_val): (Option<Value>, Value) = {
             let borrow = state_rc.borrow();
             let s = borrow.downcast_ref::<FilterIter>().ok_or_else(|| {
-                PyError::Runtime("step_filter_iter on non-FilterIter state".to_string())
+                PyError::runtime("step_filter_iter on non-FilterIter state".to_string())
             })?;
             if s.done {
                 return Ok(None);
@@ -376,7 +376,7 @@ impl Interpreter {
                 .downcast_ref::<ProviderIterator>()
                 .map(ProviderIterator::advance_parts)
                 .ok_or_else(|| {
-                    PyError::Runtime("invalid standard-library iterator adapter".to_string())
+                    PyError::runtime("invalid standard-library iterator adapter".to_string())
                 })?
         };
         advance(self, &provider_state)
@@ -397,7 +397,7 @@ impl Interpreter {
         let (iter_val, counter): (Value, Value) = {
             let borrow = state_rc.borrow();
             let s = borrow.downcast_ref::<EnumerateIter>().ok_or_else(|| {
-                PyError::Runtime("step_enumerate_iter on non-EnumerateIter state".to_string())
+                PyError::runtime("step_enumerate_iter on non-EnumerateIter state".to_string())
             })?;
             if s.done {
                 return Ok(None);
@@ -432,7 +432,7 @@ impl Interpreter {
     ) -> Result<Option<Value>> {
         let mut borrow = state_rc.borrow_mut();
         let s = borrow.downcast_mut::<BigRangeIter>().ok_or_else(|| {
-            PyError::Runtime("step_bigrange_iter on non-BigRangeIter state".to_string())
+            PyError::runtime("step_bigrange_iter on non-BigRangeIter state".to_string())
         })?;
         let exhausted = if s.step.sign() == PyBigIntSign::Plus {
             s.cur >= s.stop
@@ -454,7 +454,7 @@ impl Interpreter {
     ) -> Result<Option<Value>> {
         let mut borrow = state_rc.borrow_mut();
         let state = borrow.downcast_mut::<RangeIter>().ok_or_else(|| {
-            PyError::Runtime("step_range_iter on non-RangeIter state".to_string())
+            PyError::runtime("step_range_iter on non-RangeIter state".to_string())
         })?;
         Ok(state.advance())
     }
@@ -475,7 +475,7 @@ impl Interpreter {
         let (n_sources, strict) = {
             let borrow = state_rc.borrow();
             let s = borrow.downcast_ref::<ZipIter>().ok_or_else(|| {
-                PyError::Runtime("step_zip_iter on non-ZipIter state".to_string())
+                PyError::runtime("step_zip_iter on non-ZipIter state".to_string())
             })?;
             if s.done {
                 return Ok(None);

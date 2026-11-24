@@ -25,7 +25,8 @@ fn min_max_primitive_slice(items: &[Value], is_max: bool) -> Option<Result<Value
             // `min_max_compare`; semantic failures such as RecursionError
             // must propagate without a second comparison pass.
             Err(error) => {
-                if matches!(&error, PyError::Named(class, _) if class.as_ref() == "TypeError") {
+                if matches!(error.kind(), pyrust_core::PyErrorKind::Named(class, _) if class.as_ref() == "TypeError")
+                {
                     return None;
                 }
                 return Some(Err(error));

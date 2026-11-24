@@ -8,9 +8,9 @@ fn check_except_star_body(body: &[Stmt], in_loop: bool) -> Result<()> {
     const MSG: &str = "'break', 'continue' and 'return' cannot appear in an except* block";
     for stmt in body {
         match stmt {
-            Stmt::Return(_) => return Err(PyError::Parse(MSG.to_string())),
+            Stmt::Return(_) => return Err(PyError::parse(MSG.to_string())),
             Stmt::Break | Stmt::Continue if !in_loop => {
-                return Err(PyError::Parse(MSG.to_string()));
+                return Err(PyError::parse(MSG.to_string()));
             }
             Stmt::Break | Stmt::Continue => {}
             // New scopes: control flow inside them is independent.
@@ -124,7 +124,7 @@ fn collect_pattern_captures(
             let mut attrs: std::collections::HashSet<&str> = std::collections::HashSet::new();
             for (attr, p) in kwargs {
                 if !attrs.insert(attr.as_str()) {
-                    return Err(PyError::Parse(format!(
+                    return Err(PyError::parse(format!(
                         "attribute name repeated in class pattern: {attr}"
                     )));
                 }
@@ -150,10 +150,10 @@ fn collect_pattern_captures(
 /// Record a capture name, rejecting `_` (illegal target) and duplicates.
 fn bind_capture(name: &str, seen: &mut std::collections::HashSet<String>) -> Result<()> {
     if name == "_" {
-        return Err(PyError::Parse("cannot use '_' as a target".to_string()));
+        return Err(PyError::parse("cannot use '_' as a target".to_string()));
     }
     if !seen.insert(name.to_string()) {
-        return Err(PyError::Parse(format!(
+        return Err(PyError::parse(format!(
             "multiple assignments to name '{name}' in pattern"
         )));
     }
@@ -169,7 +169,7 @@ fn check_duplicate_mapping_keys(pairs: &[(Expr, Pattern)]) -> Result<()> {
     for (key, _) in pairs {
         if let Some(mk) = MapKey::from_expr(key) {
             if seen.iter().any(|s| s.eq_value(&mk)) {
-                return Err(PyError::Parse(format!(
+                return Err(PyError::parse(format!(
                     "mapping pattern checks duplicate key ({})",
                     mk.repr()
                 )));
@@ -256,7 +256,7 @@ impl MapKey {
 fn validate_del_target(expr: &Expr) -> Result<()> {
     let reason = match expr {
         Expr::Var(name, _) if name == "__debug__" => {
-            return Err(PyError::Parse("cannot delete __debug__".to_string()));
+            return Err(PyError::parse("cannot delete __debug__".to_string()));
         }
         Expr::Var(_, _) | Expr::Attr { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
             return Ok(());
@@ -289,7 +289,7 @@ fn validate_del_target(expr: &Expr) -> Result<()> {
         Expr::Lambda { .. } => "lambda",
         _ => "expression",
     };
-    Err(PyError::Parse(format!("cannot delete {reason}")))
+    Err(PyError::parse(format!("cannot delete {reason}")))
 }
 
 /// Convert a parallel list of expressions and starred-flags into AssignTargets.
@@ -298,7 +298,7 @@ fn exprs_to_assign_targets(exprs: &[Expr], starred: &[bool]) -> Result<Vec<Assig
     assert_eq!(exprs.len(), starred.len());
     let star_count = starred.iter().filter(|&&s| s).count();
     if star_count > 1 {
-        return Err(PyError::Parse(
+        return Err(PyError::parse(
             "multiple starred expressions in assignment".to_string(),
         ));
     }

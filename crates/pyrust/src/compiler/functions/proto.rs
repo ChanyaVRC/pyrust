@@ -167,12 +167,14 @@ impl Compiler {
             Ok(c) => c,
             Err(e) => {
                 self.failed = true;
-                if matches!(e, PyError::Named(ref cls, _) if cls.as_ref() == "SyntaxError") {
+                if matches!(e.kind(), crate::error::PyErrorKind::Named(cls, _) if cls.as_ref() == "SyntaxError")
+                {
                     self.is_syntax_error = true;
                 }
                 if self.error_msg.is_none() {
-                    self.error_msg = Some(match e {
-                        PyError::Named(_, msg) | PyError::Runtime(msg) => msg,
+                    self.error_msg = Some(match e.into_kind() {
+                        crate::error::PyErrorKind::Named(_, msg)
+                        | crate::error::PyErrorKind::Runtime(msg) => msg,
                         other => other.to_string(),
                     });
                 }

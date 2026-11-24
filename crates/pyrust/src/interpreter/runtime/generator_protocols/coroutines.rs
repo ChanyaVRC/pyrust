@@ -224,7 +224,7 @@ impl Interpreter {
                                 && let Some(cls) = lookup_exc_class("StopIteration")
                             {
                                 let exc = instantiate_exception(cls, vec![rv]);
-                                return Err(PyError::Raised(exc));
+                                return Err(PyError::raised(exc));
                             }
                             return Err(e);
                         }
@@ -232,7 +232,7 @@ impl Interpreter {
                     }
                 }
 
-                Err(PyError::Runtime(
+                Err(PyError::runtime(
                     "invalid generator state in yield from".to_string(),
                 ))
             }
@@ -337,7 +337,7 @@ impl Interpreter {
         let (agen_rc, is_close_or_throw, is_aclose) = {
             let b = asend_rc.borrow();
             let asend = b.downcast_ref::<AsyncGenASend>().ok_or_else(|| {
-                PyError::Runtime("invalid async-generator asend state".to_string())
+                PyError::runtime("invalid async-generator asend state".to_string())
             })?;
             if asend.done {
                 if asend.is_close_or_throw {
@@ -372,7 +372,7 @@ impl Interpreter {
         }
         let frame = borrow
             .downcast_mut::<GeneratorFrame>()
-            .ok_or_else(|| PyError::Runtime("invalid async-generator state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("invalid async-generator state".to_string()))?;
 
         if enforce_running_owner {
             match frame.async_gen_running_owner.as_ref() {
@@ -393,7 +393,7 @@ impl Interpreter {
         let (send_value, throw_exc) = {
             let mut b = asend_rc.borrow_mut();
             let asend = b.downcast_mut::<AsyncGenASend>().ok_or_else(|| {
-                PyError::Runtime("invalid async-generator asend state".to_string())
+                PyError::runtime("invalid async-generator asend state".to_string())
             })?;
             let send_value = if asend.started {
                 Some(sent_val)
@@ -529,7 +529,7 @@ impl Interpreter {
     /// Build a `StopAsyncIteration` error (async-generator exhaustion, #2280).
     fn make_stop_async_iteration(&self) -> PyError {
         if let Some(cls) = self.exc_classes.get("StopAsyncIteration") {
-            PyError::Raised(instantiate_exception(cls, vec![]))
+            PyError::raised(instantiate_exception(cls, vec![]))
         } else {
             pyrust_core::py_err!("StopAsyncIteration", String::new())
         }
@@ -538,7 +538,7 @@ impl Interpreter {
     /// Build the argument-less `StopIteration` used when `aclose()` completes.
     fn make_stop_iteration(&self) -> PyError {
         if let Some(cls) = self.exc_classes.get("StopIteration") {
-            PyError::Raised(instantiate_exception(cls, vec![]))
+            PyError::raised(instantiate_exception(cls, vec![]))
         } else {
             pyrust_core::py_err!("StopIteration", String::new())
         }
@@ -548,7 +548,7 @@ impl Interpreter {
     /// (#2280).  The consumer's `YieldFrom` reads `.value` to obtain the item.
     fn make_stop_iteration_with_value(&self, value: Value) -> PyError {
         if let Some(cls) = self.exc_classes.get("StopIteration") {
-            PyError::Raised(instantiate_exception(cls, vec![value]))
+            PyError::raised(instantiate_exception(cls, vec![value]))
         } else {
             pyrust_core::py_err!("StopIteration", String::new())
         }
@@ -581,12 +581,16 @@ impl Interpreter {
                 // and convert `StopAsyncIteration` to `StopIteration(default)`.
                 if borrow.downcast_ref::<AnextAwaitable>().is_some() {
                     drop(borrow);
-                    let exc_val = match exc {
-                        PyError::Raised(v) => v,
-                        PyError::Named(name, msg) => {
-                            self.instantiate_named_exception(name.as_ref(), msg)?
-                        }
-                        other => return Err(other),
+                    let exc_val = match exc.kind() {
+                        pyrust_core::PyErrorKind::Raised(_)
+                        | pyrust_core::PyErrorKind::Named(_, _) => match exc.into_kind() {
+                            pyrust_core::PyErrorKind::Raised(v) => v,
+                            pyrust_core::PyErrorKind::Named(name, msg) => {
+                                self.instantiate_named_exception(name.as_ref(), msg)?
+                            }
+                            _ => unreachable!(),
+                        },
+                        _ => return Err(exc),
                     };
                     return self.step_anext_awaitable_throw(&state_rc, vec![exc_val]);
                 }
@@ -612,7 +616,7 @@ impl Interpreter {
                                 && let Some(cls) = lookup_exc_class("StopIteration")
                             {
                                 let exc_with_val = instantiate_exception(cls, vec![rv]);
-                                return Err(PyError::Raised(exc_with_val));
+                                return Err(PyError::raised(exc_with_val));
                             }
                             return Err(e);
                         }
@@ -628,12 +632,16 @@ impl Interpreter {
                 // Try throw() method first.
                 if let Some(throw_method) = lookup_class_attr(&class, "throw") {
                     // Materialise the exception into a Value for the throw() call.
-                    let exc_val = match exc {
-                        PyError::Raised(v) => v,
-                        PyError::Named(name, msg) => {
-                            self.instantiate_named_exception(name.as_ref(), msg)?
-                        }
-                        other => return Err(other),
+                    let exc_val = match exc.kind() {
+                        pyrust_core::PyErrorKind::Raised(_)
+                        | pyrust_core::PyErrorKind::Named(_, _) => match exc.into_kind() {
+                            pyrust_core::PyErrorKind::Raised(v) => v,
+                            pyrust_core::PyErrorKind::Named(name, msg) => {
+                                self.instantiate_named_exception(name.as_ref(), msg)?
+                            }
+                            _ => unreachable!(),
+                        },
+                        _ => return Err(exc),
                     };
                     invoke_class_method(
                         self,
@@ -774,7 +782,7 @@ impl Interpreter {
             let b = aw_rc.borrow();
             let aw = b
                 .downcast_ref::<AnextAwaitable>()
-                .ok_or_else(|| PyError::Runtime("invalid anext_awaitable state".to_string()))?;
+                .ok_or_else(|| PyError::runtime("invalid anext_awaitable state".to_string()))?;
             (aw.wrapped.clone(), aw.default_value.clone())
         };
         let iter_val = self.get_awaitable(&wrapped)?;
@@ -856,7 +864,7 @@ impl Interpreter {
             let b = aw_rc.borrow();
             let aw = b
                 .downcast_ref::<AnextAwaitable>()
-                .ok_or_else(|| PyError::Runtime("invalid anext_awaitable state".to_string()))?;
+                .ok_or_else(|| PyError::runtime("invalid anext_awaitable state".to_string()))?;
             (aw.wrapped.clone(), aw.default_value.clone())
         };
         let iter_val = self.get_awaitable(&wrapped)?;
@@ -905,7 +913,7 @@ impl Interpreter {
             let b = aw_rc.borrow();
             let aw = b
                 .downcast_ref::<AnextAwaitable>()
-                .ok_or_else(|| PyError::Runtime("invalid anext_awaitable state".to_string()))?;
+                .ok_or_else(|| PyError::runtime("invalid anext_awaitable state".to_string()))?;
             aw.wrapped.clone()
         };
         let iter_val = self.get_awaitable(&wrapped)?;

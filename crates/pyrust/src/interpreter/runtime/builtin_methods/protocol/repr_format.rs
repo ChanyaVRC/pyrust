@@ -198,7 +198,7 @@ impl Interpreter {
                 &backing,
                 "bytearray_iterator",
             )
-            .ok_or_else(|| PyError::Runtime("bytearray iterator lost its backing".into()))?;
+            .ok_or_else(|| PyError::runtime("bytearray iterator lost its backing".into()))?;
             return Ok(Value::generator(Box::new(frame)));
         }
         if !is_mutable_builtin_inplace_dunder(method) {

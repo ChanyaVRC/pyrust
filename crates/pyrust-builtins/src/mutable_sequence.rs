@@ -13,7 +13,7 @@ pub fn append(receiver: &Value, args: Vec<Value>) -> Result<Value> {
     let mut iter = args.into_iter();
     let val = iter
         .next()
-        .ok_or_else(|| PyError::Runtime("list.append() requires 1 argument".to_string()))?;
+        .ok_or_else(|| PyError::runtime("list.append() requires 1 argument".to_string()))?;
     receiver.list_push(val)?;
     Ok(Value::none())
 }
@@ -34,7 +34,7 @@ pub fn extend(receiver: &Value, args: Vec<Value>) -> Result<Value> {
     let mut iter = args.into_iter();
     let iterable = iter
         .next()
-        .ok_or_else(|| PyError::Runtime("list.extend() requires 1 argument".to_string()))?;
+        .ok_or_else(|| PyError::runtime("list.extend() requires 1 argument".to_string()))?;
     // Materialise the snapshot BEFORE touching the receiver's storage.
     // This is the structural fix for #414: with no `&mut` held on the
     // receiver while we iterate the arg, aliasing (`a.extend(a)`) can't
@@ -51,7 +51,7 @@ pub fn extend(receiver: &Value, args: Vec<Value>) -> Result<Value> {
 
 pub fn insert(receiver: &Value, args: Vec<Value>) -> Result<Value> {
     if args.len() < 2 {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "list.insert() requires 2 arguments".to_string(),
         ));
     }
@@ -136,7 +136,7 @@ pub fn remove(receiver: &Value, args: Vec<Value>) -> Result<Value> {
     let mut iter = args.into_iter();
     let target = iter
         .next()
-        .ok_or_else(|| PyError::Runtime("list.remove() requires 1 argument".to_string()))?;
+        .ok_or_else(|| PyError::runtime("list.remove() requires 1 argument".to_string()))?;
     let pos = receiver
         .list_with(|items| items.iter().position(|v| v == &target))
         .ok_or_else(|| {

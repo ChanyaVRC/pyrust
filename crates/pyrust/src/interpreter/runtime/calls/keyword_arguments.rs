@@ -77,8 +77,8 @@ pub(super) fn star_operand_error(
     let type_name = value_type_name_str(source);
     let generic_message = format!("'{type_name}' object is not iterable");
     let is_non_iterable = matches!(
-        &error,
-        PyError::Named(class_name, message)
+        error.kind(),
+        pyrust_core::PyErrorKind::Named(class_name, message)
             if class_name.as_ref() == "TypeError" && message == &generic_message
     );
     let Some(name) = is_non_iterable.then(func_name).flatten() else {
@@ -162,7 +162,7 @@ impl Interpreter {
         value: Value,
     ) -> Result<Option<String>> {
         let key = key.to_key().ok_or_else(|| {
-            PyError::Runtime("internal: non-hashable keyword argument key".to_string())
+            PyError::runtime("internal: non-hashable keyword argument key".to_string())
         })?;
         self.dict_setitem_kwcall(receiver, key, value)
     }
@@ -179,7 +179,7 @@ impl Interpreter {
             }
             receiver
                 .dict_with_mut(|dict| dict.insert(key, value))
-                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
         }
         Ok(None)
     }
@@ -196,7 +196,7 @@ impl Interpreter {
         }
         receiver
             .dict_with_mut(|dict| dict.insert(key, value))
-            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
         Ok(None)
     }
 }

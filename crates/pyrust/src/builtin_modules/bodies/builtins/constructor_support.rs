@@ -98,7 +98,7 @@ fn builtin_type_new(
         && constructor_args[0].name.is_none()
         && iteration::reversed_uses_special_method(&constructor_args[0].value);
     let dispatch = crate::builtin_registry::lookup(kind.class_name()).ok_or_else(|| {
-        PyError::Runtime(format!(
+        PyError::runtime(format!(
             "internal: {} constructor is not registered",
             kind.class_name()
         ))
@@ -121,7 +121,7 @@ fn builtin_type_new(
         if kind == BuiltinTypeClass::Reversed {
             return Ok(backing);
         }
-        return Err(PyError::Runtime(format!(
+        return Err(PyError::runtime(format!(
             "internal: {} constructor returned an incompatible backing",
             kind.class_name()
         )));

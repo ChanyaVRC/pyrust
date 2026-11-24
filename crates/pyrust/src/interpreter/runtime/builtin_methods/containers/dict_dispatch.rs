@@ -48,7 +48,7 @@ impl Interpreter {
             DictMethod::Get | DictMethod::Contains | DictMethod::Pop | DictMethod::SetDefault => {
                 let mut iter = args.into_iter();
                 let key_val = iter.next().ok_or_else(|| {
-                    PyError::Runtime(format!(
+                    PyError::runtime(format!(
                         "dict.{}() requires at least 1 argument",
                         resolved.name()
                     ))
@@ -188,7 +188,7 @@ impl Interpreter {
                                 dict.insert(k.clone(), v.clone());
                             })
                             .ok_or_else(|| {
-                                PyError::Runtime("internal: expected dict".to_string())
+                                PyError::runtime("internal: expected dict".to_string())
                             })?;
                     }
                     return Ok(Value::none());
@@ -220,7 +220,7 @@ impl Interpreter {
                                 dict.insert(k.clone(), v.clone());
                             })
                             .ok_or_else(|| {
-                                PyError::Runtime("internal: expected dict".to_string())
+                                PyError::runtime("internal: expected dict".to_string())
                             })?;
                     }
                     return Ok(Value::none());
@@ -295,7 +295,7 @@ impl Interpreter {
                         .dict_with_mut(|dict| {
                             dict.insert(k.clone(), v.clone());
                         })
-                        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                        .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
                 }
                 Ok(Value::none())
             }
@@ -304,7 +304,7 @@ impl Interpreter {
             DictMethod::FromKeys => {
                 let dispatch =
                     crate::builtin_registry::lookup("dict.fromkeys").ok_or_else(|| {
-                        PyError::Runtime("internal: dict.fromkeys not in registry".to_string())
+                        PyError::runtime("internal: dict.fromkeys not in registry".to_string())
                     })?;
                 let expanded: Vec<ExpandedCallArg> = args
                     .into_iter()

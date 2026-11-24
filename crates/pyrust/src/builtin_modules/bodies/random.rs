@@ -72,7 +72,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(RANDOM_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("random: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("random: exec namespace not a dict".into()))?;
     for name in RANDOM_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             // `Random` renders its repr/qualname via `__module__`; the exec

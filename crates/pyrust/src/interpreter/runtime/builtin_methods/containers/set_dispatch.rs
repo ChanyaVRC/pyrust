@@ -17,7 +17,7 @@ impl Interpreter {
             SetMethod::Add | SetMethod::Contains | SetMethod::Discard | SetMethod::Remove => {
                 let mut iter = args.into_iter();
                 let key_val = iter.next().ok_or_else(|| {
-                    PyError::Runtime(format!(
+                    PyError::runtime(format!(
                         "set.{}() requires at least 1 argument",
                         resolved.name()
                     ))
@@ -37,7 +37,7 @@ impl Interpreter {
                                     set.shift_remove_index(idx);
                                 })
                                 .ok_or_else(|| {
-                                    PyError::Runtime("internal: expected set".to_string())
+                                    PyError::runtime("internal: expected set".to_string())
                                 })?;
                         }
                         Ok(Value::none())
@@ -49,7 +49,7 @@ impl Interpreter {
                                     set.shift_remove_index(idx);
                                 })
                                 .ok_or_else(|| {
-                                    PyError::Runtime("internal: expected set".to_string())
+                                    PyError::runtime("internal: expected set".to_string())
                                 })?;
                             Ok(Value::none())
                         }
@@ -88,7 +88,7 @@ impl Interpreter {
                             receiver
                                 .set_with_mut(|items| *items = replacement)
                                 .ok_or_else(|| {
-                                    PyError::Runtime("internal: expected set".to_string())
+                                    PyError::runtime("internal: expected set".to_string())
                                 })?;
                             continue;
                         }
@@ -97,7 +97,7 @@ impl Interpreter {
                         receiver
                             .set_with_mut(|items| items.prepare_cpython_merge(source.len()))
                             .ok_or_else(|| {
-                                PyError::Runtime("internal: expected set".to_string())
+                                PyError::runtime("internal: expected set".to_string())
                             })?;
                         for pk in keys {
                             if self.set_lookup(&receiver, &pk)?.is_none() {
@@ -111,7 +111,7 @@ impl Interpreter {
                         receiver
                             .set_with_mut(|items| items.prepare_cpython_merge(keys.len()))
                             .ok_or_else(|| {
-                                PyError::Runtime("internal: expected set".to_string())
+                                PyError::runtime("internal: expected set".to_string())
                             })?;
                         for pk in keys {
                             if self.set_lookup(&receiver, &pk)?.is_none() {

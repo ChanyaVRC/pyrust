@@ -263,13 +263,13 @@ fn decode_text_bytes(raw: &[u8], enc: &str) -> Result<String> {
             Err(e) => {
                 let start = e.valid_up_to();
                 let end = start + e.error_len().unwrap_or(stripped.len() - start);
-                Err(PyError::UnicodeDecodeError {
+                Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
                     encoding: "utf-8-sig".to_string(),
                     object: stripped.to_vec(),
                     start,
                     end,
                     reason: "invalid start byte".to_string(),
-                })
+                }))
             }
         };
     }
@@ -379,7 +379,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             let borrow = state.borrow();
             let s = borrow
                 .downcast_ref::<FileState>()
-                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+                .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
             if s.closed {
                 return Err(PyError::named(
                     "ValueError",
@@ -392,7 +392,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             let borrow = state.borrow();
             let s = borrow
                 .downcast_ref::<FileState>()
-                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+                .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
             if s.closed {
                 return Err(PyError::named(
                     "ValueError",
@@ -457,7 +457,7 @@ fn file_seek(state: &BuiltinState, args: &[Value]) -> Result<Value> {
     let mut borrow = state.borrow_mut();
     let s = borrow
         .downcast_mut::<FileState>()
-        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if s.closed {
         return Err(PyError::named(
             "ValueError",
@@ -610,7 +610,7 @@ fn file_read(state: &BuiltinState, args: &[Value]) -> Result<Value> {
     let mut borrow = state.borrow_mut();
     let s = borrow
         .downcast_mut::<FileState>()
-        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if s.closed {
         return Err(PyError::named(
             "ValueError",
@@ -670,7 +670,7 @@ fn file_write(state: &BuiltinState, args: &[Value]) -> Result<Value> {
     let mut borrow = state.borrow_mut();
     let st = borrow
         .downcast_mut::<FileState>()
-        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if st.closed {
         return Err(PyError::named(
             "ValueError",
@@ -733,7 +733,7 @@ fn file_writelines(state: &BuiltinState, args: &[Value]) -> Result<Value> {
     let mut borrow = state.borrow_mut();
     let st = borrow
         .downcast_mut::<FileState>()
-        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if st.closed {
         return Err(PyError::named(
             "ValueError",
@@ -774,7 +774,7 @@ fn read_line_value(state: &BuiltinState) -> Result<Option<Value>> {
     let mut borrow = state.borrow_mut();
     let s = borrow
         .downcast_mut::<FileState>()
-        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if s.closed {
         return Err(PyError::named(
             "ValueError",
@@ -824,7 +824,7 @@ fn close_file(state: &BuiltinState) -> Result<()> {
     let mut borrow = state.borrow_mut();
     let s = borrow
         .downcast_mut::<FileState>()
-        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if s.closed {
         return Ok(());
     }

@@ -83,7 +83,7 @@ impl Interpreter {
         // immutable, so the snapshot is exact.
         let items: Vec<Value> = match receiver.kind() {
             ValueKind::Tuple(items) => items.to_vec(),
-            _ => return Err(PyError::Runtime("internal: expected tuple".to_string())),
+            _ => return Err(PyError::runtime("internal: expected tuple".to_string())),
         };
         if matches!(
             interpreter_method,
@@ -155,7 +155,7 @@ impl Interpreter {
             // without panicking or losing the original elements.
             let saved: Vec<Value> = receiver
                 .list_with_mut(std::mem::take)
-                .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
+                .ok_or_else(|| PyError::runtime("internal: expected list".to_string()))?;
             if saved.is_empty() {
                 return Ok(Value::none());
             }
@@ -225,7 +225,7 @@ impl Interpreter {
         // regression on the common int/str/float case.
         let (sort_kind, len) = receiver
             .list_with(|items| (pyrust_core::classify_sort(items.iter()), items.len()))
-            .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: expected list".to_string()))?;
         if len < 2 {
             return Ok(Value::none());
         }
@@ -245,7 +245,7 @@ impl Interpreter {
         // sort, and always restore the elements even if `__lt__` raises.
         let mut saved: Vec<Value> = receiver
             .list_with_mut(std::mem::take)
-            .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: expected list".to_string()))?;
         let mut sort_err: Option<PyError> = None;
         saved.sort_by(|a, b| {
             if sort_err.is_some() {

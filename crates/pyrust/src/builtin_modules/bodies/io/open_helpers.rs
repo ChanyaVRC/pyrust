@@ -32,7 +32,7 @@ pub(super) fn expect_self(
 ) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
         Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
-        _ => Err(PyError::Runtime(format!(
+        _ => Err(PyError::runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
     }

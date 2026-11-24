@@ -22,7 +22,7 @@ pub(super) fn eval_cached_property(
         pyrust_builtins::cached_property::with_cached_property(descriptor, |s| {
             (s.func.clone(), s.attr_name.clone())
         })
-        .ok_or_else(|| PyError::Runtime("invalid cached_property state".to_string()))?;
+        .ok_or_else(|| PyError::runtime("invalid cached_property state".to_string()))?;
     let Some(attr_name) = attr_name_opt else {
         return Err(pyrust_core::type_err!(
             "Cannot use cached_property instance without calling __set_name__ on it."

@@ -10,12 +10,12 @@ use crate::value::{Value, ValueKind};
 pub(super) fn raise_struct_error(error_cls: &Value, msg: impl Into<String>) -> PyError {
     let msg = msg.into();
     if let ValueKind::PyClass(cls_rc) = error_cls.kind() {
-        return PyError::Raised(crate::interpreter::instantiate_exception(
+        return PyError::raised(crate::interpreter::instantiate_exception(
             Rc::clone(cls_rc),
             vec![Value::string(&msg)],
         ));
     }
-    PyError::Runtime(msg)
+    PyError::runtime(msg)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

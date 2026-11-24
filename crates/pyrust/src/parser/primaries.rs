@@ -54,7 +54,7 @@ impl Parser {
                             parts.extend(self.parse_fstring_parts(lex_parts, token_line)?);
                         }
                         Some(Token::Bytes(_)) => {
-                            return Err(PyError::Parse(
+                            return Err(PyError::parse(
                                 "cannot mix bytes and nonbytes literals".to_string(),
                             ));
                         }
@@ -88,7 +88,7 @@ impl Parser {
                             bs.extend_from_slice(&next);
                         }
                         Some(Token::Str(_)) | Some(Token::FString(_)) => {
-                            return Err(PyError::Parse(
+                            return Err(PyError::parse(
                                 "cannot mix bytes and nonbytes literals".to_string(),
                             ));
                         }
@@ -117,7 +117,7 @@ impl Parser {
                             }
                         }
                         Some(Token::Bytes(_)) => {
-                            return Err(PyError::Parse(
+                            return Err(PyError::parse(
                                 "cannot mix bytes and nonbytes literals".to_string(),
                             ));
                         }
@@ -176,7 +176,7 @@ impl Parser {
                 if self.is(&Token::Star) {
                     let first = self.parse_seq_item()?;
                     if !self.is(&Token::Comma) {
-                        return Err(PyError::Parse(
+                        return Err(PyError::parse(
                             "cannot use starred expression here".to_string(),
                         ));
                     }
@@ -224,12 +224,12 @@ impl Parser {
             Some(Token::LBracket) => self.parse_list_literal(),
             Some(Token::LBrace) => self.parse_dict_or_set_literal(),
             Some(Token::Eof) => match self.unclosed_delimiter() {
-                Some(delimiter) => Err(PyError::Parse(format!("'{delimiter}' was never closed"))),
-                None => Err(PyError::Parse(
+                Some(delimiter) => Err(PyError::parse(format!("'{delimiter}' was never closed"))),
+                None => Err(PyError::parse(
                     "unexpected token in expression: Some(Eof)".to_string(),
                 )),
             },
-            other => Err(PyError::Parse(format!(
+            other => Err(PyError::parse(format!(
                 "unexpected token in expression: {other:?}"
             ))),
         }
@@ -248,7 +248,7 @@ impl Parser {
         // Comprehensions cannot start with `*expr` (PEP 448 syntax restriction).
         if self.is(&Token::For) || self.is_async_for() {
             if let Expr::Starred(_) = &first {
-                return Err(PyError::Parse(
+                return Err(PyError::parse(
                     "iterable unpacking cannot be used in comprehension".to_string(),
                 ));
             }
@@ -497,7 +497,7 @@ impl Parser {
                 self.bump();
                 Ok(name)
             }
-            other => Err(PyError::Parse(format!("expected {ctx}, found {other:?}"))),
+            other => Err(PyError::parse(format!("expected {ctx}, found {other:?}"))),
         }
     }
 
@@ -524,9 +524,9 @@ impl Parser {
         } else if self.is(&Token::Eof)
             && let Some(delimiter) = self.unclosed_delimiter()
         {
-            Err(PyError::Parse(format!("'{delimiter}' was never closed")))
+            Err(PyError::parse(format!("'{delimiter}' was never closed")))
         } else {
-            Err(PyError::Parse(format!(
+            Err(PyError::parse(format!(
                 "expected {token:?}, found {:?}",
                 self.current()
             )))

@@ -269,7 +269,7 @@ pub fn call_resolved(method: Method, receiver: &Value, args: Vec<Value>) -> Resu
             let other = args
                 .first()
                 .ok_or_else(|| {
-                    PyError::Runtime(
+                    PyError::runtime(
                         "set.symmetric_difference_update() requires 1 argument".to_string(),
                     )
                 })
@@ -626,7 +626,7 @@ fn subtract_snapshot(items: &mut PySet, snapshot: &PySet) {
 fn add(items: &mut PySet, args: &[Value]) -> Result<Value> {
     let elem = args
         .first()
-        .ok_or_else(|| PyError::Runtime("set.add() requires 1 argument".to_string()))?;
+        .ok_or_else(|| PyError::runtime("set.add() requires 1 argument".to_string()))?;
     items.insert(to_key(elem)?);
     Ok(Value::none())
 }
@@ -634,7 +634,7 @@ fn add(items: &mut PySet, args: &[Value]) -> Result<Value> {
 fn remove(items: &mut PySet, args: &[Value]) -> Result<Value> {
     let elem = args
         .first()
-        .ok_or_else(|| PyError::Runtime("set.remove() requires 1 argument".to_string()))?;
+        .ok_or_else(|| PyError::runtime("set.remove() requires 1 argument".to_string()))?;
     let key = to_key(elem)?;
     if items.shift_remove(&key) {
         Ok(Value::none())
@@ -646,7 +646,7 @@ fn remove(items: &mut PySet, args: &[Value]) -> Result<Value> {
 fn discard(items: &mut PySet, args: &[Value]) -> Result<Value> {
     let elem = args
         .first()
-        .ok_or_else(|| PyError::Runtime("set.discard() requires 1 argument".to_string()))?;
+        .ok_or_else(|| PyError::runtime("set.discard() requires 1 argument".to_string()))?;
     let key = to_key(elem)?;
     items.shift_remove(&key);
     Ok(Value::none())
@@ -753,7 +753,7 @@ fn symmetric_difference(receiver: &Value, args: &[Value]) -> Result<Value> {
     let other = args
         .first()
         .ok_or_else(|| {
-            PyError::Runtime("set.symmetric_difference() requires 1 argument".to_string())
+            PyError::runtime("set.symmetric_difference() requires 1 argument".to_string())
         })
         .and_then(|v| snapshot_iterable(receiver, v))?;
     receiver
@@ -782,7 +782,7 @@ fn symmetric_difference(receiver: &Value, args: &[Value]) -> Result<Value> {
 fn issubset(receiver: &Value, args: &[Value]) -> Result<Value> {
     let other = args
         .first()
-        .ok_or_else(|| PyError::Runtime("set.issubset() requires 1 argument".to_string()))
+        .ok_or_else(|| PyError::runtime("set.issubset() requires 1 argument".to_string()))
         .and_then(|v| snapshot_iterable(receiver, v))?;
     receiver
         .set_with(|items| Value::bool_(items.iter().all(|k| other.contains(k))))
@@ -797,7 +797,7 @@ fn issubset(receiver: &Value, args: &[Value]) -> Result<Value> {
 fn issuperset(receiver: &Value, args: &[Value]) -> Result<Value> {
     let other = args
         .first()
-        .ok_or_else(|| PyError::Runtime("set.issuperset() requires 1 argument".to_string()))
+        .ok_or_else(|| PyError::runtime("set.issuperset() requires 1 argument".to_string()))
         .and_then(|v| snapshot_iterable(receiver, v))?;
     receiver
         .set_with(|items| Value::bool_(other.iter().all(|k| items.contains(k))))
@@ -812,7 +812,7 @@ fn issuperset(receiver: &Value, args: &[Value]) -> Result<Value> {
 fn isdisjoint(receiver: &Value, args: &[Value]) -> Result<Value> {
     let other = args
         .first()
-        .ok_or_else(|| PyError::Runtime("set.isdisjoint() requires 1 argument".to_string()))
+        .ok_or_else(|| PyError::runtime("set.isdisjoint() requires 1 argument".to_string()))
         .and_then(|v| snapshot_iterable(receiver, v))?;
     receiver
         .set_with(|items| Value::bool_(!items.iter().any(|k| other.contains(k))))

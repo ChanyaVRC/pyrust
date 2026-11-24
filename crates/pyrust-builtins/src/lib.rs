@@ -105,10 +105,10 @@ mod method_table_drift_guard {
     //! reached the right arm.
 
     use indexmap::IndexMap;
-    use pyrust_core::{PyDict, PyError, PySet, Value};
+    use pyrust_core::{PyDict, PyError, PyErrorKind, PySet, Value};
 
     fn is_fallback(e: &PyError) -> bool {
-        matches!(e, PyError::Runtime(msg) if msg.contains("has no attribute"))
+        matches!(e.kind(), PyErrorKind::Runtime(msg) if msg.contains("has no attribute"))
     }
 
     #[test]

@@ -78,7 +78,7 @@ where
 fn join(sep: &str, args: &[Value]) -> Result<Value> {
     let iterable = args
         .first()
-        .ok_or_else(|| PyError::Runtime("str.join() requires 1 argument".to_string()))?;
+        .ok_or_else(|| PyError::runtime("str.join() requires 1 argument".to_string()))?;
     // Borrow each element as &str (no owned String per element); the result
     // string is allocated exactly once. The borrow guard from `kind()` must
     // stay alive across the build, so do it inside each arm.

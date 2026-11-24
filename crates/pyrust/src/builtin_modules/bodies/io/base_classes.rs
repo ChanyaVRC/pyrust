@@ -37,7 +37,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(IO_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("io: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("io: exec namespace not a dict".into()))?;
     for name in IO_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             // The ABC classes render their repr / `__module__` via the exec

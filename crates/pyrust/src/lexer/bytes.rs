@@ -15,20 +15,20 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
             }
             match chars.get(pos) {
                 None => {
-                    return Err(PyError::Lex(
+                    return Err(PyError::lex(
                         "unterminated triple-quoted bytes literal".to_string(),
                     ));
                 }
                 Some(&'\\') if raw => {
                     // In raw mode: backslash is kept literally.
                     let next = chars.get(pos + 1).copied().ok_or_else(|| {
-                        PyError::Lex(
+                        PyError::lex(
                             "EOL while scanning bytes literal (trailing backslash in raw bytes)"
                                 .to_string(),
                         )
                     })?;
                     if (next as u32) > 0x7f {
-                        return Err(PyError::Lex(format!(
+                        return Err(PyError::lex(format!(
                             "bytes can only contain ASCII literal characters (got {next:?})"
                         )));
                     }
@@ -41,7 +41,7 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                     let esc = chars
                         .get(pos)
                         .copied()
-                        .ok_or_else(|| PyError::Lex("unterminated bytes escape".to_string()))?;
+                        .ok_or_else(|| PyError::lex("unterminated bytes escape".to_string()))?;
                     let mapped = match esc {
                         'n' => 0x0a,
                         't' => 0x09,
@@ -75,13 +75,13 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                             let hi = chars
                                 .get(pos + 1)
                                 .copied()
-                                .ok_or_else(|| PyError::Lex("incomplete \\x escape".to_string()))?;
+                                .ok_or_else(|| PyError::lex("incomplete \\x escape".to_string()))?;
                             let lo = chars
                                 .get(pos + 2)
                                 .copied()
-                                .ok_or_else(|| PyError::Lex("incomplete \\x escape".to_string()))?;
+                                .ok_or_else(|| PyError::lex("incomplete \\x escape".to_string()))?;
                             let v = u8::from_str_radix(&format!("{hi}{lo}"), 16)
-                                .map_err(|_| PyError::Lex("invalid \\x escape".to_string()))?;
+                                .map_err(|_| PyError::lex("invalid \\x escape".to_string()))?;
                             pos += 2;
                             v
                         }
@@ -101,7 +101,7 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                             // Unrecognised escape: keep backslash + char verbatim
                             // (matches CPython 3.12 which emits a SyntaxWarning).
                             if (other as u32) > 0x7f {
-                                return Err(PyError::Lex(format!(
+                                return Err(PyError::lex(format!(
                                     "bytes can only contain ASCII literal characters (got {other:?})"
                                 )));
                             }
@@ -125,7 +125,7 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                 }
                 Some(&c) => {
                     if (c as u32) > 0x7f {
-                        return Err(PyError::Lex(format!(
+                        return Err(PyError::lex(format!(
                             "bytes can only contain ASCII literal characters (got {c:?})"
                         )));
                     }
@@ -149,13 +149,13 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                 // ending the string, but the backslash itself is included in the output.
                 // A backslash at end of input is a syntax error.
                 let next = chars.get(pos + 1).copied().ok_or_else(|| {
-                    PyError::Lex(
+                    PyError::lex(
                         "EOL while scanning bytes literal (trailing backslash in raw bytes)"
                             .to_string(),
                     )
                 })?;
                 if (next as u32) > 0x7f {
-                    return Err(PyError::Lex(format!(
+                    return Err(PyError::lex(format!(
                         "bytes can only contain ASCII literal characters (got {next:?})"
                     )));
                 }
@@ -168,7 +168,7 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
             let esc = chars
                 .get(pos)
                 .copied()
-                .ok_or_else(|| PyError::Lex("unterminated bytes escape".to_string()))?;
+                .ok_or_else(|| PyError::lex("unterminated bytes escape".to_string()))?;
             let mapped = match esc {
                 'n' => 0x0a,
                 't' => 0x09,
@@ -204,13 +204,13 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                     let hi = chars
                         .get(pos + 1)
                         .copied()
-                        .ok_or_else(|| PyError::Lex("incomplete \\x escape".to_string()))?;
+                        .ok_or_else(|| PyError::lex("incomplete \\x escape".to_string()))?;
                     let lo = chars
                         .get(pos + 2)
                         .copied()
-                        .ok_or_else(|| PyError::Lex("incomplete \\x escape".to_string()))?;
+                        .ok_or_else(|| PyError::lex("incomplete \\x escape".to_string()))?;
                     let v = u8::from_str_radix(&format!("{hi}{lo}"), 16)
-                        .map_err(|_| PyError::Lex("invalid \\x escape".to_string()))?;
+                        .map_err(|_| PyError::lex("invalid \\x escape".to_string()))?;
                     pos += 2;
                     v
                 }
@@ -233,7 +233,7 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                     // the character verbatim (emitting a SyntaxWarning which pyrust
                     // omits for now).
                     if (other as u32) > 0x7f {
-                        return Err(PyError::Lex(format!(
+                        return Err(PyError::lex(format!(
                             "bytes can only contain ASCII literal characters (got {other:?})"
                         )));
                     }
@@ -249,12 +249,12 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
         }
         // Non-ASCII characters not allowed in bytes literals
         if (c as u32) > 0x7f {
-            return Err(PyError::Lex(format!(
+            return Err(PyError::lex(format!(
                 "bytes can only contain ASCII literal characters (got {c:?})"
             )));
         }
         out.push(c as u8);
         pos += 1;
     }
-    Err(PyError::Lex("unterminated bytes literal".to_string()))
+    Err(PyError::lex("unterminated bytes literal".to_string()))
 }

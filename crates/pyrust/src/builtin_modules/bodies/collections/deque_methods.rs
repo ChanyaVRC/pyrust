@@ -356,7 +356,7 @@ fn deque_getitem(
         .borrow()
         .get(idx)
         .cloned()
-        .ok_or_else(|| PyError::Runtime("internal: resolved deque index disappeared".to_string()))
+        .ok_or_else(|| PyError::runtime("internal: resolved deque index disappeared".to_string()))
 }
 
 fn deque_setitem(

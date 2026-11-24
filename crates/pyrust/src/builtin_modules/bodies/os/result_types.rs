@@ -121,7 +121,7 @@ fn struct_sequence_args(
     let class = match args.first().map(|arg| arg.value.kind()) {
         Some(ValueKind::PyClass(class)) => Rc::clone(class),
         _ => {
-            return Err(PyError::Runtime(format!(
+            return Err(PyError::runtime(format!(
                 "internal: {type_name}.__new__ first argument must be a class"
             )));
         }
@@ -271,7 +271,7 @@ pub(super) fn terminal_size_repr(args: &[ExpandedCallArg], fn_name: &str) -> Res
     let instance = match args[0].value.kind() {
         ValueKind::PyInstance(instance) => Rc::clone(instance),
         _ => {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "terminal_size_repr() expected a terminal_size instance".to_string(),
             ));
         }
@@ -293,7 +293,7 @@ pub(super) fn stat_result_repr(args: &[ExpandedCallArg], fn_name: &str) -> Resul
     let instance = match args[0].value.kind() {
         ValueKind::PyInstance(instance) => Rc::clone(instance),
         _ => {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "stat_result_repr() expected a stat_result instance".to_string(),
             ));
         }

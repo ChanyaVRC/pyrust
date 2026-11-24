@@ -40,7 +40,7 @@ fn lex_fstring(
         let c = match chars.get(pos).copied() {
             Some(c) => c,
             None => {
-                return Err(PyError::Lex("unterminated f-string".to_string()));
+                return Err(PyError::lex("unterminated f-string".to_string()));
             }
         };
 
@@ -118,7 +118,7 @@ fn lex_fstring(
                 pos += 2;
                 continue;
             }
-            return Err(PyError::Lex("single '}' in f-string".to_string()));
+            return Err(PyError::lex("single '}' in f-string".to_string()));
         }
 
         if c == '\\' {
@@ -126,7 +126,7 @@ fn lex_fstring(
             let next_ch = chars
                 .get(pos)
                 .copied()
-                .ok_or_else(|| PyError::Lex("unterminated escape in f-string".to_string()))?;
+                .ok_or_else(|| PyError::lex("unterminated escape in f-string".to_string()))?;
             if raw {
                 // Raw mode: pass backslash and the following character verbatim.
                 literal.push('\\');
@@ -210,16 +210,16 @@ fn fstring_conversion_error(chars: &[char], pos: usize, segment: &str) -> PyErro
     if segment.is_empty() {
         match chars.get(pos).copied() {
             Some('}') | Some(':') => {
-                PyError::Lex("f-string: missing conversion character".to_string())
+                PyError::lex("f-string: missing conversion character".to_string())
             }
             Some(c) if c.is_whitespace() => {
-                PyError::Lex("f-string: missing conversion character".to_string())
+                PyError::lex("f-string: missing conversion character".to_string())
             }
-            None => PyError::Lex("f-string: missing conversion character".to_string()),
-            _ => PyError::Lex("f-string: invalid conversion character".to_string()),
+            None => PyError::lex("f-string: missing conversion character".to_string()),
+            _ => PyError::lex("f-string: invalid conversion character".to_string()),
         }
     } else {
-        PyError::Lex(format!(
+        PyError::lex(format!(
             "f-string: invalid conversion character '{segment}': expected 's', 'r', or 'a'"
         ))
     }
@@ -285,7 +285,7 @@ fn lex_fstring_expr(
 
     loop {
         match chars.get(pos).copied() {
-            None => return Err(PyError::Lex("unterminated f-string expression".to_string())),
+            None => return Err(PyError::lex("unterminated f-string expression".to_string())),
             Some('}') if depth == 0 && paren_depth == 0 => {
                 // End of expression with no conversion or format spec.
                 return Ok((src, None, None, None, pos + 1));
@@ -401,7 +401,7 @@ fn lex_fstring_expr(
                     None
                 };
                 if chars.get(pos) != Some(&'}') {
-                    return Err(PyError::Lex(
+                    return Err(PyError::lex(
                         "expected '}' to close f-string expression".to_string(),
                     ));
                 }
@@ -425,7 +425,7 @@ fn lex_fstring_expr(
                     None
                 };
                 if chars.get(pos) != Some(&'}') {
-                    return Err(PyError::Lex(
+                    return Err(PyError::lex(
                         "expected '}' to close f-string expression".to_string(),
                     ));
                 }
@@ -436,7 +436,7 @@ fn lex_fstring_expr(
                 pos += 1; // skip ':'
                 let spec = lex_format_spec(chars, &mut pos, base, raw, spec_depth)?;
                 if chars.get(pos) != Some(&'}') {
-                    return Err(PyError::Lex(
+                    return Err(PyError::lex(
                         "expected '}' to close f-string expression".to_string(),
                     ));
                 }
@@ -482,7 +482,7 @@ fn lex_format_spec(
     loop {
         match chars.get(*pos).copied() {
             None => {
-                return Err(PyError::Lex(
+                return Err(PyError::lex(
                     "unterminated f-string format spec".to_string(),
                 ));
             }
@@ -502,7 +502,7 @@ fn lex_format_spec(
             }
             Some('{') => {
                 if spec_depth >= MAX_FORMAT_SPEC_NESTING {
-                    return Err(PyError::Lex(
+                    return Err(PyError::lex(
                         "f-string: expressions nested too deeply".to_string(),
                     ));
                 }
@@ -531,7 +531,7 @@ fn lex_format_spec(
                 *pos += 1;
                 match chars.get(*pos).copied() {
                     None => {
-                        return Err(PyError::Lex(
+                        return Err(PyError::lex(
                             "unterminated escape in f-string format spec".to_string(),
                         ));
                     }
@@ -620,7 +620,7 @@ fn consume_fstring_literal(
     nesting: usize,
 ) -> Result<()> {
     if nesting >= MAX_FSTRING_SCAN_DEPTH {
-        return Err(PyError::Lex(
+        return Err(PyError::lex(
             "f-string: expressions nested too deeply".to_string(),
         ));
     }
@@ -702,7 +702,7 @@ fn consume_fstring_field_verbatim(
     nesting: usize,
 ) -> Result<()> {
     if nesting >= MAX_FSTRING_SCAN_DEPTH {
-        return Err(PyError::Lex(
+        return Err(PyError::lex(
             "f-string: expressions nested too deeply".to_string(),
         ));
     }

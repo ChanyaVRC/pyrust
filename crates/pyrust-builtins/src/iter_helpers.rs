@@ -51,7 +51,7 @@ impl BuiltinTypeOps for EnumerateOps {
         let borrow = state.borrow();
         let s = borrow
             .downcast_ref::<EnumerateState>()
-            .ok_or_else(|| PyError::Runtime("internal: bad enumerate state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad enumerate state".to_string()))?;
         ensure_materialized(&s.items, || iter_values_via_registry(&s.source))?;
         let items_ref = s.items.borrow();
         let items = items_ref.as_ref().unwrap();
@@ -121,7 +121,7 @@ impl BuiltinTypeOps for ZipOps {
         let borrow = state.borrow();
         let s = borrow
             .downcast_ref::<ZipState>()
-            .ok_or_else(|| PyError::Runtime("internal: bad zip state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: bad zip state".to_string()))?;
         if s.columns.borrow().is_none() {
             let mut cols: Vec<Vec<Value>> = Vec::with_capacity(s.sources.len());
             for src in &s.sources {
@@ -251,7 +251,7 @@ fn reversed_iter_next(state: &BuiltinState) -> Result<Option<Value>> {
     let borrow = state.borrow();
     let s = borrow
         .downcast_ref::<ReversedState>()
-        .ok_or_else(|| PyError::Runtime("internal: bad reversed state".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: bad reversed state".to_string()))?;
     if s.items.borrow().is_none() {
         let items = iter_values_via_registry(&s.source)?;
         let len = items.len();

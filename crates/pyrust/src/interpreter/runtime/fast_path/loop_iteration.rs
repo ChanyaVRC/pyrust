@@ -13,7 +13,7 @@ pub(super) enum LoopFastOutcome {
     Advanced,
     Exhausted,
     UserDefined,
-    Error(Box<PyError>),
+    Error(PyError),
 }
 
 #[inline(always)]
@@ -40,7 +40,7 @@ pub(super) fn advance_loop_fast_state(
         ($result:expr) => {{
             match $result {
                 Ok(value) => value,
-                Err(error) => return LoopFastOutcome::Error(Box::new(error)),
+                Err(error) => return LoopFastOutcome::Error(error),
             }
         }};
     }
@@ -265,7 +265,7 @@ fn ensure_loop_collection_unchanged(
         Some(watch) => ordered_mapping_guard_outcome(container, recorded_len, watch).message,
         None => default_message,
     };
-    Err(PyError::Runtime(message.to_string()))
+    Err(PyError::runtime(message.to_string()))
 }
 
 #[inline(always)]

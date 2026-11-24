@@ -40,7 +40,7 @@ pub(crate) fn construct_primitive_backing(
 ) -> Result<Value> {
     let class = canonical_class_by_tag(kind);
     let dispatch = primitive_class_dispatch(&class).ok_or_else(|| {
-        PyError::Runtime(format!(
+        PyError::runtime(format!(
             "missing constructor dispatch for canonical primitive {kind:?}"
         ))
     })?;

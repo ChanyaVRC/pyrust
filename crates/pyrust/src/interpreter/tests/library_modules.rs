@@ -901,7 +901,9 @@ fn int_max_str_digits_isolated_between_root_interpreters_and_applied_to_core() {
             None,
         )
         .unwrap_err();
-    let PyError::Named(literal_error_class, literal_error_message) = literal_error else {
+    let crate::error::PyErrorKind::Named(literal_error_class, literal_error_message) =
+        literal_error.into_kind()
+    else {
         panic!("oversized decimal literal must raise SyntaxError");
     };
     assert_eq!(literal_error_class.as_ref(), "SyntaxError");

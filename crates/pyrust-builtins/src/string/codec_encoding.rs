@@ -109,13 +109,13 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
                         while run_end < cps.len() && !fits(cps[run_end]) {
                             run_end += 1;
                         }
-                        return Err(PyError::UnicodeEncodeError {
+                        return Err(PyError::new(pyrust_core::PyErrorKind::UnicodeEncodeError {
                             encoding: codec_name.to_string(),
                             object: source.to_string(),
                             start: run_start,
                             end: run_end,
                             reason: format!("ordinal not in range({range_label})"),
-                        });
+                        }));
                     }
                 }
             }
@@ -181,13 +181,13 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
                     while run_end < cps.len() && is_surrogate(cps[run_end]) {
                         run_end += 1;
                     }
-                    return Err(PyError::UnicodeEncodeError {
+                    return Err(PyError::new(pyrust_core::PyErrorKind::UnicodeEncodeError {
                         encoding: codec_name.to_string(),
                         object: source.to_string(),
                         start: run_start,
                         end: run_end,
                         reason: "surrogates not allowed".to_string(),
-                    });
+                    }));
                 }
             }
         }

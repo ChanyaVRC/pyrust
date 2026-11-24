@@ -201,7 +201,7 @@ pyrust_module! {
         let backing = if let Some(dispatch) = crate::builtin_registry::lookup("int") {
             dispatch(_interp, rest)?
         } else {
-            return Err(PyError::Runtime("internal: int not in registry".to_string()));
+            return Err(PyError::runtime("internal: int not in registry".to_string()));
         };
         let mut attrs = InstanceAttrs::new();
         attrs.set_builtin_data(backing);
@@ -246,7 +246,7 @@ pyrust_module! {
         let backing = if let Some(dispatch) = crate::builtin_registry::lookup("str") {
             dispatch(_interp, rest)?
         } else {
-            return Err(PyError::Runtime("internal: str not in registry".to_string()));
+            return Err(PyError::runtime("internal: str not in registry".to_string()));
         };
         let mut attrs = InstanceAttrs::new();
         attrs.set_builtin_data(backing);
@@ -291,7 +291,7 @@ pyrust_module! {
         let backing = if let Some(dispatch) = crate::builtin_registry::lookup("float") {
             dispatch(_interp, rest)?
         } else {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "internal: float not in registry".to_string(),
             ));
         };
@@ -338,7 +338,7 @@ pyrust_module! {
         let backing = if let Some(dispatch) = crate::builtin_registry::lookup("bytes") {
             dispatch(_interp, rest)?
         } else {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "internal: bytes not in registry".to_string(),
             ));
         };

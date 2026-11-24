@@ -155,7 +155,7 @@ impl Parser {
     ) -> Result<(Vec<Stmt>, Vec<u32>)> {
         self.skip_newlines();
         if self.is(&Token::Eof) {
-            return Err(PyError::Parse("invalid syntax".to_string()));
+            return Err(PyError::parse("invalid syntax".to_string()));
         }
         let stmt_lineno = self.current_lineno();
         let stmts = self.parse_stmt_sequence()?;
@@ -174,7 +174,7 @@ impl Parser {
         };
         let has_compound = stmts.iter().any(is_compound);
         if has_compound && stmts.len() > 1 {
-            return Err(PyError::Parse("invalid syntax".to_string()));
+            return Err(PyError::parse("invalid syntax".to_string()));
         }
         if has_compound {
             let ended_with_dedent = self
@@ -183,7 +183,7 @@ impl Parser {
                 .and_then(|i| self.tokens.get(i))
                 .is_some_and(|t| matches!(t, Token::Dedent));
             if !ended_with_dedent && !ends_with_newline {
-                return Err(PyError::Parse("invalid syntax".to_string()));
+                return Err(PyError::parse("invalid syntax".to_string()));
             }
         }
         self.skip_newlines();
@@ -193,7 +193,7 @@ impl Parser {
             } else {
                 "multiple statements found while compiling a single statement"
             };
-            return Err(PyError::Parse(msg.to_string()));
+            return Err(PyError::parse(msg.to_string()));
         }
         let linenos = vec![stmt_lineno; stmts.len()];
         Ok((stmts, linenos))
@@ -258,7 +258,7 @@ impl Parser {
                 self.bump(); // consume `async`
                 Ok(vec![self.parse_with(true)?])
             }
-            _ if !decorators.is_empty() => Err(PyError::Parse(
+            _ if !decorators.is_empty() => Err(PyError::parse(
                 "decorator must be followed by def or class".to_string(),
             )),
             Some(Token::Global) => Ok(vec![self.parse_global()?]),
@@ -289,7 +289,7 @@ impl Parser {
                 } else {
                     let value = self.parse_expr_or_tuple()?;
                     if matches!(value, Expr::Starred(_)) {
-                        return Err(PyError::Parse(
+                        return Err(PyError::parse(
                             "can't use starred expression here".to_string(),
                         ));
                     }

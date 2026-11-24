@@ -40,13 +40,13 @@ pub(crate) fn resolve_zero_arg_super(interp: &Interpreter) -> crate::error::Resu
 
     let Some(view) = innermost_fn_frame else {
         // Called at module/script scope — no function frame at all.
-        return Err(PyError::Runtime("super(): no arguments".to_string()));
+        return Err(PyError::runtime("super(): no arguments".to_string()));
     };
 
     if !view.is_class_method {
         // Innermost function is not a direct class method (e.g. nested inner
         // function, standalone function).
-        return Err(PyError::Runtime("super(): no arguments".to_string()));
+        return Err(PyError::runtime("super(): no arguments".to_string()));
     }
 
     // Verify that __class__ is reachable through the env chain.  It is written
@@ -54,12 +54,12 @@ pub(crate) fn resolve_zero_arg_super(interp: &Interpreter) -> crate::error::Resu
     // captured the same Rc<RefCell<Environment>> at MakeFunction time.
     let class_val = lookup_name_in_env(&interp.env, "__class__")?;
     let Some(class_val) = class_val else {
-        return Err(PyError::Runtime("super(): no arguments".to_string()));
+        return Err(PyError::runtime("super(): no arguments".to_string()));
     };
 
     // Read register 0 — the first positional parameter (`self` or `cls`).
     if view.regs_len == 0 {
-        return Err(PyError::Runtime("super(): no arguments".to_string()));
+        return Err(PyError::runtime("super(): no arguments".to_string()));
     }
     // SAFETY: view.regs_ptr is a NonNull<Value> pointing at the frame's
     // register file; the frame is suspended inside call_user_function_expanded
@@ -67,7 +67,7 @@ pub(crate) fn resolve_zero_arg_super(interp: &Interpreter) -> crate::error::Resu
     // element read does not alias any &mut [Value] (PR #646 removed those).
     let first_arg = unsafe { view.regs_ptr.as_ref() };
     if first_arg.is_unset() {
-        return Err(PyError::Runtime("super(): no arguments".to_string()));
+        return Err(PyError::runtime("super(): no arguments".to_string()));
     }
 
     Ok((class_val, first_arg.clone()))
@@ -608,8 +608,10 @@ pub(crate) fn call_del_if_last_binding(
         // using format_single_exc_line, which calls to_py_str() on the
         // instance — matching CPython's `ValueError: oops` output.
         // For other PyError variants, Display already formats as "ClassName: msg".
-        match &e {
-            PyError::Raised(v) => eprintln!("{}", format_single_exc_line(interp, v)),
+        match e.kind() {
+            crate::error::PyErrorKind::Raised(v) => {
+                eprintln!("{}", format_single_exc_line(interp, v))
+            }
             _ => eprintln!("{}", e),
         }
     }

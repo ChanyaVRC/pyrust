@@ -234,13 +234,13 @@ pub(crate) fn inject_python_members(
             .attrs
             .get(name)
             .cloned()
-            .ok_or_else(|| PyError::Runtime(format!("types: missing seed {name}")))?;
+            .ok_or_else(|| PyError::runtime(format!("types: missing seed {name}")))?;
         ns.dict_insert(PyKey::str_from(name), value)?;
     }
     interp.exec_source(TYPES_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("types: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("types: exec namespace not a dict".into()))?;
     for name in TYPES_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             if let crate::value::ValueKind::PyClass(class) = val.kind() {

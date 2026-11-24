@@ -16,7 +16,7 @@ fn counter_repeat_entry(
     let (element, count) = match args[0].value.kind() {
         ValueKind::Tuple(items) if items.len() == 2 => (items[0].clone(), items[1].clone()),
         _ => {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "internal: Counter.items() yielded a non-pair".to_string(),
             ));
         }
@@ -89,7 +89,7 @@ fn counter_delitem(
                 counts.shift_remove_index(index);
             })
             .ok_or_else(|| {
-                PyError::Runtime("internal: Counter backing is not a dict".to_string())
+                PyError::runtime("internal: Counter backing is not a dict".to_string())
             })?;
     }
     Ok(Value::none())
@@ -109,7 +109,7 @@ fn counter_repr(
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect()
         })
-        .ok_or_else(|| PyError::Runtime("internal: Counter backing is not a dict".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: Counter backing is not a dict".to_string()))?;
     if pairs.is_empty() {
         return Ok(Value::string(format!(
             "{}()",
@@ -152,7 +152,7 @@ fn counter_most_common(
                 .map(|(key, count)| (key.clone(), count.clone()))
                 .collect()
         })
-        .ok_or_else(|| PyError::Runtime("internal: Counter backing is not a dict".to_string()))?;
+        .ok_or_else(|| PyError::runtime("internal: Counter backing is not a dict".to_string()))?;
     let selected =
         most_common::select(interp, pairs, user.first().map(|argument| &argument.value))?;
     Ok(Value::list(
@@ -373,7 +373,7 @@ fn counter_tally_into_backing<const SUBTRACT: bool>(
         && backing
             .dict_with(|counts| counts.is_empty())
             .ok_or_else(|| {
-                PyError::Runtime("internal: Counter backing is not a dict".to_string())
+                PyError::runtime("internal: Counter backing is not a dict".to_string())
             })?;
 
     let mapping_entries = other
@@ -444,7 +444,7 @@ fn counter_apply_kwargs_to_backing<const SUBTRACT: bool>(
         && backing
             .dict_with(|counts| counts.is_empty())
             .ok_or_else(|| {
-                PyError::Runtime("internal: Counter backing is not a dict".to_string())
+                PyError::runtime("internal: Counter backing is not a dict".to_string())
             })?;
     for kw in kwargs {
         counter_apply_mapping_entry::<SUBTRACT>(

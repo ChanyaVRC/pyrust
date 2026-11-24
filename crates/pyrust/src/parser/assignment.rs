@@ -19,18 +19,18 @@ fn parse_expr_str(src: &str, base_line: u32) -> Result<Expr> {
         Parser::new_with_lines(tokens, line_nos)
     };
     if p.is(&Token::Eof) {
-        return Err(PyError::Parse(
+        return Err(PyError::parse(
             "f-string: valid expression required before '}'".to_string(),
         ));
     }
     let expr = p.parse_expr_or_tuple()?;
     if matches!(expr, Expr::Starred(_)) {
-        return Err(PyError::Parse(
+        return Err(PyError::parse(
             "can't use starred expression here".to_string(),
         ));
     }
     if !p.is(&Token::Eof) {
-        return Err(PyError::Parse(format!(
+        return Err(PyError::parse(format!(
             "invalid syntax in f-string expression: unexpected {:?}",
             p.current()
         )));
@@ -43,7 +43,7 @@ fn parse_expr_str(src: &str, base_line: u32) -> Result<Expr> {
 fn lhs_to_assign_stmt(target: &Expr, rhs: Expr) -> Result<Stmt> {
     match target {
         Expr::Var(name, _) if name == "__debug__" => {
-            Err(PyError::Parse("cannot assign to __debug__".to_string()))
+            Err(PyError::parse("cannot assign to __debug__".to_string()))
         }
         Expr::Var(name, _) => Ok(Stmt::Assign(AssignTarget::Name(*name), rhs)),
         Expr::Attr {
@@ -92,10 +92,10 @@ fn lhs_to_assign_stmt(target: &Expr, rhs: Expr) -> Result<Stmt> {
             let assign_targets = exprs_to_assign_targets(&exprs, &flags)?;
             Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets), rhs))
         }
-        Expr::Int(_) => Err(PyError::Parse(
+        Expr::Int(_) => Err(PyError::parse(
             "cannot assign to literal here. Maybe you meant '==' instead of '='?".to_string(),
         )),
-        _ => Err(PyError::Parse(
+        _ => Err(PyError::parse(
             "cannot assign to this expression".to_string(),
         )),
     }
@@ -159,7 +159,7 @@ fn build_assign_stmts(groups: Vec<(Vec<Expr>, Vec<bool>, bool)>, rhs: Expr) -> R
 fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
     match expr {
         Expr::Var(name, _) if name == "__debug__" => {
-            Err(PyError::Parse("cannot assign to __debug__".to_string()))
+            Err(PyError::parse("cannot assign to __debug__".to_string()))
         }
         Expr::Var(name, _) => Ok(AssignTarget::Name(*name)),
         Expr::Attr {
@@ -198,7 +198,7 @@ fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
             let targets = exprs_to_assign_targets(&exprs, &flags)?;
             Ok(AssignTarget::Tuple(targets))
         }
-        _ => Err(PyError::Parse(
+        _ => Err(PyError::parse(
             "cannot assign to this expression".to_string(),
         )),
     }
@@ -212,7 +212,7 @@ fn check_duplicate_params(params: &[FunctionParam]) -> Result<()> {
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for p in params {
         if !seen.insert(p.name.as_str()) {
-            return Err(PyError::Parse(format!(
+            return Err(PyError::parse(format!(
                 "duplicate argument '{}' in function definition",
                 p.name
             )));
@@ -220,7 +220,7 @@ fn check_duplicate_params(params: &[FunctionParam]) -> Result<()> {
     }
     for p in params {
         if p.name == "__debug__" {
-            return Err(PyError::Parse("cannot assign to __debug__".to_string()));
+            return Err(PyError::parse("cannot assign to __debug__".to_string()));
         }
     }
     Ok(())

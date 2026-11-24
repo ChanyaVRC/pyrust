@@ -64,7 +64,7 @@ impl Value {
         })?;
         let len = rc.borrow().len();
         if from >= len || to >= len {
-            return Err(PyError::Runtime(format!(
+            return Err(PyError::runtime(format!(
                 "internal: dict_move_index index out of bounds ({from} -> {to}, len {len})"
             )));
         }

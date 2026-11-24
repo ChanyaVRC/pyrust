@@ -676,7 +676,8 @@ mod vm_tests {
     #[test]
     fn generator_drive_hot_struct_sizes_stay_compact() {
         use super::{
-            GenDriveFrame, GeneratorFrame, IterCacheBuf, IterState, ItersBuf, LoopIteratorAdvance,
+            GenDriveFrame, GeneratorFrame, IterCacheBuf, IterState, ItersBuf, LoopFastOutcome,
+            LoopIteratorAdvance,
         };
         use std::mem::size_of;
 
@@ -700,10 +701,17 @@ mod vm_tests {
             "IterCacheBuf grew to {} B (guard <= 56 B; keep IterNextCacheEntry boxed)",
             size_of::<IterCacheBuf>()
         );
-        assert!(
-            size_of::<LoopIteratorAdvance>() <= 24,
-            "LoopIteratorAdvance grew to {} B (guard <= 24 B; keep PyError boxed)",
+        assert_eq!(
+            size_of::<LoopIteratorAdvance>(),
+            16,
+            "LoopIteratorAdvance grew to {} B (expected 16 B with boxed PyError)",
             size_of::<LoopIteratorAdvance>()
+        );
+        assert_eq!(
+            size_of::<LoopFastOutcome>(),
+            16,
+            "LoopFastOutcome grew to {} B (expected 16 B with boxed PyError)",
+            size_of::<LoopFastOutcome>()
         );
         assert!(
             size_of::<GeneratorFrame>() <= 304,

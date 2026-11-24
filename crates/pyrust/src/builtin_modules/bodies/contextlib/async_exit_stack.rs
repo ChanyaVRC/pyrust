@@ -39,7 +39,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(CONTEXTLIB_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("contextlib: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("contextlib: exec namespace not a dict".into()))?;
     for name in CONTEXTLIB_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             module
@@ -65,7 +65,7 @@ fn seed_dependency(
 ) -> Result<()> {
     let module = interp.load_module(module_name)?;
     let ValueKind::PyModule(m) = module.kind() else {
-        return Err(PyError::Runtime(format!(
+        return Err(PyError::runtime(format!(
             "contextlib: {module_name} is not a module",
         )));
     };
@@ -73,7 +73,7 @@ fn seed_dependency(
         let val = m
             .borrow()
             .get_attr_value(name)
-            .ok_or_else(|| PyError::Runtime(format!("contextlib: {module_name}.{name} missing")))?;
+            .ok_or_else(|| PyError::runtime(format!("contextlib: {module_name}.{name} missing")))?;
         ns.dict_insert(PyKey::str_from(name), val)?;
     }
     Ok(())

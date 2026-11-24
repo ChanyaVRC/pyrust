@@ -245,7 +245,7 @@ impl Lexer {
             // we already hold `MAX_INDENT_LEVELS` levels, matching CPython 3.12
             // which accepts 99 nested levels and rejects the 100th.
             if stack.len() >= MAX_INDENT_LEVELS {
-                return Err(PyError::Lex("too many levels of indentation".to_string()));
+                return Err(PyError::lex("too many levels of indentation".to_string()));
             }
             stack.push(indent);
             self.emit(Token::Indent);
@@ -259,7 +259,7 @@ impl Lexer {
             }
             let after = *stack.last().expect("indent stack is never empty");
             if indent != after {
-                return Err(PyError::Lex("inconsistent indentation".to_string()));
+                return Err(PyError::lex("inconsistent indentation".to_string()));
             }
         }
         Ok(())
@@ -643,7 +643,7 @@ impl Lexer {
                         self.emit(Token::Ne);
                         pos += 2;
                     } else {
-                        return Err(PyError::Lex("expected '=' after '!'".to_string()));
+                        return Err(PyError::lex("expected '=' after '!'".to_string()));
                     }
                 }
                 Some('\\') => {
@@ -658,7 +658,7 @@ impl Lexer {
                     self.emit(tok);
                     pos = next;
                 }
-                Some(_) => return Err(PyError::Lex("invalid syntax".to_string())),
+                Some(_) => return Err(PyError::lex("invalid syntax".to_string())),
             }
             // Fill in the end column of the token emitted this iteration
             // (issue #2411).  `pos` now sits one past the token's last char, so

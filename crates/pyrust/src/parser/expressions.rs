@@ -48,7 +48,7 @@ impl Parser {
         let first = self.parse_seq_item_no_walrus()?;
         if !self.is(&Token::Comma) {
             if matches!(first, Expr::Starred(_)) {
-                return Err(PyError::Parse(
+                return Err(PyError::parse(
                     "can't use starred expression here".to_string(),
                 ));
             }
@@ -82,7 +82,7 @@ impl Parser {
         self.expr_depth += 1;
         if self.expr_depth > MAX_EXPR_DEPTH {
             self.expr_depth -= 1;
-            return Err(PyError::Parse("too many nested parentheses".to_string()));
+            return Err(PyError::parse("too many nested parentheses".to_string()));
         }
         let result = self.parse_expr_inner(allow_walrus);
         self.expr_depth -= 1;
@@ -116,7 +116,7 @@ impl Parser {
             }
             let val = self.parse_expr_or_tuple()?;
             if matches!(val, Expr::Starred(_)) {
-                return Err(PyError::Parse(
+                return Err(PyError::parse(
                     "can't use starred expression here".to_string(),
                 ));
             }
@@ -136,7 +136,7 @@ impl Parser {
         if allow_walrus && self.is(&Token::Walrus) {
             if let Expr::Var(name, _) = expr {
                 if name == "__debug__" {
-                    return Err(PyError::Parse("cannot assign to __debug__".to_string()));
+                    return Err(PyError::parse("cannot assign to __debug__".to_string()));
                 }
                 self.bump(); // consume :=
                 let value = self.parse_expr()?;
@@ -145,7 +145,7 @@ impl Parser {
                     value: Box::new(value),
                 });
             } else {
-                return Err(PyError::Parse(
+                return Err(PyError::parse(
                     "walrus operator ':=' requires a name on the left-hand side".to_string(),
                 ));
             }
@@ -179,7 +179,7 @@ impl Parser {
 
         loop {
             if seen_kwargs {
-                return Err(PyError::Parse("parameter after **kwargs".to_string()));
+                return Err(PyError::parse("parameter after **kwargs".to_string()));
             }
 
             if self.is(&Token::StarStar) {
@@ -197,7 +197,7 @@ impl Parser {
                 seen_kwargs = true;
             } else if self.is(&Token::Star) {
                 if seen_star {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "* argument may appear only once".to_string(),
                     ));
                 }
@@ -228,7 +228,7 @@ impl Parser {
                             Some(self.parse_expr()?)
                         } else {
                             if seen_default && !seen_star {
-                                return Err(PyError::Parse(
+                                return Err(PyError::parse(
                                     "non-default argument follows default argument".to_string(),
                                 ));
                             }
@@ -248,7 +248,7 @@ impl Parser {
                         });
                     }
                     other => {
-                        return Err(PyError::Parse(format!(
+                        return Err(PyError::parse(format!(
                             "expected lambda parameter, found {other:?}"
                         )));
                     }
@@ -257,7 +257,7 @@ impl Parser {
 
             if self.is(&Token::Colon) {
                 if bare_star_needs_kwonly {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "named arguments must follow bare *".to_string(),
                     ));
                 }
@@ -266,7 +266,7 @@ impl Parser {
             self.expect(&Token::Comma)?;
             if self.is(&Token::Colon) {
                 if bare_star_needs_kwonly {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "named arguments must follow bare *".to_string(),
                     ));
                 }

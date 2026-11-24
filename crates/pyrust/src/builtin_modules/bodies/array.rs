@@ -66,7 +66,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(ARRAY_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("array: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("array: exec namespace not a dict".into()))?;
     for name in ARRAY_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             if let ValueKind::PyClass(cls_rc) = val.kind() {
@@ -573,7 +573,7 @@ fn decode_single_item(tc: TypeCode, slot: &[u8]) -> Value {
 
 fn extract_bytearray_rc(val: &Value) -> Result<Rc<RefCell<Vec<u8>>>> {
     pyrust_builtins::bytearray::as_bytearray_rc(val)
-        .ok_or_else(|| PyError::Runtime("array: internal buffer must be bytearray".into()))
+        .ok_or_else(|| PyError::runtime("array: internal buffer must be bytearray".into()))
 }
 
 pyrust_module! {
@@ -618,7 +618,7 @@ pyrust_module! {
         let idx = args[2]
             .value
             .as_int()
-            .ok_or_else(|| PyError::Runtime("array: internal index must be int".into()))?
+            .ok_or_else(|| PyError::runtime("array: internal index must be int".into()))?
             as usize;
         let itemsize = tc.itemsize();
         let start = idx * itemsize;
@@ -680,7 +680,7 @@ pyrust_module! {
         let itemsize = args[1]
             .value
             .as_int()
-            .ok_or_else(|| PyError::Runtime("array: internal itemsize must be int".into()))?
+            .ok_or_else(|| PyError::runtime("array: internal itemsize must be int".into()))?
             as usize;
         if itemsize > 1 {
             let mut borrowed = rc.borrow_mut();

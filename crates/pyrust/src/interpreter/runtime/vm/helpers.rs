@@ -11,7 +11,7 @@ pub(super) fn vm_read(
                 "local variable referenced before assignment"
             ));
         } else {
-            return Err(crate::error::PyError::Runtime(
+            return Err(crate::error::PyError::runtime(
                 "internal: temp register read before write".to_string(),
             ));
         }
@@ -28,7 +28,7 @@ fn store_register_values(
     for (offset, value) in values.into_iter().enumerate() {
         let destination = base as usize + offset;
         if destination >= regs.len() {
-            return Err(PyError::Runtime(format!(
+            return Err(PyError::runtime(format!(
                 "{opcode}: register {destination} out of range"
             )));
         }

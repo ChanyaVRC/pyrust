@@ -17,7 +17,7 @@ fn vm_jump_pc(pc: usize, offset: i32, insns_len: usize, cur_line: u32) -> Result
     let new_pc = pc as i64 + offset as i64;
     if new_pc < 0 || new_pc as usize > insns_len {
         pyrust_core::set_current_vm_line(cur_line);
-        return Err(PyError::Runtime(format!(
+        return Err(PyError::runtime(format!(
             "internal error: jump to invalid PC {} (insns len {})",
             new_pc, insns_len
         )));
@@ -29,7 +29,7 @@ fn vm_jump_pc(pc: usize, offset: i32, insns_len: usize, cur_line: u32) -> Result
 #[inline(never)]
 fn vm_oob_pc_err(pc: usize, insns_len: usize, cur_line: u32) -> PyError {
     pyrust_core::set_current_vm_line(cur_line);
-    PyError::Runtime(format!(
+    PyError::runtime(format!(
         "internal error: PC {} out of bounds (insns len {})",
         pc, insns_len
     ))
@@ -75,7 +75,7 @@ impl Interpreter {
             LoopIteratorAdvance::Error(error) if is_stop_iteration_error(&error) => {
                 Ok(ForIterUserOutcome::Exhausted)
             }
-            LoopIteratorAdvance::Error(error) => Err(*error),
+            LoopIteratorAdvance::Error(error) => Err(error),
             LoopIteratorAdvance::NotIterator => Err(pyrust_core::type_err!(
                 "iter() returned non-iterator of type '{}'",
                 value_type_name_str(iterator),
@@ -256,7 +256,7 @@ impl Interpreter {
     fn exec_load_exc(&self) -> Result<Value> {
         self.active_exception
             .clone()
-            .ok_or_else(|| PyError::Runtime("no active exception".to_string()))
+            .ok_or_else(|| PyError::runtime("no active exception".to_string()))
     }
 
     fn exec_load_exc_traceback(
@@ -277,7 +277,7 @@ impl Interpreter {
     ) -> Result<bool> {
         let type_val = vm_read(regs, type_reg, num_locals)?;
         let exc = self.active_exception.as_ref().ok_or_else(|| {
-            PyError::Runtime("internal error: MatchExcept with no active exception".to_string())
+            PyError::runtime("internal error: MatchExcept with no active exception".to_string())
         })?;
         self.exception_matches(exc, &type_val)
     }
@@ -367,7 +367,7 @@ impl Interpreter {
             None => None,
         };
         let exc = self.prepare_assertion_error(msg)?;
-        Err(PyError::Raised(exc))
+        Err(PyError::raised(exc))
     }
 
     fn exec_raise_value(
@@ -378,7 +378,7 @@ impl Interpreter {
     ) -> Result<()> {
         let val = vm_read(regs, src, num_locals)?;
         let exc = self.prepare_explicit_raise(val)?;
-        Err(PyError::Raised(exc))
+        Err(PyError::raised(exc))
     }
 
     fn exec_raise_except_star_residual(
@@ -400,7 +400,7 @@ impl Interpreter {
         if self.exc_saved_active.len() > exc_saved_active_frame_base {
             self.active_exception = self.exc_saved_active.pop().unwrap();
         }
-        Err(PyError::Raised(exc))
+        Err(PyError::raised(exc))
     }
 
     fn exec_raise_from(
@@ -413,7 +413,7 @@ impl Interpreter {
         let val = vm_read(regs, src, num_locals)?;
         let cause_raw = vm_read(regs, cause_reg, num_locals)?;
         let exc = self.prepare_explicit_raise_from(val, cause_raw)?;
-        Err(PyError::Raised(exc))
+        Err(PyError::raised(exc))
     }
 
     /// Bare `raise`, unmatched-except fall-through, and implicit `finally`
@@ -426,7 +426,7 @@ impl Interpreter {
         let exc = self
             .active_exception
             .take()
-            .ok_or_else(|| PyError::Runtime("No active exception to reraise".to_string()))?;
+            .ok_or_else(|| PyError::runtime("No active exception to reraise".to_string()))?;
         if self.handled_exc_stack.len() > exc_ctx_frame_base {
             self.handled_exc_stack.pop();
         }
@@ -435,7 +435,7 @@ impl Interpreter {
         }
         self.reraise_is_bare = true;
         self.reset_captured_frames_if_reraise(&exc);
-        Err(PyError::Raised(exc))
+        Err(PyError::raised(exc))
     }
 
     fn exec_get_awaitable(

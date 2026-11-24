@@ -71,7 +71,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(TYPING_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("typing: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("typing: exec namespace not a dict".into()))?;
     let mut exports = TYPING_PY_EXPORTS.to_vec();
     exports.extend([
         "_namedtuple_functional",

@@ -17,7 +17,7 @@ impl Interpreter {
         annots_base: crate::bytecode::Reg,
     ) -> Result<Value> {
         let proto = code.fn_protos.get(proto_idx as usize).ok_or_else(|| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "bytecode error: fn_proto index {} out of range (pool size {})",
                 proto_idx,
                 code.fn_protos.len()
@@ -154,7 +154,7 @@ impl Interpreter {
             .names
             .get(name_idx as usize)
             .ok_or_else(|| {
-                PyError::Runtime(format!(
+                PyError::runtime(format!(
                     "bytecode error: name index {} out of range (pool size {})",
                     name_idx,
                     code.names.len()
@@ -162,7 +162,7 @@ impl Interpreter {
             })?
             .to_string();
         let proto = code.fn_protos.get(proto_idx as usize).ok_or_else(|| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "bytecode error: fn_proto index {} out of range (pool size {})",
                 proto_idx,
                 code.fn_protos.len()
@@ -356,7 +356,7 @@ impl Interpreter {
             .names
             .get(name_idx as usize)
             .ok_or_else(|| {
-                PyError::Runtime(format!(
+                PyError::runtime(format!(
                     "bytecode error: name index {} out of range (pool size {})",
                     name_idx,
                     code.names.len()
@@ -364,7 +364,7 @@ impl Interpreter {
             })?
             .to_string();
         let proto = code.fn_protos.get(proto_idx as usize).ok_or_else(|| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "bytecode error: fn_proto index {} out of range (pool size {})",
                 proto_idx,
                 code.fn_protos.len()

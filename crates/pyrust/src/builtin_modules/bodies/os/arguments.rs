@@ -55,7 +55,7 @@ pub(super) fn require_int(fn_name: &str, value: &Value, what: &str) -> Result<i6
 /// Internal guard for private `_Environ` methods.
 pub(super) fn require_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<()> {
     if args.is_empty() {
-        Err(PyError::Runtime(format!(
+        Err(PyError::runtime(format!(
             "internal: {fn_name}() called without self",
         )))
     } else {

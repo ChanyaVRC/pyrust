@@ -97,13 +97,13 @@ fn encode_cp1252(source: &str, errors: &str) -> Result<Value> {
                 while run_end < cps.len() && cp1252_encode_byte(cps[run_end]).is_none() {
                     run_end += 1;
                 }
-                return Err(PyError::UnicodeEncodeError {
+                return Err(PyError::new(pyrust_core::PyErrorKind::UnicodeEncodeError {
                     encoding: "charmap".to_string(),
                     object: source.to_string(),
                     start: run_start,
                     end: run_end,
                     reason: "character maps to <undefined>".to_string(),
-                });
+                }));
             }
             other => {
                 return Err(PyError::named(

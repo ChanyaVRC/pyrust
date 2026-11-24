@@ -8,12 +8,14 @@
 /// `StopIteration`.
 #[inline]
 pub(crate) fn is_stop_iteration_error(err: &PyError) -> bool {
-    match err {
+    match err.kind() {
         // VM-internal errors that have not been materialised carry only their
         // canonical built-in name.
-        PyError::Named(cls, _) => cls.as_ref() == "StopIteration",
-        PyError::Class(cls, _) => class_is_builtin_exception_subclass(cls, "StopIteration"),
-        PyError::Raised(exc) => match exc.kind() {
+        pyrust_core::PyErrorKind::Named(cls, _) => cls.as_ref() == "StopIteration",
+        pyrust_core::PyErrorKind::Class(cls, _) => {
+            class_is_builtin_exception_subclass(cls, "StopIteration")
+        }
+        pyrust_core::PyErrorKind::Raised(exc) => match exc.kind() {
             ValueKind::PyInstance(inst) => {
                 class_is_builtin_exception_subclass(&inst.borrow().class, "StopIteration")
             }
@@ -31,11 +33,11 @@ pub(crate) fn is_stop_iteration_error(err: &PyError) -> bool {
 /// accessible as `e.value` and `e.args[0]`.
 ///
 /// We mirror this by extracting `args[0]` from the materialized exception
-/// instance, or by using the message string for `PyError::Named` variants.
+/// instance, or by using the message string for `PyErrorKind::Named` variants.
 /// Returns `None` when no value was provided (bare `return` / `return None`).
 pub(super) fn extract_stop_iteration_value(err: &PyError) -> Option<Value> {
-    match err {
-        PyError::Raised(exc) => match exc.kind() {
+    match err.kind() {
+        pyrust_core::PyErrorKind::Raised(exc) => match exc.kind() {
             ValueKind::PyInstance(inst) => {
                 // Check for a `value` attribute first (set by our exception
                 // machinery), then fall back to args[0].
@@ -62,7 +64,7 @@ pub(super) fn extract_stop_iteration_value(err: &PyError) -> Option<Value> {
             }
             _ => None,
         },
-        PyError::Named(name, msg) if name.as_ref() == "StopIteration" => {
+        pyrust_core::PyErrorKind::Named(name, msg) if name.as_ref() == "StopIteration" => {
             if msg.is_empty() {
                 None
             } else {
@@ -77,10 +79,12 @@ pub(super) fn extract_stop_iteration_value(err: &PyError) -> Option<Value> {
 /// `StopAsyncIteration` or subclass (PEP 479 / PEP 525).
 #[inline]
 pub(super) fn is_stop_async_iteration_error(err: &PyError) -> bool {
-    match err {
-        PyError::Named(cls, _) => cls.as_ref() == "StopAsyncIteration",
-        PyError::Class(cls, _) => class_is_builtin_exception_subclass(cls, "StopAsyncIteration"),
-        PyError::Raised(exc) => match exc.kind() {
+    match err.kind() {
+        pyrust_core::PyErrorKind::Named(cls, _) => cls.as_ref() == "StopAsyncIteration",
+        pyrust_core::PyErrorKind::Class(cls, _) => {
+            class_is_builtin_exception_subclass(cls, "StopAsyncIteration")
+        }
+        pyrust_core::PyErrorKind::Raised(exc) => match exc.kind() {
             ValueKind::PyInstance(inst) => {
                 class_is_builtin_exception_subclass(&inst.borrow().class, "StopAsyncIteration")
             }
@@ -124,9 +128,9 @@ impl Interpreter {
     fn pep479_wrap_impl(&mut self, err: PyError, message: &str) -> PyError {
         // Materialise the original StopIteration / StopAsyncIteration error into
         // a Value so it can be attached as __cause__ on the new RuntimeError.
-        let cause_val: Option<Value> = match err {
-            PyError::Raised(exc) => Some(exc),
-            PyError::Class(cls, msg) => {
+        let cause_val: Option<Value> = match err.into_kind() {
+            pyrust_core::PyErrorKind::Raised(exc) => Some(exc),
+            pyrust_core::PyErrorKind::Class(cls, msg) => {
                 let args = if msg.is_empty() {
                     vec![]
                 } else {
@@ -134,7 +138,7 @@ impl Interpreter {
                 };
                 Some(instantiate_exception(cls, args))
             }
-            PyError::Named(cls_name, msg) => {
+            pyrust_core::PyErrorKind::Named(cls_name, msg) => {
                 // Internal named errors always denote a canonical built-in class;
                 // do not let a module global shadow the exception identity.
                 lookup_exc_class(cls_name.as_ref()).map(|cls| {
@@ -199,7 +203,7 @@ impl Interpreter {
                     .attrs
                     .insert_slot("__suppress_context__", Value::bool_(true));
             }
-            return PyError::Raised(rt_err);
+            return PyError::raised(rt_err);
         }
 
         // Fallback: builtins not yet installed (startup) or materialisation failed.

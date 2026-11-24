@@ -49,7 +49,7 @@ fn copy_chain_from_iterable(
         let state = state
             .downcast_ref::<ChainFromIterableState>()
             .ok_or_else(|| {
-                PyError::Runtime(
+                PyError::runtime(
                     "internal: chain.from_iterable iterator state corrupted".to_string(),
                 )
             })?;
@@ -110,7 +110,7 @@ fn advance_chain_from_iterable(
             let state = state
                 .downcast_ref::<ChainFromIterableState>()
                 .ok_or_else(|| {
-                    PyError::Runtime(
+                    PyError::runtime(
                         "internal: chain.from_iterable iterator state corrupted".to_string(),
                     )
                 })?;
@@ -152,7 +152,7 @@ fn advance_chain_from_iterable(
             state
                 .downcast_ref::<ChainFromIterableState>()
                 .ok_or_else(|| {
-                    PyError::Runtime(
+                    PyError::runtime(
                         "internal: chain.from_iterable iterator state corrupted".to_string(),
                     )
                 })?
@@ -192,7 +192,7 @@ fn chain_state_mut(
         state.downcast_mut::<ChainFromIterableState>()
     })
     .map_err(|_| {
-        PyError::Runtime("internal: chain.from_iterable iterator state corrupted".to_string())
+        PyError::runtime("internal: chain.from_iterable iterator state corrupted".to_string())
     })
 }
 
@@ -283,7 +283,7 @@ fn copy_tee(
     let (shared_rc, slot) = {
         let state = orig.state_rc().borrow();
         let cursor = state.downcast_ref::<TeeCursor>().ok_or_else(|| {
-            PyError::Runtime("internal: itertools tee iterator state corrupted".to_string())
+            PyError::runtime("internal: itertools tee iterator state corrupted".to_string())
         })?;
         (Rc::clone(&cursor.shared), cursor.slot)
     };
@@ -292,7 +292,7 @@ fn copy_tee(
         .positions
         .get(slot)
         .and_then(|pos| *pos)
-        .ok_or_else(|| PyError::Runtime("inactive tee iterator".to_string()))?;
+        .ok_or_else(|| PyError::runtime("inactive tee iterator".to_string()))?;
     if !deep {
         return Ok(clone_tee_slot(&shared_rc, position));
     }
@@ -364,7 +364,7 @@ pub(super) fn tee_iterators(
             .positions
             .get(slot)
             .and_then(|pos| *pos)
-            .ok_or_else(|| PyError::Runtime("inactive tee iterator".to_string()))?;
+            .ok_or_else(|| PyError::runtime("inactive tee iterator".to_string()))?;
         let mut result = Vec::with_capacity(count);
         result.push(iterable.clone());
         for _ in 1..count {
@@ -393,7 +393,7 @@ fn advance_tee(
     let (shared_rc, slot) = {
         let state = state_rc.borrow();
         let iterator = state.downcast_ref::<TeeCursor>().ok_or_else(|| {
-            PyError::Runtime("internal: itertools tee iterator state corrupted".to_string())
+            PyError::runtime("internal: itertools tee iterator state corrupted".to_string())
         })?;
         (Rc::clone(&iterator.shared), iterator.slot)
     };
@@ -404,7 +404,7 @@ fn advance_tee(
             .positions
             .get(slot)
             .and_then(|position| *position)
-            .ok_or_else(|| PyError::Runtime("inactive tee iterator".to_string()))?;
+            .ok_or_else(|| PyError::runtime("inactive tee iterator".to_string()))?;
         let buffered_end = shared.base.saturating_add(shared.buffer.len());
         if position < buffered_end {
             let value = shared.buffer[position - shared.base].clone();
@@ -416,7 +416,7 @@ fn advance_tee(
             return Ok(None);
         }
         if shared.advancing {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "cannot re-enter the tee iterator".to_string(),
             ));
         }
@@ -433,7 +433,7 @@ fn advance_tee(
                 .positions
                 .get(slot)
                 .and_then(|position| *position)
-                .ok_or_else(|| PyError::Runtime("inactive tee iterator".to_string()))?;
+                .ok_or_else(|| PyError::runtime("inactive tee iterator".to_string()))?;
             shared.buffer.push_back(value.clone());
             shared.positions[slot] = Some(position.saturating_add(1));
             shared.reclaim_consumed_prefix();

@@ -187,7 +187,7 @@ pyrust_module! {
     #[py_name = "_Feature.__repr__"]
     fn feature_repr(args) -> Result<Value> {
         if args.is_empty() {
-            return Err(PyError::Runtime(
+            return Err(PyError::runtime(
                 "_Feature.__repr__() missing self".to_string(),
             ));
         }

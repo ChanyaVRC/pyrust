@@ -128,7 +128,7 @@ impl Interpreter {
         let mut classes: Vec<Rc<RefCell<PyClass>>> = Vec::with_capacity(bases.len());
         for base_val in bases {
             let ValueKind::PyClass(c) = base_val.kind() else {
-                return Err(PyError::Runtime("class base must be a class".to_string()));
+                return Err(PyError::runtime("class base must be a class".to_string()));
             };
             let cls = Rc::clone(c);
             if let Some(tname) = crate::interpreter::non_subclassable_builtin_name(&cls) {
@@ -211,7 +211,7 @@ impl Interpreter {
                         let _ = notes.list_push(Value::string(note));
                     }
                 }
-                return Err(PyError::Raised(exc_val));
+                return Err(PyError::raised(exc_val));
             }
         }
         Ok(())

@@ -4,7 +4,7 @@ impl Parser {
         // PEP 614: `'@' named_expression NEWLINE`.
         // `yield` / `yield from` is not a `named_expression` unless parenthesized.
         if self.is(&Token::Yield) {
-            return Err(PyError::Parse("invalid syntax".to_string()));
+            return Err(PyError::parse("invalid syntax".to_string()));
         }
         let expr = self.parse_expr()?;
         self.expect(&Token::Newline)?;
@@ -82,7 +82,7 @@ impl Parser {
                 // detect conflicts with global/nonlocal (CPython SyntaxError).
                 if let Expr::Var(name, _) = &targets[0] {
                     if name == "__debug__" {
-                        return Err(PyError::Parse("cannot assign to __debug__".to_string()));
+                        return Err(PyError::parse("cannot assign to __debug__".to_string()));
                     }
                     return Ok(vec![Stmt::AnnAssign {
                         name: *name,
@@ -101,7 +101,7 @@ impl Parser {
             // slot to declare, so this remains a no-op.
             if let Expr::Var(name, _) = &targets[0] {
                 if name == "__debug__" {
-                    return Err(PyError::Parse("cannot assign to __debug__".to_string()));
+                    return Err(PyError::parse("cannot assign to __debug__".to_string()));
                 }
                 return Ok(vec![Stmt::AnnAssign {
                     name: *name,
@@ -117,13 +117,13 @@ impl Parser {
             // Validate starred flags on the first target group.
             let star_count = starred_flags.iter().filter(|&&s| s).count();
             if star_count > 1 {
-                return Err(PyError::Parse(
+                return Err(PyError::parse(
                     "multiple starred expressions in assignment".to_string(),
                 ));
             }
             // Standalone `*a = x` is invalid, but `*a, = x` (trailing comma) is valid.
             if star_count == 1 && targets.len() == 1 && !had_comma {
-                return Err(PyError::Parse(
+                return Err(PyError::parse(
                     "starred assignment target must be in a list or tuple".to_string(),
                 ));
             }
@@ -181,12 +181,12 @@ impl Parser {
                     // Another `=` follows — this group is another target list.
                     let star_count = next_flags.iter().filter(|&&s| s).count();
                     if star_count > 1 {
-                        return Err(PyError::Parse(
+                        return Err(PyError::parse(
                             "multiple starred expressions in assignment".to_string(),
                         ));
                     }
                     if star_count == 1 && next_items.len() == 1 && !next_had_comma {
-                        return Err(PyError::Parse(
+                        return Err(PyError::parse(
                             "starred assignment target must be in a list or tuple".to_string(),
                         ));
                     }
@@ -197,7 +197,7 @@ impl Parser {
                 // No more `=`: this last group is the RHS.  Stars are not
                 // permitted in the RHS expression.
                 if next_flags.iter().any(|&s| s) {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "can't use starred expression here".to_string(),
                     ));
                 }
@@ -217,7 +217,7 @@ impl Parser {
 
         // Starred item outside assignment is invalid
         if starred_flags.iter().any(|&s| s) {
-            return Err(PyError::Parse(
+            return Err(PyError::parse(
                 "can't use starred expression here".to_string(),
             ));
         }
@@ -229,7 +229,7 @@ impl Parser {
             let target = if targets.len() == 1 {
                 expr_to_assign_target(&targets[0])?
             } else {
-                return Err(PyError::Parse(
+                return Err(PyError::parse(
                     "invalid augmented assignment target".to_string(),
                 ));
             };
@@ -331,22 +331,22 @@ impl Parser {
 
         loop {
             if seen_kwargs {
-                return Err(PyError::Parse("parameter after **kwargs".to_string()));
+                return Err(PyError::parse("parameter after **kwargs".to_string()));
             }
 
             if self.is(&Token::Slash) {
                 if seen_slash {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "duplicate '/' in function parameter list".to_string(),
                     ));
                 }
                 if seen_star {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "'/' must appear before '*' in parameter list".to_string(),
                     ));
                 }
                 if params.is_empty() {
-                    return Err(PyError::Parse(
+                    return Err(PyError::parse(
                         "at least one parameter must precede '/'".to_string(),
                     ));
                 }
@@ -426,7 +426,7 @@ impl Parser {
                             Some(self.parse_expr()?)
                         } else {
                             if seen_default && !seen_args && !seen_star {
-                                return Err(PyError::Parse(
+                                return Err(PyError::parse(
                                     "non-default argument follows default argument".to_string(),
                                 ));
                             }
@@ -443,7 +443,7 @@ impl Parser {
                         });
                     }
                     other => {
-                        return Err(PyError::Parse(format!(
+                        return Err(PyError::parse(format!(
                             "expected parameter name, found {other:?}"
                         )));
                     }
@@ -485,7 +485,7 @@ impl Parser {
                         let value = self.parse_expr()?;
                         if key == "metaclass" {
                             if metaclass.is_some() {
-                                return Err(PyError::Parse(
+                                return Err(PyError::parse(
                                     "duplicate 'metaclass' keyword in class header".to_string(),
                                 ));
                             }

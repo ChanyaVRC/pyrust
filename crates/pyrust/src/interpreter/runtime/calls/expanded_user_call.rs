@@ -80,7 +80,7 @@ impl Interpreter {
             // `Vec<Option<Value>>` allocation + option-wrapping (#2123).
             let Some(code) = self.get_or_compile_bytecode(&function) else {
                 // All user functions must have precompiled bytecode.
-                return Err(PyError::Runtime(format!(
+                return Err(PyError::runtime(format!(
                     "no bytecode for '{}'",
                     function.name
                 )));

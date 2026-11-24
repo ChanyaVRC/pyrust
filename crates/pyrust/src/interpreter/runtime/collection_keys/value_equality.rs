@@ -71,7 +71,7 @@ impl Interpreter {
             let size_changed = set_comparison_len(source) != Some(recorded_len);
             if relinked || size_changed {
                 let outcome = ordered_mapping_guard_outcome(source, recorded_len, watch);
-                return Err(PyError::Runtime(outcome.message.to_string()));
+                return Err(PyError::runtime(outcome.message.to_string()));
             }
         }
         advance_live_key_cursor(source, cursor)
@@ -88,10 +88,10 @@ impl Interpreter {
     ) -> Result<bool> {
         let expected_len = subset
             .dict_len()
-            .ok_or_else(|| PyError::Runtime("internal: expected dict backing".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: expected dict backing".to_string()))?;
         let superset_len = superset
             .dict_len()
-            .ok_or_else(|| PyError::Runtime("internal: expected dict backing".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: expected dict backing".to_string()))?;
         if expected_len > superset_len {
             return Ok(false);
         }
@@ -169,7 +169,7 @@ impl Interpreter {
     ) -> Result<bool> {
         let expected_len = subset
             .dict_len()
-            .ok_or_else(|| PyError::Runtime("internal: expected dict backing".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: expected dict backing".to_string()))?;
         if self.eq_cycle_enter(target, subset) {
             return Ok(true);
         }

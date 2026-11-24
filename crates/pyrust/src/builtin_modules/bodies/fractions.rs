@@ -61,7 +61,7 @@ pub(crate) fn inject_python_members(
     interp.exec_source(FRACTIONS_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
-        .ok_or_else(|| PyError::Runtime("fractions: exec namespace not a dict".into()))?;
+        .ok_or_else(|| PyError::runtime("fractions: exec namespace not a dict".into()))?;
     for name in FRACTIONS_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             // The exec namespace's `__name__` defaults to `__main__`; override

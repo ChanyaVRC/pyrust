@@ -19,7 +19,7 @@ impl Interpreter {
         num_locals: crate::bytecode::Reg,
     ) -> Result<Value> {
         let Some(callee_code) = self.get_or_compile_bytecode(f) else {
-            return Err(PyError::Runtime(format!("no bytecode for '{}'", f.name)));
+            return Err(PyError::runtime(format!("no bytecode for '{}'", f.name)));
         };
         // Positionals, in source order: leading fixed positionals, then the splat
         // elements (a plain tuple/list — cloned, not the same Rc, so the callee's
@@ -285,7 +285,7 @@ impl Interpreter {
         num_locals: crate::bytecode::Reg,
     ) -> Result<Value> {
         let Some(callee_code) = self.get_or_compile_bytecode(f) else {
-            return Err(PyError::Runtime(format!("no bytecode for '{}'", f.name)));
+            return Err(PyError::runtime(format!("no bytecode for '{}'", f.name)));
         };
         let mut pos_vals: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(npos);
         for i in 0..npos as u32 {

@@ -73,7 +73,7 @@ impl Interpreter {
         {
             let dict = receiver
                 .as_dict()
-                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
             let exact = dict.get_full(key);
             if !dict.may_have_dynamic_key() && !key_contains_object(key) {
                 return Ok(exact.map(|(idx, _, value)| (idx, value.clone())));
@@ -96,7 +96,7 @@ impl Interpreter {
             let (candidate_keys, observed_version, activate_hash_index) = {
                 let dict = receiver
                     .as_dict()
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                    .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
                 let exact = dict.get_full(key);
                 if !dict.may_have_dynamic_key() && !key_contains_object(key) {
                     return Ok(exact.map(|(idx, _, value)| (idx, value.clone())));
@@ -123,7 +123,7 @@ impl Interpreter {
             if activate_hash_index {
                 receiver
                     .dict_ensure_python_hash_index()
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                    .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
                 continue;
             }
 
@@ -132,7 +132,7 @@ impl Interpreter {
                 let equal = self.pykeys_user_eq(&cand, key)?;
                 let changed = receiver
                     .dict_with(|dict| dict.structural_version() != observed_version)
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                    .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
                 if changed {
                     // `__eq__` changed the key table. The candidate snapshot
                     // and its probe order are stale, so restart from the live
@@ -159,7 +159,7 @@ impl Interpreter {
     fn dict_entry_by_key(&self, receiver: &Value, key: &PyKey) -> Result<Option<(usize, Value)>> {
         let dict = receiver
             .as_dict()
-            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
         Ok(dict.get_full(key).map(|(idx, _, v)| (idx, v.clone())))
     }
 
@@ -213,7 +213,7 @@ impl Interpreter {
             {
                 let dict = receiver
                     .as_dict()
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                    .ok_or_else(|| PyError::runtime("internal: expected dict".to_string()))?;
                 if !dict.may_have_dynamic_key()
                     || (!matches!(
                         key.kind(),
@@ -243,7 +243,7 @@ impl Interpreter {
             let hit = {
                 let set = receiver
                     .as_set()
-                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                    .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
                 set.get_index_of(&probe)
             };
             if hit.is_some() || !key.is_none() {
@@ -284,7 +284,7 @@ impl Interpreter {
         {
             let set = receiver
                 .as_set()
-                .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
             if let Some(idx) = set.get_index_of(key) {
                 return Ok(Some(idx));
             }
@@ -300,7 +300,7 @@ impl Interpreter {
             let candidate_keys = {
                 let set = receiver
                     .as_set()
-                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                    .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
                 collect_object_bucket_keys_set(&set, key, |k| match k {
                     PyKey::Object { hash, .. } => hash == target_hash,
                     // PyKey::None has Python-level hash py_hash_none(); include it
@@ -324,7 +324,7 @@ impl Interpreter {
             let candidate_keys = {
                 let set = receiver
                     .as_set()
-                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                    .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
                 collect_object_bucket_keys_set(
                     &set,
                     key,
@@ -345,7 +345,7 @@ impl Interpreter {
             let candidate_keys = {
                 let set = receiver
                     .as_set()
-                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                    .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
                 collect_object_bucket_keys_set(&set, key, nested_object_tuple_key)
             };
             for cand in candidate_keys {
@@ -362,7 +362,7 @@ impl Interpreter {
     fn set_index_by_key(&self, receiver: &Value, key: &PyKey) -> Result<Option<usize>> {
         let set = receiver
             .as_set()
-            .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+            .ok_or_else(|| PyError::runtime("internal: expected set".to_string()))?;
         Ok(set.get_index_of(key))
     }
 

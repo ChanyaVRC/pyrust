@@ -89,7 +89,7 @@ impl BuiltinTypeOps for PropertyOps {
         let mut borrow = state.borrow_mut();
         let property = borrow
             .downcast_mut::<PropertyState>()
-            .ok_or_else(|| pyrust_core::PyError::Runtime("invalid property state".to_string()))?;
+            .ok_or_else(|| pyrust_core::PyError::runtime("invalid property state".to_string()))?;
         property.name = Some(args[1].clone());
         Ok(Value::none())
     }

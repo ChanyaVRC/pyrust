@@ -62,7 +62,7 @@ impl Interpreter {
             };
             if let Some((_, slots)) = cached {
                 let Some(callee_code) = self.get_or_compile_bytecode(&f) else {
-                    return Err(PyError::Runtime(format!("no bytecode for '{}'", f.name)));
+                    return Err(PyError::runtime(format!("no bytecode for '{}'", f.name)));
                 };
                 // Read the positional and keyword values from their registers.
                 let mut pos_vals: smallvec::SmallVec<[Value; 4]> =
@@ -96,7 +96,7 @@ impl Interpreter {
                 {
                     Some(t) => t.to_vec(),
                     None => {
-                        return Err(PyError::Runtime(
+                        return Err(PyError::runtime(
                             "bytecode error: CallKw kwnames is not a tuple".to_string(),
                         ));
                     }
@@ -111,7 +111,7 @@ impl Interpreter {
                         };
                         drop(cache);
                         let Some(callee_code) = self.get_or_compile_bytecode(&f) else {
-                            return Err(PyError::Runtime(format!("no bytecode for '{}'", f.name)));
+                            return Err(PyError::runtime(format!("no bytecode for '{}'", f.name)));
                         };
                         let mut pos_vals: smallvec::SmallVec<[Value; 4]> =
                             smallvec::SmallVec::with_capacity(npos);
@@ -150,7 +150,7 @@ impl Interpreter {
         {
             Some(t) => t.to_vec(),
             None => {
-                return Err(PyError::Runtime(
+                return Err(PyError::runtime(
                     "bytecode error: CallKw kwnames is not a tuple".to_string(),
                 ));
             }
@@ -167,7 +167,7 @@ impl Interpreter {
             let name = name_val
                 .as_str()
                 .ok_or_else(|| {
-                    PyError::Runtime("bytecode error: CallKw kwname is not a str".to_string())
+                    PyError::runtime("bytecode error: CallKw kwname is not a str".to_string())
                 })?
                 .to_string();
             let value = vm_read(regs, func + 1 + npos as u32 + i as u32, num_locals)?;
@@ -267,7 +267,7 @@ impl Interpreter {
                     {
                         Some(t) => t.to_vec(),
                         None => {
-                            return Err(PyError::Runtime(
+                            return Err(PyError::runtime(
                                 "bytecode error: CallMethodKw kwnames is not a tuple".to_string(),
                             ));
                         }
@@ -296,7 +296,7 @@ impl Interpreter {
 
             if let Some(slots) = resolved {
                 let Some(callee_code) = self.get_or_compile_bytecode(&f) else {
-                    return Err(PyError::Runtime(format!("no bytecode for '{}'", f.name)));
+                    return Err(PyError::runtime(format!("no bytecode for '{}'", f.name)));
                 };
                 // Positionals seen by the callee: receiver first, then the plain
                 // positional args from the register window.
@@ -331,7 +331,7 @@ impl Interpreter {
             .names
             .get(name_idx as usize)
             .ok_or_else(|| {
-                PyError::Runtime(format!(
+                PyError::runtime(format!(
                     "bytecode error: name index {name_idx} out of range"
                 ))
             })?
@@ -344,7 +344,7 @@ impl Interpreter {
         {
             Some(t) => t.to_vec(),
             None => {
-                return Err(PyError::Runtime(
+                return Err(PyError::runtime(
                     "bytecode error: CallMethodKw kwnames is not a tuple".to_string(),
                 ));
             }
@@ -356,7 +356,7 @@ impl Interpreter {
         let mut kw_map = PyDict::default();
         for (i, name_val) in kwnames.iter().enumerate() {
             if name_val.as_str().is_none() {
-                return Err(PyError::Runtime(
+                return Err(PyError::runtime(
                     "bytecode error: CallMethodKw kwname is not a str".to_string(),
                 ));
             }

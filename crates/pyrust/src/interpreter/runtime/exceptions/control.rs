@@ -9,17 +9,19 @@ impl Interpreter {
         &mut self,
         error: PyError,
     ) -> std::result::Result<Value, PyError> {
-        Ok(match error {
-            PyError::Raised(value) => value,
-            PyError::Runtime(message) => {
+        Ok(match error.into_kind() {
+            pyrust_core::PyErrorKind::Raised(value) => value,
+            pyrust_core::PyErrorKind::Runtime(message) => {
                 if let Some(class) = self.exc_classes.get("RuntimeError") {
                     instantiate_exception(class, vec![Value::string(message)])
                 } else {
                     self.instantiate_named_exception("RuntimeError", message)?
                 }
             }
-            PyError::Named(class, message) => self.instantiate_named_exception(&class, message)?,
-            PyError::Class(class, message) => {
+            pyrust_core::PyErrorKind::Named(class, message) => {
+                self.instantiate_named_exception(&class, message)?
+            }
+            pyrust_core::PyErrorKind::Class(class, message) => {
                 let args = if message.is_empty() {
                     Vec::new()
                 } else {
@@ -27,23 +29,23 @@ impl Interpreter {
                 };
                 instantiate_exception(class, args)
             }
-            PyError::KeyError(key) => {
+            pyrust_core::PyErrorKind::KeyError(key) => {
                 self.instantiate_named_exception_with_value("KeyError", key)?
             }
-            PyError::NameError {
+            pyrust_core::PyErrorKind::NameError {
                 class_name,
                 message,
                 name,
             } => self.instantiate_name_error_exception(class_name, message, name)?,
-            PyError::AttributeError { message, name, obj } => {
+            pyrust_core::PyErrorKind::AttributeError { message, name, obj } => {
                 self.instantiate_attribute_error_exception(message, name, obj)?
             }
-            PyError::ImportError {
+            pyrust_core::PyErrorKind::ImportError {
                 class_name,
                 message,
                 module_name,
             } => self.instantiate_import_error_exception(class_name, message, module_name)?,
-            PyError::OsError {
+            pyrust_core::PyErrorKind::OsError {
                 class_name,
                 errno,
                 strerror,
@@ -51,7 +53,7 @@ impl Interpreter {
                 filename2,
             } => self
                 .instantiate_os_error_exception(class_name, errno, strerror, filename, filename2)?,
-            PyError::UnicodeDecodeError {
+            pyrust_core::PyErrorKind::UnicodeDecodeError {
                 encoding,
                 object,
                 start,
@@ -59,7 +61,7 @@ impl Interpreter {
                 reason,
             } => self
                 .instantiate_unicode_decode_error_exception(encoding, object, start, end, reason)?,
-            PyError::UnicodeEncodeError {
+            pyrust_core::PyErrorKind::UnicodeEncodeError {
                 encoding,
                 object,
                 start,
@@ -67,7 +69,7 @@ impl Interpreter {
                 reason,
             } => self
                 .instantiate_unicode_encode_error_exception(encoding, object, start, end, reason)?,
-            other => return Err(other),
+            other => return Err(PyError::new(other)),
         })
     }
 
@@ -81,7 +83,7 @@ impl Interpreter {
             Err(original) => return original,
         };
         self.attach_implicit_context(&exception);
-        PyError::Raised(exception)
+        PyError::raised(exception)
     }
 
     /// Update an exception's Python-visible traceback slot when a handler
@@ -143,7 +145,7 @@ impl Interpreter {
             .get("AssertionError")
             .or_else(|| lookup_exc_class("AssertionError"))
             .ok_or_else(|| {
-                PyError::Runtime("built-in exception 'AssertionError' is not defined".to_string())
+                PyError::runtime("built-in exception 'AssertionError' is not defined".to_string())
             })?;
         let exception = instantiate_exception(class, message.into_iter().collect());
         self.attach_implicit_context(&exception);
@@ -325,7 +327,7 @@ impl Interpreter {
         } else {
             self.instantiate_named_exception("RecursionError", MESSAGE.to_string())?
         };
-        Ok(PyError::Raised(exception))
+        Ok(PyError::raised(exception))
     }
 
     /// Build the canonical completion exception for an exhausted generator.
@@ -334,7 +336,7 @@ impl Interpreter {
     #[inline]
     pub(super) fn generator_completion_error(&self, args: Vec<Value>) -> Result<PyError> {
         if let Some(class) = self.exc_classes.get("StopIteration") {
-            Ok(PyError::Raised(instantiate_exception(class, args)))
+            Ok(PyError::raised(instantiate_exception(class, args)))
         } else if args.is_empty() {
             Ok(pyrust_core::py_err!("StopIteration", String::new()))
         } else {
@@ -344,7 +346,7 @@ impl Interpreter {
 
     pub(super) fn instantiate_named_exception(&self, name: &str, message: String) -> Result<Value> {
         let class = lookup_exc_class(name).ok_or_else(|| {
-            PyError::Runtime(format!("built-in exception '{}' is not defined", name))
+            PyError::runtime(format!("built-in exception '{}' is not defined", name))
         })?;
         let args = if message.is_empty() {
             vec![]
@@ -363,7 +365,7 @@ impl Interpreter {
         arg: Value,
     ) -> Result<Value> {
         let class = lookup_exc_class(name).ok_or_else(|| {
-            PyError::Runtime(format!("built-in exception '{}' is not defined", name))
+            PyError::runtime(format!("built-in exception '{}' is not defined", name))
         })?;
         Ok(instantiate_exception(class, vec![arg]))
     }
@@ -380,7 +382,7 @@ impl Interpreter {
         name: Option<String>,
     ) -> Result<Value> {
         let class = lookup_exc_class(class_name).ok_or_else(|| {
-            PyError::Runtime(format!("built-in exception '{class_name}' is not defined"))
+            PyError::runtime(format!("built-in exception '{class_name}' is not defined"))
         })?;
         Ok(instantiate_name_error(class, message, name))
     }
@@ -396,7 +398,7 @@ impl Interpreter {
         module_name: Option<String>,
     ) -> Result<Value> {
         let class = lookup_exc_class(class_name).ok_or_else(|| {
-            PyError::Runtime(format!("built-in exception '{class_name}' is not defined"))
+            PyError::runtime(format!("built-in exception '{class_name}' is not defined"))
         })?;
         Ok(instantiate_import_error(class, message, module_name))
     }
@@ -410,7 +412,7 @@ impl Interpreter {
         obj: Option<Value>,
     ) -> Result<Value> {
         let class = lookup_exc_class("AttributeError").ok_or_else(|| {
-            PyError::Runtime("built-in exception 'AttributeError' is not defined".to_string())
+            PyError::runtime("built-in exception 'AttributeError' is not defined".to_string())
         })?;
         Ok(instantiate_attribute_error(class, message, name, obj))
     }
@@ -427,7 +429,7 @@ impl Interpreter {
         filename2: Option<String>,
     ) -> Result<Value> {
         let class = lookup_exc_class(class_name).ok_or_else(|| {
-            PyError::Runtime(format!("built-in exception '{class_name}' is not defined"))
+            PyError::runtime(format!("built-in exception '{class_name}' is not defined"))
         })?;
         Ok(instantiate_os_error(
             class, errno, strerror, filename, filename2,
@@ -446,7 +448,7 @@ impl Interpreter {
         reason: String,
     ) -> Result<Value> {
         let class = lookup_exc_class("UnicodeDecodeError").ok_or_else(|| {
-            PyError::Runtime("built-in exception 'UnicodeDecodeError' is not defined".to_string())
+            PyError::runtime("built-in exception 'UnicodeDecodeError' is not defined".to_string())
         })?;
         Ok(instantiate_unicode_decode_error(
             class, encoding, object, start, end, reason,
@@ -465,7 +467,7 @@ impl Interpreter {
         reason: String,
     ) -> Result<Value> {
         let class = lookup_exc_class("UnicodeEncodeError").ok_or_else(|| {
-            PyError::Runtime("built-in exception 'UnicodeEncodeError' is not defined".to_string())
+            PyError::runtime("built-in exception 'UnicodeEncodeError' is not defined".to_string())
         })?;
         Ok(instantiate_unicode_encode_error(
             class, encoding, object, start, end, reason,

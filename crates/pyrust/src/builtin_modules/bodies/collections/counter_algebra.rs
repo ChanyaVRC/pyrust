@@ -33,7 +33,7 @@ fn fresh_base_counter(receiver: &Rc<RefCell<PyInstance>>, counts: PyDict) -> Res
     let Some(class) =
         canonical_collection_base_for_receiver(&receiver_class, CanonicalCollectionKind::Counter)
     else {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "internal: canonical Counter class is not registered".to_string(),
         ));
     };

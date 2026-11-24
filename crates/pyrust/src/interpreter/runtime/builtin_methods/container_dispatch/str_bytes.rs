@@ -65,7 +65,7 @@ impl Interpreter {
                 }
                 let template = receiver
                     .as_str()
-                    .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
+                    .ok_or_else(|| PyError::runtime("internal: expected str".to_string()))?;
                 self.format_str_template(template, &pos, &keyword)
             }
             InterpreterMethod::FormatMap => {
@@ -82,7 +82,7 @@ impl Interpreter {
                 let mapping = pos.into_iter().next().unwrap();
                 let template = receiver
                     .as_str()
-                    .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?
+                    .ok_or_else(|| PyError::runtime("internal: expected str".to_string()))?
                     .to_string();
                 self.format_str_template_map(&template, mapping)
             }

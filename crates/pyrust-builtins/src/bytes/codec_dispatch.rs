@@ -128,13 +128,13 @@ fn decode_cp1252(bytes: &[u8], errors: &str) -> Result<Value> {
                 idx += 1;
             }
             "strict" => {
-                return Err(PyError::UnicodeDecodeError {
+                return Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
                     encoding: "charmap".to_string(),
                     object: bytes.to_vec(),
                     start: idx,
                     end: idx + 1,
                     reason: "character maps to <undefined>".to_string(),
-                });
+                }));
             }
             other => {
                 return Err(PyError::named(

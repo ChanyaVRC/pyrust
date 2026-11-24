@@ -43,7 +43,8 @@ macro_rules! seq_prefix_step {
             Ok(std::cmp::Ordering::Equal) => continue,
             Ok(ord) => return Ok(ord),
             Err(e) => {
-                if matches!(&e, PyError::Named(class, _) if class.as_ref() == "RecursionError") {
+                if matches!(e.kind(), crate::error::PyErrorKind::Named(class, _) if class.as_ref() == "RecursionError")
+                {
                     return Err(e);
                 }
                 if $a == $b {

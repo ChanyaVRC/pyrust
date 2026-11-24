@@ -43,7 +43,7 @@ fn codepoint_to_string_fragment(cp: u32) -> Option<String> {
 fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(String, usize)> {
     let c = *chars
         .get(pos)
-        .ok_or_else(|| PyError::Lex("unterminated escape sequence".to_string()))?;
+        .ok_or_else(|| PyError::lex("unterminated escape sequence".to_string()))?;
     match c {
         'n' => Ok(("\n".to_string(), pos + 1)),
         't' => Ok(("\t".to_string(), pos + 1)),
@@ -74,20 +74,20 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
                 }
             }
             let ch = char::from_u32(val).ok_or_else(|| {
-                PyError::Lex(format!("octal escape value out of range: \\{val:o}"))
+                PyError::lex(format!("octal escape value out of range: \\{val:o}"))
             })?;
             Ok((ch.to_string(), end))
         }
         'x' => {
             // \xNN — exactly two hex digits; produces U+0000–U+00FF.
             let hi = chars.get(pos + 1).copied().ok_or_else(|| {
-                PyError::Lex("incomplete \\x escape (need 2 hex digits)".to_string())
+                PyError::lex("incomplete \\x escape (need 2 hex digits)".to_string())
             })?;
             let lo = chars.get(pos + 2).copied().ok_or_else(|| {
-                PyError::Lex("incomplete \\x escape (need 2 hex digits)".to_string())
+                PyError::lex("incomplete \\x escape (need 2 hex digits)".to_string())
             })?;
             let v = u8::from_str_radix(&format!("{hi}{lo}"), 16)
-                .map_err(|_| PyError::Lex(format!("invalid \\x escape: \\x{hi}{lo}")))?;
+                .map_err(|_| PyError::lex(format!("invalid \\x escape: \\x{hi}{lo}")))?;
             Ok((char::from(v).to_string(), pos + 3))
         }
         'u' => {
@@ -95,17 +95,17 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
             let digits: String = (1..=4)
                 .map(|i| {
                     chars.get(pos + i).copied().ok_or_else(|| {
-                        PyError::Lex("incomplete \\u escape (need 4 hex digits)".to_string())
+                        PyError::lex("incomplete \\u escape (need 4 hex digits)".to_string())
                     })
                 })
                 .collect::<Result<_>>()?;
             let codepoint = u32::from_str_radix(&digits, 16)
-                .map_err(|_| PyError::Lex(format!("invalid \\u escape: \\u{digits}")))?;
+                .map_err(|_| PyError::lex(format!("invalid \\u escape: \\u{digits}")))?;
             // Lone surrogates (U+D800–U+DFFF) are stored using pyrust's
             // surrogate-aware encoding (same as `chr()`), matching CPython
             // which keeps lone surrogates in `str` (fixes #1893).
             let frag = codepoint_to_string_fragment(codepoint)
-                .ok_or_else(|| PyError::Lex(format!("invalid \\u escape: U+{codepoint:04X}")))?;
+                .ok_or_else(|| PyError::lex(format!("invalid \\u escape: U+{codepoint:04X}")))?;
             Ok((frag, pos + 5))
         }
         'U' => {
@@ -113,23 +113,23 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
             let digits: String = (1..=8)
                 .map(|i| {
                     chars.get(pos + i).copied().ok_or_else(|| {
-                        PyError::Lex("incomplete \\U escape (need 8 hex digits)".to_string())
+                        PyError::lex("incomplete \\U escape (need 8 hex digits)".to_string())
                     })
                 })
                 .collect::<Result<_>>()?;
             let codepoint = u32::from_str_radix(&digits, 16)
-                .map_err(|_| PyError::Lex(format!("invalid \\U escape: \\U{digits}")))?;
+                .map_err(|_| PyError::lex(format!("invalid \\U escape: \\U{digits}")))?;
             // Keep the genuine out-of-range check; only the surrogate
             // rejection is lifted (fixes #1893).
             if codepoint > 0x10FFFF {
-                return Err(PyError::Lex(format!(
+                return Err(PyError::lex(format!(
                     "invalid \\U escape: codepoint U+{codepoint:08X} out of range"
                 )));
             }
             // Lone surrogates are stored using pyrust's surrogate-aware
             // encoding (same as `chr()`), matching CPython.
             let frag = codepoint_to_string_fragment(codepoint)
-                .ok_or_else(|| PyError::Lex(format!("invalid \\U escape: U+{codepoint:08X}")))?;
+                .ok_or_else(|| PyError::lex(format!("invalid \\U escape: U+{codepoint:08X}")))?;
             Ok((frag, pos + 9))
         }
         'N' => {
@@ -142,7 +142,7 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
                 .map(|c| c.len_utf8())
                 .sum();
             if chars.get(pos + 1) != Some(&'{') {
-                return Err(PyError::Lex(format!(
+                return Err(PyError::lex(format!(
                     "(unicode error) 'unicodeescape' codec can't decode bytes in position \
                      {bs_byte}-{}: malformed \\N character escape",
                     bs_byte + 1
@@ -163,14 +163,14 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
                     .map(|c| c.len_utf8())
                     .sum();
                 let end_byte = bs_byte + 2 + name_bytes;
-                return Err(PyError::Lex(format!(
+                return Err(PyError::lex(format!(
                     "(unicode error) 'unicodeescape' codec can't decode bytes in position \
                      {bs_byte}-{end_byte}: malformed \\N character escape"
                 )));
             }
             let name: String = chars[pos + 2..end].iter().collect();
             if name.is_empty() {
-                return Err(PyError::Lex(format!(
+                return Err(PyError::lex(format!(
                     "(unicode error) 'unicodeescape' codec can't decode bytes in position \
                      {bs_byte}-{}: malformed \\N character escape",
                     bs_byte + 2
@@ -178,7 +178,7 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
             }
             let end_byte: usize = chars[content_start..end].iter().map(|c| c.len_utf8()).sum();
             let ch = unicode_names2::character(&name).ok_or_else(|| {
-                PyError::Lex(format!(
+                PyError::lex(format!(
                     "(unicode error) 'unicodeescape' codec can't decode bytes in position \
                      {bs_byte}-{end_byte}: unknown Unicode character name"
                 ))

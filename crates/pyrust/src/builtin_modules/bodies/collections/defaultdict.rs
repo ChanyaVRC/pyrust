@@ -76,7 +76,7 @@ fn defaultdict_missing(
     let key_arg = args
         .get(1)
         .cloned()
-        .ok_or_else(|| PyError::Runtime(format!("internal: {fn_name}() missing key arg")))?;
+        .ok_or_else(|| PyError::runtime(format!("internal: {fn_name}() missing key arg")))?;
     let factory = inst
         .borrow()
         .attrs

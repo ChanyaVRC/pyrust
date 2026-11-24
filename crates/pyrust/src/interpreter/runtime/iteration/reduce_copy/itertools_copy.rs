@@ -48,7 +48,7 @@ pub(crate) fn copy_iterator_object(value: &Value, deep: bool) -> Result<Iterator
     if tid == TypeId::of::<NativeIterFrame>() {
         let frame = borrow
             .downcast_ref::<NativeIterFrame>()
-            .ok_or_else(|| PyError::Runtime("invalid iterator state".to_string()))?;
+            .ok_or_else(|| PyError::runtime("invalid iterator state".to_string()))?;
         if matches!(frame.copy_policy, NativeIterCopyPolicy::Generator) {
             return Ok(IteratorCopy::Unpicklable("generator"));
         }
@@ -161,7 +161,7 @@ pub(crate) fn copy_provider_iterator(
 fn expect_state<T: 'static>(state: &dyn std::any::Any) -> Result<&T> {
     state
         .downcast_ref::<T>()
-        .ok_or_else(|| PyError::Runtime("invalid iterator state".to_string()))
+        .ok_or_else(|| PyError::runtime("invalid iterator state".to_string()))
 }
 
 fn rebuilt<T: 'static>(state: T) -> IteratorCopy {

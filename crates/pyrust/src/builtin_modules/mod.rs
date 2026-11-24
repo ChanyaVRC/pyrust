@@ -45,7 +45,7 @@ fn publish_exec_dunder_all(
 ) -> crate::error::Result<()> {
     use pyrust_core::PyKey;
     let dict = exec_ns.as_dict().ok_or_else(|| {
-        crate::error::PyError::Runtime("injected module exec namespace not a dict".into())
+        crate::error::PyError::runtime("injected module exec namespace not a dict".into())
     })?;
     if let Some(all) = dict.get(&PyKey::str_from("__all__")) {
         module

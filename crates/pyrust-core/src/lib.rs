@@ -44,7 +44,7 @@ pub use environment::{
     CellSlot, EnvRef, EnvValues, Environment, EnvironmentStorage, NameSet,
     NamespaceFastLocalCacheSource, NamespaceMirrorGuard, namespace_name_interest_mask,
 };
-pub use errors::{PyError, Result};
+pub use errors::{PyError, PyErrorKind, Result};
 pub use numeric_ops::{
     NumericBinOp, NumericCmpOp, NumericOps, NumericSlot, NumericUnaryOp, bigint_divmod_floor,
     bigint_float_cmp, bigint_float_eq, bigint_to_float_or_overflow, dispatch_numeric_binop,

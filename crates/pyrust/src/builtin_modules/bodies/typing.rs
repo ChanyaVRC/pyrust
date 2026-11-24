@@ -322,7 +322,7 @@ pyrust_module! {
             .get("_origin")
             .cloned()
             .ok_or_else(|| {
-                PyError::Runtime("typing._GenericAlias has no origin".to_string())
+                PyError::runtime("typing._GenericAlias has no origin".to_string())
             })?;
         Ok(Value::tuple(vec![origin]))
     }
@@ -620,7 +620,7 @@ pyrust_module! {
 fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
         Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
-        _ => Err(PyError::Runtime(format!(
+        _ => Err(PyError::runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
     }

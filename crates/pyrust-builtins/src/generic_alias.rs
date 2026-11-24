@@ -130,7 +130,7 @@ impl<const TYPING_UNION: bool> BuiltinTypeOps for GenericAliasOps<TYPING_UNION> 
         let borrow = state.borrow();
         let alias = borrow
             .downcast_ref::<GenericAliasState>()
-            .ok_or_else(|| pyrust_core::PyError::Runtime("invalid GenericAlias state".into()))?;
+            .ok_or_else(|| pyrust_core::PyError::runtime("invalid GenericAlias state".into()))?;
         Ok(Value::tuple(vec![alias.origin.clone()]))
     }
 
@@ -232,12 +232,12 @@ pub fn render_generic_alias_with<C>(
     render_module_str: fn(&mut C, &Value) -> pyrust_core::Result<String>,
 ) -> pyrust_core::Result<String> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
-        return Err(pyrust_core::PyError::Runtime(
+        return Err(pyrust_core::PyError::runtime(
             "expected GenericAlias value".to_string(),
         ));
     };
     let Some(typing_union) = generic_alias_ops_kind(ops) else {
-        return Err(pyrust_core::PyError::Runtime(
+        return Err(pyrust_core::PyError::runtime(
             "expected GenericAlias value".to_string(),
         ));
     };
@@ -245,7 +245,7 @@ pub fn render_generic_alias_with<C>(
         let borrow = state.borrow();
         let alias = borrow
             .downcast_ref::<GenericAliasState>()
-            .ok_or_else(|| pyrust_core::PyError::Runtime("invalid GenericAlias state".into()))?;
+            .ok_or_else(|| pyrust_core::PyError::runtime("invalid GenericAlias state".into()))?;
         (alias.origin.clone(), alias.args.clone())
     };
     render_generic_alias_parts(

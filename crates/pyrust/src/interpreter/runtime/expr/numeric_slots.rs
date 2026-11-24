@@ -199,7 +199,7 @@ fn rewrite_aug_operand_error(op: BinaryOp, err: PyError) -> PyError {
     let Some((base, aug)) = aug_operand_symbols(op) else {
         return err;
     };
-    let PyError::Named(class, msg) = &err else {
+    let pyrust_core::PyErrorKind::Named(class, msg) = err.kind() else {
         return err;
     };
     if class.as_ref() != "TypeError" {
@@ -294,7 +294,7 @@ fn dispatch_numeric_binop_with_originals(
     let num_op = binary_op_to_numeric(op)?;
     let res = pyrust_core::dispatch_numeric_binop(num_op, coerced_lhs, coerced_rhs)?;
     Some(res.map_err(|err| {
-        if matches!(&err, PyError::Named(cls, _) if cls.as_ref() == "TypeError")
+        if matches!(err.kind(), pyrust_core::PyErrorKind::Named(cls, _) if cls.as_ref() == "TypeError")
             && (matches!(orig_lhs.kind(), ValueKind::PyInstance(_))
                 || matches!(orig_rhs.kind(), ValueKind::PyInstance(_))
                 || orig_lhs.is_bool()

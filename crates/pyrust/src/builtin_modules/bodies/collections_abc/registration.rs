@@ -213,7 +213,7 @@ pub(crate) fn inject_python_members(
     {
         let dict = ns
             .as_dict()
-            .ok_or_else(|| PyError::Runtime("collections.abc: exec namespace not a dict".into()))?;
+            .ok_or_else(|| PyError::runtime("collections.abc: exec namespace not a dict".into()))?;
         for abc in MIXIN_TARGETS {
             if let Some(carrier_val) = dict.get(&PyKey::str_from(abc.name()))
                 && let ValueKind::PyClass(carrier_cls) = carrier_val.kind()

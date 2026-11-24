@@ -301,7 +301,7 @@ impl Interpreter {
                 let origin_class = primitive_class_by_name(type_name)
                     .or_else(|| self.collections_class_by_name(type_name))
                     .ok_or_else(|| {
-                        PyError::Runtime(format!(
+                        PyError::runtime(format!(
                             "internal: unknown class for __class_getitem__: {type_name}"
                         ))
                     })?;

@@ -64,7 +64,7 @@ impl Interpreter {
             && let Some(res) = pyrust_core::dispatch_numeric_compare(cmp_op, &nl, &nr)
         {
             return res.map(Value::bool_).map_err(|err| {
-                if matches!(&err, PyError::Named(cls, _) if cls.as_ref() == "TypeError")
+                if matches!(err.kind(), pyrust_core::PyErrorKind::Named(cls, _) if cls.as_ref() == "TypeError")
                     && (matches!(left.kind(), ValueKind::PyInstance(_))
                         || matches!(right.kind(), ValueKind::PyInstance(_)))
                 {
@@ -91,7 +91,8 @@ impl Interpreter {
         match compare_values_with_op(&left, &right, op_name) {
             Ok(ordering) => Ok(Value::bool_(cmp(ordering))),
             Err(error) => {
-                if !matches!(&error, PyError::Named(class, _) if class.as_ref() == "TypeError") {
+                if !matches!(error.kind(), pyrust_core::PyErrorKind::Named(class, _) if class.as_ref() == "TypeError")
+                {
                     return Err(error);
                 }
                 self.richcmp_sequence_binary(&left, &right, op)

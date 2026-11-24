@@ -46,7 +46,7 @@ fn vi_as_fields(val: &Value) -> Result<ViFields> {
     let get_int = |name: &str| -> Result<i64> {
         match borrow.attrs.get(name).map(|v| v.kind()) {
             Some(ValueKind::Int(n)) => Ok(n),
-            _ => Err(PyError::Runtime(format!(
+            _ => Err(PyError::runtime(format!(
                 "version_info missing integer field '{name}'"
             ))),
         }
@@ -54,7 +54,7 @@ fn vi_as_fields(val: &Value) -> Result<ViFields> {
     let get_str = |name: &str| -> Result<String> {
         match borrow.attrs.get(name).map(|v| v.kind()) {
             Some(ValueKind::Str(s)) => Ok(s.to_string()),
-            _ => Err(PyError::Runtime(format!(
+            _ => Err(PyError::runtime(format!(
                 "version_info missing string field '{name}'"
             ))),
         }
@@ -74,7 +74,7 @@ fn vi_as_fields(val: &Value) -> Result<ViFields> {
 /// version_info instance, which the callers convert to `Value::not_implemented()`.
 fn vi_cmp_args(args: &[ExpandedCallArg]) -> Result<Option<(Vec<Value>, Vec<Value>)>> {
     if args.len() < 2 {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "version_info comparison missing argument".to_string(),
         ));
     }
@@ -146,7 +146,7 @@ pub(super) fn version_info_cmp(
 
 pub(super) fn version_info_repr(args: &[ExpandedCallArg]) -> Result<Value> {
     if args.is_empty() {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "version_info_repr() missing self".to_string(),
         ));
     }
@@ -159,7 +159,7 @@ pub(super) fn version_info_repr(args: &[ExpandedCallArg]) -> Result<Value> {
 
 pub(super) fn version_info_getitem(args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() < 2 {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "version_info_getitem() missing index".to_string(),
         ));
     }
@@ -199,7 +199,7 @@ pub(super) fn version_info_getitem(args: &[ExpandedCallArg]) -> Result<Value> {
 
 pub(super) fn version_info_len(args: &[ExpandedCallArg]) -> Result<Value> {
     if args.is_empty() {
-        return Err(PyError::Runtime(
+        return Err(PyError::runtime(
             "version_info_len() missing self".to_string(),
         ));
     }

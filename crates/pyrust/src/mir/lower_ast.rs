@@ -29,7 +29,7 @@ pub fn lower_ast_to_mir(stmts: &[Stmt], linenos: &[u32], filename: &str) -> Resu
         crate::compiler::compile_script_with_linenos(stmts, local_index, false, linenos, filename)?;
     let mir = lower_fncode_to_mir(&fn_code);
     #[cfg(debug_assertions)]
-    verify_mir(&mir).map_err(|e| PyError::Runtime(format!("MIR verifier error: {e}")))?;
+    verify_mir(&mir).map_err(|e| PyError::runtime(format!("MIR verifier error: {e}")))?;
     Ok(mir)
 }
 
@@ -43,7 +43,7 @@ pub fn compile_stmts_to_mir(
     run_mir_passes(&mut mir);
     #[cfg(debug_assertions)]
     verify_mir(&mir)
-        .map_err(|e| PyError::Runtime(format!("MIR verifier error after passes: {e}")))?;
+        .map_err(|e| PyError::runtime(format!("MIR verifier error after passes: {e}")))?;
     Ok(mir)
 }
 
@@ -55,7 +55,7 @@ fn emit_mir_recursive(mir: &MirFn, out: &mut String) -> Result<(), PyError> {
         let mut child_mir = lower_fncode_to_mir(&proto.code);
         #[cfg(debug_assertions)]
         verify_mir(&child_mir).map_err(|e| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "MIR verifier error in '{}' before passes: {e}",
                 proto.qualname
             ))
@@ -63,7 +63,7 @@ fn emit_mir_recursive(mir: &MirFn, out: &mut String) -> Result<(), PyError> {
         run_mir_passes(&mut child_mir);
         #[cfg(debug_assertions)]
         verify_mir(&child_mir).map_err(|e| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "MIR verifier error in '{}' after passes: {e}",
                 proto.qualname
             ))

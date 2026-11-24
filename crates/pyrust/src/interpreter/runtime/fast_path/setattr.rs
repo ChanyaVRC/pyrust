@@ -16,7 +16,7 @@ impl Interpreter {
         let obj_val = vm_read(regs, obj, num_locals)?;
         let val_val = vm_read(regs, val, num_locals)?;
         let name = code.names.get(name_idx as usize).ok_or_else(|| {
-            PyError::Runtime(format!(
+            PyError::runtime(format!(
                 "bytecode error: name index {} out of range (pool size {})",
                 name_idx,
                 code.names.len()

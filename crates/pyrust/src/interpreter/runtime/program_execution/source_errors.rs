@@ -6,9 +6,14 @@
 /// (e.g. `too many levels of indentation`, issue #2221); everything else is a
 /// plain `SyntaxError`.
 pub(crate) fn lex_parse_to_exc(e: PyError) -> PyError {
-    let msg = match e {
-        PyError::Lex(s) | PyError::Parse(s) => s,
-        other => return other,
+    let msg = match e.kind() {
+        pyrust_core::PyErrorKind::Lex(_) | pyrust_core::PyErrorKind::Parse(_) => {
+            match e.into_kind() {
+                pyrust_core::PyErrorKind::Lex(s) | pyrust_core::PyErrorKind::Parse(s) => s,
+                _ => unreachable!(),
+            }
+        }
+        _ => return e,
     };
     if is_indentation_message(&msg) {
         pyrust_core::py_err!("IndentationError", msg)
