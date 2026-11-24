@@ -9,3 +9,4 @@ include!("constant_folding/dead_code.rs");
 include!("constant_folding/unary_folding.rs");
 include!("constant_folding/string_method_folding.rs");
 include!("constant_folding/branch_folding.rs");
+include!("constant_folding/sccp.rs");
