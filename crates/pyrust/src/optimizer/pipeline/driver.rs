@@ -38,6 +38,10 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_str_method_const_fold(insns, &mut consts, &names, num_locals);
 
     let insns = pass_unary_fold(insns, num_locals, &mut consts);
+    // `pass_const_branch_elim` remains as a fast pre-fusion peephole for
+    // adjacent `LoadConst + JumpIf*` / `CmpJump*Const` pairs exposed by
+    // `pass_str_method_const_fold` and `pass_unary_fold`; `pass_sccp` below
+    // handles all cross-block, multi-step, diamond, and post-fusion folding.
     let insns = pass_const_branch_elim(insns, &consts);
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_not_invert(insns, num_locals);
@@ -46,6 +50,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // `not (a == b)`, leaving `BinOp(Eq) + JumpIfTrue` ready to fuse into
     // `CmpJumpIfTrue`).
     let insns = pass_cmpjump_fusion(insns, num_locals);
+    let insns = pass_sccp(insns, &mut consts, num_locals);
     let insns = pass_const_reg_prop(insns, num_locals, &consts);
     let insns = pass_concat_merge(insns, num_locals, &mut num_regs, &consts);
     let insns = pass_exit_inline(insns);
