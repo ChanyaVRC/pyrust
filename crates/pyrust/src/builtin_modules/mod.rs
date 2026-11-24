@@ -440,6 +440,12 @@ pyrust_builtin_modules! {
     // `basicConfig`, and `captureWarnings` — injected from `logging_py.py`
     // backed by a real `std::fs::File` stream helper in `logging.rs`.
     logging @inject,
+    // `unittest` (issue #3153): Python 3.12 unit testing framework (`TestCase`,
+    // `FunctionTestCase`, `IsolatedAsyncioTestCase`, `TestSuite`, `TestLoader`,
+    // `TestResult`, `TextTestResult`, `TextTestRunner`, `TestProgram`/`main`,
+    // skipping/expectedFailure, cleanups, subTest, and `unittest.*` submodules)
+    // injected from `unittest_py.py`.
+    unittest @inject,
 }
 
 include!("finalization.rs");
