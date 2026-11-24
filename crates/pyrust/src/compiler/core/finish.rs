@@ -89,6 +89,7 @@ impl Compiler {
                 || self.has_dead_yield
         };
         let insns = self.insns;
+        crate::bytecode::intern_const_pool(&mut self.consts);
         let global_cache_interest_masks = self
             .names
             .iter()
@@ -98,8 +99,8 @@ impl Compiler {
             insns,
             filename: self.filename,
             qualname: self.qualname,
-            lineno_table: self.lineno_table,
-            col_table: self.col_table,
+            lineno_table: crate::bytecode::LinenoTable::from_dense(&self.lineno_table),
+            col_table: crate::bytecode::ColTable::from_dense(&self.col_table),
             first_lineno: self.first_lineno,
             consts: self.consts,
             names: self.names,

@@ -128,7 +128,7 @@ fn coerce_prefix_arg(v: Value, coerce: fn(Value) -> Value) -> Value {
 /// [`coerce_str_subclass_arg`] (a no-op for the common exact-str / int / None
 /// cases).  For `startswith`/`endswith` the first argument may be a *tuple* of
 /// prefixes; its elements are coerced too.
-pub(crate) fn coerce_str_subclass_method_args(method: &str, mut args: Vec<Value>) -> Vec<Value> {
+pub(crate) fn coerce_str_subclass_method_args(method: &str, args: &mut [Value]) {
     // Hot path: the overwhelmingly common case is exact-str (or int / None)
     // arguments with no `PyInstance` and no tuple to descend into.  Bail out
     // after a single scan so a normal `"x".count("y")` pays nothing beyond it —
@@ -137,7 +137,7 @@ pub(crate) fn coerce_str_subclass_method_args(method: &str, mut args: Vec<Value>
         .iter()
         .any(|a| matches!(a.kind(), ValueKind::PyInstance(_) | ValueKind::Tuple(_)))
     {
-        return args;
+        return;
     }
     let tuple_arg0 = matches!(method, "startswith" | "endswith");
     for (i, a) in args.iter_mut().enumerate() {
@@ -148,7 +148,6 @@ pub(crate) fn coerce_str_subclass_method_args(method: &str, mut args: Vec<Value>
             coerce_str_subclass_arg(taken)
         };
     }
-    args
 }
 
 /// Coerce the positional arguments of a `bytes`/`bytearray` method so

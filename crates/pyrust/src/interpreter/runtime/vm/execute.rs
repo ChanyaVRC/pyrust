@@ -30,7 +30,6 @@ impl Interpreter {
         };
         let mut exc_handlers: ExcHandlersBuf = exc_handlers_init;
         let mut pc: usize = start_pc;
-        let mut cur_line: u32 = pyrust_core::get_current_vm_line();
         let mut pending_inject: Option<PyError> = inject_exc;
 
         let exc_ctx_frame_base: usize = self.handled_exc_stack.len();
@@ -62,7 +61,6 @@ impl Interpreter {
                         regs: &mut regs,
                         cells: &mut cells,
                         pc: &mut pc,
-                        cur_line: &mut cur_line,
                         code_ptr: &mut code_ptr,
                         num_locals: &mut num_locals,
                         iters: &mut iters,
@@ -136,6 +134,7 @@ impl Interpreter {
             macro_rules! vm_yield {
                 ($yielded:expr, $resume_pc:expr, $yield_dst:expr) => {{
                     let __resume_pc = $resume_pc;
+                    let __yield_line = code.line_at(pc.wrapping_sub(1));
                     if self.gen_drive_stack.len() > gen_base
                         && self
                             .gen_drive_stack
@@ -143,14 +142,20 @@ impl Interpreter {
                             .is_some_and(|__g| __g.tramp_floor == self.tramp_stack.len())
                     {
                         let mut __st = unwind_state!();
-                        self.vm_gen_drive_yield($yielded, __resume_pc, $yield_dst, &mut __st);
+                        self.vm_gen_drive_yield(
+                            $yielded,
+                            __resume_pc,
+                            $yield_dst,
+                            __yield_line,
+                            &mut __st,
+                        );
                         continue 'vm;
                     }
                     return Ok(self.vm_native_yield(
                         $yielded,
                         __resume_pc,
                         $yield_dst,
-                        cur_line,
+                        __yield_line,
                         exc_ctx_frame_base,
                         exc_saved_active_frame_base,
                         &mut iters,
@@ -165,7 +170,7 @@ impl Interpreter {
             }
             macro_rules! jump_pc {
                 ($offset:expr) => {
-                    match vm_jump_pc(pc, $offset, code.insns.len(), cur_line) {
+                    match vm_jump_pc(pc, $offset, code) {
                         Ok(__pc) => __pc,
                         Err(__err) => {
                             if self.tramp_stack.len() > tramp_base
@@ -180,10 +185,7 @@ impl Interpreter {
             }
             macro_rules! cond_jump {
                 ($cond:expr, $want:expr, $offset:expr) => {{
-                    if let Some(c) = regs[$cond as usize]
-                        .as_some()
-                        .and_then(try_scalar_truthiness_fast)
-                    {
+                    if let Some(c) = try_scalar_truthiness_fast(&regs[$cond as usize]) {
                         if c == $want {
                             pc = jump_pc!($offset);
                         }
@@ -233,7 +235,6 @@ impl Interpreter {
                     e,
                     code,
                     pc,
-                    cur_line,
                     &mut exc_handlers,
                     exc_ctx_frame_base,
                 ) {
@@ -248,28 +249,18 @@ impl Interpreter {
                 if pc == code.insns.len() {
                     tramp_return!(Value::none());
                 }
-                let err = vm_oob_pc_err(pc, code.insns.len(), cur_line);
+                let err = vm_oob_pc_err(pc, code);
                 if self.tramp_stack.len() > tramp_base || self.gen_drive_stack.len() > gen_base {
                     tramp_unwind_err!(err);
                 }
                 return Err(err);
             };
-            if let Some(&ln) = code.lineno_table.get(pc)
-                && ln != 0
-            {
-                cur_line = ln;
-            }
             pc += 1;
 
             match insn {
                 // ── Hot loads & moves ────────────────────────────────────
                 Insn::LoadConst(dst, idx) => {
-                    let cv = pool_get!(code.consts, *idx, "const");
-                    regs[*dst as usize] = match cv.kind() {
-                        ValueKind::Int(n) => Value::int(n),
-                        ValueKind::Str(s) => intern_string_value(s, cv),
-                        _ => cv.clone(),
-                    };
+                    regs[*dst as usize] = pool_get!(code.consts, *idx, "const").clone();
                 }
                 Insn::LoadGlobal(dst, name_idx) => {
                     regs[*dst as usize] = vm_try!(self.load_global_cached(code, *name_idx));
@@ -457,7 +448,6 @@ impl Interpreter {
                             Value::user_function(f),
                             code,
                             pc - 1,
-                            cur_line,
                             PositionalCallCacheProbe::Probed(BuiltinCallProbe::Uncacheable),
                         ));
                         continue 'vm;
@@ -528,7 +518,6 @@ impl Interpreter {
                         func_val,
                         code,
                         pc - 1,
-                        cur_line,
                         PositionalCallCacheProbe::Probed(cache_probe),
                     ));
                 }
@@ -575,7 +564,6 @@ impl Interpreter {
                         *nargs,
                         code,
                         pc - 1,
-                        cur_line,
                     );
                     regs[*dst as usize] = vm_try!(r);
                 }
@@ -638,7 +626,6 @@ impl Interpreter {
                     &mut regs,
                     cells,
                     pc,
-                    cur_line,
                     num_locals,
                     exc_ctx_frame_base,
                     exc_saved_active_frame_base,

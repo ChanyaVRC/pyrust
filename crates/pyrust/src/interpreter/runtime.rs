@@ -386,10 +386,10 @@ mod execution {
         ItersBuf, KwCallMappingMerge, LoopIteratorAdvance, MemoKey, PyError, Rc, RegSlice, Result,
         Value, ValueKind, VmFrameCache, VmFrameView, bump_global_struct_version, call_depth,
         callable_error_name, duplicate_keyword_error, extract_stop_iteration_value,
-        initialize_typevar_attr, intern_string_value, is_stop_iteration_error,
-        keyword_mapping_operand_error, lookup_class_attr, make_slice_value,
-        make_type_alias_from_syntax, make_type_param_from_syntax, max_call_depth,
-        star_operand_error, unbound_binding_error, value_class_object, value_type_name_str,
+        initialize_typevar_attr, is_stop_iteration_error, keyword_mapping_operand_error,
+        lookup_class_attr, make_slice_value, make_type_alias_from_syntax,
+        make_type_param_from_syntax, max_call_depth, star_operand_error, unbound_binding_error,
+        value_class_object, value_type_name_str,
     };
     include!("runtime/vm.rs");
     include!("runtime/vm/tests.rs");

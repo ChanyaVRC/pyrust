@@ -21,6 +21,198 @@ use super::{
 /// initial [`FnCode`] is built.
 pub(crate) const MAX_FRAME_REGS: u32 = 1 << 20;
 
+/// Intern eligible short string constants in a finalized `FnCode::consts` pool
+/// once at build time so `Insn::LoadConst` reduces to a direct `Value::clone`
+/// without per-execution TLS `RefCell` borrows or `HashMap` lookups (#3157).
+pub(crate) fn intern_const_pool(consts: &mut [Value]) {
+    for cv in consts.iter_mut() {
+        if let Some(s) = cv.as_str() {
+            *cv = pyrust_core::intern_string_value(s, cv);
+        }
+    }
+}
+
+/// Run-length-encoded source line table for a [`FnCode`].
+///
+/// Stores ascending `(start_pc, line)` runs in a tight boxed slice: `line`
+/// applies from `start_pc` until the next entry's `start_pc` (or the end of
+/// `insns`).  Empty (0 heap bytes) when no line information is present.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LinenoTable(Box<[(u32, u32)]>);
+
+impl LinenoTable {
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn empty() -> Self {
+        Self(Box::new([]))
+    }
+
+    /// Compress a dense per-instruction line array (where `0` means "same as
+    /// the previous instruction") into minimal `(start_pc, line)` runs.
+    pub(crate) fn from_dense(dense: &[u32]) -> Self {
+        let mut runs: Vec<(u32, u32)> = Vec::new();
+        let mut current = 0u32;
+        for (pc, &ln) in dense.iter().enumerate() {
+            let effective = if ln != 0 { ln } else { current };
+            if effective != current {
+                runs.push((pc as u32, effective));
+                current = effective;
+            }
+        }
+        Self(runs.into_boxed_slice())
+    }
+
+    /// Resolve the 1-based source line at instruction `pc`, or `0` when no
+    /// line information covers `pc`.
+    #[inline]
+    pub(crate) fn line_at(&self, pc: usize) -> u32 {
+        if self.0.is_empty() {
+            return 0;
+        }
+        let pc = pc as u32;
+        let idx = self.0.partition_point(|&(start_pc, _)| start_pc <= pc);
+        if idx == 0 { 0 } else { self.0[idx - 1].1 }
+    }
+
+    /// Expand back into a dense per-instruction `Vec<u32>` of length `len`
+    /// (used only during bytecode optimization / source-mapping remaps).
+    pub(crate) fn to_dense(&self, len: usize) -> Vec<u32> {
+        let mut out = vec![0u32; len];
+        if self.0.is_empty() {
+            return out;
+        }
+        for i in 0..self.0.len() {
+            let (start, line) = self.0[i];
+            let start = (start as usize).min(len);
+            let end = self
+                .0
+                .get(i + 1)
+                .map_or(len, |&(next_start, _)| (next_start as usize).min(len));
+            out[start..end].fill(line);
+        }
+        out
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.0.len() * std::mem::size_of::<(u32, u32)>()
+    }
+}
+
+/// Sparse PEP 657 caret-anchor table for a [`FnCode`].
+///
+/// Only instructions with a non-zero [`crate::ast::CaretSpan`] are stored,
+/// sorted by `pc`.  Uses 12-byte `(pc, [u16; 4])` entries whenever every column
+/// offset fits in `u16`, falling back to full 20-byte `(pc, CaretSpan)` entries
+/// for lines exceeding 65,535 columns.  Allocates 0 heap bytes when empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum ColTable {
+    #[default]
+    Empty,
+    Compact(Box<[(u32, [u16; 4])]>),
+    Wide(Box<[(u32, crate::ast::CaretSpan)]>),
+}
+
+impl ColTable {
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn empty() -> Self {
+        Self::Empty
+    }
+
+    /// Compress a dense per-instruction caret-span array into sparse entries,
+    /// omitting all `(0, 0, 0, 0)` unanchored slots.
+    pub(crate) fn from_dense(dense: &[crate::ast::CaretSpan]) -> Self {
+        let mut count = 0usize;
+        let mut needs_wide = false;
+        for &(a, b, c, d) in dense {
+            if (a, b, c, d) != (0, 0, 0, 0) {
+                count += 1;
+                if (a | b | c | d) > u32::from(u16::MAX) {
+                    needs_wide = true;
+                }
+            }
+        }
+        if count == 0 {
+            return Self::Empty;
+        }
+        if needs_wide {
+            let mut entries = Vec::with_capacity(count);
+            for (pc, &span) in dense.iter().enumerate() {
+                if span != (0, 0, 0, 0) {
+                    entries.push((pc as u32, span));
+                }
+            }
+            Self::Wide(entries.into_boxed_slice())
+        } else {
+            let mut entries = Vec::with_capacity(count);
+            for (pc, &(a, b, c, d)) in dense.iter().enumerate() {
+                if (a, b, c, d) != (0, 0, 0, 0) {
+                    entries.push((pc as u32, [a as u16, b as u16, c as u16, d as u16]));
+                }
+            }
+            Self::Compact(entries.into_boxed_slice())
+        }
+    }
+
+    /// Resolve the PEP 657 caret anchor at instruction `pc`, if present.
+    #[inline]
+    pub(crate) fn col_at(&self, pc: usize) -> Option<crate::ast::CaretSpan> {
+        let pc = pc as u32;
+        match self {
+            Self::Empty => None,
+            Self::Compact(entries) => entries
+                .binary_search_by_key(&pc, |&(entry_pc, _)| entry_pc)
+                .ok()
+                .map(|idx| {
+                    let [a, b, c, d] = entries[idx].1;
+                    (u32::from(a), u32::from(b), u32::from(c), u32::from(d))
+                }),
+            Self::Wide(entries) => entries
+                .binary_search_by_key(&pc, |&(entry_pc, _)| entry_pc)
+                .ok()
+                .map(|idx| entries[idx].1),
+        }
+    }
+
+    /// Expand back into a dense per-instruction `Vec<CaretSpan>` of length
+    /// `len` (used only during bytecode optimization / source-mapping remaps).
+    pub(crate) fn to_dense(&self, len: usize) -> Vec<crate::ast::CaretSpan> {
+        let mut out = vec![(0, 0, 0, 0); len];
+        match self {
+            Self::Empty => {}
+            Self::Compact(entries) => {
+                for &(pc, [a, b, c, d]) in entries.iter() {
+                    if let Some(slot) = out.get_mut(pc as usize) {
+                        *slot = (u32::from(a), u32::from(b), u32::from(c), u32::from(d));
+                    }
+                }
+            }
+            Self::Wide(entries) => {
+                for &(pc, span) in entries.iter() {
+                    if let Some(slot) = out.get_mut(pc as usize) {
+                        *slot = span;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::Compact(entries) => entries.len() * std::mem::size_of::<(u32, [u16; 4])>(),
+            Self::Wide(entries) => {
+                entries.len() * std::mem::size_of::<(u32, crate::ast::CaretSpan)>()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FnCode {
     pub(crate) insns: Vec<Insn>,
@@ -35,25 +227,12 @@ pub struct FnCode {
     /// runtime `__qualname__` reassignment on a function, generator, coroutine,
     /// or async generator (issue #2981).
     pub(crate) qualname: std::sync::Arc<str>,
-    /// 1-based source line number for each instruction, parallel to `insns`.
-    /// A value of 0 means "unknown / same as the previous instruction".  Set by
-    /// the compiler when per-statement line information is available (i.e. when
-    /// the script was compiled with line tracking enabled).  Used by the VM to
-    /// update the current-line counter when building tracebacks.
-    pub(crate) lineno_table: Vec<u32>,
-    /// PEP 657 caret anchor for each instruction, parallel to `insns`
-    /// (issues #2426 / #2411).  Each entry is
-    /// `(full_start, prim_start, prim_end, full_end)` (see
-    /// [`crate::ast::CaretSpan`]); `(0, 0, 0, 0)` means "no anchor" — the
-    /// formatter then omits the caret row.  Populated by the compiler only for
-    /// the highest-value expression forms (bare-name `Var` loads, calls, binary
-    /// ops, subscripts); all other entries are `(0, 0, 0, 0)`.  Read **only on
-    /// the error path** (when an exception escapes a frame), so it never touches
-    /// the per-instruction hot path.
-    ///
-    /// Offsets are 0-based char columns within the raising instruction's source
-    /// line (the `lineno_table` line), measured against the original line text.
-    pub(crate) col_table: Vec<crate::ast::CaretSpan>,
+    /// Compressed RLE 1-based source line table, queried lazily via
+    /// [`FnCode::line_at`] on cold error/yield/introspection paths (#3157).
+    pub(crate) lineno_table: LinenoTable,
+    /// Sparse PEP 657 caret-anchor table (issues #2426 / #2411 / #3157),
+    /// queried lazily via [`FnCode::col_at`] on the error path.
+    pub(crate) col_table: ColTable,
     /// 1-based source line of the `def`/`lambda` that produced this code object
     /// — the function's `co_firstlineno`.  `0` for the module-level `<module>`
     /// code or when no line information is available.  Set by the compiler from
@@ -218,6 +397,18 @@ pub struct FnCode {
 }
 
 impl FnCode {
+    /// Resolve the 1-based source line at instruction `pc`, or `0` if none.
+    #[inline]
+    pub(crate) fn line_at(&self, pc: usize) -> u32 {
+        self.lineno_table.line_at(pc)
+    }
+
+    /// Resolve the PEP 657 caret span at instruction `pc`, if anchored.
+    #[inline]
+    pub(crate) fn col_at(&self, pc: usize) -> Option<crate::ast::CaretSpan> {
+        self.col_table.col_at(pc)
+    }
+
     /// Own cell slots defined by this function (`0..own_cell_count`, sorted).
     #[inline]
     pub(crate) fn own_cell_slots(&self) -> &[CellSlotMeta] {
@@ -269,3 +460,79 @@ fn collect_env_read_names(fncode: &FnCode, seen: &mut HashSet<Symbol>, out: &mut
 }
 
 pub(crate) use crate::optimizer::EXC_NO_HANDLER;
+
+#[cfg(test)]
+mod debug_table_tests {
+    use super::{ColTable, LinenoTable};
+
+    #[test]
+    fn lineno_table_rle_roundtrip_and_binary_search() {
+        let empty = LinenoTable::from_dense(&[0, 0, 0, 0]);
+        assert_eq!(empty.heap_bytes(), 0);
+        for pc in 0..6 {
+            assert_eq!(empty.line_at(pc), 0);
+        }
+        assert_eq!(empty.to_dense(4), vec![0, 0, 0, 0]);
+
+        // Leading zeros, consecutive runs, interior zero inheriting prior line,
+        // and non-monotonic line jumps (loop/inlining).
+        let dense = vec![0, 0, 5, 5, 0, 7, 7, 7, 3, 0, 12];
+        let table = LinenoTable::from_dense(&dense);
+        assert_eq!(
+            table.heap_bytes(),
+            4 * std::mem::size_of::<(u32, u32)>(),
+            "expected exactly 4 RLE runs (lines 5, 7, 3, 12)"
+        );
+        let expected = vec![0, 0, 5, 5, 5, 7, 7, 7, 3, 3, 12];
+        for (pc, &exp) in expected.iter().enumerate() {
+            assert_eq!(table.line_at(pc), exp, "mismatch at pc={pc}");
+        }
+        // Out-of-bounds PC past the last run resolves to the final run's line.
+        assert_eq!(table.line_at(999), 12);
+        assert_eq!(table.to_dense(dense.len()), expected);
+    }
+
+    #[test]
+    fn col_table_sparse_compact_and_wide_roundtrip() {
+        let empty = ColTable::from_dense(&[(0, 0, 0, 0); 10]);
+        assert_eq!(empty.heap_bytes(), 0);
+        assert_eq!(empty.col_at(0), None);
+        assert_eq!(empty.col_at(5), None);
+        assert_eq!(empty.to_dense(4), vec![(0, 0, 0, 0); 4]);
+
+        // Compact (u16) sparse anchors.
+        let mut dense = vec![(0, 0, 0, 0); 12];
+        dense[2] = (4, 4, 9, 9);
+        dense[7] = (0, 2, 5, 10);
+        dense[11] = (100, 102, 105, 110);
+        let compact = ColTable::from_dense(&dense);
+        assert!(matches!(compact, ColTable::Compact(_)));
+        assert_eq!(
+            compact.heap_bytes(),
+            3 * std::mem::size_of::<(u32, [u16; 4])>()
+        );
+        assert!(compact.heap_bytes() < dense.len() * std::mem::size_of::<crate::ast::CaretSpan>());
+        for (pc, &span) in dense.iter().enumerate() {
+            let expected = (span != (0, 0, 0, 0)).then_some(span);
+            assert_eq!(compact.col_at(pc), expected, "compact mismatch at pc={pc}");
+        }
+        assert_eq!(compact.col_at(999), None);
+        assert_eq!(compact.to_dense(dense.len()), dense);
+
+        // Wide (u32) fallback for lines wider than u16::MAX columns.
+        let mut wide_dense = vec![(0, 0, 0, 0); 5];
+        wide_dense[1] = (4, 4, 9, 9);
+        wide_dense[3] = (70_000, 70_005, 70_010, 70_020);
+        let wide = ColTable::from_dense(&wide_dense);
+        assert!(matches!(wide, ColTable::Wide(_)));
+        assert_eq!(
+            wide.heap_bytes(),
+            2 * std::mem::size_of::<(u32, crate::ast::CaretSpan)>()
+        );
+        for (pc, &span) in wide_dense.iter().enumerate() {
+            let expected = (span != (0, 0, 0, 0)).then_some(span);
+            assert_eq!(wide.col_at(pc), expected, "wide mismatch at pc={pc}");
+        }
+        assert_eq!(wide.to_dense(wide_dense.len()), wide_dense);
+    }
+}

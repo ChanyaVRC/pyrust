@@ -251,13 +251,13 @@ impl Interpreter {
                         let prelen = backing.dict_with(|d| d.len()).unwrap_or(0);
                         pyrust_builtins::ordered_mapping::note_clear(id, prelen);
                     }
-                    self.call_dict_method_resolved(resolved, backing, args_vec, kw)
+                    self.call_dict_method_resolved(resolved, backing, args_vec.into(), kw)
                 }
                 BkKind::List => self.dispatch_builtin_container_method(
                     BuiltinContainerKind::List,
                     backing,
                     method,
-                    args_vec,
+                    args_vec.into(),
                     kw,
                     false,
                 ),
@@ -277,7 +277,7 @@ impl Interpreter {
                     BuiltinContainerKind::Tuple,
                     backing,
                     method,
-                    args_vec,
+                    args_vec.into(),
                     kw,
                     false,
                 ),
@@ -321,7 +321,7 @@ impl Interpreter {
                             BuiltinContainerKind::Str,
                             backing,
                             method,
-                            args_vec,
+                            args_vec.into(),
                             kw,
                             false,
                         )

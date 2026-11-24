@@ -218,7 +218,6 @@ impl Interpreter {
         kwnames_idx: u16,
         code: &crate::bytecode::FnCode,
         call_site_pc: usize,
-        _cur_line: u32,
     ) -> Result<Value> {
         use crate::bytecode::{KwCallCacheEntry, KwCallSimpleCache};
         let total = total as u32;

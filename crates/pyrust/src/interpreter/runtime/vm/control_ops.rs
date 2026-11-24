@@ -13,10 +13,11 @@ enum ColdInsnOutcome {
 
 /// Compute a validated relative jump target PC.
 #[inline(always)]
-fn vm_jump_pc(pc: usize, offset: i32, insns_len: usize, cur_line: u32) -> Result<usize> {
+fn vm_jump_pc(pc: usize, offset: i32, code: &crate::bytecode::FnCode) -> Result<usize> {
+    let insns_len = code.insns.len();
     let new_pc = pc as i64 + offset as i64;
     if new_pc < 0 || new_pc as usize > insns_len {
-        pyrust_core::set_current_vm_line(cur_line);
+        pyrust_core::set_current_vm_line(code.line_at(pc.wrapping_sub(1)));
         return Err(PyError::runtime(format!(
             "internal error: jump to invalid PC {} (insns len {})",
             new_pc, insns_len
@@ -27,11 +28,12 @@ fn vm_jump_pc(pc: usize, offset: i32, insns_len: usize, cur_line: u32) -> Result
 
 #[cold]
 #[inline(never)]
-fn vm_oob_pc_err(pc: usize, insns_len: usize, cur_line: u32) -> PyError {
-    pyrust_core::set_current_vm_line(cur_line);
+fn vm_oob_pc_err(pc: usize, code: &crate::bytecode::FnCode) -> PyError {
+    pyrust_core::set_current_vm_line(code.line_at(pc.wrapping_sub(1)));
     PyError::runtime(format!(
         "internal error: PC {} out of bounds (insns len {})",
-        pc, insns_len
+        pc,
+        code.insns.len()
     ))
 }
 
@@ -462,23 +464,20 @@ impl Interpreter {
         st: &mut UnwindState,
     ) -> UnwindOutcome {
         let raise_pc = (*st.pc).wrapping_sub(1);
-        let insn_col_span = code
-            .col_table
-            .get(raise_pc)
-            .copied()
-            .filter(|&s| s != (0, 0, 0, 0));
+        let insn_col_span = code.col_at(raise_pc);
         let col_span = match self.cold.inlined_comp_escaped_span.take() {
             Some(comp_span) => comp_span.or(insn_col_span),
             None => insn_col_span,
         };
         pyrust_core::set_current_vm_col_span(col_span);
+        let raise_line = code.line_at(raise_pc);
         match self.handle_vm_error(
             err,
             st.exc_handlers,
             st.exc_ctx_frame_base,
             &code.exc_table,
             raise_pc,
-            *st.cur_line,
+            raise_line,
         ) {
             Ok(h) => {
                 if !Rc::ptr_eq(&self.env, frame_base_env) {
@@ -500,16 +499,15 @@ impl Interpreter {
         err: PyError,
         code: &crate::bytecode::FnCode,
         pc: usize,
-        cur_line: u32,
         exc_handlers: &mut ExcHandlersBuf,
         exc_ctx_frame_base: usize,
     ) -> UnwindOutcome {
         let inject_pc = pc.wrapping_sub(1);
-        let inject_col = code
-            .col_table
-            .get(inject_pc)
-            .copied()
-            .filter(|&s| s != (0, 0, 0, 0));
+        let inject_col = code.col_at(inject_pc);
+        let inject_line = match code.line_at(inject_pc) {
+            0 => pyrust_core::get_current_vm_line(),
+            ln => ln,
+        };
         pyrust_core::set_current_vm_col_span(inject_col);
         match self.handle_vm_error(
             err,
@@ -517,11 +515,11 @@ impl Interpreter {
             exc_ctx_frame_base,
             &code.exc_table,
             inject_pc,
-            cur_line,
+            inject_line,
         ) {
             Ok(h) => UnwindOutcome::Resume(h),
             Err(escaped) => {
-                pyrust_core::set_current_vm_line(cur_line);
+                pyrust_core::set_current_vm_line(inject_line);
                 pyrust_core::set_current_vm_col_span(inject_col);
                 UnwindOutcome::Escape(escaped)
             }

@@ -25,7 +25,9 @@ pub(crate) use de_ssa::emit_parallel_copies;
 
 use std::cell::RefCell;
 
-use crate::bytecode::{FnCode, MAX_FRAME_REGS, SiteCache, SparsePcCache};
+use crate::bytecode::{
+    ColTable, FnCode, LinenoTable, MAX_FRAME_REGS, SiteCache, SparsePcCache, intern_const_pool,
+};
 
 use super::ir::MirFn;
 use super::verify::DominatorTree;
@@ -37,7 +39,8 @@ use regalloc::allocate_ssa_registers;
 pub fn lower_mir_to_fncode(func: &MirFn) -> FnCode {
     let dom = DominatorTree::compute(func);
     let alloc = allocate_ssa_registers(func, &dom);
-    let emitted = emit_mir_bytecode(func, &dom, alloc);
+    let mut emitted = emit_mir_bytecode(func, &dom, alloc);
+    intern_const_pool(&mut emitted.consts);
 
     let num_regs = (emitted.max_reg_used + 1)
         .max(func.num_locals)
@@ -52,8 +55,8 @@ pub fn lower_mir_to_fncode(func: &MirFn) -> FnCode {
         insns: emitted.insns,
         filename: func.filename.clone(),
         qualname: func.qualname.clone(),
-        lineno_table: emitted.lineno_table,
-        col_table: emitted.col_table,
+        lineno_table: LinenoTable::from_dense(&emitted.lineno_table),
+        col_table: ColTable::from_dense(&emitted.col_table),
         first_lineno: func.first_lineno,
         consts: emitted.consts,
         names: func.names.clone(),

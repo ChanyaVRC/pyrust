@@ -30,8 +30,8 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let mut consts = code.consts;
     let names = code.names;
     let original_insns = code.insns.clone();
-    let original_linenos = code.lineno_table.clone();
-    let original_cols = code.col_table.clone();
+    let original_linenos = code.lineno_table.to_dense(original_insns.len());
+    let original_cols = code.col_table.to_dense(original_insns.len());
     // Python function bindings and frames are observable through live namespace
     // aliases and re-entrant protocols. Keep calls explicit unless a future
     // guarded optimizer carries binding identity and frame-observability facts.
@@ -129,15 +129,16 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         &insns,
         source_prefix_len,
     );
-    let (insns, consts) = pass_compact_consts(insns, consts);
+    let (insns, mut consts) = pass_compact_consts(insns, consts);
+    crate::bytecode::intern_const_pool(&mut consts);
 
     let global_cache_interest_masks = code.global_cache_interest_masks;
     FnCode {
         insns,
         filename: code.filename,
         qualname: code.qualname,
-        lineno_table,
-        col_table,
+        lineno_table: crate::bytecode::LinenoTable::from_dense(&lineno_table),
+        col_table: crate::bytecode::ColTable::from_dense(&col_table),
         first_lineno: code.first_lineno,
         consts,
         names,

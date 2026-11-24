@@ -409,7 +409,8 @@ impl Value {
                 ptr,
                 OpaqueSlot {
                     strong: Cell::new(1),
-                    value: o,
+                    weak: Cell::new(1),
+                    value: std::mem::ManuallyDrop::new(o),
                 },
             )
         };

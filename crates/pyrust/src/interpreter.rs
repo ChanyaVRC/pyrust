@@ -14,7 +14,7 @@ use crate::value::{
     EnvRef, Environment, GeneratorCell, GeneratorKind, InstanceAttrs, ModuleMutationState,
     PyBigInt, PyBigIntSign, PyClass, PyDict, PyInstance, PyKey, PyModule, PyPow, PySet,
     PyToPrimitive, PyZero, StrKey, UserFunction, UserFunctionKind, UserFunctionParam, Value,
-    ValueKind, i64_range_native_cursor_safe, intern_string, intern_string_value, range_len,
+    ValueKind, i64_range_native_cursor_safe, intern_string, range_len,
 };
 use pyrust_core::CollectionMutationState;
 

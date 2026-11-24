@@ -84,14 +84,22 @@ pub enum ValueKind<'a> {
 ///
 /// `Value` itself remains one NaN-boxed word.  Clones point at the same slot and
 /// increment `strong`, avoiding both a slab allocation and a clone of the
-/// `Opaque` enum (including its nested `Value`s).  Values are confined to the
-/// interpreter thread (opaque variants contain `Rc` and the slab pool in
-/// [`crate::pool`] is thread-local), so a non-atomic `Cell` matches the
-/// existing ownership model.
+/// `Opaque` enum (including its nested `Value`s).  A paired `weak` counter
+/// (initialized to `1` for the implicit weak reference collectively owned by
+/// live strong references, matching `std::rc::Rc`) lets [`WeakValueCache`] hold
+/// a non-owning reference to the existing slot and upgrade back to a `Value`
+/// with zero slab allocations while still dropping `value` immediately when
+/// `strong` reaches zero.  Packing `strong` and `weak` into two `u32` fields
+/// keeps `OpaqueSlot` at its existing 40-byte size.
+///
+/// Values are confined to the interpreter thread (opaque variants contain `Rc`
+/// and the slab pool in [`crate::pool`] is thread-local), so non-atomic `Cell`s
+/// match the existing ownership model.
 #[repr(C)]
 struct OpaqueSlot {
-    strong: Cell<usize>,
-    value: Opaque,
+    strong: Cell<u32>,
+    weak: Cell<u32>,
+    value: std::mem::ManuallyDrop<Opaque>,
 }
 
 #[inline(always)]

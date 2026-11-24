@@ -500,7 +500,6 @@ impl Interpreter {
             exit_pc,
             dst,
             saved_base: *st.tramp_active_base,
-            saved_cur_line: *st.cur_line,
             saved_code_ptr: *st.code_ptr,
             saved_num_locals: *st.num_locals,
             saved_env: std::mem::replace(&mut self.env, gen_env),
@@ -538,7 +537,7 @@ impl Interpreter {
     #[cold]
     #[inline(never)]
     fn vm_unwind_error(&mut self, mut err: PyError, st: &mut UnwindState) -> UnwindOutcome {
-        let mut line = *st.cur_line;
+        let mut line = unsafe { &**st.code_ptr }.line_at((*st.pc).wrapping_sub(1));
         // PEP 657 caret anchor of the raising instruction (#2411).  The VM
         // published it (before handler dispatch) for the *innermost* frame —
         // the one that actually raised — which is the first frame popped here.
@@ -559,23 +558,16 @@ impl Interpreter {
                 }
                 // PEP 657 stage 2 (#2443): the *caller* of the frame recorded
                 // below raised at its call instruction, whose anchor is
-                // `col_table[saved_pc - 1]` in the caller's code object
-                // (`saved_code_ptr`).  Compute it now and carry it forward as the
-                // next iteration's `innermost_col`, so every trampolined frame —
-                // not just the innermost — claims its own caret.  `saved_pc` is the
-                // caller's resume pc (already advanced past the call), so the
-                // raising instruction's index is `saved_pc - 1`; `(0,0,0,0)` means
-                // "no anchor" and stays caret-free.  SAFETY: `saved_code_ptr`
-                // points at the caller's `FnCode`, kept alive by the caller's
-                // `VmFrameView` / `GenDriveFrame` (or the still-live bottom frame)
-                // until this frame is restored.
-                let caller_call_col = {
+                // `col_at(saved_pc - 1)` in the caller's code object
+                // (`saved_code_ptr`).  Resolve both its caret span and source
+                // line lazily here (#3157).  SAFETY: `saved_code_ptr` points at
+                // the caller's `FnCode`, kept alive by the caller's
+                // `VmFrameView` / `GenDriveFrame` (or the still-live bottom
+                // frame) until this frame is restored.
+                let (caller_call_line, caller_call_col) = {
                     let caller_code: &crate::bytecode::FnCode = unsafe { &*saved.saved_code_ptr };
-                    caller_code
-                        .col_table
-                        .get(saved.saved_pc.wrapping_sub(1))
-                        .copied()
-                        .filter(|&s| s != (0, 0, 0, 0))
+                    let call_pc = saved.saved_pc.wrapping_sub(1);
+                    (caller_code.line_at(call_pc), caller_code.col_at(call_pc))
                 };
                 let tb_lineno = if line == 0 { None } else { Some(line) };
                 let top_is_inlined_comp = self
@@ -635,11 +627,11 @@ impl Interpreter {
                 if callee_is_inlined_comp {
                     innermost_col = innermost_col.or(caller_call_col);
                     if line == 0 {
-                        line = saved.saved_cur_line;
+                        line = caller_call_line;
                     }
                 } else {
                     innermost_col = caller_call_col;
-                    line = saved.saved_cur_line;
+                    line = caller_call_line;
                 }
             }
             if self.gen_drive_stack.len() <= st.gen_base {
@@ -677,7 +669,6 @@ impl Interpreter {
             let foriter_pc = gd.saved_pc.wrapping_sub(1);
             *st.regs = gd.saved_regs;
             *st.cells = gd.saved_cells;
-            line = gd.saved_cur_line;
             *st.code_ptr = gd.saved_code_ptr;
             *st.num_locals = gd.saved_num_locals;
             self.env = gd.saved_env;
@@ -692,6 +683,7 @@ impl Interpreter {
             err = self.pep479_wrap_stop_iteration(err);
             // Re-raise at the consumer's `ForIter` instruction.
             let ccode: &crate::bytecode::FnCode = unsafe { &**st.code_ptr };
+            line = ccode.line_at(foriter_pc);
             // PEP 657: from here on the error belongs to the *consumer*, raised at
             // its `ForIter` — so that instruction's anchor is the consumer's caret.
             // Publish it *before* dispatching, because a handler that catches here
@@ -704,11 +696,7 @@ impl Interpreter {
             // iteration when the error escapes the consumer too (#2443).  `ForIter`
             // carries no span of its own, so this normally clears the anchor —
             // matching CPython, which leaves the `for` frame caret-free.
-            innermost_col = ccode
-                .col_table
-                .get(foriter_pc)
-                .copied()
-                .filter(|&s| s != (0, 0, 0, 0));
+            innermost_col = ccode.col_at(foriter_pc);
             pyrust_core::set_current_vm_col_span(innermost_col);
             match self.handle_vm_error(
                 err,
@@ -719,7 +707,6 @@ impl Interpreter {
                 line,
             ) {
                 Ok(h) => {
-                    *st.cur_line = line;
                     return UnwindOutcome::Resume(h);
                 }
                 Err(e2) => {
@@ -728,7 +715,6 @@ impl Interpreter {
                 }
             }
         }
-        *st.cur_line = line;
         pyrust_core::set_current_vm_line(line);
         // PEP 657 stage 2 (#2443): publish the call-site anchor of the frame that
         // natively entered this trampoline (computed as the last `caller_call_col`

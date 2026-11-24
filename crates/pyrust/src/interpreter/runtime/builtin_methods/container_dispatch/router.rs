@@ -159,7 +159,7 @@ impl Interpreter {
         kind: BuiltinContainerKind,
         receiver: Value,
         method: &str,
-        pos: Vec<Value>,
+        pos: smallvec::SmallVec<[Value; 4]>,
         kw: &PyDict,
         ordered_mapping: bool,
     ) -> Result<Value> {
@@ -227,7 +227,7 @@ impl Interpreter {
                         pyrust_core::type_err!("wrapper {method}() takes no keyword arguments")
                     });
                 }
-                return self.dispatch_builtin_protocol_dunder(method, receiver, pos);
+                return self.dispatch_builtin_protocol_dunder(method, receiver, pos.into_vec());
             }
             // Issue #2070: `__hash__` on an unhashable built-in (list/dict/set/
             // bytearray) resolves to `None` in CPython, so `[1].__hash__()`
@@ -247,13 +247,13 @@ impl Interpreter {
         }
         match kind {
             BuiltinContainerKind::List => {
-                self.dispatch_list_container_method(receiver, method, pos, kw)
+                self.dispatch_list_container_method(receiver, method, pos.into_vec(), kw)
             }
             BuiltinContainerKind::Dict => {
                 self.dispatch_dict_container_method(receiver, method, pos, kw, ordered_mapping)
             }
             BuiltinContainerKind::Tuple => {
-                self.dispatch_tuple_container_method(receiver, method, pos, kw)
+                self.dispatch_tuple_container_method(receiver, method, pos.into_vec(), kw)
             }
             BuiltinContainerKind::Str => {
                 self.dispatch_str_container_method(receiver, method, pos, kw)
@@ -262,7 +262,7 @@ impl Interpreter {
                 self.dispatch_bytes_container_method(receiver, method, pos, kw)
             }
             BuiltinContainerKind::Set => {
-                self.dispatch_set_container_method(receiver, method, pos, kw)
+                self.dispatch_set_container_method(receiver, method, pos.into_vec(), kw)
             }
         }
     }
@@ -287,7 +287,7 @@ impl Interpreter {
             kind,
             backing,
             prim_method,
-            args,
+            args.into(),
             &PyDict::default(),
             ordered,
         )

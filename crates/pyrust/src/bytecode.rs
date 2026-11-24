@@ -21,7 +21,7 @@ pub(crate) use cache::{
     SparsePcCache, global_cache_interest_mask, is_attr_cache_site, is_call_builtin_cache_site,
 };
 pub use code::FnCode;
-pub(crate) use code::{EXC_NO_HANDLER, MAX_FRAME_REGS};
+pub(crate) use code::{ColTable, EXC_NO_HANDLER, LinenoTable, MAX_FRAME_REGS, intern_const_pool};
 pub use function::{
     CaptureSource, CellSlotMeta, CellVar, FnParamSpec, FnProto, compute_param_binds,
     compute_self_bind,

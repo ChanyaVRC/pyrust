@@ -24,7 +24,7 @@ fn equal_valued_const_statements_keep_distinct_linenos() {
         .enumerate()
         .filter_map(|(i, ins)| match ins {
             Insn::BinOp(_, _, BinaryOp::Div, _) | Insn::BinOpConst(_, _, BinaryOp::Div, _, _) => {
-                Some(optimized.lineno_table.get(i).copied().unwrap_or(0))
+                Some(optimized.line_at(i))
             }
             _ => None,
         })
