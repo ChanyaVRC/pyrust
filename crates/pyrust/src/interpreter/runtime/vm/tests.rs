@@ -40,6 +40,7 @@ mod vm_tests {
                 crate::interpreter::CallBuiltinCacheEntry::Empty;
                 n
             ]),
+            cached_code_object: std::cell::RefCell::new(None),
             // Empty: these hand-built test fixtures run unoptimized, so the VM
             // uses the dynamic SetupExcept/PopExcept handler stack.
             exc_table: Vec::new(),

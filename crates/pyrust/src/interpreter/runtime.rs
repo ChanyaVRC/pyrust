@@ -81,13 +81,13 @@ mod calls {
     use super::classes::{PrimitiveLayout, classify_primitive_layout, primitive_layout_for_class};
     use super::{
         CallDepthGuard, EnvRef, ExcHandlersBuf, ExpandedArgBuf, ExpandedCallArg, FnCode, FrameKind,
-        GeneratorFrame, GeneratorKind, HandledExcBuf, HashMap, InstanceAttrs, Interpreter, PyClass,
-        PyDict, PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result, UserFunction,
-        Value, ValueKind, VmFrameView, bind_class_level_method_wrapper, call_depth,
-        call_descriptor_get, call_slot_value_unbound, class_chain_new_slot_wrapped,
-        class_is_subclass_of, invoke_class_method, is_exception_class, is_primitive_class,
-        lookup_class_attr, mapping_entries_for_expansion, max_call_depth, object_class_singleton,
-        slot_is_descriptor, smallvec, type_class_singleton, value_type_name_str,
+        GeneratorFrame, GeneratorKind, HandledExcBuf, InstanceAttrs, Interpreter, PyClass, PyDict,
+        PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result, UserFunction, Value,
+        ValueKind, VmFrameView, bind_class_level_method_wrapper, call_depth, call_descriptor_get,
+        call_slot_value_unbound, class_chain_new_slot_wrapped, class_is_subclass_of,
+        invoke_class_method, is_exception_class, is_primitive_class, lookup_class_attr,
+        mapping_entries_for_expansion, max_call_depth, object_class_singleton, slot_is_descriptor,
+        smallvec, type_class_singleton, value_type_name_str,
     };
     include!("runtime/calls.rs");
 }
@@ -167,9 +167,8 @@ mod collection_keys {
         Interpreter, PyClass, PyDict, PyError, PyKey, PySet, Rc, RefCell, Result, StrKey, Value,
         ValueKind, bind_class_level_method_wrapper, builtin_data_backing, call_descriptor_get,
         call_slot_value_unbound, class_hash_inherits_builtin_none, coerce_numeric,
-        coerce_subclass_backing, invoke_class_method, lookup_class_attr, native_iterator_class,
-        py_hash_bigint, py_hash_float, py_hash_int, range_len, slot_supports_descriptor_get,
-        values_are_identical,
+        coerce_subclass_backing, invoke_class_method, lookup_class_attr, py_hash_bigint,
+        py_hash_float, py_hash_int, range_len, slot_supports_descriptor_get, values_are_identical,
     };
     include!("runtime/collection_keys.rs");
 }

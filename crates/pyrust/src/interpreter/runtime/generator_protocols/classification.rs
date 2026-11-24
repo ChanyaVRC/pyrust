@@ -30,6 +30,21 @@ pub(crate) fn generator_is_running(cell: &Rc<GeneratorCell>) -> bool {
     }
 }
 
+/// True while a generator / coroutine / async generator is paused at a `yield`
+/// or `await` point (CPython's `gi_suspended` / `cr_suspended` / `ag_suspended`).
+///
+/// False before the first resume (`pc == 0`), while the body is actively
+/// executing (`generator_is_running`), and after exhaustion or `close()`
+/// (`frame.done`).
+pub(crate) fn generator_is_suspended(cell: &Rc<GeneratorCell>) -> bool {
+    let Ok(state) = cell.try_borrow() else {
+        return false;
+    };
+    state
+        .downcast_ref::<GeneratorFrame>()
+        .is_some_and(|frame| !frame.done && frame.pc != 0)
+}
+
 /// True when `value` is an async generator (`async def` containing `yield`).
 ///
 /// Reads the same immutable tag as [`is_coroutine_value`].

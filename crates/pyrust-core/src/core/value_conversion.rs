@@ -396,7 +396,15 @@ impl Value {
             ValueKind::SuperProxyUnbound { class, .. } => {
                 format!("<super: <class '{}'>, NULL>", class.borrow().name)
             }
-            ValueKind::Generator(_) => "<generator object>".to_string(),
+            ValueKind::Generator(cell) => {
+                if let Some(kind) = cell.kind().frame_type_name() {
+                    let qualname = cell.qualname().unwrap_or_else(|| "?".into());
+                    let addr = Rc::as_ptr(cell) as usize;
+                    format!("<{kind} object {qualname} at 0x{addr:x}>")
+                } else {
+                    "<generator object>".to_string()
+                }
+            }
             ValueKind::NotImplemented => "NotImplemented".to_string(),
             ValueKind::Bytes(rc) => bytes_repr(rc),
             ValueKind::Complex(re, im) => complex_repr(re, im),

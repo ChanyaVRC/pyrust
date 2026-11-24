@@ -52,6 +52,9 @@ pub(crate) fn apply_format_spec_named(
         if pyrust_core::value_may_exceed_int_str_limit(value) {
             pyrust_core::check_int_str_conversion(value)?;
         }
+        if matches!(value.kind(), ValueKind::Generator(_)) {
+            return Ok(Value::string(generator_repr(value)));
+        }
         return Ok(Value::string(value.to_py_str()));
     }
 
@@ -63,7 +66,7 @@ pub(crate) fn apply_format_spec_named(
     if !value_has_real_format(value) {
         let type_name = owner
             .map(std::borrow::Cow::Borrowed)
-            .unwrap_or_else(|| pyrust_core::builtin_type_name(value));
+            .unwrap_or_else(|| full_type_name_str(value));
         return Err(pyrust_core::type_err!(
             "unsupported format string passed to {}.__format__",
             type_name
@@ -181,11 +184,14 @@ pub(crate) fn apply_format_spec_cached(
         if pyrust_core::value_may_exceed_int_str_limit(value) {
             pyrust_core::check_int_str_conversion(value)?;
         }
+        if matches!(value.kind(), ValueKind::Generator(_)) {
+            return Ok(Value::string(generator_repr(value)));
+        }
         return Ok(Value::string(value.to_py_str()));
     }
 
     if !value_has_real_format(value) {
-        let type_name = pyrust_core::builtin_type_name(value);
+        let type_name = full_type_name_str(value);
         return Err(pyrust_core::type_err!(
             "unsupported format string passed to {}.__format__",
             type_name

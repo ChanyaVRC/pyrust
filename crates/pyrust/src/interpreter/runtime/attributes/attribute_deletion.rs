@@ -242,7 +242,7 @@ impl Interpreter {
                     "'module' object has no attribute '{name}'"
                 ))
             }
-            ValueKind::Generator(_) => {
+            ValueKind::Generator(cell) => {
                 if let Some(iterator_class) = native_iterator_class(&target) {
                     return Err(pyrust_core::py_err!(
                         "AttributeError",
@@ -250,23 +250,45 @@ impl Interpreter {
                         iterator_class.full_type_name()
                     ));
                 }
+                let kind = cell.kind();
+                if kind == pyrust_core::GeneratorKind::Iterator {
+                    let obj_name = crate::interpreter::full_type_name_str(&target);
+                    return Err(pyrust_core::py_err!(
+                        "AttributeError",
+                        "'{obj_name}' object has no attribute '{name}'"
+                    ));
+                }
                 // CPython 3.12 symmetry with assign_attr: deleting __name__ or
-                // __qualname__ raises the same TypeError as assigning a non-string.
-                // The read-only gi_* attrs raise AttributeError "not writable".
-                // Anything else raises AttributeError "has no attribute".
-                match name {
-                    "__name__" | "__qualname__" => Err(pyrust_core::type_err!(
+                // __qualname__ raises the same TypeError as assigning a
+                // non-string.  Read-only introspection slots match CPython
+                // 3.12's exact wording (#2980).
+                let type_name = kind.frame_type_name().unwrap_or("generator");
+                match (kind, name) {
+                    (_, "__name__" | "__qualname__") => Err(pyrust_core::type_err!(
                         "{name} must be set to a string object"
                     )),
-                    "gi_running" | "gi_yieldfrom" | "gi_frame" | "gi_code" => {
-                        Err(pyrust_core::py_err!(
-                            "AttributeError",
-                            "attribute '{name}' of 'generator' objects is not writable"
-                        ))
+                    (pyrust_core::GeneratorKind::Coroutine, "cr_origin")
+                    | (pyrust_core::GeneratorKind::AsyncGenerator, "ag_running") => {
+                        Err(pyrust_core::py_err!("AttributeError", "readonly attribute"))
                     }
+                    (
+                        pyrust_core::GeneratorKind::Generator,
+                        "gi_running" | "gi_suspended" | "gi_yieldfrom" | "gi_frame" | "gi_code",
+                    )
+                    | (
+                        pyrust_core::GeneratorKind::Coroutine,
+                        "cr_running" | "cr_suspended" | "cr_await" | "cr_frame" | "cr_code",
+                    )
+                    | (
+                        pyrust_core::GeneratorKind::AsyncGenerator,
+                        "ag_suspended" | "ag_await" | "ag_frame" | "ag_code",
+                    ) => Err(pyrust_core::py_err!(
+                        "AttributeError",
+                        "attribute '{name}' of '{type_name}' objects is not writable"
+                    )),
                     _ => Err(pyrust_core::py_err!(
                         "AttributeError",
-                        "'generator' object has no attribute '{name}'"
+                        "'{type_name}' object has no attribute '{name}'"
                     )),
                 }
             }

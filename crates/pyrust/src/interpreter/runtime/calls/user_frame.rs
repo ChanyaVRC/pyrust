@@ -55,16 +55,7 @@ impl Interpreter {
             // (When `needs_local_env` is false, `gen_env` ==
             // `function.env` — the GeneratorFrame keeps it alive.)
             let gen_env = std::mem::replace(&mut self.env, previous_env);
-            let gen_qualname = std::sync::Arc::from(function.effective_qualname().as_str());
-            return Ok(Self::build_generator_value(
-                code,
-                regs,
-                gen_env,
-                Rc::clone(&function.local_index),
-                std::sync::Arc::from(&function.name[..]),
-                gen_qualname,
-                function.iterable_coroutine.get(),
-            ));
+            return Ok(Self::build_generator_value(code, regs, gen_env, function));
         }
 
         // Issue #389: publish a view of this function frame so

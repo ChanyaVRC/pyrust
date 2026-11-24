@@ -235,6 +235,7 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
                         "ag_code",
                         "ag_frame",
                         "ag_running",
+                        "ag_suspended",
                         "ag_await",
                     ]
                     .iter()
@@ -248,7 +249,9 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
                         "close",
                         "cr_code",
                         "cr_frame",
+                        "cr_origin",
                         "cr_running",
+                        "cr_suspended",
                         "cr_await",
                     ]
                     .iter()
@@ -265,6 +268,7 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
                         "gi_code",
                         "gi_frame",
                         "gi_running",
+                        "gi_suspended",
                         "gi_yieldfrom",
                     ]
                     .iter()

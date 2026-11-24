@@ -70,6 +70,15 @@ pub struct GeneratorCell {
     iterable_coroutine: bool,
     /// `None` for built-in iterators, which expose no `__name__`.
     names: RefCell<Option<GeneratorNames>>,
+    /// Originating `UserFunction` for Python frame objects (`gi_code` /
+    /// `cr_code` / `ag_code`), kept beside the execution state so code
+    /// introspection remains readable while the body runs and after exhaustion
+    /// or `close()` (#2980).
+    function: Option<Rc<UserFunction>>,
+    /// Stable heap address of the boxed `GeneratorFrame` owned by `state`,
+    /// used to match a currently-running activation against `vm_frame_views`
+    /// without borrowing the checked-out state cell (#2980).
+    frame_ptr: Option<std::ptr::NonNull<()>>,
 }
 
 impl GeneratorCell {
@@ -81,6 +90,16 @@ impl GeneratorCell {
     /// Whether this activation carries `CO_ITERABLE_COROUTINE` semantics.
     pub fn is_iterable_coroutine(&self) -> bool {
         self.iterable_coroutine
+    }
+
+    /// Originating `UserFunction` for a generator / coroutine / async generator.
+    pub fn function(&self) -> Option<&Rc<UserFunction>> {
+        self.function.as_ref()
+    }
+
+    /// Stable heap address of the boxed `GeneratorFrame` payload, if any.
+    pub fn frame_ptr(&self) -> Option<std::ptr::NonNull<()>> {
+        self.frame_ptr
     }
 
     /// The Python-visible `__name__`, or `None` for a built-in iterator.

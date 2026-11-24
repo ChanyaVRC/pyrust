@@ -173,6 +173,10 @@ pub struct FnCode {
     /// skipping the `call_function_expanded` cascade and registry binary search.
     /// See [`crate::interpreter::CallBuiltinCacheEntry`].
     pub(crate) call_builtin_cache: RefCell<Vec<crate::interpreter::CallBuiltinCacheEntry>>,
+    /// Weakly cached `types.CodeType` object for this compiled body so
+    /// repeated `f.__code__`, `g.gi_code`, and `frame.f_code` reads share one
+    /// Python object identity without introducing strong ownership cycles.
+    pub(crate) cached_code_object: RefCell<Option<pyrust_core::WeakValueCache>>,
     /// Zero-cost exception table (CPython 3.11 model).  Parallel to `insns`:
     /// `exc_table[pc]` is the absolute target PC of the innermost `try` handler
     /// active when an exception is raised at `pc`, or [`EXC_NO_HANDLER`] for

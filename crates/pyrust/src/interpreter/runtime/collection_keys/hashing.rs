@@ -190,6 +190,12 @@ fn hash_value(value: &Value) -> Result<i64> {
             let h = func_ptr ^ class_ptr;
             Ok(if h == -1 { -2 } else { h })
         }
+        // Generators, coroutines, async generators, and built-in iterators all
+        // inherit `object.__hash__` (pointer identity) in CPython 3.12 (#2980).
+        ValueKind::Generator(cell) => {
+            let ptr = Rc::as_ptr(cell) as i64;
+            Ok(if ptr == -1 { -2 } else { ptr })
+        }
         // Complex: CPython Objects/complexobject.c complex_hash.
         //
         //   hash_real = _Py_HashDouble(re)  (as Py_uhash_t)
@@ -341,10 +347,6 @@ pub(crate) fn hash_value_with_interp(
                 .expect("mappingproxy must yield proxied value");
             hash_value_with_interp(interp, &proxied)
         }
-        ValueKind::Generator(_) if native_iterator_class(value).is_some() => Ok(value
-            .object_id()
-            .as_int()
-            .expect("object id must be an int")),
         ValueKind::Tuple(items) => {
             // Fast path: if no element at any depth requires the slow path
             // (PyInstance needing __hash__ dispatch, or a slice with unhashable
