@@ -606,6 +606,26 @@ impl Interpreter {
                         m.borrow_mut().insert_attr(attr_name, cached_submodule);
                     }
                 }
+                // Dotted built-in module parent fix-up: importing a submodule
+                // directly (e.g. `importlib.import_module("urllib.parse")` or
+                // `import importlib.util as u`) ensures its built-in parent
+                // package is also loaded in `sys.modules` and has this
+                // submodule bound on it, matching CPython 3.12.
+                if let Some((parent, leaf)) = name.rsplit_once('.')
+                    && crate::builtin_modules::load_builtin_module(parent).is_some()
+                {
+                    let parent_mod = if let Some(cached) = validate_import_cache_entry(
+                        parent,
+                        self.lookup_internal_import_registry(parent),
+                    )? {
+                        cached
+                    } else if let Some(cached) = self.lookup_sys_modules(parent)? {
+                        cached
+                    } else {
+                        self.load_module(parent)?
+                    };
+                    let _ = self.assign_attr(parent_mod, leaf, val.clone());
+                }
                 Ok(())
             })();
             if let Err(error) = initialization {
