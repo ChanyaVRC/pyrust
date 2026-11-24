@@ -363,6 +363,18 @@ pyrust_module! {
             })?;
             return native_iterator_reduce(&self_val, kind);
         }
+        if let ValueKind::PyInstance(rc) = self_val.kind() {
+            let class = Rc::clone(&rc.borrow().class);
+            if lookup_class_attr(&class, "__reduce__").is_some_and(|method| {
+                !crate::interpreter::value_is_canonical_slot(
+                    &method,
+                    crate::interpreter::CanonicalSlot::ObjectReduce,
+                )
+            }) {
+                let reducer = _interp.get_attr(&self_val, "__reduce__")?;
+                return _interp.call_function_expanded(reducer, &[]);
+            }
+        }
         Ok(Value::tuple(vec![
             value_class(&self_val),
             Value::tuple(Vec::new()),

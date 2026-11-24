@@ -45,25 +45,67 @@ impl Interpreter {
             "__eq__" | "__ne__" | "__lt__" | "__le__" | "__gt__" | "__ge__"
         ) && effective_builtin_receiver(receiver, &[method])
             .is_some();
-        if let ValueKind::BuiltinFunction(fn_name) = method_val.kind()
-            && (inherited_primitive_richcmp
-                || fn_name.split_once('.').is_some_and(|(t, _)| {
-                    matches!(
-                        t,
-                        "dict"
-                            | "list"
-                            | "set"
-                            | "frozenset"
-                            | "tuple"
-                            | "str"
-                            | "int"
-                            | "float"
-                            | "bytes"
-                            | "bytearray"
-                    )
-                }))
-            && let Some(backing) = builtin_data_backing(receiver)
-        {
+        let is_primitive_builtin_method = match method_val.kind() {
+            ValueKind::BuiltinFunction(fn_name) => {
+                inherited_primitive_richcmp
+                    || fn_name.split_once('.').is_some_and(|(t, _)| {
+                        matches!(
+                            t,
+                            "dict"
+                                | "list"
+                                | "set"
+                                | "frozenset"
+                                | "tuple"
+                                | "str"
+                                | "int"
+                                | "float"
+                                | "bytes"
+                                | "bytearray"
+                        )
+                    })
+            }
+            _ => false,
+        };
+        if is_primitive_builtin_method {
+            let is_dict_fromkeys = matches!(
+                method_val.kind(),
+                ValueKind::BuiltinFunction("dict.fromkeys")
+            );
+            if is_dict_fromkeys {
+                let args_vec: Vec<Value> = std::mem::take(pos);
+                let bound = pyrust_builtins::bound_method::bound_method(
+                    "fromkeys",
+                    Value::py_class(Rc::clone(&class)),
+                );
+                let mut expanded: Vec<ExpandedCallArg> = args_vec
+                    .into_iter()
+                    .map(|v| ExpandedCallArg {
+                        name: None,
+                        value: v,
+                    })
+                    .collect();
+                for (k, v) in kw {
+                    if let PyKey::Str(s) = k {
+                        expanded.push(ExpandedCallArg {
+                            name: Some(s.as_str().unwrap_or("").to_owned()),
+                            value: v.clone(),
+                        });
+                    }
+                }
+                return self.call_function_expanded(bound, &expanded);
+            }
+            // Issue #2953: a builtin-subclass instance missing its internal
+            // backing (or carrying a forged PyInstance backing) must fail
+            // loudly with a catchable RuntimeError instead of falling through
+            // to recursive protocol dispatch.
+            let Some(backing) = builtin_data_backing(receiver)
+                .filter(|backing| !matches!(backing.kind(), ValueKind::PyInstance(_)))
+            else {
+                let class_name = class.borrow().name.clone();
+                return Err(PyError::Runtime(format!(
+                    "'{class_name}' object is missing internal builtin backing for '{method}'"
+                )));
+            };
             // Issue #1909: container protocol dunders
             // (`MyList().__len__()`, `MyDict().__getitem__(k)`)
             // operate on the backing primitive — route through

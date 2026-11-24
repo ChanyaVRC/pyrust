@@ -415,7 +415,20 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                         IterFallback::Missing => None,
                     }
                 }
-                ResolvedIterSlot::Missing => effective_builtin_receiver(v, &[]),
+                ResolvedIterSlot::Missing => {
+                    let backing = effective_builtin_receiver(v, &[]);
+                    if backing.is_none()
+                        && lookup_class_attr(&class, "__iter__").is_some_and(|method| {
+                            is_inherited_builtin_iter_sentinel(&class, &method)
+                        })
+                    {
+                        return Err(PyError::Runtime(format!(
+                            "'{}' object is missing internal builtin backing for '__iter__'",
+                            class.borrow().name
+                        )));
+                    }
+                    backing
+                }
                 ResolvedIterSlot::NonIterable => {
                     return Err(pyrust_core::type_err!(
                         "'{}' object is not iterable",

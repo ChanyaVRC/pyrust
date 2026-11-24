@@ -86,6 +86,21 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__reduce_ex__", "BaseException", method)
         })?;
+        if let ValueKind::PyInstance(rc) = self_val.kind() {
+            let class = Rc::clone(&rc.borrow().class);
+            if crate::interpreter::lookup_class_attr(&class, "__reduce__").is_some_and(|method| {
+                !crate::interpreter::value_is_canonical_slot(
+                    &method,
+                    crate::interpreter::CanonicalSlot::ObjectReduce,
+                ) && !crate::interpreter::value_is_canonical_slot(
+                    &method,
+                    crate::interpreter::CanonicalSlot::BaseExceptionReduce,
+                )
+            }) {
+                let reducer = _interp.get_attr(&self_val, "__reduce__")?;
+                return _interp.call_function_expanded(reducer, &[]);
+            }
+        }
         Ok(base_exception_reduce_value(&self_val))
     }
 
