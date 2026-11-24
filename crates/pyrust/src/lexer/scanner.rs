@@ -58,7 +58,25 @@ impl Lexer {
             line_start_pos: 0,
             cur_col: 0,
         };
-        lexer.lex_source(src)?;
+        lexer.lex_source_inner(src, false)?;
+        Ok(lexer)
+    }
+
+    /// Lex an f-string replacement-field expression (`{ ... }`).  Inside `{...}`
+    /// Python suppresses `NEWLINE` / `INDENT` / `DEDENT` tokens (just like inside
+    /// `(...)`) while still tracking physical line numbers across newlines
+    /// (PEP 701 / issue #2587).
+    pub fn new_fstring_expr(src: &str) -> Result<Self> {
+        let mut lexer = Self {
+            tokens: Vec::new(),
+            line_nos: Vec::new(),
+            cols: Vec::new(),
+            cols_end: Vec::new(),
+            line: 1,
+            line_start_pos: 0,
+            cur_col: 0,
+        };
+        lexer.lex_source_inner(src, true)?;
         Ok(lexer)
     }
 
@@ -117,7 +135,7 @@ impl Lexer {
         (self.tokens, self.line_nos, self.cols, self.cols_end)
     }
 
-    fn lex_source(&mut self, src: &str) -> Result<()> {
+    fn lex_source_inner(&mut self, src: &str, suppress_newlines: bool) -> Result<()> {
         let mut indent_stack: Vec<usize> = vec![0];
         let mut paren_depth: usize = 0; // track ( [ { for implicit line continuation
 
@@ -135,8 +153,18 @@ impl Lexer {
             // their start column as `token_start - line_start_pos` (#2426).
             self.line_start_pos = line_start;
 
-            // Count leading spaces (tabs are rejected by count_indent_chars).
-            let indent = count_indent_chars(&chars, pos)?;
+            // Count leading spaces (tabs are rejected by count_indent_chars
+            // when indentation is significant; inside f-string expressions
+            // leading spaces/tabs are ignored just like inside parentheses).
+            let indent = if suppress_newlines {
+                let mut n = 0;
+                while matches!(chars.get(pos + n), Some(&' ') | Some(&'\t')) {
+                    n += 1;
+                }
+                n
+            } else {
+                count_indent_chars(&chars, pos)?
+            };
             pos += indent;
 
             // Collect the rest of this line (up to '\n' or end-of-source) to
@@ -164,7 +192,7 @@ impl Lexer {
                 // Blank / comment lines do not affect indentation or emit
                 // logical-line tokens (they emit Newline only at the top level,
                 // matching CPython's behaviour for blank lines outside parens).
-                if paren_depth == 0 {
+                if !suppress_newlines && paren_depth == 0 {
                     self.emit(Token::Newline);
                 }
                 // Advance past the '\n' (or reach end-of-source).
@@ -178,7 +206,7 @@ impl Lexer {
             }
 
             // Non-blank line: handle indentation.
-            if paren_depth == 0 {
+            if !suppress_newlines && paren_depth == 0 {
                 self.handle_indent(indent, &mut indent_stack)?;
             }
 
@@ -189,7 +217,7 @@ impl Lexer {
             pos = content_start; // reset to after-indent start
             let _ = line_start; // silence unused-variable warning
             let new_depth;
-            (pos, new_depth) = self.lex_line_tokens(&chars, pos, paren_depth)?;
+            (pos, new_depth) = self.lex_line_tokens(&chars, pos, paren_depth, suppress_newlines)?;
             paren_depth = new_depth;
         }
 
@@ -249,6 +277,7 @@ impl Lexer {
         chars: &[char],
         start: usize,
         mut paren_depth: usize,
+        suppress_newlines: bool,
     ) -> Result<(usize, usize)> {
         let mut pos = start;
         let mut line_continued = false;
@@ -273,7 +302,7 @@ impl Lexer {
             match chars.get(pos).copied() {
                 None => {
                     // End of source.
-                    if paren_depth == 0 && !line_continued {
+                    if !suppress_newlines && paren_depth == 0 && !line_continued {
                         self.emit(Token::Newline);
                     }
                     return Ok((chars.len() + 1, paren_depth));
@@ -292,7 +321,7 @@ impl Lexer {
                         line_continued = false;
                         continue;
                     }
-                    if paren_depth == 0 {
+                    if !suppress_newlines && paren_depth == 0 {
                         self.emit(Token::Newline);
                     }
                     // Advance past '\n' and return so that lex_source can

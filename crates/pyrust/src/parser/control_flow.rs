@@ -51,7 +51,7 @@ impl Parser {
         // Parse possibly-tuple target, supporting starred items like `for a, *b in ...`
         let target = self.parse_for_target()?;
         self.expect(&Token::In)?;
-        let iter = self.parse_expr()?;
+        let iter = self.parse_for_iter()?;
         self.expect(&Token::Colon)?;
         let (body, body_linenos) = self.parse_suite_with_linenos()?;
         let (else_branch, else_linenos) = self.parse_optional_else_with_linenos()?;

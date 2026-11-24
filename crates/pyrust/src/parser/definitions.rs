@@ -1,11 +1,13 @@
 impl Parser {
     fn parse_decorator(&mut self) -> Result<Expr> {
         self.expect(&Token::At)?;
-        let expr = self.parse_postfix()?;
-        // skip newline after decorator
-        if self.is(&Token::Newline) {
-            self.bump();
+        // PEP 614: `'@' named_expression NEWLINE`.
+        // `yield` / `yield from` is not a `named_expression` unless parenthesized.
+        if self.is(&Token::Yield) {
+            return Err(PyError::Parse("invalid syntax".to_string()));
         }
+        let expr = self.parse_expr()?;
+        self.expect(&Token::Newline)?;
         Ok(expr)
     }
 

@@ -39,7 +39,41 @@ impl Parser {
         Ok(Expr::Tuple(items))
     }
 
+    /// Parse a `for` / `async for` iterable (`star_expressions` in Python 3.12):
+    /// one or more comma-separated expressions or `*expr` items terminated by `:`.
+    /// Trailing commas produce a tuple (e.g. `for x in a,:` -> `(a,)`).
+    /// Unparenthesized walrus (`a := ...`) is not permitted in `star_expressions`,
+    /// and a bare `*expr` without a comma is rejected with CPython's error.
+    fn parse_for_iter(&mut self) -> Result<Expr> {
+        let first = self.parse_seq_item_no_walrus()?;
+        if !self.is(&Token::Comma) {
+            if matches!(first, Expr::Starred(_)) {
+                return Err(PyError::Parse(
+                    "can't use starred expression here".to_string(),
+                ));
+            }
+            return Ok(first);
+        }
+        let mut items = vec![first];
+        while self.is(&Token::Comma) {
+            self.bump(); // consume comma
+            if self.is(&Token::Colon) {
+                break; // trailing comma before `:` — still produce a tuple
+            }
+            items.push(self.parse_seq_item_no_walrus()?);
+        }
+        Ok(Expr::Tuple(items))
+    }
+
     fn parse_expr(&mut self) -> Result<Expr> {
+        self.parse_expr_with_walrus(true)
+    }
+
+    fn parse_expr_no_walrus(&mut self) -> Result<Expr> {
+        self.parse_expr_with_walrus(false)
+    }
+
+    fn parse_expr_with_walrus(&mut self, allow_walrus: bool) -> Result<Expr> {
         // Depth guard (#2009): every bracketed construct re-enters `parse_expr`
         // for its contents, so bounding the entry depth bounds the total
         // recursive-descent nesting.  Exceeding the limit raises a catchable
@@ -50,12 +84,12 @@ impl Parser {
             self.expr_depth -= 1;
             return Err(PyError::Parse("too many nested parentheses".to_string()));
         }
-        let result = self.parse_expr_inner();
+        let result = self.parse_expr_inner(allow_walrus);
         self.expr_depth -= 1;
         result
     }
 
-    fn parse_expr_inner(&mut self) -> Result<Expr> {
+    fn parse_expr_inner(&mut self, allow_walrus: bool) -> Result<Expr> {
         // Yield / yield from
         if self.is(&Token::Yield) {
             let kw_col = self.current_col();
@@ -99,7 +133,7 @@ impl Parser {
         }
         let expr = self.parse_or()?;
         // Walrus operator: NAME := expr
-        if self.is(&Token::Walrus) {
+        if allow_walrus && self.is(&Token::Walrus) {
             if let Expr::Var(name, _) = expr {
                 if name == "__debug__" {
                     return Err(PyError::Parse("cannot assign to __debug__".to_string()));
@@ -121,7 +155,7 @@ impl Parser {
             self.bump();
             let cond = self.parse_or()?;
             self.expect(&Token::Else)?;
-            let else_ = self.parse_expr()?;
+            let else_ = self.parse_expr_with_walrus(allow_walrus)?;
             return Ok(Expr::Ternary {
                 cond: Box::new(cond),
                 then: Box::new(expr),

@@ -5,7 +5,7 @@
 /// (issue #2587).  `base_line == 0` means no line info is available, and the
 /// sub-parser carries no line numbers (matching the prior behaviour).
 fn parse_expr_str(src: &str, base_line: u32) -> Result<Expr> {
-    let lexer = crate::lexer::Lexer::new(src)?;
+    let lexer = crate::lexer::Lexer::new_fstring_expr(src)?;
     let mut p = if base_line == 0 {
         Parser::new(lexer.into_tokens())
     } else {
@@ -18,7 +18,23 @@ fn parse_expr_str(src: &str, base_line: u32) -> Result<Expr> {
             .collect();
         Parser::new_with_lines(tokens, line_nos)
     };
-    let expr = p.parse_expr()?;
+    if p.is(&Token::Eof) {
+        return Err(PyError::Parse(
+            "f-string: valid expression required before '}'".to_string(),
+        ));
+    }
+    let expr = p.parse_expr_or_tuple()?;
+    if matches!(expr, Expr::Starred(_)) {
+        return Err(PyError::Parse(
+            "can't use starred expression here".to_string(),
+        ));
+    }
+    if !p.is(&Token::Eof) {
+        return Err(PyError::Parse(format!(
+            "invalid syntax in f-string expression: unexpected {:?}",
+            p.current()
+        )));
+    }
     Ok(expr)
 }
 

@@ -241,11 +241,20 @@ impl Parser {
             // `async for` / `async with` — soft keyword `async` followed by
             // `for`/`with`.  Whether they appear inside an `async def` is checked
             // by the compiler (SyntaxError otherwise), matching CPython.
-            Some(Token::Ident(kw)) if kw == "async" && matches!(self.peek(), Some(Token::For)) => {
+            // Decorators may only precede `def`, `async def`, or `class`.
+            Some(Token::Ident(kw))
+                if decorators.is_empty()
+                    && kw == "async"
+                    && matches!(self.peek(), Some(Token::For)) =>
+            {
                 self.bump(); // consume `async`
                 Ok(vec![self.parse_for(true)?])
             }
-            Some(Token::Ident(kw)) if kw == "async" && matches!(self.peek(), Some(Token::With)) => {
+            Some(Token::Ident(kw))
+                if decorators.is_empty()
+                    && kw == "async"
+                    && matches!(self.peek(), Some(Token::With)) =>
+            {
                 self.bump(); // consume `async`
                 Ok(vec![self.parse_with(true)?])
             }
