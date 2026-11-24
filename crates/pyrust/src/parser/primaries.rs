@@ -236,6 +236,8 @@ impl Parser {
     }
 
     fn parse_list_literal(&mut self) -> Result<Expr> {
+        let start_col = self.current_col();
+        let start_lineno = self.current_lineno();
         self.expect(&Token::LBracket)?;
         if self.is(&Token::RBracket) {
             self.bump();
@@ -252,9 +254,11 @@ impl Parser {
             }
             let clauses = self.parse_comp_clauses()?;
             self.expect(&Token::RBracket)?;
+            let span = self.make_comp_span(start_col, start_lineno);
             return Ok(Expr::ListComp {
                 elt: Box::new(first),
                 clauses,
+                span,
             });
         }
         let mut items = vec![first];
@@ -342,7 +346,35 @@ impl Parser {
         Ok(clauses)
     }
 
+    /// Build a PEP 657 caret span covering a bracketed/braced comprehension
+    /// (`[...]` / `{...}`), clamping to the first displayed line when the
+    /// comprehension spans multiple lines (issue #2993).
+    fn make_comp_span(
+        &self,
+        start_col: Option<u32>,
+        start_lineno: u32,
+    ) -> Option<crate::ast::CaretSpan> {
+        let start = start_col?;
+        let end = self.prev_end_col()?;
+        let end_lineno = self.prev_lineno();
+        if start_lineno != 0 && end_lineno != 0 && start_lineno != end_lineno {
+            return Some((
+                start,
+                start,
+                crate::ast::MULTILINE_FULL_END,
+                crate::ast::MULTILINE_FULL_END,
+            ));
+        }
+        if start < end {
+            Some((start, start, end, end))
+        } else {
+            None
+        }
+    }
+
     fn parse_dict_or_set_literal(&mut self) -> Result<Expr> {
+        let start_col = self.current_col();
+        let start_lineno = self.current_lineno();
         self.expect(&Token::LBrace)?;
         if self.is(&Token::RBrace) {
             self.bump();
@@ -388,10 +420,12 @@ impl Parser {
                 // Dict comprehension: {key: val for ...} or {key: val async for ...}
                 let clauses = self.parse_comp_clauses()?;
                 self.expect(&Token::RBrace)?;
+                let span = self.make_comp_span(start_col, start_lineno);
                 return Ok(Expr::DictComp {
                     key: Box::new(first),
                     val: Box::new(val),
                     clauses,
+                    span,
                 });
             }
             let mut items = vec![DictItem::Pair(first, val)];
@@ -410,9 +444,11 @@ impl Parser {
                 // Set comprehension: {elt for ...} or {elt async for ...}
                 let clauses = self.parse_comp_clauses()?;
                 self.expect(&Token::RBrace)?;
+                let span = self.make_comp_span(start_col, start_lineno);
                 return Ok(Expr::SetComp {
                     elt: Box::new(first),
                     clauses,
+                    span,
                 });
             }
             let mut items = vec![first];

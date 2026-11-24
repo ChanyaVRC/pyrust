@@ -1639,3 +1639,315 @@ ValueError: 1
 ";
     assert_eq!(stderr, expected, "got:\n{stderr}");
 }
+
+// ── #2993: PEP 709 comprehension frames, except* rewrap, asyncio filenames,
+//           and PEP 479 chain ordering / traceback ownership ────────────────
+
+#[test]
+fn pep709_listcomp_over_generator_has_no_listcomp_frame() {
+    let src = "def g():\n    yield 1/0\n[v for v in g()]\n";
+    let stderr = run_pyrust_stderr("pep709_bare_listcomp.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"pep709_bare_listcomp.py\", line 3, in <module>
+    [v for v in g()]
+  File \"pep709_bare_listcomp.py\", line 2, in g
+    yield 1/0
+          ~^~
+ZeroDivisionError: division by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn pep709_assigned_listcomp_over_generator_carries_comp_caret() {
+    let src = "def g():\n    yield 1/0\nx = [v for v in g()]\n";
+    let stderr = run_pyrust_stderr("pep709_assign_listcomp.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"pep709_assign_listcomp.py\", line 3, in <module>
+    x = [v for v in g()]
+        ^^^^^^^^^^^^^^^^
+  File \"pep709_assign_listcomp.py\", line 2, in g
+    yield 1/0
+          ~^~
+ZeroDivisionError: division by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn pep709_listcomp_elt_and_filter_binops_carry_narrow_carets() {
+    let src_elt = "def f():\n    return [1 // x for x in [0]]\nf()\n";
+    let stderr_elt = run_pyrust_stderr("pep709_elt.py", src_elt);
+    let expected_elt = "\
+Traceback (most recent call last):
+  File \"pep709_elt.py\", line 3, in <module>
+    f()
+  File \"pep709_elt.py\", line 2, in f
+    return [1 // x for x in [0]]
+            ~~^^~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr_elt, expected_elt, "got:\n{stderr_elt}");
+
+    let src_cond = "def f():\n    return [x for x in [0] if 1 // x]\nf()\n";
+    let stderr_cond = run_pyrust_stderr("pep709_cond.py", src_cond);
+    let expected_cond = "\
+Traceback (most recent call last):
+  File \"pep709_cond.py\", line 3, in <module>
+    f()
+  File \"pep709_cond.py\", line 2, in f
+    return [x for x in [0] if 1 // x]
+                              ~~^^~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr_cond, expected_cond, "got:\n{stderr_cond}");
+}
+
+#[test]
+fn pep709_nested_set_dict_and_non_iterable_comps_have_no_comp_frames() {
+    let src_nested = "def g():\n    yield 1/0\nx = [[v for v in g()] for _ in [1]]\n";
+    let stderr_nested = run_pyrust_stderr("pep709_nested.py", src_nested);
+    let expected_nested = "\
+Traceback (most recent call last):
+  File \"pep709_nested.py\", line 3, in <module>
+    x = [[v for v in g()] for _ in [1]]
+         ^^^^^^^^^^^^^^^^
+  File \"pep709_nested.py\", line 2, in g
+    yield 1/0
+          ~^~
+ZeroDivisionError: division by zero
+";
+    assert_eq!(stderr_nested, expected_nested, "got:\n{stderr_nested}");
+
+    let src_set = "def g():\n    yield 1/0\nx = {v for v in g()}\n";
+    let stderr_set = run_pyrust_stderr("pep709_set.py", src_set);
+    let expected_set = "\
+Traceback (most recent call last):
+  File \"pep709_set.py\", line 3, in <module>
+    x = {v for v in g()}
+        ^^^^^^^^^^^^^^^^
+  File \"pep709_set.py\", line 2, in g
+    yield 1/0
+          ~^~
+ZeroDivisionError: division by zero
+";
+    assert_eq!(stderr_set, expected_set, "got:\n{stderr_set}");
+
+    let src_dict = "def g():\n    yield 1/0\nx = {v: v for v in g()}\n";
+    let stderr_dict = run_pyrust_stderr("pep709_dict.py", src_dict);
+    let expected_dict = "\
+Traceback (most recent call last):
+  File \"pep709_dict.py\", line 3, in <module>
+    x = {v: v for v in g()}
+        ^^^^^^^^^^^^^^^^^^^
+  File \"pep709_dict.py\", line 2, in g
+    yield 1/0
+          ~^~
+ZeroDivisionError: division by zero
+";
+    assert_eq!(stderr_dict, expected_dict, "got:\n{stderr_dict}");
+
+    let src_noniter = "x = [v for v in 123]\n";
+    let stderr_noniter = run_pyrust_stderr("pep709_noniter.py", src_noniter);
+    let expected_noniter = "\
+Traceback (most recent call last):
+  File \"pep709_noniter.py\", line 1, in <module>
+    x = [v for v in 123]
+        ^^^^^^^^^^^^^^^^
+TypeError: 'int' object is not iterable
+";
+    assert_eq!(stderr_noniter, expected_noniter, "got:\n{stderr_noniter}");
+}
+
+#[test]
+fn except_star_bare_reraise_rewraps_plain_exception_into_exception_group() {
+    let src = "def g():\n    yield 1/0\ntry:\n    for _ in g():\n        pass\nexcept* ZeroDivisionError:\n    raise\n";
+    let stderr = run_pyrust_stderr("except_star_bare_reraise.py", src);
+    let expected = concat!(
+        "  | ExceptionGroup:  (1 sub-exception)\n",
+        "  +-+---------------- 1 ----------------\n",
+        "    | Traceback (most recent call last):\n",
+        "    |   File \"except_star_bare_reraise.py\", line 4, in <module>\n",
+        "    |     for _ in g():\n",
+        "    |   File \"except_star_bare_reraise.py\", line 2, in g\n",
+        "    |     yield 1/0\n",
+        "    |           ~^~\n",
+        "    | ZeroDivisionError: division by zero\n",
+        "    +------------------------------------\n",
+    );
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn except_star_bare_reraise_in_function_omits_reraise_frame() {
+    let src = "def g():\n    yield 1/0\ndef outer():\n    try:\n        for _ in g():\n            pass\n    except* ZeroDivisionError:\n        raise\nouter()\n";
+    let stderr = run_pyrust_stderr("except_star_fn_reraise.py", src);
+    let expected = concat!(
+        "  + Exception Group Traceback (most recent call last):\n",
+        "  |   File \"except_star_fn_reraise.py\", line 9, in <module>\n",
+        "  |     outer()\n",
+        "  | ExceptionGroup:  (1 sub-exception)\n",
+        "  +-+---------------- 1 ----------------\n",
+        "    | Traceback (most recent call last):\n",
+        "    |   File \"except_star_fn_reraise.py\", line 5, in outer\n",
+        "    |     for _ in g():\n",
+        "    |   File \"except_star_fn_reraise.py\", line 2, in g\n",
+        "    |     yield 1/0\n",
+        "    |           ~^~\n",
+        "    | ZeroDivisionError: division by zero\n",
+        "    +------------------------------------\n",
+    );
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn except_star_partial_residual_and_combined_raise_render_byte_exact() {
+    let src_res = "try:\n    raise ExceptionGroup(\"eg\", [ValueError(\"v\"), TypeError(\"t\")])\nexcept* ValueError:\n    pass\n";
+    let stderr_res = run_pyrust_stderr("except_star_residual.py", src_res);
+    let expected_res = concat!(
+        "  + Exception Group Traceback (most recent call last):\n",
+        "  |   File \"except_star_residual.py\", line 2, in <module>\n",
+        "  |     raise ExceptionGroup(\"eg\", [ValueError(\"v\"), TypeError(\"t\")])\n",
+        "  | ExceptionGroup: eg (1 sub-exception)\n",
+        "  +-+---------------- 1 ----------------\n",
+        "    | TypeError: t\n",
+        "    +------------------------------------\n",
+    );
+    assert_eq!(stderr_res, expected_res, "got:\n{stderr_res}");
+
+    let src_comb = "try:\n    raise ExceptionGroup(\"eg\", [ValueError(\"v\"), TypeError(\"t\")])\nexcept* ValueError:\n    raise KeyError(\"k\")\n";
+    let stderr_comb = run_pyrust_stderr("except_star_combined.py", src_comb);
+    let expected_comb = concat!(
+        "  | ExceptionGroup:  (2 sub-exceptions)\n",
+        "  +-+---------------- 1 ----------------\n",
+        "    | Exception Group Traceback (most recent call last):\n",
+        "    |   File \"except_star_combined.py\", line 2, in <module>\n",
+        "    |     raise ExceptionGroup(\"eg\", [ValueError(\"v\"), TypeError(\"t\")])\n",
+        "    | ExceptionGroup: eg (1 sub-exception)\n",
+        "    +-+---------------- 1 ----------------\n",
+        "      | ValueError: v\n",
+        "      +------------------------------------\n",
+        "    | \n",
+        "    | During handling of the above exception, another exception occurred:\n",
+        "    | \n",
+        "    | Traceback (most recent call last):\n",
+        "    |   File \"except_star_combined.py\", line 4, in <module>\n",
+        "    |     raise KeyError(\"k\")\n",
+        "    | KeyError: 'k'\n",
+        "    +---------------- 2 ----------------\n",
+        "    | Exception Group Traceback (most recent call last):\n",
+        "    |   File \"except_star_combined.py\", line 2, in <module>\n",
+        "    |     raise ExceptionGroup(\"eg\", [ValueError(\"v\"), TypeError(\"t\")])\n",
+        "    | ExceptionGroup: eg (1 sub-exception)\n",
+        "    +-+---------------- 1 ----------------\n",
+        "      | TypeError: t\n",
+        "      +------------------------------------\n",
+    );
+    assert_eq!(stderr_comb, expected_comb, "got:\n{stderr_comb}");
+}
+
+#[test]
+fn asyncio_bundled_frames_report_frozen_filename_and_keep_run_anchor() {
+    // Pad the script past line 100 so any regression that looks up asyncio's
+    // internal line numbers against the script source would echo `# pad` lines.
+    let mut src = String::new();
+    for _ in 0..100 {
+        src.push_str("# pad\n");
+    }
+    src.push_str("import asyncio\nasync def co():\n    1 / 0\nx = asyncio.run(co())\n");
+    let stderr = run_pyrust_stderr("asyncio_frames.py", &src);
+    assert!(
+        stderr.contains(
+            "  File \"asyncio_frames.py\", line 104, in <module>\n    x = asyncio.run(co())\n        ^^^^^^^^^^^^^^^^^\n"
+        ),
+        "missing module frame or asyncio.run caret:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("  File \"<frozen asyncio>\", line "),
+        "expected <frozen asyncio> frames:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("# pad"),
+        "bundled asyncio frame mistakenly echoed script source lines:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "  File \"asyncio_frames.py\", line 103, in co\n    1 / 0\n    ~~^~~\nZeroDivisionError: division by zero\n"
+        ),
+        "missing co() frame or caret:\n{stderr}"
+    );
+    // Ensure no bundled frame reports the user's script filename.
+    for line in stderr.lines() {
+        if line.contains("File \"asyncio_frames.py\"") {
+            assert!(
+                line.contains("in <module>") || line.contains("in co"),
+                "non-user frame reported script filename: {line}\nfull:\n{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn pep479_stopiteration_chain_order_and_frame_ownership_are_byte_exact() {
+    let src = "def g():\n    raise StopIteration(\"s\")\n    yield 1\nnext(g())\n";
+    let stderr = run_pyrust_stderr("pep479_simple.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"pep479_simple.py\", line 2, in g
+    raise StopIteration(\"s\")
+StopIteration: s
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File \"pep479_simple.py\", line 4, in <module>
+    next(g())
+RuntimeError: generator raised StopIteration
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+
+    let src_deep = "def h():\n    raise StopIteration(\"deep\")\ndef g():\n    h()\n    yield 1\nfor _ in g():\n    pass\n";
+    let stderr_deep = run_pyrust_stderr("pep479_deep.py", src_deep);
+    let expected_deep = "\
+Traceback (most recent call last):
+  File \"pep479_deep.py\", line 4, in g
+    h()
+  File \"pep479_deep.py\", line 2, in h
+    raise StopIteration(\"deep\")
+StopIteration: deep
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File \"pep479_deep.py\", line 6, in <module>
+    for _ in g():
+RuntimeError: generator raised StopIteration
+";
+    assert_eq!(stderr_deep, expected_deep, "got:\n{stderr_deep}");
+
+    let src_ctx = "def g():\n    try:\n        raise KeyError(\"orig\")\n    except KeyError:\n        raise StopIteration(\"s\")\n    yield 1\nnext(g())\n";
+    let stderr_ctx = run_pyrust_stderr("pep479_ctx.py", src_ctx);
+    let expected_ctx = "\
+Traceback (most recent call last):
+  File \"pep479_ctx.py\", line 3, in g
+    raise KeyError(\"orig\")
+KeyError: 'orig'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File \"pep479_ctx.py\", line 5, in g
+    raise StopIteration(\"s\")
+StopIteration: s
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File \"pep479_ctx.py\", line 7, in <module>
+    next(g())
+RuntimeError: generator raised StopIteration
+";
+    assert_eq!(stderr_ctx, expected_ctx, "got:\n{stderr_ctx}");
+}

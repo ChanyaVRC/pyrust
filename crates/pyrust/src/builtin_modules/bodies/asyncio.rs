@@ -80,7 +80,12 @@ pub(crate) fn inject_python_members(
             }
         });
     }
-    interp.exec_source(ASYNCIO_PY_SOURCE, Some(ns.clone()), None)?;
+    interp.exec_source_with_filename(
+        ASYNCIO_PY_SOURCE,
+        "<frozen asyncio>",
+        Some(ns.clone()),
+        None,
+    )?;
     let dict = ns.as_dict().ok_or_else(|| {
         crate::error::PyError::Runtime("asyncio: exec namespace not a dict".into())
     })?;

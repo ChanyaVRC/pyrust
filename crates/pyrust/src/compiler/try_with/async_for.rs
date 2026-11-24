@@ -22,12 +22,19 @@ impl Compiler {
             return;
         }
 
+        let comp_for_span = if matches!(aiter_expr, Expr::Var(name, _) if name == ".0") {
+            self.comp_outer_for_span
+        } else {
+            None
+        };
         // it = aiter.__aiter__()  (not awaited — __aiter__ returns the iterator
         // synchronously per PEP 492).
         let aiter_src = self.compile_expr(aiter_expr);
         let aiter_name_idx = self.intern_name("__aiter__");
         let it_reg = self.alloc_temp();
+        self.set_col_span_for_next(comp_for_span);
         self.emit(Insn::GetAttrForWith(it_reg, aiter_src, aiter_name_idx, 2)); // async for: __aiter__
+        self.set_col_span_for_next(comp_for_span);
         self.emit(Insn::Call(it_reg, 0));
         self.free_temp(aiter_src);
 
@@ -41,15 +48,17 @@ impl Compiler {
         let setup_patch = self.emit(Insn::SetupExcept(0));
         let anext_name_idx = self.intern_name("__anext__");
         let anext_reg = self.alloc_temp();
+        self.set_col_span_for_next(comp_for_span);
         self.emit(Insn::GetAttrForWith(
             anext_reg,
             it_reg,
             anext_name_idx,
             5, // async for: __anext__
         ));
+        self.set_col_span_for_next(comp_for_span);
         self.emit(Insn::Call(anext_reg, 0));
         let item_reg = self.alloc_temp();
-        self.emit_await_drive_into(anext_reg, item_reg);
+        self.emit_await_drive_into_with_span(anext_reg, item_reg, comp_for_span);
         self.free_temp(anext_reg);
         // Item obtained successfully: leave the per-iteration handler.
         self.emit(Insn::PopExcept);

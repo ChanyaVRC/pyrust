@@ -620,6 +620,24 @@ impl Interpreter {
                             frames.extend(tb_frames);
                         }
                         None => {
+                            // PEP 654 (#2993): an `except*`-synthesised
+                            // ExceptionGroup (bare re-raise of a wrapped plain
+                            // exception or combined group) carries no traceback
+                            // node for the `except*` frame itself — at module
+                            // scope (`inner_frames.is_empty()`) drop the
+                            // synthetic `<module>` frame; across a function
+                            // call drop the innermost (re-raising) frame while
+                            // keeping outer caller frames.
+                            let mut inner_frames = inner_frames;
+                            if self.reraise_is_bare
+                                && matches!(e, PyError::Raised(v) if is_exception_group_value(v))
+                            {
+                                if inner_frames.is_empty() {
+                                    frames.clear();
+                                } else {
+                                    inner_frames.pop();
+                                }
+                            }
                             // Issue #2428: the captured snapshot records each call
                             // frame's `(filename, lineno)` but leaves `source_line`
                             // as `None` — resolving the text at capture time would
@@ -776,7 +794,19 @@ impl Interpreter {
                     } else {
                         String::new()
                     };
-                    let main_tb = pyrust_core::format_traceback(&frames, &error_line);
+                    let main_tb = if let PyError::Raised(exc_val) = e
+                        && is_exception_group_value(exc_val)
+                    {
+                        format_exception_group_traceback(
+                            self,
+                            exc_val,
+                            Some(&frames),
+                            &owned_filename,
+                            src,
+                        )
+                    } else {
+                        pyrust_core::format_traceback(&frames, &error_line)
+                    };
                     Some(format!("{chain_prefix}{main_tb}"))
                 }
             } else {

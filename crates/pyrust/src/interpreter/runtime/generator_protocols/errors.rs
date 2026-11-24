@@ -73,64 +73,136 @@ pub(super) fn extract_stop_iteration_value(err: &PyError) -> Option<Value> {
     }
 }
 
-pub(super) fn pep479_wrap_stop_iteration(err: PyError) -> PyError {
-    if !is_stop_iteration_error(&err) {
-        return err;
+/// Returns `true` for any `PyError` variant that represents a
+/// `StopAsyncIteration` or subclass (PEP 479 / PEP 525).
+#[inline]
+pub(super) fn is_stop_async_iteration_error(err: &PyError) -> bool {
+    match err {
+        PyError::Named(cls, _) => cls.as_ref() == "StopAsyncIteration",
+        PyError::Class(cls, _) => class_is_builtin_exception_subclass(cls, "StopAsyncIteration"),
+        PyError::Raised(exc) => match exc.kind() {
+            ValueKind::PyInstance(inst) => {
+                class_is_builtin_exception_subclass(&inst.borrow().class, "StopAsyncIteration")
+            }
+            ValueKind::PyClass(cls) => {
+                class_is_builtin_exception_subclass(cls, "StopAsyncIteration")
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+impl Interpreter {
+    /// PEP 479: convert a `StopIteration` escaping a generator frame into
+    /// `RuntimeError("generator raised StopIteration")` with the original
+    /// `StopIteration` as `__cause__` / `__context__`.
+    ///
+    /// Crucially, the frames captured while unwinding out of the generator
+    /// belong to the `StopIteration` cause's `__traceback__`, NOT to the new
+    /// `RuntimeError` (which starts a fresh traceback at the caller's `next()`
+    /// / `for` frame). Transferring and draining `CAPTURED_ERROR_FRAMES` here
+    /// restores CPython's exact chain ordering and per-exception frame
+    /// ownership (issue #2993).
+    pub(crate) fn pep479_wrap_stop_iteration(&mut self, err: PyError) -> PyError {
+        if !is_stop_iteration_error(&err) {
+            return err;
+        }
+        self.pep479_wrap_impl(err, "generator raised StopIteration")
     }
 
-    // Materialise the original StopIteration error into a Value so it can be
-    // attached as __cause__ on the new RuntimeError.
-    let cause_val: Option<Value> = match err {
-        PyError::Raised(exc) => Some(exc),
-        PyError::Class(cls, msg) => {
-            let args = if msg.is_empty() {
-                vec![]
-            } else {
-                vec![Value::string(msg)]
-            };
-            Some(instantiate_exception(cls, args))
+    /// PEP 479 / PEP 525: convert an explicit `StopAsyncIteration` escaping an
+    /// async generator frame into
+    /// `RuntimeError("async generator raised StopAsyncIteration")`.
+    pub(super) fn pep479_wrap_stop_async_iteration(&mut self, err: PyError) -> PyError {
+        if !is_stop_async_iteration_error(&err) {
+            return err;
         }
-        PyError::Named(cls_name, msg) => {
-            // Internal named errors always denote a canonical built-in class;
-            // do not let a module global shadow the exception identity.
-            lookup_exc_class(cls_name.as_ref()).map(|cls| {
+        self.pep479_wrap_impl(err, "async generator raised StopAsyncIteration")
+    }
+
+    fn pep479_wrap_impl(&mut self, err: PyError, message: &str) -> PyError {
+        // Materialise the original StopIteration / StopAsyncIteration error into
+        // a Value so it can be attached as __cause__ on the new RuntimeError.
+        let cause_val: Option<Value> = match err {
+            PyError::Raised(exc) => Some(exc),
+            PyError::Class(cls, msg) => {
                 let args = if msg.is_empty() {
                     vec![]
                 } else {
                     vec![Value::string(msg)]
                 };
-                instantiate_exception(cls, args)
-            })
-        }
-        _ => None,
-    };
+                Some(instantiate_exception(cls, args))
+            }
+            PyError::Named(cls_name, msg) => {
+                // Internal named errors always denote a canonical built-in class;
+                // do not let a module global shadow the exception identity.
+                lookup_exc_class(cls_name.as_ref()).map(|cls| {
+                    let args = if msg.is_empty() {
+                        vec![]
+                    } else {
+                        vec![Value::string(msg)]
+                    };
+                    instantiate_exception(cls, args)
+                })
+            }
+            _ => None,
+        };
 
-    // Build the RuntimeError instance and attach __cause__, __context__, and
-    // __suppress_context__, mirroring CPython's PEP 479 behaviour.
-    // CPython sets both __cause__ and __context__ to the original StopIteration
-    // instance (they are the same object: `e.__context__ is e.__cause__`), and
-    // sets __suppress_context__ = True so the "During handling of..." context
-    // chain is suppressed in tracebacks.
-    if let Some(cause) = cause_val
-        && let Some(rt_cls) = lookup_exc_class("RuntimeError")
-    {
-        let rt_err = instantiate_exception(
-            rt_cls,
-            vec![Value::string("generator raised StopIteration")],
-        );
-        if let ValueKind::PyInstance(inst) = rt_err.kind() {
-            // Clone before the first insert so both __cause__ and __context__
-            // share the same underlying Rc (preserving CPython identity: is).
-            let context = cause.clone();
-            inst.borrow_mut().attrs.insert_slot("__cause__", cause);
-            inst.borrow_mut().attrs.insert_slot("__context__", context);
-            inst.borrow_mut()
-                .attrs
-                .insert_slot("__suppress_context__", Value::bool_(true));
+        // Drain the captured generator-body frames now so they belong to the
+        // StopIteration cause rather than leaking onto the new RuntimeError.
+        let mut cause_frames = pyrust_core::take_captured_error_frames().unwrap_or_default();
+        let is_bare_reraise = std::mem::take(&mut self.reraise_is_bare);
+
+        // Build the RuntimeError instance and attach __cause__, __context__, and
+        // __suppress_context__, mirroring CPython's PEP 479 behaviour.
+        // CPython sets both __cause__ and __context__ to the original exception
+        // instance (they are the same object: `e.__context__ is e.__cause__`),
+        // and sets __suppress_context__ = True so the "During handling of..."
+        // context chain is suppressed in tracebacks.
+        if let Some(cause) = cause_val
+            && let Some(rt_cls) = lookup_exc_class("RuntimeError")
+        {
+            if !cause_frames.is_empty()
+                && let ValueKind::PyInstance(cause_inst) = cause.kind()
+            {
+                let existing = cause_inst
+                    .borrow()
+                    .attrs
+                    .get_cloned_or_slot("__traceback__")
+                    .unwrap_or_else(Value::none);
+                let tail = if existing.is_none() {
+                    Value::none()
+                } else {
+                    if is_bare_reraise {
+                        cause_frames.pop();
+                    }
+                    self.materialize_deferred_traceback(&existing)
+                        .unwrap_or(existing)
+                };
+                if !cause_frames.is_empty() {
+                    let tb = self.build_traceback_nodes_from_frames(&cause_frames, tail);
+                    cause_inst
+                        .borrow_mut()
+                        .attrs
+                        .insert_slot("__traceback__", tb);
+                }
+            }
+            let rt_err = instantiate_exception(rt_cls, vec![Value::string(message)]);
+            if let ValueKind::PyInstance(inst) = rt_err.kind() {
+                // Clone before the first insert so both __cause__ and __context__
+                // share the same underlying Rc (preserving CPython identity: is).
+                let context = cause.clone();
+                inst.borrow_mut().attrs.insert_slot("__cause__", cause);
+                inst.borrow_mut().attrs.insert_slot("__context__", context);
+                inst.borrow_mut()
+                    .attrs
+                    .insert_slot("__suppress_context__", Value::bool_(true));
+            }
+            return PyError::Raised(rt_err);
         }
-        return PyError::Raised(rt_err);
+
+        // Fallback: builtins not yet installed (startup) or materialisation failed.
+        pyrust_core::runtime_err!("{message}")
     }
-
-    // Fallback: builtins not yet installed (startup) or materialisation failed.
-    pyrust_core::runtime_err!("generator raised StopIteration")
 }

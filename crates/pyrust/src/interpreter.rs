@@ -329,16 +329,12 @@ pub struct Interpreter {
     /// [`ExcClasses`] is a newtype that exposes a `get(&str)` method so
     /// callers stay legible and the HashMap detail stays local.
     pub(crate) exc_classes: ExcClasses,
-    /// Tracks the nesting depth of `PushExcContext` instructions currently
-    /// in progress.  Incremented by `PushExcContext`, decremented by
-    /// `PopExcContext`.  While non-zero, `handle_vm_error` must NOT perform
-    /// its "active-exception duplicate pop" because the top of
-    /// `handled_exc_stack` was placed there by `PushExcContext` (the
-    /// to-be-raised exception), not by the normal handler-dispatch path.
-    /// Popping it prematurely would lose the context entry and cause any
-    /// exception raised inside the finally block to get a `None` context
-    /// instead of the correct value.
-    pub(crate) push_exc_ctx_depth: u32,
+    /// Stack of `(handled_exc_stack_len, exc_saved_active_len)` marks recorded
+    /// by `PushExcContext` and restored by `PopExcContext` (used for inlined
+    /// `finally` blocks and PEP 654 `except*` handler scopes).  While the
+    /// active exception sits at or below `saved_handled_len + 1`,
+    /// `handle_vm_error` must NOT dedup-pop the pushed context entry.
+    pub(crate) push_exc_ctx_marks: Vec<(usize, usize)>,
     /// Set by a bare `raise` / implicit re-raise (`RaiseReRaise`) and consumed
     /// by the next catch site (issue #2367).  When set, the catch rebuilds the
     /// traceback from the captured unwind frames rather than *prepending* onto
@@ -347,6 +343,12 @@ pub struct Interpreter {
     /// An explicit `raise e` / `raise e.with_traceback(...)` clears it, so the
     /// prepend path (issue #2367's actual scope) runs for those.
     pub(crate) reraise_is_bare: bool,
+    /// When an inlined comprehension (`FnCode::is_inlined_comp`, PEP 709) exits
+    /// with an error via a non-trampolined call or coroutine resume, it skips
+    /// recording a `<listcomp>`/`<setcomp>`/`<dictcomp>` traceback frame and
+    /// stashes its inner PEP 657 caret anchor here so the enclosing frame's
+    /// `vm_try!` adopts that anchor instead of clobbering it (#2993).
+    pub(crate) inlined_comp_escaped_span: Option<Option<(u32, u32, u32, u32)>>,
 }
 
 /// Discriminator for `VmFrameView`: script-level (module-scope) vs.
@@ -545,8 +547,9 @@ impl Default for Interpreter {
             comparison_recursion_cost: 0,
             comparison_structural_cost_bias: 0,
             exc_classes: ExcClasses::uninitialized(),
-            push_exc_ctx_depth: 0,
+            push_exc_ctx_marks: Vec::new(),
             reraise_is_bare: false,
+            inlined_comp_escaped_span: None,
         }
     }
 }

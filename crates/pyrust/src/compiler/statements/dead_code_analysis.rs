@@ -331,13 +331,15 @@ impl Compiler {
                 self.is_async_function = saved_is_async_function;
                 self.is_class_body = saved_is_class_body;
             }
-            Expr::ListComp { elt, clauses } => {
+            Expr::ListComp { elt, clauses, .. } => {
                 self.check_dead_comprehension(&[elt], clauses, "list comprehension", true);
             }
-            Expr::SetComp { elt, clauses } => {
+            Expr::SetComp { elt, clauses, .. } => {
                 self.check_dead_comprehension(&[elt], clauses, "set comprehension", true);
             }
-            Expr::DictComp { key, val, clauses } => {
+            Expr::DictComp {
+                key, val, clauses, ..
+            } => {
                 self.check_dead_comprehension(&[key, val], clauses, "dict comprehension", true);
             }
             Expr::GenExp { elt, clauses, .. } => {

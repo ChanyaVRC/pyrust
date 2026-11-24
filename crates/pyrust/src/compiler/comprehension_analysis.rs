@@ -415,8 +415,8 @@ fn expr_contains_assignment_expression(expr: &Expr) -> bool {
                         .is_some_and(expr_contains_assignment_expression)
             }) || expr_contains_assignment_expression(body)
         }
-        Expr::ListComp { elt, clauses }
-        | Expr::SetComp { elt, clauses }
+        Expr::ListComp { elt, clauses, .. }
+        | Expr::SetComp { elt, clauses, .. }
         | Expr::GenExp { elt, clauses, .. } => {
             expr_contains_assignment_expression(elt)
                 || clauses.iter().any(|clause| {
@@ -427,7 +427,9 @@ fn expr_contains_assignment_expression(expr: &Expr) -> bool {
                             .is_some_and(expr_contains_assignment_expression)
                 })
         }
-        Expr::DictComp { key, val, clauses } => {
+        Expr::DictComp {
+            key, val, clauses, ..
+        } => {
             expr_contains_assignment_expression(key)
                 || expr_contains_assignment_expression(val)
                 || clauses.iter().any(|clause| {
@@ -683,8 +685,8 @@ fn lambda_captures_in_expr(
         // Only the outermost iterable is evaluated in the enclosing scope; the
         // body (inner iters, conditions, element/key/value expressions) runs
         // inside the nested scope and can close over enclosing locals.
-        Expr::ListComp { elt, clauses }
-        | Expr::SetComp { elt, clauses }
+        Expr::ListComp { elt, clauses, .. }
+        | Expr::SetComp { elt, clauses, .. }
         | Expr::GenExp { elt, clauses, .. } => {
             // The outermost iterable is evaluated in the enclosing scope.
             if let Some(first) = clauses.first() {
@@ -736,7 +738,9 @@ fn lambda_captures_in_expr(
                 }
             }
         }
-        Expr::DictComp { key, val, clauses } => {
+        Expr::DictComp {
+            key, val, clauses, ..
+        } => {
             // Same scope-isolation logic as list/set comprehensions above.
             if let Some(first) = clauses.first() {
                 lambda_captures_in_expr(&first.iter, local_index, is_class_scope, cells);

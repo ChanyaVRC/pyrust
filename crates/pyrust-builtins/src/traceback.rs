@@ -124,6 +124,20 @@ pub fn walk_frames(value: &Value) -> Vec<(String, i64)> {
 /// render fine-grained carets on a re-raised / chained exception (issue #2411).
 #[allow(clippy::type_complexity)]
 pub fn walk_frames_with_col(value: &Value) -> Vec<(String, i64, Option<(u32, u32, u32, u32)>)> {
+    walk_frames_with_loc(value)
+        .into_iter()
+        .map(|(_, name, lineno, col_span)| (name, lineno, col_span))
+        .collect()
+}
+
+/// Like [`walk_frames_with_col`] but also returns each node's `co_filename`
+/// (`(filename, co_name, tb_lineno, col_span)`), so frames originating from
+/// imported or bundled modules keep their own filename instead of inheriting
+/// the running script's path (issue #2993).
+#[allow(clippy::type_complexity)]
+pub fn walk_frames_with_loc(
+    value: &Value,
+) -> Vec<(String, String, i64, Option<(u32, u32, u32, u32)>)> {
     let mut out = Vec::new();
     let mut cur = value.clone();
     loop {
@@ -140,12 +154,19 @@ pub fn walk_frames_with_col(value: &Value) -> Vec<(String, i64, Option<(u32, u32
                 None => break,
             }
         };
-        // co_name via tb_frame.f_code.co_name.
-        let name = builtin_getattr(&frame, "f_code")
-            .and_then(|code| builtin_getattr(&code, "co_name"))
+        let code = builtin_getattr(&frame, "f_code");
+        // co_filename and co_name via tb_frame.f_code.
+        let filename = code
+            .as_ref()
+            .and_then(|c| builtin_getattr(c, "co_filename"))
+            .and_then(|f| f.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let name = code
+            .as_ref()
+            .and_then(|c| builtin_getattr(c, "co_name"))
             .and_then(|n| n.as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "<unknown>".to_string());
-        out.push((name, lineno, col_span));
+        out.push((filename, name, lineno, col_span));
         cur = next;
     }
     out

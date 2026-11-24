@@ -97,8 +97,14 @@ impl Compiler {
         // can all shadow it at runtime.  Once a real range object reaches
         // GetIter, the runtime still selects its dedicated allocation-light
         // range IterState fast path.
+        let comp_for_span = if matches!(iter_expr, Expr::Var(name, _) if name == ".0") {
+            self.comp_outer_for_span
+        } else {
+            None
+        };
         let iter_slot = self.alloc_iter();
         let src = self.compile_expr(iter_expr);
+        self.set_col_span_for_next(comp_for_span);
         self.emit(Insn::GetIter(iter_slot, src));
         self.free_temp(src);
         let loop_start = self.pc();
@@ -109,6 +115,7 @@ impl Compiler {
         } else {
             self.alloc_temp()
         };
+        self.set_col_span_for_next(comp_for_span);
         let exit_jmp = self.emit(Insn::ForIter(for_dst, iter_slot, 0));
         match target {
             AssignTarget::Name(name) => {

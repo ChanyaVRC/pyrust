@@ -135,14 +135,14 @@ fn pep695_expression_violation(
                         .and_then(|expr| pep695_expression_violation(expr, context))
                 })
         }),
-        Expr::ListComp { elt, clauses }
-        | Expr::SetComp { elt, clauses }
+        Expr::ListComp { elt, clauses, .. }
+        | Expr::SetComp { elt, clauses, .. }
         | Expr::GenExp { elt, clauses, .. } => {
             pep695_comprehension_violation(&[elt], clauses, context)
         }
-        Expr::DictComp { key, val, clauses } => {
-            pep695_comprehension_violation(&[key, val], clauses, context)
-        }
+        Expr::DictComp {
+            key, val, clauses, ..
+        } => pep695_comprehension_violation(&[key, val], clauses, context),
         Expr::Binary { left, right, .. } => pep695_expression_violation(left, context)
             .or_else(|| pep695_expression_violation(right, context)),
         Expr::Unary { expr, .. } | Expr::Starred(expr) => {

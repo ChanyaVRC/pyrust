@@ -39,7 +39,7 @@ fn is_indentation_message(msg: &str) -> bool {
 ///
 /// The returned text is fully dedented (leading whitespace stripped); the
 /// formatter re-indents it to a fixed four spaces, matching CPython.
-fn resolve_frame_source_line(
+pub(crate) fn resolve_frame_source_line(
     frame_file: &str,
     lineno: Option<u32>,
     script_file: &str,

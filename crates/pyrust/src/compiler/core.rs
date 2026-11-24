@@ -65,6 +65,7 @@ impl Compiler {
             list_comp_presize: false,
             is_inlined_comp: false,
             comp_enclosing_locals: None,
+            comp_outer_for_span: None,
         }
     }
 

@@ -227,12 +227,16 @@ impl Interpreter {
                             // caught and later re-raised / chained) records the anchor
                             // for the frame that actually raised — the escape-path
                             // publish below only fires when the error leaves the frame.
-                            pyrust_core::set_current_vm_col_span(
-                                code.col_table
-                                    .get(pc.wrapping_sub(1))
-                                    .copied()
-                                    .and_then(|s| if s == (0, 0, 0, 0) { None } else { Some(s) }),
-                            );
+                            let insn_col_span = code
+                                .col_table
+                                .get(pc.wrapping_sub(1))
+                                .copied()
+                                .and_then(|s| if s == (0, 0, 0, 0) { None } else { Some(s) });
+                            let col_span = match self.inlined_comp_escaped_span.take() {
+                                Some(comp_span) => comp_span.or(insn_col_span),
+                                None => insn_col_span,
+                            };
+                            pyrust_core::set_current_vm_col_span(col_span);
                             match self.handle_vm_error(
                                 e,
                                 &mut exc_handlers,
@@ -1135,29 +1139,32 @@ impl Interpreter {
                 }
                 Insn::PushExcContext(src) => {
                     // Temporarily install R[src] as the active exception context
-                    // before running an inlined finally block.  Any raise inside
-                    // the finally will call attach_implicit_context and see this
-                    // value (the to-be-raised exception) rather than the
-                    // currently-handled exception below it on the stack.
-                    //
-                    // Increment push_exc_ctx_depth so that handle_vm_error's
-                    // duplicate-detection check does not prematurely pop this
-                    // entry when a new exception is dispatched inside the finally.
+                    // (used for inlined `finally` blocks and PEP 654 `except*`
+                    // handler scopes).  Record the pre-push stack depths so
+                    // `PopExcContext` restores the exact outer state even if a
+                    // bare `raise` inside the scope popped the inner entry.
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
+                    self.push_exc_ctx_marks
+                        .push((self.handled_exc_stack.len(), self.exc_saved_active.len()));
+                    self.exc_saved_active.push(self.active_exception.clone());
                     self.handled_exc_stack.push(val.clone());
                     self.active_exception = Some(val);
-                    self.push_exc_ctx_depth += 1;
                 }
                 Insn::PopExcContext => {
-                    // Undo a PushExcContext after the inlined finally block
-                    // completes normally.  Bounded by this frame's base depth.
-                    if self.push_exc_ctx_depth > 0 {
-                        self.push_exc_ctx_depth -= 1;
+                    // Undo a PushExcContext after the bracketed block finishes.
+                    if let Some((saved_handled_len, saved_active_len)) =
+                        self.push_exc_ctx_marks.pop()
+                    {
+                        let target_handled = saved_handled_len.max(exc_ctx_frame_base);
+                        self.handled_exc_stack.truncate(target_handled);
+                        let target_active = saved_active_len.max(exc_saved_active_frame_base);
+                        if self.exc_saved_active.len() > target_active {
+                            self.active_exception = self.exc_saved_active[target_active].clone();
+                            self.exc_saved_active.truncate(target_active);
+                        } else {
+                            self.active_exception = self.handled_exc_stack.last().cloned();
+                        }
                     }
-                    if self.handled_exc_stack.len() > exc_ctx_frame_base {
-                        self.handled_exc_stack.pop();
-                    }
-                    self.active_exception = self.handled_exc_stack.last().cloned();
                 }
                 Insn::RaiseAssert(msg_reg) => {
                     let msg = vm_try!(vm_read(&regs, *msg_reg, num_locals));
@@ -1174,8 +1181,17 @@ impl Interpreter {
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseExceptStarResidual(src) => {
-                    let exc = vm_try!(vm_read(&regs, *src, num_locals));
-                    self.prepare_exception_group_residual(&exc);
+                    let packed = vm_try!(vm_read(&regs, *src, num_locals));
+                    let exc = vm_try!(self.prepare_except_star_reraise(&packed));
+                    // Pop the try-except* handler's own exception context before
+                    // propagating the final residual / combined group so outer
+                    // handlers see the pre-try active exception.
+                    if self.handled_exc_stack.len() > exc_ctx_frame_base {
+                        self.handled_exc_stack.pop();
+                    }
+                    if self.exc_saved_active.len() > exc_saved_active_frame_base {
+                        self.active_exception = self.exc_saved_active.pop().unwrap();
+                    }
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseFrom(src, cause_reg) => {

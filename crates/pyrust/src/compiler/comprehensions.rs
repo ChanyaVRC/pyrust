@@ -193,6 +193,7 @@ impl Compiler {
         comp_name: &str,
         is_async: bool,
         presize_acc: bool,
+        comp_span: Option<crate::ast::CaretSpan>,
     ) -> Reg {
         const IT_PARAM: &str = ".0";
 
@@ -259,6 +260,12 @@ impl Compiler {
         // free-variable `NameError` (issue #2340).  Generator expressions
         // (`compile_gen_exp`) are a real separate frame and stay free.
         sub.is_inlined_comp = true;
+        // PEP 709 (#2993): carry the enclosing statement's source line and the
+        // comprehension's caret span into the implicit helper so errors inside
+        // the comprehension report the enclosing frame's line and exact caret.
+        sub.current_lineno = self.current_lineno;
+        sub.first_lineno = self.current_lineno;
+        sub.comp_outer_for_span = comp_span;
         // Record the locals of the comp's immediately-enclosing *real* function
         // (the PEP 709 inlining target) so the VM can tell an unbound read of one
         // of that frame's locals (`UnboundLocalError`) apart from a free variable
@@ -351,6 +358,7 @@ impl Compiler {
             self.next_temp = fn_reg + 2;
         }
         self.emit(Insn::Move(arg_reg, iter_reg));
+        self.set_col_span_for_next(comp_span);
         self.emit(Insn::Call(fn_reg, 1));
         self.next_temp = fn_reg + 1;
         self.free_temp(iter_reg);
@@ -362,7 +370,7 @@ impl Compiler {
             // same register discipline as `compile_async_with`'s `__aenter__`
             // drive; the `GetAwaitable`/`YieldFrom` scratch temps sit above it.
             let result_reg = self.alloc_temp();
-            self.emit_await_drive_into(fn_reg, result_reg);
+            self.emit_await_drive_into_with_span(fn_reg, result_reg, comp_span);
             self.next_temp = result_reg + 1;
             return result_reg;
         }
@@ -370,7 +378,12 @@ impl Compiler {
         fn_reg
     }
 
-    fn compile_list_comp(&mut self, elt: &Expr, clauses: &[CompClause]) -> Reg {
+    fn compile_list_comp(
+        &mut self,
+        elt: &Expr,
+        clauses: &[CompClause],
+        comp_span: Option<crate::ast::CaretSpan>,
+    ) -> Reg {
         if clauses.is_empty() {
             self.failed = true;
             if self.error_msg.is_none() {
@@ -426,10 +439,18 @@ impl Compiler {
         // reserve.  The reserve reads the source length from `.0` without running
         // user code (see `list_reserve_hint`), so it never changes semantics.
         let presize = clauses.len() == 1 && clauses[0].cond.is_none() && !is_async;
-        self.compile_collection_comp_impl(iter_reg, fn_body, "listcomp", is_async, presize)
+        self.compile_collection_comp_impl(
+            iter_reg, fn_body, "listcomp", is_async, presize, comp_span,
+        )
     }
 
-    fn compile_dict_comp(&mut self, key: &Expr, val: &Expr, clauses: &[CompClause]) -> Reg {
+    fn compile_dict_comp(
+        &mut self,
+        key: &Expr,
+        val: &Expr,
+        clauses: &[CompClause],
+        comp_span: Option<crate::ast::CaretSpan>,
+    ) -> Reg {
         if clauses.is_empty() {
             self.failed = true;
             if self.error_msg.is_none() {
@@ -467,7 +488,7 @@ impl Compiler {
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
         fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string(), None))));
 
-        self.compile_collection_comp_impl(iter_reg, fn_body, "dictcomp", is_async, false)
+        self.compile_collection_comp_impl(iter_reg, fn_body, "dictcomp", is_async, false, comp_span)
     }
 
     /// When compiling the implicit function body of a set comprehension
@@ -545,7 +566,12 @@ impl Compiler {
         true
     }
 
-    fn compile_set_comp(&mut self, elt: &Expr, clauses: &[CompClause]) -> Reg {
+    fn compile_set_comp(
+        &mut self,
+        elt: &Expr,
+        clauses: &[CompClause],
+        comp_span: Option<crate::ast::CaretSpan>,
+    ) -> Reg {
         if clauses.is_empty() {
             self.failed = true;
             if self.error_msg.is_none() {
@@ -599,7 +625,7 @@ impl Compiler {
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
         fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string(), None))));
 
-        self.compile_collection_comp_impl(iter_reg, fn_body, "setcomp", is_async, false)
+        self.compile_collection_comp_impl(iter_reg, fn_body, "setcomp", is_async, false, comp_span)
     }
 
     /// Compile a generator expression `(elt for target in iter ...)`.

@@ -234,27 +234,33 @@ impl Interpreter {
         // exception propagated out of the body (issue #908).  On yield
         // (Ok(Yielded)) the body suspended successfully — nothing to record.
         if result.is_err() {
-            // Generator's own code-object filename (#2438): a generator defined
-            // in an imported module reports its module's source file.
-            let tb_filename = frame.code.filename.clone();
-            let tb_lineno = match pyrust_core::get_current_vm_line() {
-                0 => None,
-                n => Some(n),
-            };
-            pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
-                filename: tb_filename,
-                lineno: tb_lineno,
-                source_line: None,
-                funcname: frame.fn_name.clone(),
-                globals: Some(pyrust_core::FrameGlobals::for_environment(&frame.saved_env)),
-                // PEP 657 (#2904): the generator body just escaped, so the
-                // published anchor is the col span of the instruction that
-                // propagated the error inside it (the `1/0` BinOp of `yield 1/0`,
-                // the `f()` Call of `yield f()`, …) — exactly the same rule the
-                // plain-function frame uses in `calls::user_frame`.  Generator
-                // frames used to hardcode `None` here and stayed caret-free.
-                col_span: pyrust_core::get_current_vm_col_span(),
-            });
+            if frame.code.is_inlined_comp {
+                // PEP 709 (#2993): async collection comprehensions are inlined
+                // into their enclosing async function frame.
+                self.inlined_comp_escaped_span = Some(pyrust_core::get_current_vm_col_span());
+            } else {
+                // Generator's own code-object filename (#2438): a generator defined
+                // in an imported module reports its module's source file.
+                let tb_filename = frame.code.filename.clone();
+                let tb_lineno = match pyrust_core::get_current_vm_line() {
+                    0 => None,
+                    n => Some(n),
+                };
+                pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                    filename: tb_filename,
+                    lineno: tb_lineno,
+                    source_line: None,
+                    funcname: frame.fn_name.clone(),
+                    globals: Some(pyrust_core::FrameGlobals::for_environment(&frame.saved_env)),
+                    // PEP 657 (#2904): the generator body just escaped, so the
+                    // published anchor is the col span of the instruction that
+                    // propagated the error inside it (the `1/0` BinOp of `yield 1/0`,
+                    // the `f()` Call of `yield f()`, …) — exactly the same rule the
+                    // plain-function frame uses in `calls::user_frame`.  Generator
+                    // frames used to hardcode `None` here and stayed caret-free.
+                    col_span: pyrust_core::get_current_vm_col_span(),
+                });
+            }
         }
         self.vm_frame_views.pop();
 
@@ -302,7 +308,7 @@ impl Interpreter {
                 // any subclass) escapes from a generator frame, convert it to
                 // RuntimeError("generator raised StopIteration").  The original
                 // exception becomes the __cause__ of the RuntimeError.
-                Err(pep479_wrap_stop_iteration(e))
+                Err(self.pep479_wrap_stop_iteration(e))
             }
         }
     }
@@ -350,12 +356,11 @@ impl Interpreter {
         let exc_ctx_entry_depth = self.handled_exc_stack.len();
         let exc_saved_active_entry_depth = self.exc_saved_active.len();
         let saved_active = self.active_exception.clone();
-        // Save and reset push_exc_ctx_depth: PushExcContext/PopExcContext are
+        // Save and reset push_exc_ctx_marks: PushExcContext/PopExcContext are
         // always emitted as matched pairs within a single function body, but if
-        // the finally block raises (causing the frame to exit abnormally),
-        // PopExcContext is never executed and the depth would remain non-zero.
-        // Resetting at frame entry/exit keeps the counter scoped to this frame.
-        let saved_push_exc_ctx_depth = std::mem::replace(&mut self.push_exc_ctx_depth, 0);
+        // the block raises out of the frame, PopExcContext is never executed.
+        // Scoping the marks vector to this frame keeps outer frames intact.
+        let saved_push_exc_ctx_marks = std::mem::take(&mut self.push_exc_ctx_marks);
 
         let result = self.run_bytecode_inner_impl(
             code,
@@ -376,7 +381,7 @@ impl Interpreter {
         self.handled_exc_stack.truncate(exc_ctx_entry_depth);
         self.exc_saved_active.truncate(exc_saved_active_entry_depth);
         self.active_exception = saved_active;
-        self.push_exc_ctx_depth = saved_push_exc_ctx_depth;
+        self.push_exc_ctx_marks = saved_push_exc_ctx_marks;
         result
     }
 
@@ -563,30 +568,47 @@ impl Interpreter {
                 *st.tramp_active_base = saved.saved_base;
                 self.env = saved.saved_env;
                 self.finish_pop_vm_frame_view();
+                let mut callee_is_inlined_comp = false;
                 if let Some(view) = view
                     && let Some(func) = view.function
                 {
-                    let frame_col = innermost_col;
-                    // Callee's own code-object filename (#2438): a trampolined
-                    // call into an imported module's function reports that
-                    // module's source file, not the running script's path.
-                    let file = func
+                    let callee_code = func
                         .precompiled_code
                         .as_ref()
-                        .and_then(|rc| Rc::clone(rc).downcast::<crate::bytecode::FnCode>().ok())
-                        .map(|c| c.filename.clone())
-                        .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
-                    pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
-                        filename: file,
-                        lineno: if line == 0 { None } else { Some(line) },
-                        source_line: None,
-                        funcname: std::sync::Arc::from(&func.name[..]),
-                        globals: Some(pyrust_core::FrameGlobals::for_environment(&func.env)),
-                        col_span: frame_col,
-                    });
+                        .and_then(|rc| Rc::clone(rc).downcast::<crate::bytecode::FnCode>().ok());
+                    if callee_code.as_ref().is_some_and(|c| c.is_inlined_comp) {
+                        // PEP 709 (#2993): list/set/dict comprehensions are
+                        // inlined into the enclosing frame — do not emit a
+                        // `<listcomp>`/`<setcomp>`/`<dictcomp>` traceback frame
+                        // and keep the inner PEP 657 caret anchor.
+                        callee_is_inlined_comp = true;
+                    } else {
+                        let frame_col = innermost_col;
+                        // Callee's own code-object filename (#2438): a trampolined
+                        // call into an imported module's function reports that
+                        // module's source file, not the running script's path.
+                        let file = callee_code
+                            .map(|c| c.filename.clone())
+                            .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+                        pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                            filename: file,
+                            lineno: if line == 0 { None } else { Some(line) },
+                            source_line: None,
+                            funcname: std::sync::Arc::from(&func.name[..]),
+                            globals: Some(pyrust_core::FrameGlobals::for_environment(&func.env)),
+                            col_span: frame_col,
+                        });
+                    }
                 }
-                innermost_col = caller_call_col;
-                line = saved.saved_cur_line;
+                if callee_is_inlined_comp {
+                    innermost_col = innermost_col.or(caller_call_col);
+                    if line == 0 {
+                        line = saved.saved_cur_line;
+                    }
+                } else {
+                    innermost_col = caller_call_col;
+                    line = saved.saved_cur_line;
+                }
             }
             let Some(mut gd) = st.gen_drive_stack.pop() else {
                 break;
@@ -630,7 +652,7 @@ impl Interpreter {
             *gd.state_rc.borrow_mut() = boxed;
             // PEP 479: a `StopIteration` escaping a generator body becomes
             // `RuntimeError` in the *consumer's* env.
-            err = pep479_wrap_stop_iteration(err);
+            err = self.pep479_wrap_stop_iteration(err);
             // Re-raise at the consumer's `ForIter` instruction.
             let ccode: &crate::bytecode::FnCode = unsafe { &**st.code_ptr };
             // PEP 657: from here on the error belongs to the *consumer*, raised at
@@ -733,15 +755,15 @@ impl Interpreter {
         // EndExcept and RaiseReRaise pop this to restore the outer handler's
         // exception when the inner except block exits.
         let prev_active = self.active_exception.clone();
-        // When control is inside a PushExcContext-bracketed finally block
-        // (push_exc_ctx_depth > 0), the top of handled_exc_stack is the
-        // to-be-raised exception installed by PushExcContext — not an
-        // ordinary handler-dispatch entry.  Skipping the duplicate-pop
-        // here preserves that entry so that PopExcContext can remove it
-        // cleanly after the finally block completes, and so that
-        // attach_implicit_context for the outer RaiseValue sees the correct
-        // context (ValueError, not None) after the finally returns.
-        if self.push_exc_ctx_depth == 0
+        // When control is inside a PushExcContext-bracketed block (finally or
+        // `except*` handler), do not dedup-pop the pushed context entry or the
+        // outer handler entry immediately beneath it; PopExcContext restores
+        // the stack cleanly once the inner handler finishes.
+        let protected_by_push_ctx = self
+            .push_exc_ctx_marks
+            .last()
+            .is_some_and(|&(saved_len, _)| self.handled_exc_stack.len() <= saved_len + 1);
+        if !protected_by_push_ctx
             && self.handled_exc_stack.len() > exc_ctx_frame_base
             && let Some(top) = self.handled_exc_stack.last()
             && let Some(active) = self.active_exception.as_ref()

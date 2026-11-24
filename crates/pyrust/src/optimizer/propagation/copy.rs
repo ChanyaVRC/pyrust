@@ -165,8 +165,12 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             },
             Insn::CheckLocal(r, n) => Insn::CheckLocal(s(&copies, r), n),
             Insn::MatchExcept(r, k) => Insn::MatchExcept(s(&copies, r), k),
+            // MatchExceptStar writes BOTH `src` (the narrowed residual group)
+            // and `dst` (the matched subgroup); only `r` (the exception type)
+            // is a pure read operand.  Substituting `src` or `dst` would
+            // redirect the in-place write onto an aliased register!
             Insn::MatchExceptStar(r, src, dst, k) => {
-                Insn::MatchExceptStar(s(&copies, r), s(&copies, src), s(&copies, dst), k)
+                Insn::MatchExceptStar(s(&copies, r), src, dst, k)
             }
             Insn::StoreGlobal(n, src) => Insn::StoreGlobal(n, s(&copies, src)),
             Insn::StoreCell(n, src) => Insn::StoreCell(n, s(&copies, src)),
@@ -223,6 +227,11 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             copies.retain(|k, v| {
                 *k != *result_reg && *v != *result_reg && *k != *sent_reg && *v != *sent_reg
             });
+        }
+        // MatchExceptStar writes both `src` (narrowed group) and `dst` (matched
+        // subgroup); evict both so stale aliases cannot survive past the split.
+        if let Insn::MatchExceptStar(_, src, dst, _) = &insn {
+            copies.retain(|k, v| *k != *src && *v != *src && *k != *dst && *v != *dst);
         }
         // LoadConst writes dst (not in writable_dst so handled here).
         if let Insn::LoadConst(dst, _) = &insn {

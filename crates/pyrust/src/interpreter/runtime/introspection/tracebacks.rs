@@ -1,24 +1,14 @@
 impl Interpreter {
-    /// Build the Python-visible traceback chain from captured frame metadata
-    /// plus the catching frame.
-    fn build_traceback_from_snapshot(
+    /// Build traceback nodes from captured frames only (no synthetic catch
+    /// frame), prepended onto `tail`.  Used both by `build_traceback_from_snapshot`
+    /// and by PEP 479 when transferring a generator's unwound frames onto the
+    /// escaping `StopIteration` / `StopAsyncIteration` cause (issue #2993).
+    pub(crate) fn build_traceback_nodes_from_frames(
         &self,
         captured: &[pyrust_core::FrameInfo],
-        catch: TracebackCatchFrame<'_>,
         tail: Value,
     ) -> Value {
-        let catch_code = catch.code.build_code_object(self);
-        // Build the chain from innermost (tb_next == None) outward, so the
-        // outermost node is returned last and links to the rest via tb_next.
-        //
-        // `tail` is the already-materialised chain that this snapshot's frames
-        // are *prepended* onto (issue #2367): when an exception that already
-        // carries a traceback is re-raised, CPython prepends the re-raising
-        // frame(s) and links the new innermost node's `tb_next` to the old
-        // chain — which stays as the tail, same objects (identity contract).
-        // For a fresh catch the tail is `None`.
         let mut node = tail;
-
         // Innermost-last: walk the captured frames from the END (innermost)
         // toward the front (outermost callee).
         for fi in captured.iter().rev() {
@@ -60,6 +50,28 @@ impl Interpreter {
             // re-raised / chained exception renders the same carets (#2411).
             node = tb_obj::traceback_node_with_col(frame, node, lineno, -1, fi.col_span);
         }
+        node
+    }
+
+    /// Build the Python-visible traceback chain from captured frame metadata
+    /// plus the catching frame.
+    fn build_traceback_from_snapshot(
+        &self,
+        captured: &[pyrust_core::FrameInfo],
+        catch: TracebackCatchFrame<'_>,
+        tail: Value,
+    ) -> Value {
+        let catch_code = catch.code.build_code_object(self);
+        // Build the chain from innermost (tb_next == None) outward, so the
+        // outermost node is returned last and links to the rest via tb_next.
+        //
+        // `tail` is the already-materialised chain that this snapshot's frames
+        // are *prepended* onto (issue #2367): when an exception that already
+        // carries a traceback is re-raised, CPython prepends the re-raising
+        // frame(s) and links the new innermost node's `tb_next` to the old
+        // chain — which stays as the tail, same objects (identity contract).
+        // For a fresh catch the tail is `None`.
+        let node = self.build_traceback_nodes_from_frames(captured, tail);
 
         // Finally, the catching frame as the outermost node.
         let catch_env = catch.globals.environment();
@@ -139,7 +151,15 @@ impl Interpreter {
         if drop_innermost && !captured.is_empty() {
             captured.pop();
         }
-        let last_view = self.vm_frame_views.last();
+        // Skip any PEP 709 inlined comprehension helper view (`<listcomp>` /
+        // `<setcomp>` / `<dictcomp>`) so an internal `SetupExcept` inside an
+        // async comprehension (`async for`) attributes the catch node to the
+        // enclosing real frame instead of `<listcomp>` (issue #2993).
+        let last_view = self
+            .vm_frame_views
+            .iter()
+            .rev()
+            .find(|view| !Self::view_is_inlined_comp(view));
         let catch_func = last_view.and_then(|view| view.function.clone());
         // Issue #2445: a generator body has no `UserFunction`; recover the
         // generator's `(funcname, filename)` so the catching frame is attributed
@@ -319,8 +339,22 @@ impl Interpreter {
         catch_lineno: i64,
         is_bare_reraise: bool,
     ) -> Option<Value> {
-        // Fresh exception (slot still the pre-initialised `None`): plain build.
+        // Fresh exception (slot still the pre-initialised `None`): plain build,
+        // except when a bare `raise` re-raised a freshly-synthesised `except*`
+        // wrapper/combined group (`ExceptionGroup('', ...)`).  In the same
+        // frame (`captured == 0`) CPython leaves `__traceback__` as `None`;
+        // across a function boundary (`captured > 0`) CPython drops the
+        // re-raising function's own frame and records only outer callers (#2993).
         if existing.is_none() {
+            if is_bare_reraise {
+                if pyrust_core::captured_error_frames_len() == 0 {
+                    return None;
+                }
+                return Some(self.build_deferred_traceback_with_tail_drop_innermost(
+                    catch_lineno,
+                    Value::none(),
+                ));
+            }
             return Some(self.build_deferred_traceback(catch_lineno));
         }
         // Slot already carries a chain (real traceback or deferred placeholder).
@@ -415,24 +449,10 @@ impl Interpreter {
         let tb = self
             .materialize_deferred_traceback(&stored)
             .unwrap_or(stored);
-        let nodes = pyrust_builtins::traceback::walk_frames_with_col(&tb);
+        let nodes = pyrust_builtins::traceback::walk_frames_with_loc(&tb);
         if nodes.is_empty() {
             return None;
         }
-        // Source-line lookup: store the line with its own leading indentation
-        // *preserved* (only trailing whitespace stripped).  `format_traceback`
-        // dedents it for display and uses the leading-whitespace count to rebase
-        // the PEP 657 caret anchor (#2411); pre-trimming the start would drop
-        // that offset and drop/misplace the caret.
-        let resolve = |lineno: Option<u32>| -> Option<std::sync::Arc<str>> {
-            let n = lineno?;
-            if src.is_empty() {
-                return None;
-            }
-            src.lines()
-                .nth((n as usize).saturating_sub(1))
-                .map(|l| std::sync::Arc::from(l.trim_end()))
-        };
         let mut frames: Vec<pyrust_core::FrameInfo> =
             Vec::with_capacity(snapshot.len() + nodes.len());
         // Prefix: the frames the exception unwound through after the re-raise.
@@ -444,11 +464,16 @@ impl Interpreter {
             snapshot.len()
         };
         for fi in &snapshot[..prefix_end] {
-            // The snapshot lacks per-frame source text; resolve it from `src`.
+            // Preserve each frame's own filename (e.g. `<frozen asyncio>` or an
+            // imported module path — #2993) and resolve its source line against
+            // that filename rather than substituting the user script's path/text.
+            let source_line = fi.source_line.clone().or_else(|| {
+                resolve_frame_source_line(&fi.filename, fi.lineno, filename.as_ref(), src)
+            });
             frames.push(pyrust_core::FrameInfo {
-                filename: filename.clone(),
+                filename: fi.filename.clone(),
                 lineno: fi.lineno,
-                source_line: resolve(fi.lineno),
+                source_line,
                 funcname: fi.funcname.clone(),
                 // This list is for stderr formatting only; Python-visible frame
                 // objects already live in the materialised traceback.
@@ -456,18 +481,20 @@ impl Interpreter {
                 col_span: fi.col_span,
             });
         }
-        // The carried chain (outermost-first), each node carrying its PEP 657
-        // caret anchor recovered from the original capture (#2411).
-        for (funcname, lineno, col_span) in nodes {
+        // The carried chain (outermost-first), each node carrying its own
+        // `co_filename` (#2993) and PEP 657 caret anchor (#2411).
+        for (node_filename, funcname, lineno, col_span) in nodes {
             let lineno = if lineno > 0 {
                 Some(lineno as u32)
             } else {
                 None
             };
+            let source_line =
+                resolve_frame_source_line(&node_filename, lineno, filename.as_ref(), src);
             frames.push(pyrust_core::FrameInfo {
-                filename: filename.clone(),
+                filename: std::sync::Arc::from(node_filename),
                 lineno,
-                source_line: resolve(lineno),
+                source_line,
                 funcname: std::sync::Arc::from(&funcname[..]),
                 globals: None,
                 col_span,

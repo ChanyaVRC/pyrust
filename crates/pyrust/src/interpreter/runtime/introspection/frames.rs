@@ -370,7 +370,44 @@ impl Interpreter {
         self.sync_cached_function_locals_at(view_index);
     }
 
-    /// Resolve `f_back` on demand for any live frame object (issue #3028).
+    /// True when `view` is an implicit PEP 709 inlined comprehension helper
+    /// (`<listcomp>`/`<setcomp>`/`<dictcomp>`), which CPython 3.12 does not
+    /// expose as a separate frame to `sys._getframe()` (issue #2993).
+    fn view_is_inlined_comp(view: &VmFrameView) -> bool {
+        if let Some(func) = view.function.as_ref()
+            && let Some(code_any) = func.precompiled_code.as_ref()
+            && let Ok(code) = Rc::clone(code_any).downcast::<crate::bytecode::FnCode>()
+            && code.is_inlined_comp
+        {
+            return true;
+        }
+        if let Some(gen_frame) = view.gen_frame {
+            // SAFETY: `gen_frame` is alive while this view is on `vm_frame_views`.
+            if unsafe { gen_frame.as_ref() }.code.is_inlined_comp {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Translate a Python-visible frame depth `idx` (0 = innermost non-inlined
+    /// frame) into its index inside `self.vm_frame_views`.
+    fn visible_frame_view_index(&self, idx: usize) -> Option<usize> {
+        let mut remaining = idx;
+        for (view_index, view) in self.vm_frame_views.iter().enumerate().rev() {
+            if Self::view_is_inlined_comp(view) {
+                continue;
+            }
+            if remaining == 0 {
+                return Some(view_index);
+            }
+            remaining -= 1;
+        }
+        None
+    }
+
+    /// Resolve `f_back` on demand for any live frame object (issues #2993,
+    /// #3028).
     ///
     /// Returns `None` if `frame` is not currently active on `vm_frame_views`
     /// (unwound, suspended generator, or traceback frame), letting `FrameOps`
@@ -392,16 +429,19 @@ impl Interpreter {
         if view_index == 0 {
             return Some(Value::none());
         }
-        let depth = self.vm_frame_views.len() - 1 - view_index;
+        let visible_above = self.vm_frame_views[view_index + 1..]
+            .iter()
+            .filter(|v| !Self::view_is_inlined_comp(v))
+            .count();
         if self.vm_frame_views[view_index].gen_frame.is_some() {
-            return Some(self.build_frame_object(depth + 1, 0));
+            return Some(self.build_frame_object(visible_above + 1, 0));
         }
         if let Some(stored) = frame_obj::stored_back(frame)
             && !stored.is_none()
         {
             return Some(stored);
         }
-        let back = self.build_frame_object(depth + 1, 0);
+        let back = self.build_frame_object(visible_above + 1, 0);
         frame_obj::set_back(frame, back.clone());
         Some(back)
     }
@@ -411,12 +451,9 @@ impl Interpreter {
     /// attribute access (or on unwind if the frame escapes), keeping
     /// `sys._getframe()` O(1) regardless of stack depth (issue #3028).
     pub(crate) fn build_frame_object(&mut self, idx: usize, lineno: i64) -> Value {
-        let len = self.vm_frame_views.len();
-        if idx >= len {
+        let Some(view_index) = self.visible_frame_view_index(idx) else {
             return Value::none();
-        }
-        // `idx` counts from the top (innermost).  Translate to the Vec index.
-        let view_index = len - 1 - idx;
+        };
 
         // A live activation owns one Python frame identity. Upgrade the weak
         // value only on introspection; an ordinary call allocates no side

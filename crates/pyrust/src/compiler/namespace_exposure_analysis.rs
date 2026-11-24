@@ -203,8 +203,8 @@ fn expr_may_expose_module_namespace(expr: &Expr) -> bool {
             }
             DictItem::DoubleSplat(expr) => expr_may_expose_module_namespace(expr),
         }),
-        Expr::ListComp { elt, clauses }
-        | Expr::SetComp { elt, clauses }
+        Expr::ListComp { elt, clauses, .. }
+        | Expr::SetComp { elt, clauses, .. }
         | Expr::GenExp { elt, clauses, .. } => {
             expr_may_expose_module_namespace(elt)
                 || clauses.iter().any(|clause| {
@@ -216,7 +216,9 @@ fn expr_may_expose_module_namespace(expr: &Expr) -> bool {
                             .is_some_and(expr_may_expose_module_namespace)
                 })
         }
-        Expr::DictComp { key, val, clauses } => {
+        Expr::DictComp {
+            key, val, clauses, ..
+        } => {
             expr_may_expose_module_namespace(key)
                 || expr_may_expose_module_namespace(val)
                 || clauses.iter().any(|clause| {
