@@ -229,21 +229,37 @@ impl Interpreter {
         idx: crate::bytecode::Reg,
         val: crate::bytecode::Reg,
     ) -> Result<()> {
-        if let Some(raw_i) = regs[idx as usize].as_int()
-            && let Some(len) = regs[obj as usize].list_len()
-        {
-            let j = if raw_i < 0 { raw_i + len as i64 } else { raw_i };
-            if j >= 0 && (j as usize) < len {
-                let v = regs[val as usize].clone();
-                regs[obj as usize].list_with_mut(|items| {
-                    items[j as usize] = v;
-                });
-            } else {
-                return Err(pyrust_core::index_err!(
-                    "list assignment index out of range"
-                ));
+        if let Some(raw_i) = regs[idx as usize].as_int() {
+            if let Some(len) = regs[obj as usize].list_len() {
+                let j = if raw_i < 0 { raw_i + len as i64 } else { raw_i };
+                if j >= 0 && (j as usize) < len {
+                    let v = regs[val as usize].clone();
+                    regs[obj as usize].list_with_mut(|items| {
+                        items[j as usize] = v;
+                    });
+                } else {
+                    return Err(pyrust_core::index_err!(
+                        "list assignment index out of range"
+                    ));
+                }
+                return Ok(());
             }
-            return Ok(());
+            // Fast path for `dict[int] = val` (#2924): skips `value_to_pykey`,
+            // `ValueKind` dispatch, and cloning the dict `Rc` when no object
+            // key hash candidate forces user `__eq__`.
+            if regs[obj as usize].get_dict_rc().is_some() {
+                let val_val = vm_read(regs, val, num_locals)?;
+                let deferred = crate::interpreter::collection_keys::try_dict_insert_primitive_fast(
+                    &regs[obj as usize],
+                    PyKey::Int(raw_i),
+                    val_val,
+                )?;
+                if let Some((key, val_val)) = deferred {
+                    let dict_val = regs[obj as usize].clone();
+                    return self.dict_insert_value(&dict_val, key, val_val);
+                }
+                return Ok(());
+            }
         }
         let idx_val = vm_read(regs, idx, num_locals)?;
         let val_val = vm_read(regs, val, num_locals)?;

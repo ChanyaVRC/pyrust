@@ -458,29 +458,74 @@ pub(crate) fn advance_stable_snapshot_cursor(
     })
 }
 
-/// Yield the next key of a walk whose order is still frozen.
+/// Build the initial frozen key order or key snapshot from an already-borrowed
+/// plain `PyDict` in a single `RefCell` borrow (#2924).
+pub(crate) fn initial_dict_order_from_ref(
+    dict: &pyrust_core::PyDict,
+    kind: u8,
+) -> (Option<Vec<Value>>, Option<Vec<PyKey>>) {
+    let len = dict.len();
+    if len > ADAPTIVE_KEY_SNAPSHOT_THRESHOLD {
+        return (None, None);
+    }
+    if kind == 0 {
+        let mut order = FROZEN_KEY_BUFFERS.with(SnapshotBufferPool::take);
+        if push_frozen_key_order(dict.keys(), &mut order) && order.len() == len {
+            return (Some(order), None);
+        }
+        release_frozen_key_buffer(order);
+    }
+    let mut keys = take_key_snapshot_buffer();
+    keys.extend(dict.keys().cloned());
+    if keys.len() == len {
+        (None, Some(keys))
+    } else {
+        release_key_snapshot_buffer(keys);
+        (None, None)
+    }
+}
+
+/// Outcome of the inline steady-state stepper for frozen key/set walks (#2924).
+pub(crate) enum FrozenKeyStep {
+    Item(Value),
+    Exhausted,
+    Slow,
+}
+
+/// Yield the next key — or fast-exhaust — a walk whose order is still frozen.
 ///
 /// This is the whole steady state of `for k in dict` and `for k in set`: the
-/// order is already held in yielded form, so the step is a generation compare
-/// and one indexed read. Everything else — exhaustion, the terminal entry that
-/// installs the reinsertion watch, mutated orders, value and item walks, and
-/// subclass backing that can move — declines here and runs the general state
-/// machine, which keeps this stepper free of the dispatch those cases need.
+/// order is already held in yielded form, so each step is a generation compare
+/// and one unchecked indexed read, and clean exhaustion releases the cursor
+/// without entering `advance_live_key_cursor`. The final entry (which installs
+/// the terminal-key reinsertion watch) and any mutated order decline here with
+/// `Slow` and run the general state machine.
 #[inline(always)]
-pub(crate) fn next_frozen_key(cursor: &mut LiveKeyCursor) -> Option<Value> {
-    let pos = cursor.snapshot_pos;
-    // Leaving the final entry to the general path also covers exhaustion,
-    // release, and the terminal-key reinsertion watch.
-    if pos + 1 >= cursor.recorded_len {
-        return None;
-    }
-    let state = cursor.mutation_state.as_ref()?;
+pub(crate) fn next_frozen_key_step(cursor: &mut LiveKeyCursor) -> FrozenKeyStep {
+    let Some(frozen) = cursor.frozen_keys.as_ref() else {
+        return FrozenKeyStep::Slow;
+    };
+    let Some(state) = cursor.mutation_state.as_ref() else {
+        return FrozenKeyStep::Slow;
+    };
     if state.version() != cursor.observed_mutation {
-        return None;
+        return FrozenKeyStep::Slow;
     }
-    let item = cursor.frozen_keys.as_ref()?.get(pos)?.clone();
-    cursor.snapshot_pos = pos + 1;
-    Some(item)
+    let pos = cursor.snapshot_pos;
+    let len = frozen.len();
+    if pos + 1 < len {
+        // SAFETY: `pos + 1 < len` guarantees `pos < frozen.len()`.
+        let item = unsafe { frozen.get_unchecked(pos).clone() };
+        cursor.snapshot_pos = pos + 1;
+        return FrozenKeyStep::Item(item);
+    }
+    if pos == len {
+        cursor.release();
+        return FrozenKeyStep::Exhausted;
+    }
+    // `pos + 1 == len`: terminal entry; delegate to the general path so it
+    // installs the terminal-key reinsertion watch.
+    FrozenKeyStep::Slow
 }
 
 fn emit_live_key_item(

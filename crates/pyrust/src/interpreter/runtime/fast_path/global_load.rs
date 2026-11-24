@@ -11,34 +11,37 @@ impl Interpreter {
             current_namespace_id,
             current_environment_version,
             current_structure_version,
-            current_mirror_epoch,
-            cache_disabled,
-        ) = self.env.borrow().namespace_cache_snapshot();
-
-        // Once globals() has exposed the backing dict, arbitrary alias methods
-        // (e.g. update/clear) can mutate it without an interpreter callback.
-        // Keep those uncommon namespaces uncached instead of installing a
-        // process-wide dict mutation watcher on every normal program.
-        if !cache_disabled {
-            let cached = code.global_cache.borrow().get(slot).and_then(|entry| {
-                entry.lookup_with_fastlocal(
-                    current_namespace_id,
-                    current_environment_version,
-                    current_structure_version,
-                    current_mirror_epoch,
-                    |mirror_epoch, local_index, register| {
-                        self.env.borrow().namespace_fastlocal_cached_value(
-                            mirror_epoch,
-                            local_index,
-                            register,
-                        )
-                    },
-                )
-            });
-            if let Some(value) = cached {
-                return Ok(value);
+            _current_mirror_epoch,
+            _cache_disabled,
+        ) = {
+            let env = self.env.borrow();
+            let snapshot = env.namespace_cache_snapshot();
+            // Once globals() has exposed the backing dict, arbitrary alias methods
+            // (e.g. update/clear) can mutate it without an interpreter callback.
+            // Keep those uncommon namespaces uncached instead of installing a
+            // process-wide dict mutation watcher on every normal program.
+            if !snapshot.4 {
+                let cached = code.global_cache.borrow().get(slot).and_then(|entry| {
+                    entry.lookup_with_fastlocal(
+                        snapshot.0,
+                        snapshot.1,
+                        snapshot.2,
+                        snapshot.3,
+                        |mirror_epoch, local_index, register| {
+                            env.namespace_fastlocal_cached_value(
+                                mirror_epoch,
+                                local_index,
+                                register,
+                            )
+                        },
+                    )
+                });
+                if let Some(value) = cached {
+                    return Ok(value);
+                }
             }
-        }
+            snapshot
+        };
 
         let name = code.names.get(slot).ok_or_else(|| {
             PyError::Runtime(format!(

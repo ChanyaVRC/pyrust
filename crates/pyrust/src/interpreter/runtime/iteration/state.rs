@@ -259,6 +259,46 @@ pub(crate) struct LiveKeyCursor {
 }
 
 impl LiveKeyCursor {
+    /// Construct a live dict cursor from an already-resolved plain `PyDict`
+    /// handle in a single `RefCell` borrow (#2924).
+    ///
+    /// Keys-only walks (`kind == 0`) never read `backing` during steady-state
+    /// stepping, so we skip cloning `Rc<RefCell<PyDict>>` for them.
+    pub(crate) fn dict_from_rc(dict: &Rc<RefCell<pyrust_core::PyDict>>, kind: u8) -> Self {
+        let (len, frozen_keys, snapshot) = {
+            let borrowed = dict.borrow();
+            let len = borrowed.len();
+            let (frozen_keys, snapshot) = initial_dict_order_from_ref(&borrowed, kind);
+            (len, frozen_keys, snapshot)
+        };
+        let mutation_state = pyrust_core::dict_iteration_mutation_state_with_len(dict, len);
+        let observed_mutation = mutation_state.version();
+        Self {
+            yielded: Vec::new(),
+            snapshot,
+            frozen_keys,
+            snapshot_pos: 0,
+            backing: (kind != 0).then(|| Rc::clone(dict)),
+            seen: None,
+            next_index: 0,
+            last_key: None,
+            last_index: 0,
+            mutation_state: Some(mutation_state),
+            observed_mutation,
+            recorded_len: len,
+            size_change_message: "dictionary changed size during iteration",
+            dynamic_backing: false,
+            remaining: Some(len),
+            kind,
+            keys_changed: false,
+            size_changed: false,
+            watching_terminal_key: false,
+            terminal_entry_cursor: 0,
+            structurally_changed: false,
+            exhausted: false,
+        }
+    }
+
     pub(crate) fn dict(container: &Value, kind: u8, len: usize) -> Self {
         let mutation_state = live_collection_mutation_state(container)
             .expect("live dict cursor requires mutation state");
@@ -272,7 +312,11 @@ impl LiveKeyCursor {
                 .flatten(),
             frozen_keys,
             snapshot_pos: 0,
-            backing: stable_cursor_backing(container, dynamic_backing),
+            backing: if kind == 0 {
+                None
+            } else {
+                stable_cursor_backing(container, dynamic_backing)
+            },
             seen: None,
             next_index: 0,
             last_key: None,

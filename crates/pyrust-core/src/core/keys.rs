@@ -315,25 +315,13 @@ fn hash_complex_key<H: Hasher>(re: f64, im: f64, state: &mut H) {
     }
 }
 
-impl PartialEq for PyKey {
-    fn eq(&self, other: &Self) -> bool {
-        // In CPython, `True == 1` and `False == 0`, and they hash equal, so
-        // dict/set treat them as the same key.  We preserve the original key
-        // (e.g. `{True: 1, 1: 2}` keeps `True` as the visible key) by storing
-        // `PyKey::Bool` distinctly, but we make `Bool(b) == Int(b as i64)` so
-        // lookups across the two types succeed.
-        //
-        // CPython also guarantees `1.0 == 1` for dict/set purposes, so
-        // `Float` and `Int` (or `Bool`) must compare equal when the float is
-        // integer-valued and representable as an `i64`.
-        //
-        // Two `Object` keys compare equal only when the underlying value
-        // identity matches.  This is intentionally strict: the dict/set
-        // runtime layer dispatches user-defined `__eq__` separately when the
-        // precomputed hashes coincide so that distinct instances which the
-        // user considers equal still collapse.
+impl PyKey {
+    /// Out-of-line equality for non-`(Int, Int)` / non-`(Str, Str)` key pairs
+    /// so the inlined `PartialEq::eq` stays tiny on homogeneous int/str probes
+    /// (#2924).
+    #[inline(never)]
+    fn eq_slow(&self, other: &Self) -> bool {
         match (self, other) {
-            (PyKey::Int(a), PyKey::Int(b)) => a == b,
             (PyKey::Bool(a), PyKey::Bool(b)) => a == b,
             (PyKey::Bool(a), PyKey::Int(b)) | (PyKey::Int(b), PyKey::Bool(a)) => *b == *a as i64,
             // Bit-identical floats are equal first (`a == b`): this is the
@@ -370,7 +358,6 @@ impl PartialEq for PyKey {
             (PyKey::Float(bits), PyKey::BigInt(n)) | (PyKey::BigInt(n), PyKey::Float(bits)) => {
                 bigint_float_eq(n, f64::from_bits(*bits))
             }
-            (PyKey::Str(a), PyKey::Str(b)) => a.as_str() == b.as_str(),
             (PyKey::None, PyKey::None) => true,
             (PyKey::Ellipsis, PyKey::Ellipsis) => true,
             (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => {
@@ -390,10 +377,7 @@ impl PartialEq for PyKey {
                     && (ai == bi || ai.to_bits() == bi.to_bits())
             }
             // Cross-type: a *real-valued* complex equals the int / bool / float
-            // / BigInt with the same value (#2900).  Outlined so that the four
-            // extra arms don't inflate `eq` itself — this function is inlined
-            // into every dict/set probe, and growing it measurably slowed
-            // `set.add` for Int and Str keys.
+            // / BigInt with the same value (#2900).
             (PyKey::Complex(re, im), other) | (other, PyKey::Complex(re, im)) => {
                 real_valued_complex_eq(*re, *im, other)
             }
@@ -403,44 +387,18 @@ impl PartialEq for PyKey {
             _ => false,
         }
     }
-}
 
-impl Eq for PyKey {}
-
-impl Hash for PyKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // NOTE: `Bool(b)` must hash equal to `Int(b as i64)` so that the two
-        // collide in dict/set buckets and PartialEq can deduplicate them.
-        // We therefore deliberately omit `std::mem::discriminant` here and
-        // hash a per-variant tag instead, treating Bool as Int.
-        //
-        // `Float` must also hash equal to `Int` when they are equal (CPython
-        // invariant: `hash(1.0) == hash(1)`).  Integer-valued floats use tag 0
-        // and the same `i64` value as the equivalent `Int`, satisfying the
-        // `Hash + PartialEq` contract.  Fractional or non-finite floats use
-        // tag 1, keeping them in a separate hash space.
-        //
-        // `BigInt` that fits in i64 uses tag 0 (same as Int/Bool) so that
-        // `BigInt(n) == Int(n)` implies identical hashes — required by the
-        // Hash+Eq contract.  BigInt values beyond i64 range use tag 1 +
-        // Mersenne-prime reduction, matching the large-integer-valued Float
-        // path.
+    /// Out-of-line hashing for non-`Int` / non-`Str` keys so the inlined
+    /// `Hash::hash` stays minimal on homogeneous int/str probes (#2924).
+    #[inline(never)]
+    fn hash_slow<H: Hasher>(&self, state: &mut H) {
         match self {
-            PyKey::Int(v) => {
-                0u8.hash(state);
-                v.hash(state);
-            }
             PyKey::Bool(b) => {
                 0u8.hash(state);
                 (*b as i64).hash(state);
             }
             PyKey::Float(bits) => hash_float_bits(*bits, state),
             PyKey::BigInt(n) => {
-                // BigInt that fits in i64 must hash identically to PyKey::Int
-                // with the same value, because PartialEq makes them equal (the
-                // `BigInt <-> Int` arm).  When it does not fit in i64 we use
-                // tag 1 + Mersenne-prime reduction, which matches the Float
-                // path for the same large integer-valued float.
                 if let Some(i) = n.to_i64() {
                     0u8.hash(state);
                     i.hash(state);
@@ -449,15 +407,7 @@ impl Hash for PyKey {
                     pykey_hash_bigint(n).hash(state);
                 }
             }
-            PyKey::Str(s) => {
-                2u8.hash(state);
-                s.as_str().unwrap_or("").hash(state);
-            }
             PyKey::None => {
-                // Hash the Python-level value so that a PyKey::Object whose
-                // __hash__ returns hash(None) lands in the same IndexMap
-                // bucket, enabling the slow-path __eq__ to deduplicate them
-                // (issue #906).
                 (py_hash_none() as u64).hash(state);
             }
             PyKey::Ellipsis => {
@@ -478,13 +428,46 @@ impl Hash for PyKey {
                 6u8.hash(state);
                 b.as_ref().hash(state);
             }
-            // A real-valued complex compares equal to the Int / Bool / Float /
-            // BigInt with the same value, so it must hash identically to the
-            // equivalent float key or the two would land in different buckets
-            // and never be deduplicated (Hash + Eq contract, #2900).  Outlined
-            // for the same reason as `real_valued_complex_eq`.
             PyKey::Complex(re, im) => hash_complex_key(*re, *im, state),
             PyKey::Object { hash, .. } => hash.hash(state),
+            PyKey::Int(_) | PyKey::Str(_) => unreachable!(),
+        }
+    }
+}
+
+impl PartialEq for PyKey {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        // Fast path for the two dominant homogeneous key types (`Int` and
+        // `Str`), keeping all cross-type numeric / Complex / Object arms out
+        // of line so cross-crate inlining into `IndexMap`/`IndexSet` stays
+        // compact (#2924).
+        match (self, other) {
+            (PyKey::Int(a), PyKey::Int(b)) => a == b,
+            (PyKey::Str(a), PyKey::Str(b)) => a.as_str() == b.as_str(),
+            _ => self.eq_slow(other),
+        }
+    }
+}
+
+impl Eq for PyKey {}
+
+impl Hash for PyKey {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // NOTE: `Bool(b)` and integer-valued `Float`/`BigInt`/`Complex` share
+        // tag 0 + the `i64` payload with `Int` so equal numeric keys collide
+        // in the same bucket (Hash + Eq contract).
+        match self {
+            PyKey::Int(v) => {
+                0u8.hash(state);
+                v.hash(state);
+            }
+            PyKey::Str(s) => {
+                2u8.hash(state);
+                s.as_str().unwrap_or("").hash(state);
+            }
+            _ => self.hash_slow(state),
         }
     }
 }

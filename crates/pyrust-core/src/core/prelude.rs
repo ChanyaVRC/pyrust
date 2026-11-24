@@ -391,7 +391,21 @@ impl PyDict {
     /// Perform CPython's unicode-only-to-general conversion before lookup of
     /// a non-exact-string insertion key. This must run before user equality:
     /// the conversion also happens when lookup finds an equal existing string.
+    #[inline]
     pub fn prepare_python_insert(&mut self, key: &PyKey) {
+        if self.metadata_is_precise() {
+            match self.python_key_table_kind {
+                DictKeyTableKind::General => return,
+                DictKeyTableKind::Unicode if matches!(key, PyKey::Str(_)) => return,
+                _ => {}
+            }
+        }
+        self.prepare_python_insert_slow(key);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn prepare_python_insert_slow(&mut self, key: &PyKey) {
         self.repair_poisoned_metadata();
         match self.python_key_table_kind {
             DictKeyTableKind::General => return,
@@ -425,14 +439,34 @@ impl PyDict {
         self.bump_structural_version();
     }
 
+    #[inline]
     fn record_inserted_index(&mut self, entry_index: usize, is_object: bool, is_dynamic: bool) {
+        self.bump_structural_version();
+        if !is_object
+            && !is_dynamic
+            && self.python_hash_index.is_none()
+            && self.python_hash_mutation_journal.is_none()
+            && self.live_object_key_count == 0
+        {
+            return;
+        }
+        self.record_inserted_index_slow(entry_index, is_object, is_dynamic);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn record_inserted_index_slow(
+        &mut self,
+        entry_index: usize,
+        is_object: bool,
+        is_dynamic: bool,
+    ) {
         if is_object {
             self.live_object_key_count = self.live_object_key_count.saturating_add(1);
         }
         if is_dynamic {
             self.live_dynamic_key_count = self.live_dynamic_key_count.saturating_add(1);
         }
-        self.bump_structural_version();
         if let Some(index) = self.python_hash_index.as_mut() {
             let key = self
                 .entries
@@ -505,6 +539,20 @@ impl PyDict {
         let (entry_index, replaced) = self.entries.insert_full(key, value);
         if replaced.is_none() {
             self.record_inserted_index(entry_index, is_object, is_dynamic);
+        }
+        replaced
+    }
+
+    /// Insert a primitive (non-`Object`, non-nested-object) key whose table
+    /// kind has already been prepared by [`Self::prepare_python_insert`]
+    /// (#2924). Avoids redundant `prepare_python_insert` and `pykey_contains_object`
+    /// checks on the hot `d[k] = v` path.
+    #[inline]
+    pub fn insert_primitive_prepared(&mut self, key: PyKey, value: Value) -> Option<Value> {
+        debug_assert!(!matches!(key, PyKey::Object { .. }) && !pykey_contains_object(&key));
+        let (entry_index, replaced) = self.entries.insert_full(key, value);
+        if replaced.is_none() {
+            self.record_inserted_index(entry_index, false, false);
         }
         replaced
     }

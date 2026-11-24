@@ -93,6 +93,7 @@ impl Drop for NamespaceMirrorGuard {
         if active.len() != old_len {
             root.active_mirror_count
                 .set(root.active_mirror_count.get().saturating_sub(1));
+            root.recompute_sync_fast_check_mask();
             root.fastlocal_mirror_epoch
                 .set(root.fastlocal_mirror_epoch.get().saturating_add(1));
         }
@@ -154,6 +155,14 @@ struct RootNamespaceState {
     /// `PyModule` object. Controlled module/script writes therefore mirror into
     /// that backing even before Python obtains a `__dict__` alias.
     filesystem_module_backing: Cell<bool>,
+    /// Precomputed conservative mask for `Insn::SyncModuleGlobal` (#2924).
+    ///
+    /// Equal to `u64::MAX` whenever `cache_disabled`, `filesystem_module_backing`,
+    /// `active_mirror_count > 1`, or `has_binding_order` is active; otherwise
+    /// the bitwise OR of `fallback_cache_interest`, `value_cache_interest`, and
+    /// `env_binding_interest`. When `(mask & name_mask) != name_mask`, a module
+    /// fast-local sync is guaranteed to be a no-op.
+    sync_fast_check_mask: Cell<u64>,
     /// The filesystem module's provider generation. Once the globals mapping
     /// escapes through `module.__dict__`, `vars(module)`, or
     /// `function.__globals__`, arbitrary dict mutations can bypass
@@ -187,10 +196,27 @@ impl RootNamespaceState {
             cache_disabled: Cell::new(false),
             globals_provider: RefCell::new(None),
             filesystem_module_backing: Cell::new(false),
+            sync_fast_check_mask: Cell::new(0),
             filesystem_module_mutation: RefCell::new(None),
             has_binding_order: Cell::new(false),
             binding_order: RefCell::new(None),
         }
+    }
+
+    #[inline]
+    fn recompute_sync_fast_check_mask(&self) {
+        let mask = if self.cache_disabled.get()
+            || self.filesystem_module_backing.get()
+            || self.active_mirror_count.get() > 1
+            || self.has_binding_order.get()
+        {
+            u64::MAX
+        } else {
+            self.fallback_cache_interest.get()
+                | self.value_cache_interest.get()
+                | self.env_binding_interest.get()
+        };
+        self.sync_fast_check_mask.set(mask);
     }
 
     #[inline]
@@ -250,6 +276,7 @@ impl RootNamespaceState {
             mirror.lifetime.upgrade().is_some() && mirror.local_index.upgrade().is_some()
         });
         self.active_mirror_count.set(active.len());
+        self.recompute_sync_fast_check_mask();
         if active.len() != old_len {
             self.fastlocal_mirror_epoch
                 .set(self.fastlocal_mirror_epoch.get().saturating_add(1));
@@ -420,20 +447,40 @@ fn namespace_alias_roots(dict: &Rc<RefCell<PyDict>>) -> Vec<Rc<RootNamespaceStat
     })
 }
 
+#[cold]
+#[inline(never)]
+fn notify_namespace_dict_key_mutation_slow(dict: &Rc<RefCell<PyDict>>, name: &str) {
+    for root in namespace_alias_roots(dict) {
+        root.synchronize_alias_key_mutation(dict, name);
+    }
+}
+
 /// Notify every live root whose Python-visible namespace uses this dictionary
 /// backing that one exact string key changed. Called only after the mutable
 /// dictionary borrow has been dropped.
+#[inline]
 pub(crate) fn notify_namespace_dict_key_mutation(dict: &Rc<RefCell<PyDict>>, name: &str) {
+    if !HAS_NAMESPACE_ALIASES.with(Cell::get) {
+        return;
+    }
+    notify_namespace_dict_key_mutation_slow(dict, name);
+}
+
+#[cold]
+#[inline(never)]
+fn notify_namespace_dict_mutation_slow(dict: &Rc<RefCell<PyDict>>) {
     for root in namespace_alias_roots(dict) {
-        root.synchronize_alias_key_mutation(dict, name);
+        root.synchronize_alias_full_mutation(dict);
     }
 }
 
 /// Notify namespace owners after an opaque or batched dictionary mutation.
 /// This is intentionally the cold full-refresh path; single-key operations
 /// use [`notify_namespace_dict_key_mutation`] to avoid O(locals) work.
+#[inline]
 pub(crate) fn notify_namespace_dict_mutation(dict: &Rc<RefCell<PyDict>>) {
-    for root in namespace_alias_roots(dict) {
-        root.synchronize_alias_full_mutation(dict);
+    if !HAS_NAMESPACE_ALIASES.with(Cell::get) {
+        return;
     }
+    notify_namespace_dict_mutation_slow(dict);
 }

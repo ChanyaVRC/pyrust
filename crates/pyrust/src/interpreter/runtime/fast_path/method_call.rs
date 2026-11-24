@@ -22,11 +22,37 @@ impl Interpreter {
                 ))
             })?
             .as_str();
+        let obj_kind = BuiltinContainerKind::classify(regs[obj as usize].as_some());
+        if nargs == 1
+            && let Some(kind) = obj_kind
+            && kind.supports_direct_method(method)
+        {
+            let arg = vm_read(regs, args_base, num_locals)?;
+            match Self::try_dispatch_builtin_container_method_1arg(
+                kind,
+                &regs[obj as usize],
+                method,
+                arg,
+            )? {
+                Ok(result) => return Ok(result),
+                Err(arg) => {
+                    let receiver = regs[obj as usize].clone();
+                    let empty_kw = PyDict::default();
+                    return self.dispatch_builtin_container_method(
+                        kind,
+                        receiver,
+                        method,
+                        vec![arg],
+                        &empty_kw,
+                        false,
+                    );
+                }
+            }
+        }
         let mut args: Vec<Value> = Vec::with_capacity(nargs as usize);
         for i in 0..crate::bytecode::Reg::from(nargs) {
             args.push(vm_read(regs, args_base + i, num_locals)?);
         }
-        let obj_kind = BuiltinContainerKind::classify(regs[obj as usize].as_some());
 
         // No upfront unalias needed (#448): each builtin scopes its
         // own `RefCell::borrow_mut()` and snapshots iterable args

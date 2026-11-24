@@ -73,6 +73,11 @@ impl LiveKeysGuardedBox {
     }
 
     #[inline(always)]
+    pub(crate) fn state(&self) -> &LiveKeysGuardedState {
+        &self.0
+    }
+
+    #[inline(always)]
     pub(crate) fn state_mut(&mut self) -> &mut LiveKeysGuardedState {
         &mut self.0
     }
@@ -170,6 +175,16 @@ impl Interpreter {
     /// classification, user protocol dispatch, concrete iterator adapters, and
     /// live-collection mutation guards.
     pub(crate) fn make_loop_iter_state(&mut self, source: Value) -> Result<IterState> {
+        // Plain dict fast path (#2924): handle `for k in d:` directly before
+        // coroutine/view classification, reading len + frozen key order under
+        // one `RefCell` borrow. A plain `ValueKind::Dict` is never a coroutine.
+        if let Some(dict_rc) = source.get_dict_rc() {
+            let cursor = LiveKeyCursor::dict_from_rc(dict_rc, 0);
+            return Ok(IterState::LiveKeysGuarded(LiveKeysGuardedBox::new(
+                source, cursor,
+            )));
+        }
+
         if is_coroutine_value(&source) {
             let type_name = full_type_name_str(&source);
             return Err(pyrust_core::type_err!(
@@ -452,7 +467,7 @@ impl Interpreter {
         if ordered_policy.is_none() {
             // The live cursor owns its own key-order policy, so a plain view
             // must not pay for a key vector it would immediately discard.
-            let cursor = LiveKeyCursor::dict(&source, kind.live_cursor_code(), recorded_len);
+            let cursor = LiveKeyCursor::dict_from_rc(&dict, kind.live_cursor_code());
             return IterState::LiveKeysGuarded(LiveKeysGuardedBox::new(source, cursor));
         }
         let keys = pyrust_builtins::dict_views::backing_keys(&dict);

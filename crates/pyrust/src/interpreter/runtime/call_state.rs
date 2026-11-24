@@ -93,13 +93,30 @@ pub(crate) fn get_call_depth() -> usize {
 pub(super) struct CallDepthGuard;
 
 impl CallDepthGuard {
+    #[inline]
     pub(super) fn enter() -> Self {
         CALL_DEPTH.with(|depth| depth.set(depth.get() + 1));
         Self
     }
+
+    /// Check the recursion limit and increment the active depth in a single TLS
+    /// lookup (#2924).
+    #[inline]
+    pub(super) fn try_enter(limit: usize) -> Option<Self> {
+        CALL_DEPTH.with(|depth| {
+            let current = depth.get();
+            if current >= limit {
+                None
+            } else {
+                depth.set(current + 1);
+                Some(Self)
+            }
+        })
+    }
 }
 
 impl Drop for CallDepthGuard {
+    #[inline]
     fn drop(&mut self) {
         CALL_DEPTH.with(|depth| depth.set(depth.get() - 1));
     }
