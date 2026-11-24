@@ -131,8 +131,8 @@ print("context identical:", list(context_diff(["a\n"], ["a\n"])))
 
 # Type checks on unified_diff / context_diff
 for bad_call in [
-    lambda: list(unified_diff("abc", "def")),
     lambda: list(unified_diff([b"a\n"], [b"b\n"])),
+    lambda: list(context_diff(["a\n"], [b"b\n"])),
     lambda: list(context_diff(["a\n"], ["b\n"], fromfile=b"old")),
 ]:
     try:
