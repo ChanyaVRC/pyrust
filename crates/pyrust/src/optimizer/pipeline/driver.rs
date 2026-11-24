@@ -81,7 +81,6 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_dead_store_elim(insns, &descs, num_locals);
     let insns = pass_loop_inversion(insns);
     let insns = pass_trivial_nop(insns);
-    let insns = pass_loadnone_merge(insns);
     // Runs last among the shape passes: the guarded out-of-line loop copies it
     // appends introduce `JumpIfNotInt` / `CountCmpJump*`, which downstream
     // shape passes do not model.  Only `build_exc_table`, the source-table

@@ -37,10 +37,114 @@ fn set_binop_cache(
 }
 
 impl Interpreter {
+    /// Cold fallback for `exec_binop`: evaluates `eval_binary` without changing
+    /// the site's cache state (e.g. edge cases like float div-by-zero or
+    /// unsupported ops on specialized types).
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn exec_binop_eval_slow(
+        &mut self,
+        regs: &mut RegSlice,
+        dst: crate::bytecode::Reg,
+        lhs: crate::bytecode::Reg,
+        op: BinaryOp,
+        rhs: crate::bytecode::Reg,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<()> {
+        let l = vm_read(regs, lhs, num_locals)?;
+        let r = vm_read(regs, rhs, num_locals)?;
+        regs[dst as usize] = self.eval_binary(l, op, r)?;
+        Ok(())
+    }
+
+    /// Cold deopt fallback for `exec_binop`: transitions a specialized site to
+    /// `Megamorphic` on a type mismatch and delegates to `eval_binary`.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn exec_binop_deopt_slow(
+        &mut self,
+        regs: &mut RegSlice,
+        code: &crate::bytecode::FnCode,
+        cache_slot: usize,
+        dst: crate::bytecode::Reg,
+        lhs: crate::bytecode::Reg,
+        op: BinaryOp,
+        rhs: crate::bytecode::Reg,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<()> {
+        set_binop_cache(
+            code,
+            cache_slot,
+            crate::bytecode::BinOpCacheEntry::Megamorphic,
+        );
+        self.exec_binop_eval_slow(regs, dst, lhs, op, rhs, num_locals)
+    }
+
+    /// Cold cache-state handler for `exec_binop`: warms `Empty` / `Counting`
+    /// sites and evaluates `Megamorphic` / `Specialized(Int | Other)` through
+    /// `eval_binary`.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn exec_binop_cold_state(
+        &mut self,
+        regs: &mut RegSlice,
+        code: &crate::bytecode::FnCode,
+        cache_slot: usize,
+        cache_entry: crate::bytecode::BinOpCacheEntry,
+        dst: crate::bytecode::Reg,
+        lhs: crate::bytecode::Reg,
+        op: BinaryOp,
+        rhs: crate::bytecode::Reg,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<()> {
+        use crate::bytecode::{BINOP_SPEC_THRESHOLD, BinOpCacheEntry};
+        match cache_entry {
+            BinOpCacheEntry::Counting { tag, count } => {
+                let observed = classify_binop_tag(&regs[lhs as usize], &regs[rhs as usize]);
+                let new_entry = if observed == tag {
+                    let new_count = count + 1;
+                    if new_count >= BINOP_SPEC_THRESHOLD {
+                        BinOpCacheEntry::Specialized(tag)
+                    } else {
+                        BinOpCacheEntry::Counting {
+                            tag,
+                            count: new_count,
+                        }
+                    }
+                } else {
+                    BinOpCacheEntry::Megamorphic
+                };
+                set_binop_cache(code, cache_slot, new_entry);
+            }
+            BinOpCacheEntry::Empty => {
+                let observed = classify_binop_tag(&regs[lhs as usize], &regs[rhs as usize]);
+                set_binop_cache(
+                    code,
+                    cache_slot,
+                    BinOpCacheEntry::Counting {
+                        tag: observed,
+                        count: 1,
+                    },
+                );
+            }
+            // Megamorphic, Specialized(Int) (int_int_fast already missed on
+            // overflow or unsupported op), and Specialized(Other) all keep
+            // their current cache state and fall through to eval_binary.
+            BinOpCacheEntry::Megamorphic | BinOpCacheEntry::Specialized(_) => {}
+        }
+        let l = vm_read(regs, lhs, num_locals)?;
+        let r = vm_read(regs, rhs, num_locals)?;
+        regs[dst as usize] = self.eval_binary(l, op, r)?;
+        Ok(())
+    }
+
     /// Full `Insn::BinOp` body: the unconditional int–int fast path followed by
-    /// the adaptive float/str inline cache (Empty → Counting → Specialized, with
-    /// Megamorphic deopt on a type mismatch).  See the original dispatch-arm
-    /// comments inlined below for the per-state rationale.
+    /// the specialized Float / NumMixed / Str inline-cache hit arms.  Cold
+    /// cache-warming (`Empty` / `Counting`), deopt, and `eval_binary` fallbacks
+    /// live out of line in `#[cold] #[inline(never)]` helpers (#3163).
     #[inline(always)]
     // Hot-path VM instruction handler: the arg list is the decoded `BinOp`
     // operands (dst/lhs/op/rhs + regs/code/pc/num_locals). Bundling into a struct
@@ -57,7 +161,7 @@ impl Interpreter {
         rhs: crate::bytecode::Reg,
         num_locals: crate::bytecode::Reg,
     ) -> Result<()> {
-        use crate::bytecode::{BINOP_SPEC_THRESHOLD, BinOpCacheEntry, BinopTypeTag};
+        use crate::bytecode::{BinOpCacheEntry, BinopTypeTag};
         // Hot path: `as_int()` is a tagged-u64 check that bypasses `kind()`'s
         // scoped RefCell borrow for the List/Dict/Set kinds (#450).  Unlike
         // `Insn::Move` (where #441 showed the int specialization is a wash), the
@@ -86,13 +190,6 @@ impl Interpreter {
             .copied()
             .unwrap_or(BinOpCacheEntry::Empty);
         match cache_entry {
-            BinOpCacheEntry::Megamorphic => {
-                // Permanently polymorphic site: skip classification, go straight
-                // to eval_binary.
-                let l = vm_read(regs, lhs, num_locals)?;
-                let r = vm_read(regs, rhs, num_locals)?;
-                regs[dst as usize] = self.eval_binary(l, op, r)?;
-            }
             BinOpCacheEntry::Specialized(BinopTypeTag::Float) => {
                 let lv = &regs[lhs as usize];
                 let rv = &regs[rhs as usize];
@@ -106,13 +203,10 @@ impl Interpreter {
                     // Fast path returned None (e.g. div-by-zero, unsupported
                     // op): site is still Float/Float, so keep the Specialized
                     // state and fall through to eval_binary for this edge case.
-                } else {
-                    // Actual type mismatch: deopt to Megamorphic.
-                    set_binop_cache(code, cache_slot, BinOpCacheEntry::Megamorphic);
+                    return self.exec_binop_eval_slow(regs, dst, lhs, op, rhs, num_locals);
                 }
-                let l = vm_read(regs, lhs, num_locals)?;
-                let r = vm_read(regs, rhs, num_locals)?;
-                regs[dst as usize] = self.eval_binary(l, op, r)?;
+                // Actual type mismatch: deopt to Megamorphic.
+                self.exec_binop_deopt_slow(regs, code, cache_slot, dst, lhs, op, rhs, num_locals)
             }
             BinOpCacheEntry::Specialized(BinopTypeTag::NumMixed) => {
                 let lv = &regs[lhs as usize];
@@ -128,13 +222,10 @@ impl Interpreter {
                     // Unsupported op (comparison / Pow) or a div-by-zero edge:
                     // site is still mixed-numeric, so keep Specialized and fall
                     // through to eval_binary for this invocation.
-                } else {
-                    // Actual type mismatch: deopt to Megamorphic.
-                    set_binop_cache(code, cache_slot, BinOpCacheEntry::Megamorphic);
+                    return self.exec_binop_eval_slow(regs, dst, lhs, op, rhs, num_locals);
                 }
-                let l = vm_read(regs, lhs, num_locals)?;
-                let r = vm_read(regs, rhs, num_locals)?;
-                regs[dst as usize] = self.eval_binary(l, op, r)?;
+                // Actual type mismatch: deopt to Megamorphic.
+                self.exec_binop_deopt_slow(regs, code, cache_slot, dst, lhs, op, rhs, num_locals)
             }
             BinOpCacheEntry::Specialized(BinopTypeTag::Str) => {
                 let lv = &regs[lhs as usize];
@@ -149,68 +240,15 @@ impl Interpreter {
                     // Unsupported op for str (e.g. str * str): keep Specialized,
                     // fall through to eval_binary which will raise the proper
                     // TypeError.
-                } else {
-                    // Type mismatch: deopt.
-                    set_binop_cache(code, cache_slot, BinOpCacheEntry::Megamorphic);
+                    return self.exec_binop_eval_slow(regs, dst, lhs, op, rhs, num_locals);
                 }
-                let l = vm_read(regs, lhs, num_locals)?;
-                let r = vm_read(regs, rhs, num_locals)?;
-                regs[dst as usize] = self.eval_binary(l, op, r)?;
+                // Type mismatch: deopt.
+                self.exec_binop_deopt_slow(regs, code, cache_slot, dst, lhs, op, rhs, num_locals)
             }
-            BinOpCacheEntry::Specialized(BinopTypeTag::Int) => {
-                // int_int_fast already ran above and returned None (overflow or
-                // unsupported op such as FloorDiv/Mod/Div/Pow).  The types are
-                // still correct; keep Specialized so the fast path is retried
-                // next loop iteration.  Fall through to eval_binary for this
-                // invocation.
-                let l = vm_read(regs, lhs, num_locals)?;
-                let r = vm_read(regs, rhs, num_locals)?;
-                regs[dst as usize] = self.eval_binary(l, op, r)?;
-            }
-            BinOpCacheEntry::Specialized(BinopTypeTag::Other) => {
-                // No fast path for 'Other' types.  If the types are still
-                // 'Other', stay Specialized (no deopt needed since there's no
-                // fast path to lose).  Fall through.
-                let l = vm_read(regs, lhs, num_locals)?;
-                let r = vm_read(regs, rhs, num_locals)?;
-                regs[dst as usize] = self.eval_binary(l, op, r)?;
-            }
-            BinOpCacheEntry::Counting { tag, count } => {
-                let observed = classify_binop_tag(&regs[lhs as usize], &regs[rhs as usize]);
-                let new_entry = if observed == tag {
-                    let new_count = count + 1;
-                    if new_count >= BINOP_SPEC_THRESHOLD {
-                        BinOpCacheEntry::Specialized(tag)
-                    } else {
-                        BinOpCacheEntry::Counting {
-                            tag,
-                            count: new_count,
-                        }
-                    }
-                } else {
-                    BinOpCacheEntry::Megamorphic
-                };
-                set_binop_cache(code, cache_slot, new_entry);
-                let l = vm_read(regs, lhs, num_locals)?;
-                let r = vm_read(regs, rhs, num_locals)?;
-                regs[dst as usize] = self.eval_binary(l, op, r)?;
-            }
-            BinOpCacheEntry::Empty => {
-                let observed = classify_binop_tag(&regs[lhs as usize], &regs[rhs as usize]);
-                set_binop_cache(
-                    code,
-                    cache_slot,
-                    BinOpCacheEntry::Counting {
-                        tag: observed,
-                        count: 1,
-                    },
-                );
-                let l = vm_read(regs, lhs, num_locals)?;
-                let r = vm_read(regs, rhs, num_locals)?;
-                regs[dst as usize] = self.eval_binary(l, op, r)?;
-            }
+            other => self.exec_binop_cold_state(
+                regs, code, cache_slot, other, dst, lhs, op, rhs, num_locals,
+            ),
         }
-        Ok(())
     }
 
     /// Full `Insn::GetAttr` body: the InstanceAttr / ClassAttr inline-cache hit

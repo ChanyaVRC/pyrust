@@ -43,7 +43,6 @@ fn insn_reads_reg(insn: &Insn, descs: &[InsnDesc], r: u32) -> bool {
         | LoadCell(..)
         | LoadClassDeref(..)
         | LoadNone(..)
-        | LoadNoneRange { .. }
         | LoadExc(..)
         | ImportModule(..)
         | DeleteName(..)
@@ -471,7 +470,6 @@ fn for_each_read(insn: &Insn, descs: &[InsnDesc], mut f: impl FnMut(u32)) {
             f(*sent_reg);
         }
         UnpackEx { src, .. } => f(*src),
-        LoadNoneRange { .. } => {}
         Concat { base, count, .. } => {
             for r in *base..*base + *count as u32 {
                 f(r);

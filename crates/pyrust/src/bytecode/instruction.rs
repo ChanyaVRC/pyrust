@@ -345,9 +345,6 @@ pub enum Insn {
     LoadClassDeref(Reg, u16),
     /// R[dst] = None
     LoadNone(Reg),
-    /// R[start], R[start+1], ..., R[start+count-1] = None
-    /// Equivalent to `count` consecutive `LoadNone` instructions.
-    LoadNoneRange { start: Reg, count: u8 },
     /// R[dst] = R[src]
     Move(Reg, Reg),
     /// R[dst] = R[lhs] op R[rhs]

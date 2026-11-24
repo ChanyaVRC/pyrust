@@ -1,5 +1,4 @@
 impl Interpreter {
-    #[inline(always)]
     /// Full body of `Insn::CallKw` (issue #2382).  The args occupy
     /// `R[func+1 .. func+1+total]`; the trailing `nkw` of them are keyword args
     /// whose names are the const-pool tuple `consts[kwnames_idx]`.  Returns the

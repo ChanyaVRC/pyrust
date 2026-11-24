@@ -629,7 +629,6 @@ fn named_local_effect_classifier_is_a_conservative_false_whitelist() {
         Insn::LoadGlobal(0, 0),
         Insn::LoadCell(0, 0),
         Insn::LoadNone(0),
-        Insn::LoadNoneRange { start: 0, count: 2 },
         Insn::Move(0, 1),
         Insn::CheckLocal(0, 0),
         Insn::BuildList(0, 1, 1),

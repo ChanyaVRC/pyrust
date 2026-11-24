@@ -25,12 +25,6 @@ impl BlockBuilder<'_, '_> {
                 let v = self.emit_def(MirOp::Const(Value::none()), ln, sp);
                 self.write_reg(*dst, v, ln, sp);
             }
-            Insn::LoadNoneRange { start, count } => {
-                for offset in 0..(*count as u32) {
-                    let v = self.emit_def(MirOp::Const(Value::none()), ln, sp);
-                    self.write_reg(*start + offset, v, ln, sp);
-                }
-            }
             Insn::Move(dst, src) => {
                 let sv = self.read_reg(*src, ln, sp);
                 let v = self.emit_def(MirOp::Copy(sv), ln, sp);

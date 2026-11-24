@@ -49,12 +49,6 @@ impl Interpreter {
         }
         match insn {
             // ── Cold loads / namespace / attribute / type-param ──────────
-            Insn::LoadNoneRange { start, count } => {
-                let s = *start as usize;
-                for idx in s..(s + *count as usize) {
-                    regs[idx] = Value::none();
-                }
-            }
             Insn::DeleteItem(obj, idx) => {
                 self.exec_delete_item(regs, num_locals, *obj, *idx)?;
             }

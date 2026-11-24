@@ -24,6 +24,78 @@ pub(super) fn advance_loop_fast_state(
     pc: &mut usize,
     dst: crate::bytecode::Reg,
 ) -> LoopFastOutcome {
+    // Keep only the hot zero-allocation loop shapes (`range(...)`, indexed
+    // `list`/`tuple`, the frozen-key `dict`/`set` fast step, and the trivial
+    // `UserDefined` sentinel) inline in `run_bytecode_inner_impl`; outline all
+    // other iterator representations into a `#[cold] #[inline(never)]` helper
+    // so LLVM shrink-wraps spills out of the hot dispatch loop (#3163).
+    match state {
+        IterState::Range { cur, stop, step } => {
+            let exhausted = if *step > 0 {
+                *cur >= *stop
+            } else {
+                *cur <= *stop
+            };
+            if exhausted {
+                LoopFastOutcome::Exhausted
+            } else {
+                let value = Value::int(*cur);
+                // Construction promotes a cursor whose one-past-the-end value
+                // cannot fit i64 to BigRange. Keep the step checked as a
+                // defensive invariant boundary: if a future constructor misses
+                // that promotion, overflow means the mathematical next value
+                // is already beyond this i64 stop, so latching at stop safely
+                // exhausts instead of wrapping into a near-infinite loop.
+                *cur = cur.checked_add(*step).unwrap_or(*stop);
+                regs[dst as usize] = value;
+                LoopFastOutcome::Advanced
+            }
+        }
+        IterState::ValueIndexed { value, pos } => {
+            let current = *pos;
+            match indexed_sequence_item(value, current) {
+                Some(value) => {
+                    *pos = current + 1;
+                    regs[dst as usize] = value;
+                    LoopFastOutcome::Advanced
+                }
+                _ => LoopFastOutcome::Exhausted,
+            }
+        }
+        IterState::LiveKeysGuarded(guarded) => {
+            let inner = guarded.state_mut();
+            match crate::interpreter::iteration::next_frozen_key_step(&mut inner.cursor) {
+                crate::interpreter::iteration::FrozenKeyStep::Item(value) => {
+                    regs[dst as usize] = value;
+                    LoopFastOutcome::Advanced
+                }
+                crate::interpreter::iteration::FrozenKeyStep::Exhausted => {
+                    LoopFastOutcome::Exhausted
+                }
+                crate::interpreter::iteration::FrozenKeyStep::Slow => {
+                    advance_loop_fast_state_slow(state, code, regs, pc, dst)
+                }
+            }
+        }
+        IterState::UserDefined(_) => LoopFastOutcome::UserDefined,
+        other => advance_loop_fast_state_slow(other, code, regs, pc, dst),
+    }
+}
+
+/// Out-of-line iterator advancement for non-range/non-list/slow `IterState`
+/// variants (strings, bytes, bytearray, guarded collections, dict/set views &
+/// live snapshots, materialized iterables, enumerate, big ranges). Marked
+/// `#[cold] #[inline(never)]` so LLVM keeps spills out of `run_bytecode_inner_impl`
+/// (#3163).
+#[cold]
+#[inline(never)]
+fn advance_loop_fast_state_slow(
+    state: &mut IterState,
+    code: &crate::bytecode::FnCode,
+    regs: &mut RegSlice,
+    pc: &mut usize,
+    dst: crate::bytecode::Reg,
+) -> LoopFastOutcome {
     macro_rules! advanced_item {
         ($value:expr) => {{
             regs[dst as usize] = $value;
@@ -46,16 +118,6 @@ pub(super) fn advance_loop_fast_state(
     }
 
     match state {
-        IterState::ValueIndexed { value, pos } => {
-            let current = *pos;
-            match indexed_sequence_item(value, current) {
-                Some(value) => {
-                    *pos = current + 1;
-                    advanced_item!(value)
-                }
-                _ => LoopFastOutcome::Exhausted,
-            }
-        }
         IterState::StrAsciiIndexed { value, pos } => {
             let current = *pos;
             let string = value.as_str().unwrap_or("");
@@ -142,15 +204,6 @@ pub(super) fn advance_loop_fast_state(
             let state = guarded.state_mut();
             let cursor = &mut state.cursor;
             let container = &state.container;
-            match crate::interpreter::iteration::next_frozen_key_step(cursor) {
-                crate::interpreter::iteration::FrozenKeyStep::Item(value) => {
-                    return advanced_item!(value);
-                }
-                crate::interpreter::iteration::FrozenKeyStep::Exhausted => {
-                    return LoopFastOutcome::Exhausted;
-                }
-                crate::interpreter::iteration::FrozenKeyStep::Slow => {}
-            }
             if cursor.snapshot.is_some() {
                 match fast_try!(
                     crate::interpreter::iteration::advance_stable_snapshot_cursor(
@@ -202,26 +255,6 @@ pub(super) fn advance_loop_fast_state(
                 LoopFastOutcome::Exhausted
             }
         }
-        IterState::Range { cur, stop, step } => {
-            let exhausted = if *step > 0 {
-                *cur >= *stop
-            } else {
-                *cur <= *stop
-            };
-            if exhausted {
-                LoopFastOutcome::Exhausted
-            } else {
-                let value = Value::int(*cur);
-                // Construction promotes a cursor whose one-past-the-end value
-                // cannot fit i64 to BigRange. Keep the step checked as a
-                // defensive invariant boundary: if a future constructor misses
-                // that promotion, overflow means the mathematical next value
-                // is already beyond this i64 stop, so latching at stop safely
-                // exhausts instead of wrapping into a near-infinite loop.
-                *cur = cur.checked_add(*step).unwrap_or(*stop);
-                advanced_item!(value)
-            }
-        }
         IterState::BigRange(state) => {
             let BigRangeState { cur, stop, step } = &mut **state;
             let exhausted = if step.sign() == pyrust_core::PyBigIntSign::Plus {
@@ -243,7 +276,9 @@ pub(super) fn advance_loop_fast_state(
                 None => LoopFastOutcome::Exhausted,
             }
         }
-        IterState::UserDefined(_) => LoopFastOutcome::UserDefined,
+        IterState::Range { .. } | IterState::ValueIndexed { .. } | IterState::UserDefined(_) => {
+            unreachable!("hot IterState variants are handled inline in advance_loop_fast_state")
+        }
     }
 }
 

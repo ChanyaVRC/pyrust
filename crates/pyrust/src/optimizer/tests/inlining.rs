@@ -226,13 +226,7 @@ fn leaf_binop_inlining_invalidates_non_move_register_writes() {
     let clobbers = [
         ("LoadConst", Insn::LoadConst(leaf_reg, 0)),
         ("Call", Insn::Call(leaf_reg, 0)),
-        (
-            "LoadNoneRange",
-            Insn::LoadNoneRange {
-                start: leaf_reg,
-                count: 1,
-            },
-        ),
+        ("LoadNone", Insn::LoadNone(leaf_reg)),
     ];
 
     for (name, clobber) in clobbers {

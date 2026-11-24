@@ -228,130 +228,37 @@ impl Interpreter {
         if let Some(code) = self.get_or_compile_bytecode(&function) {
             let num_regs = code.num_regs as usize;
             let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+            let mut cells = allocate_frame_cells(&code, &function.closure_cells);
 
-            // Bind non-cell params into register file using precomputed slots
-            // (#1918).  Cell-var params are inserted into the env below.  Each
-            // param binds to EITHER a register OR a cell, so we move the value
-            // out of `param_vals` (leaving `unset`) instead of cloning — the
-            // second clone (source -> param_vals -> regs) was pure overhead on
-            // every variadic call.  The cell loop below moves the remaining
-            // (cell) entries.
+            // Bind each parameter directly into its precomputed register or
+            // indexed cell slot (#1918 / #452), moving out of `param_vals`
+            // (leaving `unset`) to avoid a redundant per-arg clone.
             for (param_index, bind) in function.param_binds.iter().enumerate() {
-                if let pyrust_core::ParamBind::Reg(slot) = *bind {
-                    if (slot as usize) >= num_regs {
-                        return Err(pyrust_core::py_err!(
-                            "SystemError",
-                            "parameter '{}' register index {} out of range (num_regs={})",
-                            function.params[param_index].name,
-                            slot,
-                            num_regs
+                match *bind {
+                    pyrust_core::ParamBind::Reg(slot) => {
+                        if (slot as usize) >= num_regs {
+                            return Err(pyrust_core::py_err!(
+                                "SystemError",
+                                "parameter '{}' register index {} out of range (num_regs={})",
+                                function.params[param_index].name,
+                                slot,
+                                num_regs
+                            ));
+                        }
+                        regs[slot as usize] =
+                            std::mem::replace(&mut param_vals[param_index], Value::unset());
+                    }
+                    pyrust_core::ParamBind::Cell(cell_idx) => {
+                        cells[cell_idx as usize].set(std::mem::replace(
+                            &mut param_vals[param_index],
+                            Value::unset(),
                         ));
                     }
-                    regs[slot as usize] =
-                        std::mem::replace(&mut param_vals[param_index], Value::unset());
+                    pyrust_core::ParamBind::None => {}
                 }
             }
-            // Self-reference for recursive calls (only if not a cell var).
-            if let Some(slot) = function.self_bind {
-                if (slot as usize) >= num_regs {
-                    return Err(pyrust_core::py_err!(
-                        "SystemError",
-                        "self-reference register index {} out of range (num_regs={})",
-                        slot,
-                        num_regs
-                    ));
-                }
-                regs[slot as usize] = Value::user_function(Rc::clone(&function));
-            }
 
-            let _depth_guard = CallDepthGuard::enter();
-            if call_depth() > max_call_depth(self) {
-                return Err(self.recursion_limit_error()?);
-            }
-
-            // Build the frame's indexed cell array and bind any cell parameters
-            // directly in O(1); swap straight to the defining namespace env
-            // with zero per-call `Environment` allocation (#452).
-            let cells = allocate_frame_cells(&code, &function.closure_cells);
-            for (param_index, bind) in function.param_binds.iter().enumerate() {
-                if let pyrust_core::ParamBind::Cell(cell_idx) = *bind {
-                    cells[cell_idx as usize].set(std::mem::replace(
-                        &mut param_vals[param_index],
-                        Value::unset(),
-                    ));
-                }
-            }
-            let previous_env = std::mem::replace(&mut self.env, Rc::clone(&function.env));
-
-            // Issue #488: variadic generator functions (`def g(*args):
-            // yield ...` and friends) must also be wrapped in a
-            // GeneratorFrame instead of executed synchronously — the
-            // simple-path branch already does this above; mirror it here
-            // so the body's `yield` isn't observed as a runtime error.
-            // Coroutines (`async def`, issue #1039) take the same path.
-            if code.is_generator || code.is_coroutine {
-                self.env = previous_env;
-                return Ok(Self::build_generator_value(&code, regs, cells, &function));
-            }
-
-            // Capture the raw pointer and length BEFORE constructing RegSlice
-            // so both the VmFrameView and the dispatch loop share the same raw
-            // pointer with no &mut [Value] in scope (issue #547 / PR #646).
-            let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
-            let regs_len = regs.len();
-            let cells_slice = CellSlice::from_slice(&cells);
-            // SAFETY: SmallVec / Vec allocation is always non-null.
-            // Popped before `regs` / `cells` are dropped.
-            self.vm_frame_views.push(VmFrameView::function_frame(
-                regs_ptr,
-                regs_len,
-                cells_slice,
-                Rc::clone(&function),
-                code.is_class_method,
-            ));
-            // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
-            // of `regs` (a local RegsBuf that outlives this call).  No
-            // &mut [Value] referencing `regs` is held while the dispatch loop
-            // runs; RegSlice (raw pointer + len) is used instead, removing
-            // the LLVM noalias constraint (issue #547).
-            let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
-            let vm_result = self.run_bytecode_with_cells(&code, regs_slice, cells_slice);
-            // Lazy traceback: only build + record this frame's `FrameInfo`
-            // when the body actually errored (see the simple-call path above).
-            if vm_result.is_err() {
-                if code.is_inlined_comp {
-                    self.cold.inlined_comp_escaped_span =
-                        Some(pyrust_core::get_current_vm_col_span());
-                } else {
-                    // Callee's own code-object filename (#2438): an imported module's
-                    // function reports its module's source file.
-                    let tb_filename = code.filename.clone();
-                    let tb_lineno = match pyrust_core::get_current_vm_line() {
-                        0 => None,
-                        n => Some(n),
-                    };
-                    let (tb_locals, tb_frame) = self.capture_unwinding_traceback_frame(tb_lineno);
-                    pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
-                        filename: tb_filename,
-                        lineno: tb_lineno,
-                        source_line: None,
-                        funcname: std::sync::Arc::from(&function.name[..]),
-                        globals: Some(pyrust_core::FrameGlobals::for_environment(&function.env)),
-                        // This callee just escaped, so the published anchor (#2411)
-                        // is the col span of the instruction that propagated the
-                        // error within this frame.
-                        col_span: pyrust_core::get_current_vm_col_span(),
-                        locals: tb_locals,
-                        frame: tb_frame,
-                    });
-                }
-            }
-            self.detach_vm_frame_view();
-            drop(regs);
-            drop(cells);
-            self.env = previous_env;
-            self.finish_pop_vm_frame_view();
-            return vm_result;
+            return self.run_bound_user_frame(&function, &code, &mut regs, &mut cells);
         }
 
         // All user functions must have precompiled bytecode

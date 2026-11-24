@@ -294,12 +294,6 @@ fn pass_copy_prop(insns: Vec<Insn>, descs: &mut Vec<InsnDesc>, num_locals: u32) 
             let hi = desc.dst_base + desc.n;
             copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
         }
-        // LoadNoneRange writes start..start+count; kill the entire range.
-        if let Insn::LoadNoneRange { start, count } = &insn {
-            let lo = *start;
-            let hi = start + *count as u32;
-            copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
-        }
         // Move(dst, src): kill stale aliases THEN record the new copy.
         // Killing is necessary because overwriting `dst` invalidates any
         // existing alias that names `dst` as its source (e.g. `x → dst`).
