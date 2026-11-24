@@ -53,21 +53,20 @@ impl Interpreter {
                         resolved.name()
                     ))
                 })?;
-                let pk = self.value_to_pykey(&key_val)?;
                 match resolved {
                     DictMethod::Get => {
                         let default = iter.next().unwrap_or_else(Value::none);
                         Ok(self
-                            .dict_lookup(&receiver, &pk)?
+                            .dict_lookup_value(&receiver, &key_val)?
                             .map(|(_, v)| v)
                             .unwrap_or(default))
                     }
-                    DictMethod::Contains => {
-                        Ok(Value::bool_(self.dict_lookup(&receiver, &pk)?.is_some()))
-                    }
-                    DictMethod::Pop => match self.dict_lookup(&receiver, &pk)? {
+                    DictMethod::Contains => Ok(Value::bool_(
+                        self.dict_lookup_value(&receiver, &key_val)?.is_some(),
+                    )),
+                    DictMethod::Pop => match self.dict_lookup_value(&receiver, &key_val)? {
                         Some((idx, v)) => {
-                            // `dict_lookup` already dropped its borrow before
+                            // `dict_lookup_value` already dropped its borrow before
                             // running user code, so the index is still valid.
                             receiver.dict_with_mut(|dict| dict.shift_remove_index(idx));
                             Ok(v)
@@ -82,14 +81,23 @@ impl Interpreter {
                     },
                     DictMethod::SetDefault => {
                         let default = iter.next().unwrap_or_else(Value::none);
+                        if pyrust_core::ValueKeyRef::try_new(&key_val).is_some() {
+                            if let Some((_, v)) = self.dict_lookup_value(&receiver, &key_val)? {
+                                return Ok(v);
+                            }
+                            let pk = key_val
+                                .to_key()
+                                .expect("ValueKeyRef::try_new guarantees Value::to_key succeeds");
+                            receiver.dict_insert(pk, default.clone())?;
+                            return Ok(default);
+                        }
+                        // Dynamic key: hash exactly once via `value_to_pykey` so
+                        // `d.setdefault(obj, default)` invokes `obj.__hash__` once.
+                        let pk = self.value_to_pykey(&key_val)?;
                         if let Some((_, v)) = self.dict_lookup(&receiver, &pk)? {
                             return Ok(v);
                         }
-                        receiver
-                            .dict_with_mut(|dict| dict.insert(pk, default.clone()))
-                            .ok_or_else(|| {
-                                PyError::Runtime("internal: expected dict".to_string())
-                            })?;
+                        receiver.dict_insert(pk, default.clone())?;
                         Ok(default)
                     }
                     _ => unreachable!(),
@@ -272,15 +280,12 @@ impl Interpreter {
                             ));
                         }
                     };
-                    let pk = self.value_to_pykey(&k_val)?;
                     // Insert this pair immediately so an error from a later
-                    // element leaves earlier updates visible.  The single-pair
-                    // receiver helper gives primitive keys an O(1) IndexMap
-                    // probe; calling the bulk helper with a one-element Vec
-                    // rescanned every destination key and made this loop O(n²).
-                    // Object keys still dispatch stored-key `__eq__` and keep
-                    // the original key object/insertion position (#1914).
-                    self.dict_insert_value(&receiver, pk, v_val)?;
+                    // element leaves earlier updates visible.  `dict_set_value`
+                    // updates existing pure keys in place without allocating a
+                    // `PyKey`, and dispatches stored-key `__eq__` for Object keys
+                    // while keeping the original key object/position (#1914).
+                    self.dict_set_value(&receiver, k_val, v_val)?;
                     idx += 1;
                 }
                 // Apply keyword arguments after the positional iterable,

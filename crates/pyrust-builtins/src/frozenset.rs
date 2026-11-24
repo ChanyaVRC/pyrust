@@ -138,6 +138,9 @@ impl BuiltinTypeOps for FrozenSetOps {
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
         let items = borrow_items(state)
             .ok_or_else(|| PyError::Runtime("internal: bad frozenset state".to_string()))?;
+        if let Some(probe) = pyrust_core::ValueKeyRef::try_new(item) {
+            return Ok(items.contains(&probe));
+        }
         match item.to_key() {
             Some(k) => Ok(items.contains(&k)),
             None => Err(PyError::named(
@@ -172,6 +175,16 @@ impl BuiltinTypeOps for FrozenSetOps {
 
     fn to_key(&self, state: &BuiltinState) -> Option<PyKey> {
         Some(PyKey::FrozenSet(borrow_key(state)?))
+    }
+
+    fn with_frozenset_key(&self, state: &BuiltinState, f: &mut dyn FnMut(&FrozenSetKey)) -> bool {
+        let borrow = state.borrow();
+        if let Some(s) = borrow.downcast_ref::<FrozenSetState>() {
+            f(&s.key);
+            true
+        } else {
+            false
+        }
     }
 
     fn hash(&self, state: &BuiltinState) -> Option<u64> {

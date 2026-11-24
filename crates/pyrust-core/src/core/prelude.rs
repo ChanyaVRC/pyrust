@@ -393,25 +393,32 @@ impl PyDict {
     /// the conversion also happens when lookup finds an equal existing string.
     #[inline]
     pub fn prepare_python_insert(&mut self, key: &PyKey) {
+        self.prepare_python_insert_is_str(matches!(key, PyKey::Str(_)));
+    }
+
+    /// Borrowed counterpart of [`Self::prepare_python_insert`] for callers
+    /// probing with [`ValueKeyRef`] / [`StrKey`] before allocating a `PyKey`.
+    #[inline]
+    pub fn prepare_python_insert_is_str(&mut self, is_str: bool) {
         if self.metadata_is_precise() {
             match self.python_key_table_kind {
                 DictKeyTableKind::General => return,
-                DictKeyTableKind::Unicode if matches!(key, PyKey::Str(_)) => return,
+                DictKeyTableKind::Unicode if is_str => return,
                 _ => {}
             }
         }
-        self.prepare_python_insert_slow(key);
+        self.prepare_python_insert_slow(is_str);
     }
 
     #[cold]
     #[inline(never)]
-    fn prepare_python_insert_slow(&mut self, key: &PyKey) {
+    fn prepare_python_insert_slow(&mut self, is_str: bool) {
         self.repair_poisoned_metadata();
         match self.python_key_table_kind {
             DictKeyTableKind::General => return,
             DictKeyTableKind::Unknown => {
                 debug_assert!(self.entries.is_empty());
-                self.python_key_table_kind = if matches!(key, PyKey::Str(_)) {
+                self.python_key_table_kind = if is_str {
                     DictKeyTableKind::Unicode
                 } else {
                     DictKeyTableKind::General
@@ -419,7 +426,7 @@ impl PyDict {
                 self.python_hash_initial_table_kind = self.python_key_table_kind;
                 return;
             }
-            DictKeyTableKind::Unicode if matches!(key, PyKey::Str(_)) => return,
+            DictKeyTableKind::Unicode if is_str => return,
             DictKeyTableKind::Unicode => {}
         }
         self.python_key_table_kind = DictKeyTableKind::General;
@@ -437,6 +444,16 @@ impl PyDict {
         // A reentrant outer lookup must discard any snapshot taken against the
         // old key table even though no logical key changed.
         self.bump_structural_version();
+    }
+
+    /// Borrow an existing entry's value mutably without poisoning key metadata
+    /// or bumping `structural_version` (keys are immutable through this borrow).
+    #[inline]
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut Value>
+    where
+        Q: ?Sized + Hash + indexmap::Equivalent<PyKey>,
+    {
+        self.entries.get_mut(key)
     }
 
     #[inline]

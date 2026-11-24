@@ -444,7 +444,7 @@ impl Value {
                 for item in items {
                     keys.push(item.to_key()?);
                 }
-                Some(PyKey::Tuple(keys))
+                Some(PyKey::Tuple(keys.into_boxed_slice()))
             }
             _ => None,
         }

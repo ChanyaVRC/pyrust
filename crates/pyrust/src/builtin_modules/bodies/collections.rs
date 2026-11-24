@@ -539,7 +539,6 @@ pyrust_module! {
 
         let last = _interp.truthy_value(&args[2].value)?;
         let key_value = args[1].value.clone();
-        let key = _interp.value_to_pykey(&key_value)?;
         let backing = coerce_subclass_backing(&args[0].value, &[])
             .filter(Value::is_dict)
             .ok_or_else(|| {
@@ -548,7 +547,7 @@ pyrust_module! {
                         .to_string(),
                 )
             })?;
-        let Some((from, _)) = _interp.dict_lookup(&backing, &key)? else {
+        let Some((from, _)) = _interp.dict_lookup_value(&backing, &key_value)? else {
             return Err(PyError::key_error(key_value));
         };
         let len = backing.dict_len().ok_or_else(|| {
@@ -602,11 +601,11 @@ pyrust_module! {
         /// proper present-key lookup we fall through to the stored map.
         fn __getitem__(args) -> Result<Value> {
             let backing = counter_backing(args, FN_NAME)?;
-            let key = require_key(_interp, args, 1, FN_NAME)?;
-            // Probe the live backing directly.  `dict_lookup` keeps primitive
-            // keys O(1) and drops its map borrow before object-key `__eq__`.
+            let key = require_key_arg(args, 1, FN_NAME)?;
+            // Probe the live backing directly. `dict_lookup_value` avoids PyKey
+            // allocation for pure keys and drops its map borrow before object `__eq__`.
             Ok(_interp
-                .dict_lookup(&backing, &key)?
+                .dict_lookup_value(&backing, key)?
                 .map(|(_, value)| value)
                 .unwrap_or_else(|| Value::int(0)))
         }
@@ -621,10 +620,10 @@ pyrust_module! {
                     "{FN_NAME}() takes exactly 2 arguments",
                 )));
             }
-            let key = require_key(_interp, args, 1, FN_NAME)?;
+            let key = require_key_arg(args, 1, FN_NAME)?.clone();
             let value = args[2].value.clone();
             let backing = counter_backing(args, FN_NAME)?;
-            _interp.dict_insert_value(&backing, key, value)?;
+            _interp.dict_set_value(&backing, key, value)?;
             Ok(Value::none())
         }
 
@@ -638,9 +637,9 @@ pyrust_module! {
                     format!("{FN_NAME}() takes exactly 1 argument"),
                 ));
             }
-            let key = require_key(_interp, args, 1, FN_NAME)?;
+            let key = require_key_arg(args, 1, FN_NAME)?;
             let backing = counter_backing(args, FN_NAME)?;
-            if let Some((index, _)) = _interp.dict_lookup(&backing, &key)? {
+            if let Some((index, _)) = _interp.dict_lookup_value(&backing, key)? {
                 backing
                     .dict_with_mut(|counts| {
                         counts.shift_remove_index(index);
@@ -655,9 +654,9 @@ pyrust_module! {
         /// `key in c` — fall through to the stored map's contains.
         fn __contains__(args) -> Result<Value> {
             let backing = counter_backing(args, FN_NAME)?;
-            let key = require_key(_interp, args, 1, FN_NAME)?;
+            let key = require_key_arg(args, 1, FN_NAME)?;
             Ok(Value::bool_(
-                _interp.dict_lookup(&backing, &key)?.is_some(),
+                _interp.dict_lookup_value(&backing, key)?.is_some(),
             ))
         }
 
@@ -843,8 +842,8 @@ pyrust_module! {
                     "get() takes 1 or 2 arguments".to_string(),
                 ));
             }
-            let key = require_key(_interp, args, 1, FN_NAME)?;
-            match _interp.dict_lookup(&backing, &key)? {
+            let key = require_key_arg(args, 1, FN_NAME)?;
+            match _interp.dict_lookup_value(&backing, key)? {
                 Some((_, value)) => Ok(value),
                 None => Ok(user.get(1).cloned().map(|a| a.value).unwrap_or_else(Value::none)),
             }
@@ -1025,9 +1024,9 @@ pyrust_module! {
         /// `dict.__getitem__(self, k)` falls back to `self.__missing__(k)`.
         fn __getitem__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            let key = require_key(_interp, args, 1, FN_NAME)?;
+            let key = require_key_arg(args, 1, FN_NAME)?;
             let backing = defaultdict_backing(args, FN_NAME)?;
-            if let Some((_, value)) = _interp.dict_lookup(&backing, &key)? {
+            if let Some((_, value)) = _interp.dict_lookup_value(&backing, key)? {
                 return Ok(value);
             }
             // Miss → __missing__.  Resolved via the class so that
@@ -1065,9 +1064,8 @@ pyrust_module! {
             // Call the factory with no args.  The result is stored
             // under `key` and returned.
             let new_val = _interp.call_function_expanded(factory, &[])?;
-            let pk = _interp.value_to_pykey(&key_arg.value)?;
             let backing = defaultdict_backing(args, FN_NAME)?;
-            _interp.dict_insert_value(&backing, pk, new_val.clone())?;
+            _interp.dict_set_value(&backing, key_arg.value, new_val.clone())?;
             Ok(new_val)
         }
 
@@ -1079,17 +1077,17 @@ pyrust_module! {
                     "{FN_NAME}() takes exactly 2 arguments",
                 )));
             }
-            let key = require_key(_interp, args, 1, FN_NAME)?;
+            let key = require_key_arg(args, 1, FN_NAME)?.clone();
             let backing = defaultdict_backing(args, FN_NAME)?;
-            _interp.dict_insert_value(&backing, key, args[2].value.clone())?;
+            _interp.dict_set_value(&backing, key, args[2].value.clone())?;
             Ok(Value::none())
         }
 
         fn __contains__(args) -> Result<Value> {
             let backing = defaultdict_backing(args, FN_NAME)?;
-            let key = require_key(_interp, args, 1, FN_NAME)?;
+            let key = require_key_arg(args, 1, FN_NAME)?;
             Ok(Value::bool_(
-                _interp.dict_lookup(&backing, &key)?.is_some(),
+                _interp.dict_lookup_value(&backing, key)?.is_some(),
             ))
         }
 
@@ -1135,8 +1133,8 @@ pyrust_module! {
                     "get() takes 1 or 2 arguments".to_string(),
                 ));
             }
-            let key = require_key(_interp, args, 1, FN_NAME)?;
-            Ok(match _interp.dict_lookup(&backing, &key)? {
+            let key = require_key_arg(args, 1, FN_NAME)?;
+            Ok(match _interp.dict_lookup_value(&backing, key)? {
                 Some((_, value)) => value,
                 None => user.get(1).cloned().map(|a| a.value).unwrap_or_else(Value::none),
             })

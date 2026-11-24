@@ -146,17 +146,10 @@ impl Interpreter {
         };
         match fast {
             FastResult::Value(r) => Ok(r),
-            FastResult::DictLookup(dict_val) => {
-                let lookup = if let Some(s) = idx_val.as_str() {
-                    self.dict_str_lookup(&dict_val, s)?
-                } else {
-                    let key = self.value_to_pykey(&idx_val)?;
-                    self.dict_lookup(&dict_val, &key)?
-                };
-                lookup
-                    .map(|(_, v)| v)
-                    .ok_or_else(|| PyError::key_error(idx_val.clone()))
-            }
+            FastResult::DictLookup(dict_val) => self
+                .dict_lookup_value(&dict_val, &idx_val)?
+                .map(|(_, v)| v)
+                .ok_or_else(|| PyError::key_error(idx_val.clone())),
             FastResult::Miss => {
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 // bytearray honors __index__ on a non-int subscript like bytes
@@ -363,8 +356,7 @@ impl Interpreter {
                         }
                         match bk_kind {
                             BkKind::Dict => {
-                                let key = self.value_to_pykey(&idx_val)?;
-                                self.dict_insert_value(&backing, key, val_val)?;
+                                self.dict_set_value(&backing, idx_val, val_val)?;
                                 return Ok(());
                             }
                             BkKind::List => {
@@ -483,12 +475,11 @@ impl Interpreter {
         idx_val: Value,
         val_val: Value,
     ) -> Result<()> {
-        let key = self.value_to_pykey(&idx_val)?;
         let dict_val = regs[obj as usize]
             .as_some()
             .cloned()
             .unwrap_or(Value::none());
-        self.dict_insert_value(&dict_val, key, val_val)
+        self.dict_set_value(&dict_val, idx_val, val_val)
     }
 
     /// Execute `del obj[idx]`.
@@ -546,14 +537,13 @@ impl Interpreter {
             return Ok(());
         }
         if target_kind == 2 {
-            let key = self.value_to_pykey(&idx_val)?;
             // Route every key through the shared fast-get/eq-aware lookup so
             // primitive probes can delete an equal stored Object (#2820).
             let dict_val = regs[obj as usize]
                 .as_some()
                 .cloned()
                 .unwrap_or(Value::none());
-            let found = self.dict_lookup(&dict_val, &key)?;
+            let found = self.dict_lookup_value(&dict_val, &idx_val)?;
             if let Some((idx, _)) = found {
                 regs[obj as usize].dict_with_mut(|dict| {
                     dict.shift_remove_index(idx);

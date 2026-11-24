@@ -213,9 +213,8 @@ fn counter_tally_into_backing<const SUBTRACT: bool>(
             Err(error) if crate::interpreter::is_stop_iteration_error(&error) => break,
             Err(error) => return Err(error),
         };
-        let lookup_key = interp.value_to_pykey(&value)?;
         let current = interp
-            .dict_lookup(backing, &lookup_key)?
+            .dict_lookup_value(backing, &value)?
             .map(|(_, value)| value)
             .unwrap_or_else(|| Value::int(0));
         let one = Value::int(1);
@@ -224,8 +223,7 @@ fn counter_tally_into_backing<const SUBTRACT: bool>(
         } else {
             counter_add_values(interp, current, one)?
         };
-        let insert_key = interp.value_to_pykey(&value)?;
-        interp.dict_insert_value(backing, insert_key, result)?;
+        interp.dict_set_value(backing, value, result)?;
     }
     Ok(())
 }

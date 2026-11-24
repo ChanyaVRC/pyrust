@@ -123,12 +123,7 @@ pyrust_module! {
                 "__getitem__", "dict", actual, method
             ));
         }
-        let lookup = if let Some(s) = key.as_str() {
-            _interp.dict_str_lookup(&backing, s)?
-        } else {
-            let py_key = _interp.value_to_pykey(&key)?;
-            _interp.dict_lookup(&backing, &py_key)?
-        };
+        let lookup = _interp.dict_lookup_value(&backing, &key)?;
         match lookup {
             Some((_, v)) => Ok(v),
             None => {

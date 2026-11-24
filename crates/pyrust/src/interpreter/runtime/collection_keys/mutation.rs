@@ -252,12 +252,87 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Insert or update `receiver[key] = value` directly from a `Value` key (#454).
+    ///
+    /// For pure non-dynamic heap/RC keys (`Str`, `BigInt`, `Bytes`, `Tuple`,
+    /// `FrozenSet`) into a dict with no dynamic keys, attempts an in-place value
+    /// replacement via [`ValueKeyRef`] so existing-key updates perform zero
+    /// `PyKey` allocation and zero RC bumps. Stack-only scalar keys (`Int`,
+    /// `Bool`, `Float`, `None`, `Ellipsis`, `Complex`) convert directly in one
+    /// probe with zero heap allocation. Dynamic keys and dicts containing dynamic
+    /// keys fall back to `value_to_pykey` + `dict_insert_value` (calling
+    /// `__hash__` at most once).
+    pub(crate) fn dict_set_value(
+        &mut self,
+        receiver: &Value,
+        key: Value,
+        value: Value,
+    ) -> Result<()> {
+        if let Some(probe) = pyrust_core::ValueKeyRef::try_new(&key) {
+            let may_have_dynamic = receiver
+                .dict_with(|dict| dict.may_have_dynamic_key())
+                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+            if !may_have_dynamic {
+                let needs_alloc_or_rc = matches!(
+                    key.kind(),
+                    ValueKind::Str(_)
+                        | ValueKind::BigInt(_)
+                        | ValueKind::Bytes(_)
+                        | ValueKind::Tuple(_)
+                        | ValueKind::BuiltinObject { .. }
+                );
+                if needs_alloc_or_rc {
+                    let key_is_str = key.is_str();
+                    let str_name = key.as_str();
+                    match receiver.dict_replace_existing(&probe, key_is_str, str_name, value)? {
+                        Ok(_old) => return Ok(()),
+                        Err(value) => {
+                            let py_key = key
+                                .to_key()
+                                .expect("ValueKeyRef::try_new guarantees Value::to_key succeeds");
+                            receiver.dict_insert(py_key, value)?;
+                            return Ok(());
+                        }
+                    }
+                }
+                let py_key = key
+                    .to_key()
+                    .expect("ValueKeyRef::try_new guarantees Value::to_key succeeds");
+                receiver.dict_insert(py_key, value)?;
+                return Ok(());
+            }
+            let py_key = key
+                .to_key()
+                .expect("ValueKeyRef::try_new guarantees Value::to_key succeeds");
+            return self.dict_insert_value(receiver, py_key, value);
+        }
+        let py_key = self.value_to_pykey(&key)?;
+        self.dict_insert_value(receiver, py_key, value)
+    }
+
     /// Hash and insert one Python value into a live set accumulator.
     ///
     /// This receiver-based form is used by set displays/comprehensions. It
     /// keeps representation-aware equality deduplication out of the opcode
     /// loop and releases the set borrow before any user `__eq__` call.
     pub(crate) fn set_insert_value(&mut self, receiver: &Value, value: Value) -> Result<()> {
+        if matches!(
+            value.kind(),
+            ValueKind::Str(_)
+                | ValueKind::BigInt(_)
+                | ValueKind::Bytes(_)
+                | ValueKind::Tuple(_)
+                | ValueKind::BuiltinObject { .. }
+        ) && let Some(probe) = pyrust_core::ValueKeyRef::try_new(&value)
+        {
+            if receiver.as_set().is_some_and(|set| set.contains(&probe)) {
+                return Ok(());
+            }
+            let key = value
+                .to_key()
+                .expect("ValueKeyRef::try_new guarantees Value::to_key succeeds");
+            return receiver.set_add(key).map(|_| ());
+        }
         let key = self.value_to_pykey(&value)?;
         let needs_dedup = match &key {
             PyKey::Object { .. } => true,

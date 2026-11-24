@@ -106,21 +106,13 @@ fn make_guarded_dict_subclass_iter(backing: Value) -> Value {
     )))
 }
 
-/// Hashable-key extraction at index `i` with a uniform TypeError on
-/// non-hashable input.  Uses the interpreter-aware hash path so that
-/// slice keys (and any other type with a custom `__hash__`) are handled
-/// correctly rather than falling back to the pure `Value::to_key()` path
-/// which cannot hash slices (issue #905).
-fn require_key(
-    interp: &mut crate::Interpreter,
-    args: &[ExpandedCallArg],
-    i: usize,
-    fn_name: &str,
-) -> Result<PyKey> {
+/// Extract a required key argument at index `i` without eagerly allocating a
+/// `PyKey`, allowing callers to probe via `dict_lookup_value` / `dict_set_value`.
+fn require_key_arg<'a>(args: &'a [ExpandedCallArg], i: usize, fn_name: &str) -> Result<&'a Value> {
     let v = args
         .get(i)
         .ok_or_else(|| PyError::Runtime(format!("internal: {fn_name}() missing arg {i}")))?;
-    interp.value_to_pykey(&v.value)
+    Ok(&v.value)
 }
 
 /// `__eq__`-aware `get` against an owned `_counts`/`_items` snapshot map

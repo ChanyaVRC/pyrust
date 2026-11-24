@@ -34,7 +34,7 @@ impl Interpreter {
             for item in items {
                 keys.push(self.value_to_pykey(item)?);
             }
-            return Ok(PyKey::Tuple(keys));
+            return Ok(PyKey::Tuple(keys.into_boxed_slice()));
         }
         // Slices with PyInstance components need interpreter access to dispatch
         // `__hash__`.  The pure `SliceOps::to_key()` path (via `value.to_key()`)

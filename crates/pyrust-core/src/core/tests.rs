@@ -737,12 +737,15 @@ mod tests {
             IndexMap::new(),
         )));
         let nested = || {
-            PyKey::Tuple(vec![PyKey::Object {
-                hash: 1,
-                value: plain_instance(Rc::clone(&class)),
-            }])
+            PyKey::Tuple(
+                vec![PyKey::Object {
+                    hash: 1,
+                    value: plain_instance(Rc::clone(&class)),
+                }]
+                .into_boxed_slice(),
+            )
         };
-        let primitive = PyKey::Tuple(vec![PyKey::Int(1)]);
+        let primitive = PyKey::Tuple(vec![PyKey::Int(1)].into_boxed_slice());
         let python_hash = py_hash_pykey(&primitive) as u64;
 
         let dynamic_first = nested();
@@ -2605,5 +2608,261 @@ mod tests {
                 "untagged class named {spoofed_name} must not hide its repr override"
             );
         }
+    }
+
+    #[test]
+    fn pykey_layout_is_at_most_24_bytes() {
+        assert!(
+            std::mem::size_of::<PyKey>() <= 24,
+            "PyKey grew beyond 24 bytes: {}",
+            std::mem::size_of::<PyKey>()
+        );
+    }
+
+    #[test]
+    fn value_key_ref_matches_pykey_hash_and_eq_across_full_cross_product() {
+        use super::{BuiltinState, PyHasher, ValueKeyRef, py_hash_none};
+        use num_bigint::BigInt;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{BuildHasher, Hash, Hasher};
+
+        struct MockFrozenSetOps;
+        static MOCK_FROZENSET_OPS: MockFrozenSetOps = MockFrozenSetOps;
+
+        impl BuiltinTypeOps for MockFrozenSetOps {
+            fn type_name(&self) -> &'static str {
+                "frozenset"
+            }
+
+            fn canonical_class_tag(&self) -> Option<CanonicalClassTag> {
+                Some(CanonicalClassTag::Frozenset)
+            }
+
+            fn to_key(&self, state: &BuiltinState) -> Option<PyKey> {
+                let borrow = state.borrow();
+                borrow
+                    .downcast_ref::<Rc<FrozenSetKey>>()
+                    .map(|k| PyKey::FrozenSet(Rc::clone(k)))
+            }
+
+            fn with_frozenset_key(
+                &self,
+                state: &BuiltinState,
+                f: &mut dyn FnMut(&FrozenSetKey),
+            ) -> bool {
+                let borrow = state.borrow();
+                if let Some(k) = borrow.downcast_ref::<Rc<FrozenSetKey>>() {
+                    f(k);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+
+        fn mock_frozenset(items: PySet) -> Value {
+            let key = Rc::new(FrozenSetKey::new(Rc::new(items)));
+            Value::builtin_object(&MOCK_FROZENSET_OPS, Box::new(key))
+        }
+
+        fn fx_hash<T: Hash>(v: &T) -> u64 {
+            PyHasher::default().hash_one(v)
+        }
+
+        fn default_hash<T: Hash>(v: &T) -> u64 {
+            let mut h = DefaultHasher::new();
+            v.hash(&mut h);
+            h.finish()
+        }
+
+        let nan_a = Value::float(f64::NAN);
+        let nan_b = Value::float(f64::NAN);
+        let nan_a_bits = match nan_a.kind() {
+            ValueKind::Float(f) => f,
+            _ => unreachable!(),
+        };
+        let nan_b_bits = match nan_b.kind() {
+            ValueKind::Float(f) => f,
+            _ => unreachable!(),
+        };
+
+        let mut fs_12 = PySet::default();
+        fs_12.insert(PyKey::Int(1));
+        fs_12.insert(PyKey::Int(2));
+        let mut fs_21 = PySet::default();
+        fs_21.insert(PyKey::Int(2));
+        fs_21.insert(PyKey::Int(1));
+        let mut fs_empty = PySet::default();
+        let _ = &mut fs_empty;
+
+        let big_pos = BigInt::from(10u64).pow(20);
+        let big_neg = -&big_pos;
+
+        let pure_values: Vec<Value> = vec![
+            Value::int(0),
+            Value::int(1),
+            Value::int(-1),
+            Value::int(42),
+            Value::int(i64::MIN),
+            Value::int(i64::MAX),
+            Value::bool_(false),
+            Value::bool_(true),
+            Value::float(0.0),
+            Value::float(-0.0),
+            Value::float(1.0),
+            Value::float(-1.0),
+            Value::float(1.5),
+            Value::float(1e20),
+            Value::float(-1e20),
+            Value::float(f64::INFINITY),
+            Value::float(f64::NEG_INFINITY),
+            nan_a.clone(),
+            nan_a.clone(),
+            nan_b.clone(),
+            Value::bigint(big_pos.clone()),
+            Value::bigint(big_neg.clone()),
+            Value::bigint(BigInt::from(1)),
+            Value::bigint(BigInt::from(0)),
+            Value::string(""),
+            Value::string("abc"),
+            Value::string("1"),
+            Value::none(),
+            Value::ellipsis(),
+            Value::bytes(vec![]),
+            Value::bytes(b"abc".to_vec()),
+            Value::complex(0.0, 0.0),
+            Value::complex(-0.0, -0.0),
+            Value::complex(1.0, 0.0),
+            Value::complex(1.0, -0.0),
+            Value::complex(1.0, 2.0),
+            Value::complex(1e20, 0.0),
+            Value::complex(nan_a_bits, 0.0),
+            Value::complex(nan_a_bits, 1.0),
+            Value::complex(nan_b_bits, 1.0),
+            Value::tuple(vec![]),
+            Value::tuple(vec![Value::int(1), Value::string("a")]),
+            Value::tuple(vec![Value::float(1.0), Value::string("a")]),
+            Value::tuple(vec![Value::bool_(true), Value::string("a")]),
+            Value::tuple(vec![
+                Value::int(1),
+                Value::tuple(vec![Value::float(0.0), Value::complex(1.0, 0.0)]),
+            ]),
+            Value::tuple(vec![
+                Value::bool_(true),
+                Value::tuple(vec![Value::int(0), Value::int(1)]),
+            ]),
+            Value::tuple(vec![nan_a.clone()]),
+            Value::tuple(vec![nan_b.clone()]),
+            mock_frozenset(fs_12),
+            mock_frozenset(fs_21),
+            mock_frozenset(fs_empty),
+        ];
+
+        // Build the full target PyKey list including PyKey::Object.
+        let cls = Rc::new(RefCell::new(PyClass::new("K", "K", None, IndexMap::new())));
+        let inst = plain_instance(Rc::clone(&cls));
+        let mut target_keys: Vec<PyKey> = pure_values
+            .iter()
+            .map(|v| v.to_key().expect("pure value must convert to PyKey"))
+            .collect();
+        target_keys.push(PyKey::Object {
+            hash: 1,
+            value: inst.clone(),
+        });
+        target_keys.push(PyKey::Object {
+            hash: py_hash_none() as u64,
+            value: plain_instance(Rc::clone(&cls)),
+        });
+        // Also verify a tuple containing a PyKey::Object never matches a pure tuple.
+        target_keys.push(PyKey::Tuple(
+            vec![PyKey::Object {
+                hash: 1,
+                value: inst.clone(),
+            }]
+            .into_boxed_slice(),
+        ));
+
+        for (i, val) in pure_values.iter().enumerate() {
+            let probe = ValueKeyRef::try_new(val).unwrap_or_else(|| {
+                panic!("pure value #{i} ({}) rejected by try_new", val.repr_raw())
+            });
+            let owned = val.to_key().expect("pure value must convert to PyKey");
+
+            assert_eq!(
+                fx_hash(&probe),
+                fx_hash(&owned),
+                "FxHasher mismatch for value #{i} ({})",
+                val.repr_raw()
+            );
+            assert_eq!(
+                default_hash(&probe),
+                default_hash(&owned),
+                "DefaultHasher mismatch for value #{i} ({})",
+                val.repr_raw()
+            );
+
+            for (j, target) in target_keys.iter().enumerate() {
+                assert_eq!(
+                    indexmap::Equivalent::equivalent(&probe, target),
+                    owned == *target,
+                    "Equivalent mismatch for value #{i} ({}) vs key #{j} ({target:?})",
+                    val.repr_raw()
+                );
+            }
+        }
+
+        // Non-pure and unhashable values MUST be rejected by ValueKeyRef::try_new.
+        let mut dynamic_fs = PySet::default();
+        dynamic_fs.insert(PyKey::Object {
+            hash: 1,
+            value: inst.clone(),
+        });
+        let mut deep_tuple = Value::int(1);
+        for _ in 0..70 {
+            deep_tuple = Value::tuple(vec![deep_tuple]);
+        }
+        let rejected_values: Vec<Value> = vec![
+            Value::list(vec![Value::int(1)]),
+            Value::dict(PyDict::default()),
+            Value::set(PySet::default()),
+            Value::range(0, 10, 1),
+            Value::not_implemented(),
+            Value::py_class(Rc::clone(&cls)),
+            inst.clone(),
+            Value::tuple(vec![Value::int(1), Value::list(vec![])]),
+            Value::tuple(vec![Value::int(1), inst.clone()]),
+            mock_frozenset(dynamic_fs),
+            deep_tuple,
+        ];
+        for (i, val) in rejected_values.iter().enumerate() {
+            assert!(
+                ValueKeyRef::try_new(val).is_none(),
+                "non-pure value #{i} ({}) must be rejected by ValueKeyRef::try_new",
+                val.repr_raw()
+            );
+        }
+
+        // Verify PyDict::get_mut / Value::dict_replace_existing preserves metadata & version.
+        let dict_val = Value::dict(PyDict::default());
+        let tup_val = Value::tuple(vec![Value::int(1), Value::string("x")]);
+        dict_val
+            .dict_insert(tup_val.to_key().unwrap(), Value::int(10))
+            .unwrap();
+        let ver_before = dict_val.dict_with(|d| d.structural_version()).unwrap();
+        let probe = ValueKeyRef::try_new(&tup_val).unwrap();
+        let old = dict_val
+            .dict_replace_existing(&probe, false, None, Value::int(20))
+            .unwrap()
+            .expect("existing tuple key must hit");
+        assert_eq!(old, Value::int(10));
+        assert_eq!(
+            dict_val.dict_with(|d| d.structural_version()).unwrap(),
+            ver_before
+        );
+        assert!(!dict_val.dict_with(|d| d.may_have_dynamic_key()).unwrap());
+        assert_eq!(
+            dict_val.dict_with(|d| d.get(&probe).cloned()).unwrap(),
+            Some(Value::int(20))
+        );
     }
 }
