@@ -119,22 +119,8 @@ __version__ = '1.70'    # Highest version of the spec this complies with
 __libmpdec_version__ = "2.4.2" # compatible libmpdec version
 
 import math as _math
+import numbers as _numbers
 import sys
-
-# pyrust note: the stdlib ``numbers`` module is not available, so we provide a
-# minimal stand-in covering the three uses in this file:
-#   * ``_numbers.Number.register(Decimal)`` -- ABC registration (no-op here)
-#   * ``isinstance(other, _numbers.Rational)`` -- ``int`` (and its ``bool``
-#     subclass) qualify; ``Fraction`` would too but pyrust does not ship it.
-#   * ``isinstance(other, _numbers.Complex)`` -- ``complex`` qualifies.
-class _NumbersStub:
-    class Number:
-        @staticmethod
-        def register(cls):
-            return cls
-    Rational = int
-    Complex = complex
-_numbers = _NumbersStub
 
 try:
     # pyrust note: ``from collections import namedtuple as _namedtuple`` does

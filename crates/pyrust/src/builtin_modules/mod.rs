@@ -387,6 +387,17 @@ pyrust_builtin_modules! {
     // inspection, and source/docstring helpers injected from `inspect_py.py`
     // with a private native bytecode-name classifier in `inspect.rs`.
     inspect @inject,
+    // `numbers` (issue #3147): PEP 3141 numeric tower ABCs (`Number`,
+    // `Complex`, `Real`, `Rational`, `Integral`) injected from `numbers_py.py`.
+    numbers @inject,
+    // `difflib` (issue #3147): pure-Python sequence matching and delta helpers
+    // (`SequenceMatcher`, `Differ`, `unified_diff`, `context_diff`, `ndiff`,
+    // `restore`, `diff_bytes`, `get_close_matches`, `HtmlDiff`, `Match`)
+    // injected from `difflib_py.py`.
+    difflib @inject,
+    // `shlex` (issue #3147): pure-Python shell-like lexical analyzer (`shlex`,
+    // `split`, `join`, `quote`) injected from `shlex_py.py`.
+    shlex @inject,
 }
 
 include!("finalization.rs");

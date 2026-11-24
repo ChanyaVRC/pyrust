@@ -43,13 +43,14 @@ pub(crate) fn inject_python_members(
 ) -> Result<Option<Value>> {
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     // Pre-seed the exec namespace with the modules `fractions_py.py` depends on
-    // (`math`, `functools`, `operator`, `re`).  We can't rely on module-level
-    // `import` statements inside the exec'd source: a top-level `import X` in an
-    // explicit-dict exec namespace binds the name where function-scope reads see
-    // it but module-top-level reads don't, so `_RATIONAL_FORMAT = re.compile(…)`
-    // would raise `NameError: name 're' is not defined`.  Seeding the modules
-    // directly side-steps that pre-existing exec/import limitation.
-    let deps: Vec<(&str, Value)> = ["math", "functools", "operator", "re"]
+    // (`math`, `functools`, `numbers`, `operator`, `re`).  We can't rely on
+    // module-level `import` statements inside the exec'd source: a top-level
+    // `import X` in an explicit-dict exec namespace binds the name where
+    // function-scope reads see it but module-top-level reads don't, so
+    // `_RATIONAL_FORMAT = re.compile(…)` would raise `NameError: name 're' is
+    // not defined`.  Seeding the modules directly side-steps that pre-existing
+    // exec/import limitation.
+    let deps: Vec<(&str, Value)> = ["math", "functools", "numbers", "operator", "re"]
         .into_iter()
         .map(|name| interp.load_module(name).map(|m| (name, m)))
         .collect::<Result<_>>()?;
