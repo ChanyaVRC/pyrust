@@ -292,61 +292,7 @@ fn binop_const_fusion_does_not_commute_non_commutative() {
     );
 }
 
-// ── pass_unary_fold ───────────────────────────────────────────────────────
-
-#[test]
-fn unary_fold_neg_int() {
-    use crate::ast::UnaryOp;
-    use crate::value::Value;
-    // LoadConst(r=5, idx=0) [consts[0]=-3]  UnaryOp(dst=1, Neg, r=5)
-    // → LoadConst(dst=1, idx_3)
-    let mut consts = vec![Value::int(-3)];
-    let insns = vec![
-        Insn::LoadConst(5, 0),
-        Insn::UnaryOp(1, UnaryOp::Neg, 5),
-        Insn::Return(1),
-    ];
-    let out = pass_unary_fold(insns, 2, &mut consts);
-    assert_eq!(out.len(), 2, "LoadConst should be removed");
-    assert!(
-        matches!(out[0], Insn::LoadConst(1, _)),
-        "UnaryOp should become LoadConst"
-    );
-    let idx = match out[0] {
-        Insn::LoadConst(_, i) => i,
-        _ => panic!(),
-    };
-    assert!(matches!(
-        consts[idx as usize].kind(),
-        crate::value::ValueKind::Int(3)
-    ));
-}
-
-#[test]
-fn unary_fold_skips_unaryop_that_is_jump_target() {
-    use crate::ast::UnaryOp;
-    use crate::value::Value;
-    // Ternary-as-operand-of-unary shape (issue #2565 sibling):
-    //   0 JumpIfFalse(0, 2)        a falsy → jump to the else LoadConst (idx 3)
-    //   1 LoadConst(2, 0)          then: t = const#0 (10)
-    //   2 Jump(1)                  jump past the else load, onto the UnaryOp (idx 4)
-    //   3 LoadConst(2, 1)          else: t = const#1 (20)  ← jump target of insn 0
-    //   4 UnaryOp(1, Neg, 2)       ← jump target of insn 2 (the then-branch)
-    //   5 Return(1)
-    // Fusing idx 3/4 would make the then-branch land on LoadConst(1, -20),
-    // discarding the then value. Must be skipped.
-    let mut consts = vec![Value::int(10), Value::int(20)];
-    let insns = vec![
-        Insn::JumpIfFalse(0, 2),
-        Insn::LoadConst(2, 0),
-        Insn::Jump(1),
-        Insn::LoadConst(2, 1),
-        Insn::UnaryOp(1, UnaryOp::Neg, 2),
-        Insn::Return(1),
-    ];
-    let out = pass_unary_fold(insns.clone(), 1, &mut consts);
-    assert_eq!(out, insns, "must not fold a UnaryOp that is a jump target");
-}
+// ── Unary constant folding (end-to-end via MIR + optimizer pipeline) ──────
 
 #[test]
 fn unary_fold_folds_negated_literals_before_and_inside_a_loop() {
@@ -410,105 +356,11 @@ fn unary_fold_folds_negated_literals_before_and_inside_a_loop() {
 }
 
 #[test]
-fn unary_fold_folds_distinct_dead_source_before_a_back_edge() {
-    use crate::ast::UnaryOp;
-    use crate::value::{Value, ValueKind};
-
-    // The later loop never reads r3, so removing its defining LoadConst is
-    // safe even though the UnaryOp writes a distinct destination.
-    let mut consts = vec![Value::int(5)];
-    let insns = vec![
-        Insn::LoadConst(3, 0),
-        Insn::UnaryOp(4, UnaryOp::Neg, 3),
-        Insn::JumpIfFalse(0, 1),
-        Insn::Jump(-2),
-        Insn::Return(4),
-    ];
-    let out = pass_unary_fold(insns, 2, &mut consts);
-    assert!(
-        matches!(out[0], Insn::LoadConst(4, _)),
-        "a dead distinct source must fold before an unrelated back edge: {out:?}"
-    );
-    assert!(
-        !out.iter().any(|insn| matches!(insn, Insn::UnaryOp(..))),
-        "the folded UnaryOp must be absent: {out:?}"
-    );
-    let Insn::LoadConst(_, folded) = out[0] else {
-        unreachable!()
-    };
-    assert!(matches!(
-        consts[usize::from(folded)].kind(),
-        ValueKind::Int(-5)
-    ));
-}
-
-#[test]
-fn unary_fold_keeps_distinct_source_live_across_a_back_edge() {
-    use crate::ast::UnaryOp;
-    use crate::value::Value;
-
-    // Folding would remove r3's defining LoadConst while the loop keeps
-    // reading r3 on every trip through its back edge.  Because dst != src,
-    // the folded result in r4 cannot preserve that live source value.
-    let mut consts = vec![Value::int(5)];
-    let insns = vec![
-        Insn::LoadConst(3, 0),
-        Insn::UnaryOp(4, UnaryOp::Neg, 3),
-        Insn::CopyReg(5, 3),
-        Insn::Jump(-2),
-        Insn::Return(4),
-    ];
-    let out = pass_unary_fold(insns.clone(), 2, &mut consts);
-    assert_eq!(
-        out, insns,
-        "a distinct source that stays live across a back edge must not fold"
-    );
-}
-
-#[test]
-fn unary_fold_not_bool() {
-    use crate::ast::UnaryOp;
-    use crate::value::Value;
-    let mut consts = vec![Value::bool_(true)];
-    let insns = vec![
-        Insn::LoadConst(5, 0),
-        Insn::UnaryOp(1, UnaryOp::Not, 5),
-        Insn::Return(1),
-    ];
-    let out = pass_unary_fold(insns, 2, &mut consts);
-    assert_eq!(out.len(), 2, "LoadConst should be removed");
-    let idx = match out[0] {
-        Insn::LoadConst(_, i) => i,
-        _ => panic!(),
-    };
-    assert!(matches!(
-        consts[idx as usize].kind(),
-        crate::value::ValueKind::Bool(false)
-    ));
-}
-
-#[test]
-fn unary_fold_skips_local_reg() {
-    use crate::ast::UnaryOp;
-    use crate::value::Value;
-    // r=1 < num_locals=3: should not fuse.
-    let mut consts = vec![Value::int(5)];
-    let insns = vec![
-        Insn::LoadConst(1, 0),
-        Insn::UnaryOp(2, UnaryOp::Neg, 1),
-        Insn::Return(2),
-    ];
-    let out = pass_unary_fold(insns, 3, &mut consts);
-    assert_eq!(out.len(), 3, "no fusion for local register");
-}
-
-#[test]
 fn unary_fold_on_compiled_literal() {
-    // -5 is a literal unary-neg in the source; after removing the fold_constant check
-    // from compile_expr, the optimizer should fold it via pass_unary_fold.
+    // -5 is a literal unary-neg in the source; the optimizer pipeline folds it
+    // into a constant in the pool.
     let code = compile_fn("x = -5\nprint(x)\n");
     let optimized = optimize(code);
-    // The constant pool should contain -5 (or the LoadConst(-5) folded from Neg+5).
     let has_neg5 = optimized
         .consts
         .iter()
@@ -697,101 +549,7 @@ fn float_lhs_keeps_runtime_binop() {
     );
 }
 
-// ── pass_const_fold ───────────────────────────────────────────────────────
-
-#[test]
-fn const_fold_binopconst_with_known_lhs() {
-    use crate::ast::BinaryOp;
-    use crate::value::Value;
-    // LoadConst(r0, 0)  [consts[0]=5]
-    // BinOpConst(r1, r0, Add, 1)  [consts[1]=3]
-    // → LoadConst(r1, 2)  [consts[2]=8]
-    let mut consts = vec![Value::int(5), Value::int(3)];
-    let insns = vec![
-        Insn::LoadConst(0, 0),                           // r0 = 5
-        Insn::BinOpConst(1, 0, BinaryOp::Add, 1, false), // r1 = r0 + 3
-        Insn::Return(1),
-    ];
-    let out = pass_const_fold(insns, &mut consts, 0);
-    assert!(
-        matches!(out[1], Insn::LoadConst(1, _)),
-        "BinOpConst with known lhs should be folded to LoadConst"
-    );
-    let folded_idx = match out[1] {
-        Insn::LoadConst(_, i) => i,
-        _ => panic!(),
-    };
-    assert!(matches!(
-        consts[folded_idx as usize].kind(),
-        crate::value::ValueKind::Int(8)
-    ));
-}
-
-#[test]
-fn const_fold_binop_with_both_known() {
-    use crate::ast::BinaryOp;
-    use crate::value::Value;
-    let mut consts = vec![Value::int(10), Value::int(2)];
-    let insns = vec![
-        Insn::LoadConst(0, 0),               // r0 = 10
-        Insn::LoadConst(1, 1),               // r1 = 2
-        Insn::BinOp(2, 0, BinaryOp::Mul, 1), // r2 = r0 * r1
-        Insn::Return(2),
-    ];
-    let out = pass_const_fold(insns, &mut consts, 0);
-    assert!(
-        matches!(out[2], Insn::LoadConst(2, _)),
-        "BinOp with both operands known should fold to LoadConst"
-    );
-    let idx = match out[2] {
-        Insn::LoadConst(_, i) => i,
-        _ => panic!(),
-    };
-    assert!(matches!(
-        consts[idx as usize].kind(),
-        crate::value::ValueKind::Int(20)
-    ));
-}
-
-#[test]
-fn const_fold_propagates_through_move() {
-    use crate::ast::BinaryOp;
-    use crate::value::Value;
-    // LoadConst(t, idx_5)  Move(x, t)  BinOpConst(y, x, Add, idx_3)
-    // After propagation: known[x]=idx_5, fold BinOpConst to LoadConst(y, idx_8)
-    let mut consts = vec![Value::int(5), Value::int(3)];
-    let insns = vec![
-        Insn::LoadConst(5, 0),                           // temp=5 (reg 5)
-        Insn::Move(0, 5),                                // x = temp
-        Insn::BinOpConst(1, 0, BinaryOp::Add, 1, false), // y = x + 3
-        Insn::Return(1),
-    ];
-    let out = pass_const_fold(insns, &mut consts, 0);
-    assert!(
-        matches!(out[2], Insn::LoadConst(1, _)),
-        "BinOpConst should fold after Move propagates known value"
-    );
-}
-
-#[test]
-fn const_fold_clears_at_branch() {
-    use crate::ast::BinaryOp;
-    use crate::value::Value;
-    // LoadConst(r0, idx_5)  JumpIfFalse(r0, 0)  BinOpConst(r1, r0, Add, idx_3)
-    // After the branch, known is cleared, so BinOpConst should NOT fold.
-    let mut consts = vec![Value::int(5), Value::int(3)];
-    let insns = vec![
-        Insn::LoadConst(0, 0),
-        Insn::JumpIfFalse(0, 0),
-        Insn::BinOpConst(1, 0, BinaryOp::Add, 1, false),
-        Insn::Return(1),
-    ];
-    let out = pass_const_fold(insns, &mut consts, 0);
-    assert!(
-        matches!(out[2], Insn::BinOpConst(1, 0, BinaryOp::Add, 1, ..)),
-        "no folding after a branch clears known map"
-    );
-}
+// ── Constant folding (end-to-end via MIR + optimizer pipeline) ────────────
 
 #[test]
 fn const_fold_on_compiled_chain() {
@@ -813,8 +571,7 @@ fn const_fold_on_compiled_chain() {
 
 #[test]
 fn const_fold_fully_constant_associative_chain() {
-    // The ordinary forward constant pass is sufficient for the entire chain;
-    // no separate reassociation stage is needed.
+    // The SSA constant folding pass handles the full constant chain.
     let code = compile_fn("def f():\n    return (5 + 1) + 2\n");
     let optimized = optimize(code);
     let inner = &optimized.fn_protos[0].code;
@@ -830,41 +587,7 @@ fn const_fold_fully_constant_associative_chain() {
             .insns
             .iter()
             .any(|insn| matches!(insn, Insn::BinOpConst(..))),
-        "forward constant folding should eliminate the full constant chain"
-    );
-}
-
-#[test]
-fn const_fold_clears_at_forward_jump_target() {
-    use crate::ast::BinaryOp;
-    use crate::value::Value;
-    // Models the post-ternary merge point.  The `then`-arm writes
-    // r2 = consts[0]=10 and jumps over the `else`-arm.  At the merge
-    // instruction (index 3, the Jump target) the known-constant map
-    // must be cleared — otherwise a linear forward scan would see the
-    // else-arm's write (r2 = consts[1]=20) as the most recent and fold
-    // BinOpConst on r2 to a constant, producing a stale result on the
-    // taken-then path.
-    //
-    //   [0] JumpIfFalse(0, 2)              # if !cond, skip to [3]
-    //   [1] LoadConst(2, 0)                # then: r2 = 10
-    //   [2] Jump(1)                        # → [4]   (target of forward jump = [4])
-    //   [3] LoadConst(2, 1)                # else: r2 = 20
-    //   [4] BinOpConst(3, 2, Add, 2)       # consts[2] = 1  → must not fold
-    //   [5] Return(3)
-    let mut consts = vec![Value::int(10), Value::int(20), Value::int(1)];
-    let insns = vec![
-        Insn::JumpIfFalse(0, 2),
-        Insn::LoadConst(2, 0),
-        Insn::Jump(1),
-        Insn::LoadConst(2, 1),
-        Insn::BinOpConst(3, 2, BinaryOp::Add, 2, false),
-        Insn::Return(3),
-    ];
-    let out = pass_const_fold(insns, &mut consts, 0);
-    assert!(
-        matches!(out[4], Insn::BinOpConst(3, 2, BinaryOp::Add, 2, ..)),
-        "merge point must clear known map; BinOpConst on a phi'd value must not fold",
+        "constant folding should eliminate the full constant chain"
     );
 }
 
@@ -894,73 +617,6 @@ fn const_tuple_fold_keeps_ternary_merge_build() {
     assert!(
         matches!(out[4], Insn::BuildTuple(2, 1, 1)),
         "a shared BuildTuple must not be replaced from one predecessor"
-    );
-}
-
-#[test]
-fn const_fold_does_not_fold_loop_condition() {
-    use crate::ast::BinaryOp;
-    use crate::value::Value;
-    // Simulates: y = 3; while y > 0: y = y - 1
-    //
-    //  [0] LoadConst(0, 0)              consts[0] = 3   (y_reg = 0)
-    //  [1] BinOpConst(1, 0, Gt, 1)      consts[1] = 0   (loop header — target of Jump at [4])
-    //  [2] JumpIfFalse(1, 2)                             (exit: target = 2+1+2 = 5)
-    //  [3] BinOpConst(0, 0, Sub, 2)     consts[2] = 1
-    //  [4] Jump(-4)                                      (back to [1]: 4+1-4 = 1)
-    //  [5] Return(0)
-    let mut consts = vec![Value::int(3), Value::int(0), Value::int(1)];
-    let insns = vec![
-        Insn::LoadConst(0, 0),
-        Insn::BinOpConst(1, 0, BinaryOp::Gt, 1, false),
-        Insn::JumpIfFalse(1, 2),
-        Insn::BinOpConst(0, 0, BinaryOp::Sub, 2, false),
-        Insn::Jump(-4),
-        Insn::Return(0),
-    ];
-    let out = pass_const_fold(insns, &mut consts, 0);
-    // [1] must NOT fold to LoadConst(True) — the loop would become infinite.
-    assert!(
-        matches!(out[1], Insn::BinOpConst(1, 0, BinaryOp::Gt, 1, ..)),
-        "loop condition must not be folded; known map must clear at loop header"
-    );
-}
-
-#[test]
-fn const_fold_call_invalidates_named_locals_but_not_temps() {
-    use crate::ast::BinaryOp;
-    use crate::value::Value;
-    // Simulates the issue #671 pattern at the instruction level:
-    //
-    //   [0] LoadConst(r0, 0)      r0 is a named local (< num_locals=2): consts[0]=10
-    //   [1] LoadConst(r5, 1)      r5 is a temp (>= num_locals=2): consts[1]=3
-    //   [2] Call(r2, 0)           user call — may write r0 via assign_name write-through
-    //   [3] BinOpConst(r3, r0, Add, 1)  must NOT fold (r0 was a named local)
-    //   [4] BinOpConst(r4, r5, Add, 1)  MUST fold (r5 is a temp, safe to retain)
-    //   [5] Return(r3)
-    //
-    // With num_locals=2, after Call at [2]:
-    //   known[r0] must be removed  → BinOpConst at [3] stays unfused
-    //   known[r5] must survive     → BinOpConst at [4] folds to LoadConst
-    let mut consts = vec![Value::int(10), Value::int(3)];
-    let insns = vec![
-        Insn::LoadConst(0, 0),                           // r0 = 10 (named local)
-        Insn::LoadConst(5, 1),                           // r5 = 3  (temp)
-        Insn::Call(2, 0),                                // call — may clobber r0
-        Insn::BinOpConst(3, 0, BinaryOp::Add, 1, false), // r3 = r0 + 3
-        Insn::BinOpConst(4, 5, BinaryOp::Add, 1, false), // r4 = r5 + 3
-        Insn::Return(3),
-    ];
-    let out = pass_const_fold(insns, &mut consts, 2);
-    assert!(
-        matches!(out[3], Insn::BinOpConst(3, 0, BinaryOp::Add, 1, ..)),
-        "named-local r0 must not be folded after Call: found {:?}",
-        out[3]
-    );
-    assert!(
-        matches!(out[4], Insn::LoadConst(4, _)),
-        "temp r5 must still be folded after Call: found {:?}",
-        out[4]
     );
 }
 
@@ -1031,76 +687,35 @@ fn named_local_effect_classifier_is_a_conservative_false_whitelist() {
 }
 
 #[test]
-fn const_fold_invalidates_named_locals_across_all_reentrant_effect_classes() {
-    use crate::ast::{BinaryOp, UnaryOp};
-    use crate::value::Value;
-
-    // Each barrier sits between known constants and two folds. The named-local
-    // source r0 must be forgotten because a live namespace alias may update it;
-    // frame-private temp r5 remains valid and should still fold.
-    let barriers = [
-        Insn::UnaryOp(10, UnaryOp::Neg, 8),
-        Insn::BinOp(10, 8, BinaryOp::Add, 9),
-        Insn::BinOpInPlace(10, 8, BinaryOp::Add, 9),
-        Insn::GetAttr(10, 8, 0),
-        Insn::GetItem(10, 8, 9),
-        Insn::GetIter(0, 8),
-        Insn::FormatValue(10, 8),
-        Insn::SetItem(8, 9, 10),
-        Insn::BuildDict(10, 8, 1, crate::bytecode::DictKeyKindHint::Unknown),
-        Insn::ImportModule(10, 0),
-        Insn::StoreGlobal(0, 8),
-        Insn::DeleteName(0),
-        Insn::SyncModuleGlobal(8, 0),
-        Insn::PrintExpr(8),
-    ];
-
-    for barrier in barriers {
-        let mut consts = vec![Value::int(10), Value::int(3)];
-        let insns = vec![
-            Insn::LoadConst(0, 0), // named r0 = 10
-            Insn::LoadConst(5, 1), // temp r5 = 3
-            barrier.clone(),
-            Insn::BinOpConst(6, 0, BinaryOp::Add, 1, false), // must execute
-            Insn::BinOpConst(7, 5, BinaryOp::Add, 1, false), // safe fold
-            Insn::Return(6),
-        ];
-        let out = pass_const_fold(insns, &mut consts, 2);
-        assert!(
-            matches!(out[3], Insn::BinOpConst(6, 0, BinaryOp::Add, 1, ..)),
-            "named-local fact survived barrier {barrier:?}: {:?}",
-            out[3]
-        );
-        assert!(
-            matches!(out[4], Insn::LoadConst(7, _)),
-            "frame-private temp fact should survive barrier {barrier:?}: {:?}",
-            out[4]
-        );
-    }
-}
-
-#[test]
-fn const_fold_uses_the_emitted_instruction_for_effect_classification() {
-    use crate::ast::BinaryOp;
-    use crate::value::Value;
-
-    // Both runtime-looking BinOps fold to LoadConst. The first emitted
-    // LoadConst is non-reentrant, so it may feed the second fold.
-    let mut consts = vec![Value::int(2), Value::int(3)];
-    let insns = vec![
-        Insn::LoadConst(0, 0),
-        Insn::LoadConst(1, 1),
-        Insn::BinOp(2, 0, BinaryOp::Add, 1),
-        Insn::BinOpConst(3, 2, BinaryOp::Add, 1, false),
-        Insn::Return(3),
-    ];
-    let out = pass_const_fold(insns, &mut consts, 3);
-
-    assert!(matches!(out[2], Insn::LoadConst(2, _)));
+fn sccp_preserves_lineno_for_surviving_raise_after_dead_branch_removal() {
+    // End-to-end compile + optimize check: dead branch eliminated by MIR SCCP
+    // must not shift the line number of a surviving ZeroDivisionError.
+    let src = "\
+def f():
+    x = 1
+    if False:
+        x = 5
+    if x == 5:
+        return 100
+    return x // 0
+";
+    let code = compile_fn(src);
+    let optimized = optimize(code);
+    let inner = &optimized.fn_protos[0].code;
     assert!(
-        matches!(out[3], Insn::LoadConst(3, _)),
-        "folded pure result should keep the constant chain: {:?}",
-        out[3]
+        inner.insns.iter().any(|i| matches!(
+            i,
+            Insn::BinOp(_, _, BinaryOp::FloorDiv, _)
+                | Insn::BinOpConst(_, _, BinaryOp::FloorDiv, _, _)
+                | Insn::BinOpImm(_, _, BinaryOp::FloorDiv, _, _)
+        )),
+        "x // 0 must survive optimization: {:?}",
+        inner.insns
+    );
+    assert!(
+        !inner.consts.iter().any(|v| v.as_int() == Some(100)),
+        "dead `return 100` branch should be eliminated by SCCP: {:?}",
+        inner.consts
     );
 }
 

@@ -332,4 +332,128 @@ fn dse_keeps_call_memo_local_reg() {
     assert_eq!(out.len(), 3, "CallMemo to local must not be removed");
 }
 
+// ── linearized-pass equivalence (issue #2004) ──────────────────────────────
+
+/// Reference dead-store elimination that uses the original O(n) tail-scan
+/// (`reg_is_read_before_next_write`).  Used to confirm the linearized
+/// `pass_dead_store_elim` produces byte-identical output.
+fn dead_store_elim_reference(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    let n = insns.len();
+    let mut keep = vec![true; n];
+    let mut global_read_count: HashMap<u32, usize> = HashMap::new();
+    let mut reads_buf: HashSet<u32> = HashSet::new();
+    for insn in &insns {
+        reads_buf.clear();
+        collect_reads(insn, &mut reads_buf);
+        for &r in &reads_buf {
+            if r >= num_locals {
+                *global_read_count.entry(r).or_insert(0) += 1;
+            }
+        }
+    }
+    for i in 0..n {
+        let dst = match &insns[i] {
+            Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::Move(r, _) | Insn::CopyReg(r, _)
+                if *r >= num_locals =>
+            {
+                *r
+            }
+            // `CallMemo` remains observable even when its result is dead, so
+            // dead-store elimination never drops it.
+            _ => continue,
+        };
+        if global_read_count.get(&dst).copied().unwrap_or(0) == 0 {
+            keep[i] = false;
+            continue;
+        }
+        if slice_has_back_edge(&insns[i + 1..]) {
+            continue;
+        }
+        if !reg_is_read_before_next_write(&insns[i + 1..], dst) {
+            keep[i] = false;
+        }
+    }
+    compact(insns, &keep)
+}
+
+/// Sample instruction streams that exercise dead-store elimination: loads,
+/// moves, copies, fused ops, reads, and control flow (terminators and
+/// back-edges).
+fn sample_dse_streams() -> Vec<Vec<Insn>> {
+    use crate::ast::{BinaryOp, UnaryOp};
+    vec![
+        // Long single block of distinct LoadConsts feeding one BuildList
+        // (the #2004 literal shape).
+        {
+            let mut v: Vec<Insn> = (0..40u16)
+                .map(|i| Insn::LoadConst(2 + i as u32, i))
+                .collect();
+            v.push(Insn::BuildList(2, 2, 40));
+            v.push(Insn::Return(2));
+            v
+        },
+        // Move chain with a read in the middle.
+        vec![
+            Insn::LoadConst(2, 0),
+            Insn::Move(3, 2),
+            Insn::UnaryOp(4, UnaryOp::Neg, 3),
+            Insn::Move(3, 4),
+            Insn::Return(3),
+        ],
+        // Read-then-write of the same reg in one instruction (BinOp(r,r,..)).
+        vec![
+            Insn::LoadConst(2, 0),
+            Insn::BinOpConst(2, 2, BinaryOp::Add, 1, false),
+            Insn::Return(2),
+        ],
+        // Store with a terminator before any read.
+        vec![Insn::LoadConst(2, 0), Insn::ReturnNone],
+        // Store, control-flow (forward jump), then read.
+        vec![Insn::LoadConst(2, 0), Insn::Jump(0), Insn::Return(2)],
+        // Back-edge after a store (loop-carried).
+        vec![
+            Insn::LoadConst(2, 0),
+            Insn::BinOpConst(2, 2, BinaryOp::Add, 1, false),
+            Insn::Jump(-2),
+        ],
+        // CopyReg dead store (never read).
+        vec![Insn::LoadConst(2, 0), Insn::CopyReg(3, 2), Insn::Return(2)],
+        // Duplicate LoadConst with intervening write.
+        vec![
+            Insn::LoadConst(2, 0),
+            Insn::Move(2, 3),
+            Insn::LoadConst(4, 0),
+            Insn::Return(4),
+        ],
+        // Duplicate fused op separated by an unrelated write.
+        vec![
+            Insn::BinOpConst(2, 0, BinaryOp::Add, 1, false),
+            Insn::LoadConst(5, 7),
+            Insn::BinOpConst(3, 0, BinaryOp::Add, 1, false),
+            Insn::Return(3),
+        ],
+        // Fused op whose source is overwritten between two occurrences.
+        vec![
+            Insn::BinOpConst(2, 0, BinaryOp::Add, 1, false),
+            Insn::Move(0, 9),
+            Insn::BinOpConst(3, 0, BinaryOp::Add, 1, false),
+            Insn::Return(3),
+        ],
+    ]
+}
+
+#[test]
+fn dead_store_elim_matches_reference() {
+    for stream in sample_dse_streams() {
+        for num_locals in [0u32, 2, 3] {
+            let a = pass_dead_store_elim(stream.clone(), num_locals);
+            let b = dead_store_elim_reference(stream.clone(), num_locals);
+            assert_eq!(
+                a, b,
+                "dead_store_elim diverged from reference (num_locals={num_locals}) on {stream:?}"
+            );
+        }
+    }
+}
+
 // ── pass_exit_inline ─────────────────────────────────────────────────────
