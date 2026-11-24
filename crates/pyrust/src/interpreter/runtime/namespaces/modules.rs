@@ -3,6 +3,22 @@ struct FilesystemModuleTarget {
     package_dir: Option<PathBuf>,
 }
 
+/// Resolved execution target for `pyrust -m <module>`.
+pub(crate) struct MainModuleTarget {
+    pub(crate) file_path: PathBuf,
+    pub(crate) package_name: String,
+}
+
+/// Failure modes while resolving `pyrust -m <module>`.
+pub(crate) enum MainModuleResolveError {
+    /// CLI-level message printed as `<prog>: <message>` (exit 1).
+    Message(String),
+    /// Exception raised while importing a parent or target package's
+    /// `__init__.py` (or a `SystemExit` raised during import), along with any
+    /// captured traceback frames.
+    ImportException(PyError, Vec<pyrust_core::FrameInfo>),
+}
+
 /// Locate a filesystem package (`<dir>/<leaf>/__init__.py`) or module
 /// (`<dir>/<leaf>.py`) across `search_dirs`.
 ///
@@ -767,5 +783,131 @@ impl Interpreter {
             format!("No module named '{name}'"),
             Some(name.to_string()),
         ))
+    }
+
+    /// Resolve a `-m <module_name>` target for execution as `__main__`,
+    /// importing any parent package (and the package itself when running
+    /// `<pkg>/__main__.py`) into `sys.modules` so relative imports work.
+    pub(crate) fn resolve_module_for_main(
+        &mut self,
+        module_name: &str,
+    ) -> std::result::Result<MainModuleTarget, MainModuleResolveError> {
+        if module_name.starts_with('.') {
+            return Err(MainModuleResolveError::Message(
+                "Relative module names not supported".to_string(),
+            ));
+        }
+        if module_name.is_empty() || module_name.contains("..") {
+            return Err(MainModuleResolveError::Message(format!(
+                "No module named {module_name}"
+            )));
+        }
+        if crate::builtin_modules::load_builtin_module(module_name).is_some() {
+            return Err(MainModuleResolveError::Message(format!(
+                "No code object available for {module_name}"
+            )));
+        }
+
+        let load_pkg_or_map_err = |interp: &mut Self,
+                                   pkg_name: &str|
+         -> std::result::Result<Value, MainModuleResolveError> {
+            pyrust_core::reset_captured_error_frames();
+            match interp.load_module(pkg_name) {
+                Ok(val) => Ok(val),
+                Err(err) => {
+                    let frames = pyrust_core::take_captured_error_frames().unwrap_or_default();
+                    if frames.is_empty()
+                        && let pyrust_core::PyErrorKind::ImportError {
+                            class_name: "ModuleNotFoundError",
+                            ref message,
+                            ..
+                        } = *err.kind()
+                    {
+                        return Err(MainModuleResolveError::Message(message.clone()));
+                    }
+                    Err(MainModuleResolveError::ImportException(err, frames))
+                }
+            }
+        };
+
+        let resolve_package_main = |interp: &mut Self,
+                                    pkg_name: &str|
+         -> std::result::Result<
+            MainModuleTarget,
+            MainModuleResolveError,
+        > {
+            let pkg_mod = load_pkg_or_map_err(interp, pkg_name)?;
+            let pkg_dirs = interp
+                .extract_package_search_dirs(&pkg_mod)
+                .map_err(|err| {
+                    let frames = pyrust_core::take_captured_error_frames().unwrap_or_default();
+                    MainModuleResolveError::ImportException(err, frames)
+                })?
+                .ok_or_else(|| {
+                    MainModuleResolveError::Message(format!(
+                        "No module named {pkg_name}.__main__; '{pkg_name}' is not a package"
+                    ))
+                })?;
+            match find_filesystem_module(&pkg_dirs, "__main__") {
+                Some(main_target) if main_target.package_dir.is_none() => Ok(MainModuleTarget {
+                    file_path: main_target.file_path,
+                    package_name: pkg_name.to_string(),
+                }),
+                Some(_) => Err(MainModuleResolveError::Message(format!(
+                    "Cannot execute package '{pkg_name}.__main__'"
+                ))),
+                None => Err(MainModuleResolveError::Message(format!(
+                    "No module named {pkg_name}.__main__; '{pkg_name}' is a package and cannot be directly executed"
+                ))),
+            }
+        };
+
+        if let Some((parent_name, leaf_name)) = module_name.rsplit_once('.') {
+            let parent_mod = load_pkg_or_map_err(self, parent_name)?;
+            if leaf_name.is_empty() {
+                return Err(MainModuleResolveError::Message(format!(
+                    "No module named {module_name}"
+                )));
+            }
+            let Some(parent_dirs) =
+                self.extract_package_search_dirs(&parent_mod)
+                    .map_err(|err| {
+                        let frames = pyrust_core::take_captured_error_frames().unwrap_or_default();
+                        MainModuleResolveError::ImportException(err, frames)
+                    })?
+            else {
+                return Err(MainModuleResolveError::Message(format!(
+                    "No module named '{module_name}'; '{parent_name}' is not a package"
+                )));
+            };
+            let Some(target) = find_filesystem_module(&parent_dirs, leaf_name) else {
+                return Err(MainModuleResolveError::Message(format!(
+                    "No module named {module_name}"
+                )));
+            };
+            if target.package_dir.is_some() {
+                resolve_package_main(self, module_name)
+            } else {
+                Ok(MainModuleTarget {
+                    file_path: target.file_path,
+                    package_name: parent_name.to_string(),
+                })
+            }
+        } else {
+            let search_dirs = self.user_module_search_dirs();
+            let Some(target) = find_filesystem_module(&search_dirs, module_name) else {
+                return Err(MainModuleResolveError::Message(format!(
+                    "No module named {module_name}"
+                )));
+            };
+            if target.package_dir.is_some() {
+                resolve_package_main(self, module_name)
+            } else {
+                Ok(MainModuleTarget {
+                    file_path: target.file_path,
+                    package_name: String::new(),
+                })
+            }
+        }
     }
 }
