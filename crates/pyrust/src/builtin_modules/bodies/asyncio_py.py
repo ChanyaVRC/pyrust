@@ -19,6 +19,7 @@
 # steps the Task again.
 
 from collections import deque as _deque
+import contextvars as _contextvars
 import heapq as _heapq
 from types import GenericAlias as _GenericAlias
 
@@ -181,15 +182,17 @@ class Future:
         self._schedule_callbacks()
 
     def add_done_callback(self, fn, *, context=None):
+        if context is None:
+            context = _contextvars.copy_context()
         if self._state != _PENDING:
-            self._loop.call_soon(fn, self)
+            self._loop.call_soon(fn, self, context=context)
         else:
-            self._callbacks.append(fn)
+            self._callbacks.append((fn, context))
 
     def remove_done_callback(self, fn):
         """Remove all instances of a callback from the done-callback list.
         Returns the number of callbacks removed."""
-        filtered = [cb for cb in self._callbacks if cb != fn]
+        filtered = [(cb, ctx) for cb, ctx in self._callbacks if cb != fn]
         removed = len(self._callbacks) - len(filtered)
         if removed:
             self._callbacks[:] = filtered
@@ -200,8 +203,8 @@ class Future:
         if not callbacks:
             return
         self._callbacks[:] = []
-        for cb in callbacks:
-            self._loop.call_soon(cb, self)
+        for cb, ctx in callbacks:
+            self._loop.call_soon(cb, self, context=ctx)
 
     def __await__(self):
         if not self.done():
@@ -301,7 +304,10 @@ class Task(Future):
         else:
             self._name = str(name)
         self._coro = coro
-        self._context = context
+        if context is None:
+            self._context = _contextvars.copy_context()
+        else:
+            self._context = context
         # Number of pending cancel() requests (CPython 3.11+ cancelling/uncancel).
         self._num_cancels_requested = 0
         # The pending Future this task is currently suspended on (None when the
@@ -311,11 +317,14 @@ class Task(Future):
         # the next step throws CancelledError into the coroutine.
         self._must_cancel = False
         # Kick the coroutine off on the next loop turn.
-        self._loop.call_soon(self._step_run)
+        self._loop.call_soon(self._step_run, context=self._context)
         _register_task(self)
 
     def get_coro(self):
         return self._coro
+
+    def get_context(self):
+        return self._context
 
     def get_name(self):
         return self._name
@@ -423,17 +432,19 @@ class Task(Future):
                         f"Task {self!r} got Future "
                         f"{value!r} attached to a different loop"
                     ),
+                    context=self._context,
                 )
             elif blocking:
                 if value is self:
                     self._loop.call_soon(
                         self._step_run,
                         RuntimeError(f"Task cannot await on itself: {self!r}"),
+                        context=self._context,
                     )
                 else:
                     value._asyncio_future_blocking = False
                     self._fut_waiter = value
-                    value.add_done_callback(self._wakeup)
+                    value.add_done_callback(self._wakeup, context=self._context)
                     if self._must_cancel:
                         if self._fut_waiter.cancel(msg=self._cancel_message):
                             self._must_cancel = False
@@ -444,15 +455,17 @@ class Task(Future):
                         f"yield was used instead of yield from "
                         f"in task {self!r} with {value!r}"
                     ),
+                    context=self._context,
                 )
         elif value is None:
             # A bare `yield None` (sleep(0) fairness point): reschedule.
-            self._loop.call_soon(self._step_run)
+            self._loop.call_soon(self._step_run, context=self._context)
         else:
             # Anything else yielded out of `await` is a protocol error.
             self._loop.call_soon(
                 self._step_run,
                 RuntimeError("Task got bad yield: " + repr(value)),
+                context=self._context,
             )
 
     def _wakeup(self, future):
@@ -474,7 +487,10 @@ class Task(Future):
 class _Handle:
     """A scheduled callback (call_soon / call_at)."""
 
-    def __init__(self, callback, args):
+    def __init__(self, callback, args, context=None):
+        if context is None:
+            context = _contextvars.copy_context()
+        self._context = context
         self._callback = callback
         self._args = args
         self._cancelled = False
@@ -488,7 +504,7 @@ class _Handle:
     def _run(self):
         if self._cancelled:
             return
-        self._callback(*self._args)
+        self._context.run(self._callback, *self._args)
 
 
 class _EventLoop:
@@ -516,13 +532,13 @@ class _EventLoop:
     def call_exception_handler(self, context):
         pass
 
-    def call_soon(self, callback, *args):
-        h = _Handle(callback, args)
+    def call_soon(self, callback, *args, context=None):
+        h = _Handle(callback, args, context=context)
         self._ready.append(h)
         return h
 
-    def call_at(self, when, callback, *args):
-        h = _Handle(callback, args)
+    def call_at(self, when, callback, *args, context=None):
+        h = _Handle(callback, args, context=context)
         # Insert keeping `_scheduled` sorted by wake time (stable for equal
         # deadlines — preserves scheduling order).
         i = 0
@@ -532,8 +548,8 @@ class _EventLoop:
         self._scheduled.insert(i, (when, h))
         return h
 
-    def call_later(self, delay, callback, *args):
-        return self.call_at(self.time() + delay, callback, *args)
+    def call_later(self, delay, callback, *args, context=None):
+        return self.call_at(self.time() + delay, callback, *args, context=context)
 
     def _discard_cancelled_timers(self):
         while self._scheduled and self._scheduled[0][1]._cancelled:
