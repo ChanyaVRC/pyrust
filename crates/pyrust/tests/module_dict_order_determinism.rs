@@ -38,11 +38,11 @@ import __future__
 names = ["abc", "argparse", "asyncio", "base64", "binascii", "bisect", "builtins", "calendar",
          "cmath", "collections", "configparser", "contextlib", "contextvars", "copy", "csv",
          "dataclasses", "decimal", "difflib", "enum", "errno", "fnmatch", "fractions", "functools",
-         "glob", "hashlib", "heapq", "hmac", "html", "inspect", "io", "itertools", "json",
+         "glob", "gzip", "hashlib", "heapq", "hmac", "html", "inspect", "io", "itertools", "json",
          "logging", "math", "numbers", "operator", "os", "pathlib", "pprint", "random", "re",
-         "secrets", "shlex", "shutil", "statistics", "string", "sys", "tempfile", "textwrap",
-         "time", "tomllib", "traceback", "types", "typing", "unittest", "urllib", "uuid",
-         "warnings"]
+         "secrets", "shlex", "shutil", "statistics", "string", "sys", "tarfile", "tempfile",
+         "textwrap", "time", "tomllib", "traceback", "types", "typing", "unittest", "urllib",
+         "uuid", "warnings", "zipfile", "zlib"]
 for name in names:
     print(name, list(vars(__import__(name))))
 for name, module in [("os.path", os.path),

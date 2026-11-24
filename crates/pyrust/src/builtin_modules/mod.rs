@@ -466,6 +466,13 @@ pyrust_builtin_modules! {
     // `tomllib` (issue #3184, PEP 680): pure-Python TOML 1.0.0 parser
     // (`loads`, `load`, `TOMLDecodeError`) injected from `tomllib_py.py`.
     tomllib @inject,
+    // `zlib`, `gzip`, `zipfile`, and `tarfile` (issue #3186): pure-Rust RFC
+    // 1950/1951/1952 compression engine in `zlib/` plus the CPython 3.12
+    // streaming/archive surfaces injected from `*_py.py`.
+    zlib @inject,
+    gzip @inject,
+    zipfile @inject,
+    tarfile @inject,
 }
 
 include!("finalization.rs");
