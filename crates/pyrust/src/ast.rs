@@ -822,6 +822,11 @@ pub enum Expr {
     /// `(elt for target in iter ...)` — generator expression
     GenExp {
         elt: Box<Expr>,
+        /// 1-based source line of `elt` (issue #2992).
+        elt_lineno: u32,
+        /// 1-based source line of the opening `(` (or `elt` when unparenthesized
+        /// as a sole call argument) — backs `<genexpr>`'s `co_firstlineno`.
+        first_lineno: u32,
         clauses: Vec<CompClause>,
     },
     Unary {
@@ -862,10 +867,15 @@ pub enum Expr {
     Call {
         func: Box<Expr>,
         args: Vec<CallArg>,
-        /// PEP 657 caret anchor (issue #2411): the whole `callee(...)` span,
-        /// underlined with `^`.  `None` for calls synthesised by the parser or
+        /// PEP 657 caret anchor (issue #2411 / #2992): the whole `callee(...)`
+        /// span, underlined with `^` (clamped via `MULTILINE_FULL_END` for
+        /// multi-line calls).  `None` for calls synthesised by the parser or
         /// built without column info.
         span: Option<CaretSpan>,
+        /// 1-based source line where the call starts (`0` when unavailable).
+        /// Stamps the terminal call instruction so multi-line nested calls and
+        /// chained `.method(...)` calls report their own line (#2992).
+        lineno: u32,
     },
     Attr {
         target: Box<Expr>,
@@ -895,11 +905,23 @@ pub enum Expr {
         value: Box<Expr>,
     },
     /// `yield` or `yield expr` — only valid inside a generator function
-    Yield(Option<Box<Expr>>),
+    Yield {
+        value: Option<Box<Expr>>,
+        span: Option<CaretSpan>,
+        lineno: u32,
+    },
     /// `yield from expr`
-    YieldFrom(Box<Expr>),
+    YieldFrom {
+        expr: Box<Expr>,
+        span: Option<CaretSpan>,
+        lineno: u32,
+    },
     /// `await expr` — only valid inside an async function
-    Await(Box<Expr>),
+    Await {
+        expr: Box<Expr>,
+        span: Option<CaretSpan>,
+        lineno: u32,
+    },
 }
 
 impl Expr {
@@ -932,7 +954,7 @@ impl Expr {
             }
             Expr::ListComp { elt, clauses }
             | Expr::SetComp { elt, clauses }
-            | Expr::GenExp { elt, clauses } => {
+            | Expr::GenExp { elt, clauses, .. } => {
                 elt.visit_enclosing_walrus_targets(visitor);
                 for clause in clauses {
                     clause.iter.visit_enclosing_walrus_targets(visitor);
@@ -957,10 +979,10 @@ impl Expr {
             }
             Expr::Unary { expr, .. }
             | Expr::Starred(expr)
-            | Expr::YieldFrom(expr)
-            | Expr::Await(expr) => expr.visit_enclosing_walrus_targets(visitor),
-            Expr::Yield(expr) => {
-                if let Some(expr) = expr {
+            | Expr::YieldFrom { expr, .. }
+            | Expr::Await { expr, .. } => expr.visit_enclosing_walrus_targets(visitor),
+            Expr::Yield { value, .. } => {
+                if let Some(expr) = value {
                     expr.visit_enclosing_walrus_targets(visitor);
                 }
             }
@@ -1092,6 +1114,14 @@ pub struct CompClause {
     pub target: AssignTarget,
     pub iter: Expr,
     pub cond: Option<Expr>,
+    /// Individual `if` filters with their 1-based source lines, in source
+    /// order, so multi-line chained `if` clauses report accurate line numbers
+    /// (issue #2992).  `cond` retains the `and`-folded form for existing static
+    /// analyses.
+    pub cond_filters: Vec<(Expr, u32)>,
+    /// 1-based source line of this clause's `for` / `async for` keyword (`0`
+    /// when unavailable).
+    pub for_lineno: u32,
     pub is_async: bool,
 }
 

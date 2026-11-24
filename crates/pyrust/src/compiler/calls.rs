@@ -10,6 +10,7 @@ impl Compiler {
         // `a.b()` / `f(a=5)` explicitly).  Splat paths (`f(*a)` / `f(**d)`) stay
         // caret-free (safe — a missing caret beats a wrong one).
         span: Option<crate::ast::CaretSpan>,
+        lineno: u32,
     ) -> Reg {
         // Check for any splat args — these require a variadic call path.
         let has_splat = args.iter().any(|a| a.splat || a.double_splat);
@@ -22,7 +23,7 @@ impl Compiler {
         // (`obj.m(a=1)`) still take the variadic path so in-place mutation of
         // the receiver register is preserved.
         if has_kwargs && !has_splat && !matches!(func, Expr::Attr { .. }) {
-            return self.compile_keyword_call(func, args, span);
+            return self.compile_keyword_call(func, args, span, lineno);
         }
 
         // Keyword method call `obj.m(<pos…>, k=v…)` with no splats (issue #2392).
@@ -36,7 +37,7 @@ impl Compiler {
             && !has_splat
             && let Expr::Attr { target, name, .. } = func
         {
-            return self.compile_keyword_method_call(target, name, args, span);
+            return self.compile_keyword_method_call(target, name, args, span, lineno);
         }
 
         // Double-splat expansion `f(<pos…>, **d)` (issue #2393): exactly one
@@ -79,7 +80,7 @@ impl Compiler {
 
         // Detect obj.method(args) — emit CallMethod to allow in-place mutation.
         if let Expr::Attr { target, name, .. } = func {
-            return self.compile_method_call(target, name, args, span);
+            return self.compile_method_call(target, name, args, span, lineno);
         }
 
         let argc = args.len() as u8;
@@ -116,14 +117,20 @@ impl Compiler {
         }
         let is_pure_callee =
             matches!(func, Expr::Var(n, _) if self.pure_locals.contains(n.as_str()));
-        // Arm the `callee(...)` caret anchor on the terminal call instruction
-        // (#2411); `emit` consumes and clears it.
+        // Arm the `callee(...)` caret anchor (and call-start line for
+        // multi-line nested calls, #2992) on the terminal call instruction
+        // (#2411); `emit` consumes and clears the span.
+        let saved_lineno = self.current_lineno;
+        if lineno != 0 {
+            self.set_lineno(lineno);
+        }
         self.set_col_span_for_next(span);
         if is_pure_callee {
             self.emit(Insn::CallMemo(func_reg, argc));
         } else {
             self.emit(Insn::Call(func_reg, argc));
         }
+        self.set_lineno(saved_lineno);
         self.next_temp = func_reg + 1;
         func_reg
     }
@@ -142,6 +149,7 @@ impl Compiler {
         func: &Expr,
         args: &[crate::ast::CallArg],
         span: Option<crate::ast::CaretSpan>,
+        lineno: u32,
     ) -> Reg {
         let total = args.len();
         if total > u8::MAX as usize {
@@ -190,8 +198,12 @@ impl Compiler {
             }
             self.next_temp = saved;
         }
-        // Arm the `callee(...)` caret anchor on the terminal call (#2443);
+        // Arm the `callee(...)` caret anchor on the terminal call (#2443 / #2992);
         // `emit` consumes and clears it.
+        let saved_lineno = self.current_lineno;
+        if lineno != 0 {
+            self.set_lineno(lineno);
+        }
         self.set_col_span_for_next(span);
         self.emit(Insn::CallKw {
             func: func_reg,
@@ -199,6 +211,7 @@ impl Compiler {
             nkw: nkw as u8,
             kwnames_idx,
         });
+        self.set_lineno(saved_lineno);
         self.next_temp = func_reg + 1;
         func_reg
     }
@@ -221,6 +234,7 @@ impl Compiler {
         method_name: &str,
         args: &[crate::ast::CallArg],
         span: Option<crate::ast::CaretSpan>,
+        lineno: u32,
     ) -> Reg {
         let total = args.len();
         if total > u8::MAX as usize {
@@ -321,8 +335,12 @@ impl Compiler {
             self.next_temp = saved;
         }
         let name_idx = self.intern_name(method_name);
-        // Arm the `obj.m(...)` caret anchor on the terminal call (#2443);
+        // Arm the `obj.m(...)` caret anchor on the terminal call (#2443 / #2992);
         // `emit` consumes and clears it.
+        let saved_lineno = self.current_lineno;
+        if lineno != 0 {
+            self.set_lineno(lineno);
+        }
         self.set_col_span_for_next(span);
         self.emit(Insn::CallMethodKw {
             dst: dst_reg,
@@ -333,6 +351,7 @@ impl Compiler {
             nkw: nkw as u8,
             kwnames_idx,
         });
+        self.set_lineno(saved_lineno);
         self.next_temp = dst_reg + 1;
         dst_reg
     }
@@ -343,6 +362,7 @@ impl Compiler {
         method_name: &str,
         args: &[crate::ast::CallArg],
         span: Option<crate::ast::CaretSpan>,
+        lineno: u32,
     ) -> Reg {
         let nargs = args.len() as u8;
 
@@ -426,8 +446,12 @@ impl Compiler {
             self.next_temp = saved;
         }
         let name_idx = self.intern_name(method_name);
-        // Arm the `obj.m(...)` caret anchor on the terminal call (#2443);
+        // Arm the `obj.m(...)` caret anchor on the terminal call (#2443 / #2992);
         // `emit` consumes and clears it.
+        let saved_lineno = self.current_lineno;
+        if lineno != 0 {
+            self.set_lineno(lineno);
+        }
         self.set_col_span_for_next(span);
         self.emit(Insn::CallMethod {
             dst: dst_reg,
@@ -436,6 +460,7 @@ impl Compiler {
             args_base,
             nargs,
         });
+        self.set_lineno(saved_lineno);
         self.next_temp = dst_reg + 1;
         dst_reg
     }

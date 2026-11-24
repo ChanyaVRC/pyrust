@@ -417,7 +417,7 @@ fn expr_contains_assignment_expression(expr: &Expr) -> bool {
         }
         Expr::ListComp { elt, clauses }
         | Expr::SetComp { elt, clauses }
-        | Expr::GenExp { elt, clauses } => {
+        | Expr::GenExp { elt, clauses, .. } => {
             expr_contains_assignment_expression(elt)
                 || clauses.iter().any(|clause| {
                     expr_contains_assignment_expression(&clause.iter)
@@ -443,9 +443,9 @@ fn expr_contains_assignment_expression(expr: &Expr) -> bool {
         }
         Expr::Unary { expr, .. }
         | Expr::Starred(expr)
-        | Expr::YieldFrom(expr)
-        | Expr::Await(expr) => expr_contains_assignment_expression(expr),
-        Expr::Yield(expr) => expr
+        | Expr::YieldFrom { expr, .. }
+        | Expr::Await { expr, .. } => expr_contains_assignment_expression(expr),
+        Expr::Yield { value: expr, .. } => expr
             .as_deref()
             .is_some_and(expr_contains_assignment_expression),
         Expr::Compare { left, ops } => {
@@ -685,7 +685,7 @@ fn lambda_captures_in_expr(
         // inside the nested scope and can close over enclosing locals.
         Expr::ListComp { elt, clauses }
         | Expr::SetComp { elt, clauses }
-        | Expr::GenExp { elt, clauses } => {
+        | Expr::GenExp { elt, clauses, .. } => {
             // The outermost iterable is evaluated in the enclosing scope.
             if let Some(first) = clauses.first() {
                 lambda_captures_in_expr(&first.iter, local_index, is_class_scope, cells);
@@ -804,9 +804,15 @@ fn lambda_captures_in_expr(
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis => {}
-        Expr::Yield(Some(e)) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
-        Expr::Yield(None) => {}
-        Expr::YieldFrom(e) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
-        Expr::Await(e) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
+        Expr::Yield { value: Some(e), .. } => {
+            lambda_captures_in_expr(e, local_index, is_class_scope, cells)
+        }
+        Expr::Yield { value: None, .. } => {}
+        Expr::YieldFrom { expr: e, .. } => {
+            lambda_captures_in_expr(e, local_index, is_class_scope, cells)
+        }
+        Expr::Await { expr: e, .. } => {
+            lambda_captures_in_expr(e, local_index, is_class_scope, cells)
+        }
     }
 }

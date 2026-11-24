@@ -258,8 +258,10 @@ fn caret_row(
             return None;
         }
         let f_start = full_start - leading;
-        let line_len = stripped.chars().count();
-        if f_start >= line_len {
+        let line_len = stripped.trim_end().chars().count();
+        // Whole-line multi-line anchor (`f_start == 0` spanning to EOL):
+        // CPython omits the caret row (matching the single-line rule).
+        if f_start == 0 || f_start >= line_len {
             return None;
         }
         let mut row = String::from("    ");

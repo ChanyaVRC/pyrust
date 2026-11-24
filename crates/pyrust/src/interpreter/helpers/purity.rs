@@ -158,7 +158,7 @@ fn is_pure_expr(expr: &Expr, context: &MemoPurityContext<'_>) -> bool {
             parts.iter().all(|p| matches!(p, FStringPart::Literal(_)))
         }
         // yield/yield from/await always have side effects (suspension).
-        Expr::Yield(_) | Expr::YieldFrom(_) | Expr::Await(_) => false,
+        Expr::Yield { .. } | Expr::YieldFrom { .. } | Expr::Await { .. } => false,
     }
 }
 

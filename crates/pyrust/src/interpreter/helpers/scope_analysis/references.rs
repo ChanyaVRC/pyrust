@@ -110,9 +110,9 @@ fn collect_var_refs_in_expr(
         }
         Expr::Starred(e) => collect_var_refs_in_expr(e, used, assigned),
         Expr::FString(parts) => collect_var_refs_in_fstring_parts(parts, used, assigned),
-        Expr::Yield(Some(e)) => collect_var_refs_in_expr(e, used, assigned),
-        Expr::YieldFrom(e) => collect_var_refs_in_expr(e, used, assigned),
-        Expr::Await(e) => collect_var_refs_in_expr(e, used, assigned),
+        Expr::Yield { value: Some(e), .. } => collect_var_refs_in_expr(e, used, assigned),
+        Expr::YieldFrom { expr: e, .. } => collect_var_refs_in_expr(e, used, assigned),
+        Expr::Await { expr: e, .. } => collect_var_refs_in_expr(e, used, assigned),
         // Literals / constants — no names.
         Expr::Int(_)
         | Expr::BigInt(_)
@@ -123,7 +123,7 @@ fn collect_var_refs_in_expr(
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis
-        | Expr::Yield(None) => {}
+        | Expr::Yield { value: None, .. } => {}
     }
 }
 

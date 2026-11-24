@@ -144,8 +144,8 @@ fn expr_may_expose_module_namespace(expr: &Expr) -> bool {
         }
         Expr::Unary { expr, .. }
         | Expr::Starred(expr)
-        | Expr::YieldFrom(expr)
-        | Expr::Await(expr) => expr_may_expose_module_namespace(expr),
+        | Expr::YieldFrom { expr, .. }
+        | Expr::Await { expr, .. } => expr_may_expose_module_namespace(expr),
         Expr::Compare { left, ops } => {
             expr_may_expose_module_namespace(left)
                 || ops
@@ -205,7 +205,7 @@ fn expr_may_expose_module_namespace(expr: &Expr) -> bool {
         }),
         Expr::ListComp { elt, clauses }
         | Expr::SetComp { elt, clauses }
-        | Expr::GenExp { elt, clauses } => {
+        | Expr::GenExp { elt, clauses, .. } => {
             expr_may_expose_module_namespace(elt)
                 || clauses.iter().any(|clause| {
                     target_may_expose_module_namespace(&clause.target)
@@ -236,7 +236,7 @@ fn expr_may_expose_module_namespace(expr: &Expr) -> bool {
             });
             exposed
         }
-        Expr::Yield(expr) => expr
+        Expr::Yield { value: expr, .. } => expr
             .as_deref()
             .is_some_and(expr_may_expose_module_namespace),
         Expr::Int(_)

@@ -1,8 +1,10 @@
 impl Parser {
     fn parse_postfix(&mut self) -> Result<Expr> {
-        // Start col of the primary (callee / subscript object) for #2411 caret
-        // anchors on `callee(...)` and `obj[...]` forms.
+        // Start col/line of the primary (callee / subscript object) for #2411 /
+        // #2992 caret anchors on `callee(...)` and `obj[...]` forms.
         let primary_start = self.current_col();
+        let mut call_start = primary_start;
+        let mut call_lineno = self.current_lineno();
         let mut expr = self.parse_primary()?;
         loop {
             if self.is(&Token::LParen) {
@@ -10,15 +12,14 @@ impl Parser {
                 let args = self.parse_call_args()?;
                 self.expect(&Token::RParen)?;
                 // The whole `callee(...)` span is underlined with `^` (full ==
-                // prim); end col is the just-consumed `)` (#2411).
-                let span = match (primary_start, self.prev_end_col()) {
-                    (Some(s), Some(e)) if s < e => Some((s, s, e, e)),
-                    _ => None,
-                };
+                // prim); multi-line calls clamp to the call's start line via
+                // `MULTILINE_FULL_END` (#2411 / #2992).
+                let span = self.make_whole_span(call_start, call_lineno);
                 expr = Expr::Call {
                     func: Box::new(expr),
                     args,
                     span,
+                    lineno: call_lineno,
                 };
                 continue;
             }
@@ -30,6 +31,8 @@ impl Parser {
             }
             if self.is(&Token::Dot) {
                 self.bump();
+                let attr_col = self.current_col();
+                let attr_lineno = self.current_lineno();
                 let name = match self.current().cloned() {
                     Some(Token::Ident(name)) => {
                         self.bump();
@@ -41,6 +44,13 @@ impl Parser {
                         )));
                     }
                 };
+                // Multi-line attribute access (`obj\n.method(...)`): CPython
+                // anchors a subsequent call on `.method`'s line starting at the
+                // attribute name rather than `obj`'s earlier line (#2992).
+                if attr_lineno != 0 && call_lineno != 0 && attr_lineno != call_lineno {
+                    call_start = attr_col;
+                    call_lineno = attr_lineno;
+                }
                 // PEP 657 caret anchor (#2442): underline the whole `obj.attr`
                 // span (full == prim) from the target's start column to the
                 // just-consumed attribute name's end column.
@@ -195,6 +205,7 @@ impl Parser {
                             "positional argument follows keyword argument".to_string(),
                         ));
                     }
+                    let elt_lineno = self.current_lineno();
                     let val = self.parse_expr()?;
                     // Generator expression as sole call argument: f(expr for x in it)
                     if (self.is(&Token::For) || self.is_async_for()) && args.is_empty() {
@@ -203,6 +214,8 @@ impl Parser {
                             name: None,
                             value: Expr::GenExp {
                                 elt: Box::new(val),
+                                elt_lineno,
+                                first_lineno: elt_lineno,
                                 clauses,
                             },
                             splat: false,
@@ -223,6 +236,7 @@ impl Parser {
                         "positional argument follows keyword argument".to_string(),
                     ));
                 }
+                let elt_lineno = self.current_lineno();
                 let val = self.parse_expr()?;
                 // Generator expression as sole call argument: f(expr for x in it)
                 if (self.is(&Token::For) || self.is_async_for()) && args.is_empty() {
@@ -231,6 +245,8 @@ impl Parser {
                         name: None,
                         value: Expr::GenExp {
                             elt: Box::new(val),
+                            elt_lineno,
+                            first_lineno: elt_lineno,
                             clauses,
                         },
                         splat: false,
