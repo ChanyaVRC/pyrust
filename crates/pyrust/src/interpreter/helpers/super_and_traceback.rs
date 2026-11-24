@@ -319,6 +319,40 @@ fn format_single_exc_line(interp: &mut crate::Interpreter, value: &Value) -> Str
 ///
 /// If `__del__` raises an exception, a CPython-format warning is printed to
 /// stderr but the exception is not propagated to the caller (issue #1797).
+/// Resolve the `__del__` class slot using `PyClass::del_slot_cache` so
+/// scope-exit on the overwhelming majority of classes without `__del__` skips
+/// the MRO hash walk completely (issue #2987).  When a `__del__` slot *is*
+/// present, any slot value (plain function, staticmethod, classmethod,
+/// property, cached_property, user descriptor, callable instance, or
+/// non-callable) is returned so `invoke_class_method` binds/dispatches it.
+#[inline]
+fn resolve_del_slot(class: &Rc<RefCell<PyClass>>) -> Option<Value> {
+    {
+        let borrowed = class.borrow();
+        let version = borrowed.mutation_version.get();
+        if let Some((cached_version, cached_epoch, has_del)) = borrowed.del_slot_cache.get()
+            && pyrust_core::class_cache_stamp_matches(version, cached_version, cached_epoch)
+            && !has_del
+        {
+            return None;
+        }
+    }
+    resolve_del_slot_slow(class)
+}
+
+#[cold]
+#[inline(never)]
+fn resolve_del_slot_slow(class: &Rc<RefCell<PyClass>>) -> Option<Value> {
+    let method = lookup_class_attr(class, "__del__");
+    let has_del = method.is_some();
+    let borrowed = class.borrow();
+    if let Some((version, epoch)) = pyrust_core::class_cache_stamp(borrowed.mutation_version.get())
+    {
+        borrowed.del_slot_cache.set(Some((version, epoch, has_del)));
+    }
+    method
+}
+
 pub(crate) fn call_del_if_last_binding(
     interp: &mut Interpreter,
     val: Value,
@@ -333,17 +367,10 @@ pub(crate) fn call_del_if_last_binding(
         Some(rc) => rc,
         None => return,
     };
-    // Look up __del__ before the scan so we exit early for objects without it.
-    let method = match lookup_class_attr(&del_rc.borrow().class, "__del__") {
-        Some(m)
-            if matches!(
-                m.kind(),
-                ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
-            ) =>
-        {
-            m
-        }
-        _ => return,
+    // Look up __del__ via the class-level fast gate before the binding scan so
+    // classes without __del__ exit immediately with zero MRO walk.
+    let Some(method) = resolve_del_slot(&del_rc.borrow().class) else {
+        return;
     };
     // Scan named local-variable registers (0..num_locals) for another binding.
     // Registers >= num_locals are compiler temporaries — not Python variables.
@@ -409,6 +436,9 @@ pub(crate) fn call_del_if_last_binding_in_env(
         Some(rc) => rc,
         None => return,
     };
+    if resolve_del_slot(&del_rc.borrow().class).is_none() {
+        return;
+    }
 
     fn observe_direct_binding(
         value: &Value,

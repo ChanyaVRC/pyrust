@@ -49,14 +49,3 @@ fn do_update_wrapper(interp: &mut Interpreter, wrapper: &Value, wrapped: &Value)
     }
     interp.assign_attr(wrapper.clone(), "__wrapped__", wrapped.clone())
 }
-
-/// Best-effort name extraction used by `cached_property`.
-fn function_name(value: &Value) -> Option<String> {
-    match value.kind() {
-        ValueKind::UserFunction(function) => Some(function.name.to_string()),
-        ValueKind::BuiltinFunction(name) => Some(name.to_string()),
-        ValueKind::BoundMethod { function, .. } => Some(function.name.to_string()),
-        ValueKind::PyClass(class) => Some(class.borrow().name.clone()),
-        _ => None,
-    }
-}

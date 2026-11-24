@@ -494,6 +494,12 @@ impl Interpreter {
                     target.clone(),
                 ));
             }
+            if pyrust_builtins::cached_property::is_cached_property(target) && name == "__get__" {
+                return Ok(pyrust_builtins::bound_method::bound_method(
+                    "__get__",
+                    target.clone(),
+                ));
+            }
             if let Some(method) =
                 pyrust_builtins::numeric_attrs_descriptor::dict_view_mapping_descriptor_method(
                     target, name,

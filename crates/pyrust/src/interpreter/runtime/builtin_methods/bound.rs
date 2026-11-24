@@ -425,6 +425,21 @@ impl Interpreter {
             let args_vec: Vec<Value> = std::mem::take(pos);
             return self.member_descriptor_protocol_call(receiver, method, args_vec);
         }
+        if method == "__get__" && pyrust_builtins::cached_property::is_cached_property(&receiver) {
+            if has_kw {
+                return Err(pyrust_core::type_err!(
+                    "cached_property.__get__() takes no keyword arguments"
+                ));
+            }
+            if pos.is_empty() || pos.len() > 2 {
+                return Err(pyrust_core::type_err!(
+                    "cached_property.__get__() takes from 1 to 2 positional arguments ({} given)",
+                    pos.len()
+                ));
+            }
+            let instance = pos[0].clone();
+            return self.call_cached_property_get(&receiver, instance);
+        }
         if let Some(descriptor_method) =
             pyrust_builtins::numeric_attrs_descriptor::DictViewMappingDescriptorMethod::from_name(
                 method,

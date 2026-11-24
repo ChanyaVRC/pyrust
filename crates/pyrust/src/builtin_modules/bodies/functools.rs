@@ -570,20 +570,8 @@ pyrust_module! {
             ));
         }
         let func = args[0].value.clone();
-        // CPython grabs the attr name via `__set_name__(owner, name)`;
-        // pyrust doesn't dispatch that dunder yet, so we fall back to
-        // the wrapped function's own name — fine for the common
-        // `@cached_property def x(self): …` shape (function name and
-        // attribute name agree).
-        //
-        // Workaround: if you need the attribute name to differ from the
-        // function's `__name__`, call `desc.__set_name__(cls, 'attr_name')`
-        // after class creation (this is what the parity test does).
-        let attr_name = function_name(&func).unwrap_or_else(|| "cached_property".to_string());
         let _ = _interp;
-        Ok(pyrust_builtins::cached_property::cached_property(
-            func, attr_name,
-        ))
+        Ok(pyrust_builtins::cached_property::cached_property(func))
     }
 
     /// CPython: functools.cache(user_function).
