@@ -107,23 +107,89 @@ fn lcs_align(
     // `pile_record[t]` = index into `records` of the current tail of pile `t`.
     let mut pile_record: Vec<usize> = Vec::new();
 
-    // Per-value running occurrence counter for the new stream, so the j-th new
-    // occurrence of a value selects the j-th old occurrence from `positions`.
+    // Per-value total occurrence count in the new stream.
+    //
+    // When `new_count == old_count` (every copy of `V` survived), occurrence
+    // rank pairs the j-th new copy 1:1 with `locs[j]` in O(1) time (preserving
+    // the O(N log N) bound for issue #2432).
+    //
+    // When `new_count < old_count` (an earlier copy was folded or fused away,
+    // leaving `slack = old_count - new_count` dropped copies), hard-wiring rank
+    // `j` to `locs[j]` can force a later surviving copy onto an earlier dropped
+    // copy's old index and collapse the entire LCS interval before it (#2905).
+    // For bounded slack (`slack <= 16`), Hunt-Szymanski offers every feasible
+    // diagonal candidate `locs[rank ..= rank + slack]` in strictly decreasing
+    // order so patience solitaire finds the true global LCS in O(N log N) time.
+    //
+    // For `Insn::BinOp` with `locs.len() > 1 && new_count < locs.len()`, we
+    // still leave it unmatched in LCS: two structurally identical `BinOp`s can
+    // differ in their preceding `LoadConst` constant slot (`b // 2` vs
+    // `b // (1 - 1)`), which raw structural equality cannot distinguish; the
+    // constant-aware `pin_binop_in_interval` matcher resolves them in order.
+    const MAX_LCS_SLACK: usize = 16;
+    // Only count new occurrences for instructions that actually repeat in
+    // `old_insns` (`locs.len() > 1`); unique old instructions always have
+    // `slack == 0` and need no map entry.
+    let mut new_counts: HashMap<&Insn, usize> = HashMap::new();
+    for insn in new_insns {
+        if positions.get(insn).is_some_and(|locs| locs.len() > 1) {
+            *new_counts.entry(insn).or_insert(0) += 1;
+        }
+    }
     let mut seen: HashMap<&Insn, usize> = HashMap::new();
 
     for (new_idx, new_insn) in new_insns.iter().enumerate() {
         let Some(locs) = positions.get(new_insn) else {
             continue;
         };
-        let rank = seen.entry(new_insn).or_insert(0);
-        let old_pos = match locs.get(*rank) {
-            Some(&p) => p,
+        let new_count = if locs.len() > 1 {
+            new_counts.get(new_insn).copied().unwrap_or(0)
+        } else {
+            1
+        };
+        if matches!(new_insn, Insn::BinOp(..)) && locs.len() > 1 && new_count < locs.len() {
+            continue;
+        }
+        let rank = {
+            let entry = seen.entry(new_insn).or_insert(0);
+            let r = *entry;
+            *entry += 1;
+            r
+        };
+        if rank >= locs.len() {
             // More new copies than old copies of this value (a synthesized
             // duplicate): leave it unmatched for the fallbacks below.
-            None => continue,
+            continue;
+        }
+        let slack = locs.len().saturating_sub(new_count);
+        let hi_rank =
+            if !matches!(new_insn, Insn::LoadConst(..)) && slack > 0 && slack <= MAX_LCS_SLACK {
+                (rank + slack).min(locs.len() - 1)
+            } else {
+                rank
+            };
+        // A `LoadConst(r, _)` immediately feeding `BinOp(_, _, op, r)` in the
+        // optimized stream is typically synthesized by `pass_const_fold` (e.g.
+        // `b // (2 - 2)` → `LoadConst(t, 0); BinOp(_, b, FloorDiv, t)`).  Never
+        // align it to an unrelated `LoadConst(r, _)` from a different operator
+        // (e.g. `if b > 0:` whose `LoadConst(t, 0)` was fused into `CmpJump`),
+        // or the spurious LCS anchor jumps `old_pos` past the `BinOp` (#2905).
+        let next_binop_rhs_op = match (new_insn, new_insns.get(new_idx + 1)) {
+            (Insn::LoadConst(r, _), Some(Insn::BinOp(_, _, op, rhs))) if r == rhs => {
+                Some((*r, *op))
+            }
+            _ => None,
         };
-        *rank += 1;
-        {
+        for &old_pos in locs[rank..=hi_rank].iter().rev() {
+            if let Some((r, op)) = next_binop_rhs_op {
+                let compatible = matches!(
+                    old_insns.get(old_pos + 1),
+                    Some(Insn::BinOp(_, _, old_op, old_rhs)) if *old_op == op && *old_rhs == r
+                );
+                if !compatible {
+                    continue;
+                }
+            }
             // Pile to extend: first pile whose tail is `>= old_pos` (strictly
             // increasing subsequence).
             let t = piles.partition_point(|&tail| tail < old_pos);
@@ -294,21 +360,6 @@ fn remap_lineno_and_col_tables_with_source_prefix(
     // matched (mirrors the `old_pos` discipline of the main scan).
     let mut binop_col_cursor: usize = 0;
 
-    // Suffix recovery for the *folded* case (issues #2577 / #2578).  When a
-    // const-foldable sub-expression collapses (`a + b` with `a`,`b` known →
-    // `LoadConst`), `binop_recovery_sound` is false and the forward cursor above
-    // is disabled — yet the surviving raising op (`(a+b) + "s"`, `"s" + (x+2)`)
-    // still has a valid origin col in the old stream and must keep its caret.
-    //
-    // The optimizer's outermost binary op is emitted last (post-order) and folds
-    // only ever *remove* binops, so the surviving binops are a subsequence of the
-    // old binops in order.  When that subsequence is a contiguous **suffix** of
-    // the old binops, the k-th-from-last surviving op descends 1:1 from the
-    // k-th-from-last old binop.  We accept the suffix alignment only when the
-    // operator sequence of the surviving new binops equals the operator sequence
-    // of the last N old binops — a structural cross-check that fails for a
-    // *middle* fold (`x + y + (a+b)`, where the surviving ops are not a suffix),
-    // keeping such an op caret-free (a missing caret beats a wrong one, #2426).
     let binop_origin_op = |insn: &Insn| -> Option<crate::ast::BinaryOp> {
         match insn {
             Insn::BinOp(_, _, op, _) => Some(*op),
@@ -316,99 +367,6 @@ fn remap_lineno_and_col_tables_with_source_prefix(
             _ => None,
         }
     };
-    // Old positions where a per-op suffix col can be recovered, paired with the
-    // surviving new binop index (set up below only when the suffix cross-check
-    // passes); consumed by a flat lookup in the main scan.
-    let mut suffix_binop_old_pos: HashMap<usize, usize> = HashMap::new();
-    if want_cols && !binop_recovery_sound && new_binop_origin_count > 0 {
-        let old_start = old_binop_positions.len() - new_binop_origin_count;
-        let surviving: Vec<(usize, crate::ast::BinaryOp)> = origin_new_insns
-            .iter()
-            .enumerate()
-            .filter_map(|(i, insn)| binop_origin_op(insn).map(|op| (i, op)))
-            .collect();
-        let ops_match = surviving.iter().enumerate().all(|(j, &(_, op))| {
-            old_binop_positions
-                .get(old_start + j)
-                .and_then(|&p| old_insns.get(p))
-                .and_then(binop_origin_op)
-                == Some(op)
-        });
-        // The operator-sequence cross-check alone is too weak when the chain's
-        // operators repeat (e.g. all `+`): a sibling-subtree fold to the *right*
-        // of a surviving op (`(a+b) + "s" + (c+d)`, where `a+b` and `c+d` fold)
-        // leaves survivors `{(a+b)+"s", outer}` whose true old indices are not a
-        // contiguous suffix — yet every op is `+`, so `ops_match` passes and the
-        // raising `(a+b)+"s"` would be mis-anchored to the folded `c+d`'s span.
-        //
-        // Require additionally that the mapped old binops form a **left spine**:
-        // each shares the outermost op's `full_start` (the expression's left
-        // edge).  Python `+`/`*`/… are left-associative, so the left-descendant
-        // chain from the outermost op down all begins at that same column, while
-        // any right-operand subtree (the source of the dangerous interspersed
-        // fold) starts further right.  A non-left-spine alignment is rejected,
-        // leaving the op caret-free (a missing caret beats a wrong one, #2426).
-        let outer_full_start = old_binop_positions
-            .last()
-            .and_then(|&p| old_cols.get(p))
-            .map(|span| span.0);
-        let left_spine = outer_full_start.is_some_and(|start| {
-            (0..surviving.len()).all(|j| {
-                old_binop_positions
-                    .get(old_start + j)
-                    .and_then(|&p| old_cols.get(p))
-                    .map(|span| span.0)
-                    == Some(start)
-            })
-        });
-        if ops_match && left_spine {
-            for (j, &(new_i, _)) in surviving.iter().enumerate() {
-                suffix_binop_old_pos.insert(new_i, old_binop_positions[old_start + j]);
-            }
-        } else if let Some(start) = outer_full_start {
-            // Left-spine recovery for the *multi-fold* case (issue #2586).  When
-            // two or more nested sub-expressions both const-fold, the surviving
-            // binops are no longer a contiguous suffix of the old binops — an
-            // interspersed folded right-subtree (`(a+b) + "s" + (c+d)`, where the
-            // sibling `(a+b)` and `(c+d)` both fold) opens a gap, so the suffix
-            // alignment above is rejected by the left-spine cross-check.  Yet the
-            // raising op (`(a+b)+"s"`) and the outer op still carry valid origin
-            // cols and must keep their carets.
-            //
-            // In a left-associative chain the surviving binops are exactly the
-            // ops on the expression's **left spine**: the outermost op and its
-            // repeated left-descendants, all anchored at the expression's left
-            // edge (`full_start == outer_full_start`).  A right-operand subtree
-            // always begins strictly to the right, so it never shares that
-            // column.  Collect the old binops at the left-edge column, in order,
-            // and pair them 1:1 with the survivors — but ONLY when their count
-            // matches the survivor count exactly and the operator sequences agree.
-            //
-            // The count guard is what keeps this strictly safe (a missing caret
-            // beats a wrong one, #2426): if a left-spine op itself folded, or a
-            // right-subtree op survived, the left-edge old-binop count diverges
-            // from the survivor count and the recovery is abandoned, leaving the
-            // ops caret-free rather than risking a mis-anchored span.
-            let spine_old: Vec<usize> = old_binop_positions
-                .iter()
-                .copied()
-                .filter(|&p| old_cols.get(p).map(|span| span.0) == Some(start))
-                .collect();
-            let spine_ops_match = spine_old.len() == surviving.len()
-                && surviving.iter().enumerate().all(|(j, &(_, op))| {
-                    spine_old
-                        .get(j)
-                        .and_then(|&p| old_insns.get(p))
-                        .and_then(binop_origin_op)
-                        == Some(op)
-                });
-            if spine_ops_match {
-                for (j, &(new_i, _)) in surviving.iter().enumerate() {
-                    suffix_binop_old_pos.insert(new_i, spine_old[j]);
-                }
-            }
-        }
-    }
 
     // Exact 1:1 origin map for *binop-derived* opcodes (issue #2889).  Both
     // fusions rewrite a `BinOp` into an opcode that exists nowhere in the old
@@ -494,32 +452,53 @@ fn remap_lineno_and_col_tables_with_source_prefix(
         }
     }
 
-    // Per-destination-register index of the old `BinOp`s (issue #2580).  The
-    // monotone `binop_col_cursor` scan above assumes the surviving fused op is the
-    // *next* old `BinOp` in source order — true when fusion is a clean 1:1
-    // replacement, but WRONG when const-folding *collapsed an inner* binop into a
-    // constant: `"s" + (a + b)` (with `a`/`b` const-known) folds the inner `a + b`
-    // away, leaving only the outer `"s" + 3` as a `BinOpConst`.  The surviving op
-    // then descends from the *second* old `BinOp`, not the first the cursor points
-    // at, so the count guard above disables the (now-misaligned) monotone recovery
-    // entirely and the outer op loses its caret.  Fusion preserves the surviving
-    // op's destination *and* register operand (folding an operand only rewrites the
-    // const side), so its origin old `BinOp` can be pinned by the `(dst, lhs)`
-    // register pair: when exactly one old `BinOp` at-or-after the cursor matches,
-    // that is unambiguously the origin and its span is safe to carry.  `dst` alone
-    // is too coarse — an inner and outer op of one expression routinely reuse the
-    // same destination temp (`(a + b) + "s"`) — so the `lhs` register breaks the
-    // tie.  Still "never a wrong caret": a non-unique match falls through to no
-    // anchor.
+    // Precomputed metadata for each old `BinOp(dst, lhs, op, rhs)` (issues
+    // #2580 / #2889 / #2905):
+    //   - `old_pos`: index in `old_insns`
+    //   - `dst`, `lhs`, `op`: original operands and operator
+    //   - `rhs_const`: if `old_insns[p - 1]` is `LoadConst(rhs, c_idx)`, that
+    //     exact constant pool slot `Some(c_idx)` (recall `pass_compact_consts`
+    //     runs *after* this remapper, so constant slots are still un-reindexed).
     //
-    // Both this index and the monotone cursor also carry the fused op's *line*
-    // (issue #2889), so it is built unconditionally rather than only for carets.
-    let mut old_binop_reg_positions: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-    for &p in &old_binop_positions {
-        if let Insn::BinOp(d, l, _, _) = old_insns[p] {
-            old_binop_reg_positions.entry((d, l)).or_default().push(p);
-        }
+    // `pass_binop_const_fusion` and `pass_const_reg_prop` rewrite a `BinOp` to
+    // `BinOpConst(d, l, op, c, false)` without changing `op`, preserving `l`
+    // and `c` (unless a sub-expression folded into a *new* constant slot, in
+    // which case `rhs_const` on the old `BinOp` is `None`).  `pass_copy_prop`
+    // may subsequently retarget `d` onto a local (`Move(local, d)`).
+    //
+    // Using `(d, l, op, c)` → `(l, op, c)` → `(d, l, op)` → `(l, op)` bounded
+    // to the current LCS anchor interval `[old_pos, next_aligned_old[new_idx])`
+    // recovers both the source line and PEP 657 caret even when a constant fold
+    // elsewhere in the function disables the global 1:1 count guards — while
+    // strictly forbidding cross-constant mismatches (`rhs_const == Some(other)`
+    // with `other != c`) and ambiguous multi-matches (#2426).
+    #[derive(Clone, Copy)]
+    struct OldBinOpInfo {
+        pos: usize,
+        dst: u32,
+        lhs: u32,
+        op: crate::ast::BinaryOp,
+        rhs_const: Option<u16>,
     }
+    let old_binop_infos: Vec<OldBinOpInfo> = old_binop_positions
+        .iter()
+        .filter_map(|&p| {
+            let Insn::BinOp(dst, lhs, op, rhs) = old_insns[p] else {
+                return None;
+            };
+            let rhs_const = p.checked_sub(1).and_then(|prev| match old_insns[prev] {
+                Insn::LoadConst(r, c) if r == rhs => Some(c),
+                _ => None,
+            });
+            Some(OldBinOpInfo {
+                pos: p,
+                dst,
+                lhs,
+                op,
+                rhs_const,
+            })
+        })
+        .collect();
 
     // Old fusion sites for the `not`-invert peephole (issue #2588): a position `i`
     // where `UnaryOp(_, Not, src)` is immediately followed by a conditional jump on
@@ -632,6 +611,241 @@ fn remap_lineno_and_col_tables_with_source_prefix(
     // from the surrounding aligned positions so those stay stable too.
     let aligned = lcs_align(old_insns, new_insns, &positions);
 
+    // For each `new_idx`, the LCS anchor interval `[prev_aligned_old[new_idx],
+    // next_aligned_old[new_idx])` in `old_insns`.  Any unmatched instruction
+    // between two LCS anchors originates strictly inside that interval.
+    let mut prev_aligned_old = vec![0usize; new_insns.len()];
+    {
+        let mut prev_old = 0usize;
+        for idx in 0..new_insns.len() {
+            prev_aligned_old[idx] = prev_old;
+            if let Some(p) = aligned[idx] {
+                prev_old = p + 1;
+            }
+        }
+    }
+    let mut next_aligned_old = vec![old_insns.len(); new_insns.len()];
+    let mut next_aligned_new = vec![new_insns.len(); new_insns.len()];
+    {
+        let mut next_old = old_insns.len();
+        let mut next_new = new_insns.len();
+        for idx in (0..new_insns.len()).rev() {
+            next_aligned_old[idx] = next_old;
+            next_aligned_new[idx] = next_new;
+            if let Some(p) = aligned[idx] {
+                next_old = p;
+                next_new = idx;
+            }
+        }
+    }
+
+    // Constant-slot compatibility guard between a new binop-origin op and an
+    // old `BinOp`: an old `BinOp` whose RHS came directly from
+    // `LoadConst(_, old_c)` cannot become a fused or const-RHS op with a
+    // different constant slot `new_c` (`pass_compact_consts` has not reindexed
+    // slots yet).  An old `BinOp` whose RHS was a computed expression
+    // (`rhs_const == None`) CAN receive a newly const-folded slot `new_c`
+    // (e.g. `b // (1 - 1)`).
+    let new_binop_const_idx = |new_idx: usize, insn: &Insn| -> Option<u16> {
+        match *insn {
+            Insn::BinOpConst(_, _, _, c, false) => Some(c),
+            Insn::BinOp(_, _, _, rhs) => {
+                new_idx
+                    .checked_sub(1)
+                    .and_then(|prev| match new_insns[prev] {
+                        Insn::LoadConst(r, c) if r == rhs => Some(c),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        }
+    };
+    let old_binop_const_at = |old_p: usize| -> Option<u16> {
+        let Insn::BinOp(_, _, _, rhs) = old_insns.get(old_p)? else {
+            return None;
+        };
+        old_p.checked_sub(1).and_then(|prev| match old_insns[prev] {
+            Insn::LoadConst(r, c) if r == *rhs => Some(c),
+            _ => None,
+        })
+    };
+    let const_slots_compatible = |new_c: Option<u16>, old_c: Option<u16>| match (new_c, old_c) {
+        (Some(c), Some(oc)) => c == oc,
+        _ => true,
+    };
+
+    // Suffix / left-spine recovery for the *folded* case (issues #2577 / #2578 /
+    // #2586).  When a const-foldable sub-expression collapses (`a + b` with
+    // `a`,`b` known → `LoadConst`), `binop_recovery_sound` is false and the
+    // forward cursor is disabled — yet the surviving raising op (`(a+b) + "s"`,
+    // `"s" + (x+2)`, `(a+b) + "s" + (c+d)`) still has a valid origin col in the
+    // old stream and must keep its caret.
+    //
+    // Every candidate pair `(new_i, old_p)` must additionally stay inside
+    // `new_i`'s LCS anchor interval `[prev_aligned_old[new_i],
+    // next_aligned_old[new_i])` and satisfy `const_slots_compatible` so a
+    // folded later statement (e.g. `c1 = 10; c2 = 20; c3 = c1 + c2`) can never
+    // steal the line or caret of an earlier surviving binop (`res = s + 1`,
+    // issue #2905).
+    let mut suffix_binop_old_pos: HashMap<usize, usize> = HashMap::new();
+    if want_cols && !binop_recovery_sound && new_binop_origin_count > 0 {
+        let old_start = old_binop_positions.len() - new_binop_origin_count;
+        let surviving: Vec<(usize, crate::ast::BinaryOp)> = origin_new_insns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, insn)| binop_origin_op(insn).map(|op| (i, op)))
+            .collect();
+        let pair_valid = |new_i: usize, old_p: usize| -> bool {
+            prev_aligned_old[new_i] <= old_p
+                && old_p < next_aligned_old[new_i]
+                && const_slots_compatible(
+                    new_binop_const_idx(new_i, &origin_new_insns[new_i]),
+                    old_binop_const_at(old_p),
+                )
+        };
+        let ops_match = surviving.iter().enumerate().all(|(j, &(new_i, op))| {
+            old_binop_positions.get(old_start + j).is_some_and(|&p| {
+                old_insns.get(p).and_then(binop_origin_op) == Some(op) && pair_valid(new_i, p)
+            })
+        });
+        let outer_anchor = old_binop_positions.last().and_then(|&p| {
+            let start = old_cols.get(p)?.0;
+            let lineno = old_prefix.get(p).copied().unwrap_or(0);
+            Some((start, lineno))
+        });
+        let left_spine = outer_anchor.is_some_and(|(start, lineno)| {
+            (0..surviving.len()).all(|j| {
+                old_binop_positions.get(old_start + j).is_some_and(|&p| {
+                    old_cols.get(p).map(|span| span.0) == Some(start)
+                        && old_prefix.get(p).copied().unwrap_or(0) == lineno
+                })
+            })
+        });
+        if ops_match && left_spine {
+            for (j, &(new_i, _)) in surviving.iter().enumerate() {
+                suffix_binop_old_pos.insert(new_i, old_binop_positions[old_start + j]);
+            }
+        } else if let Some((start, lineno)) = outer_anchor {
+            let spine_old: Vec<usize> = old_binop_positions
+                .iter()
+                .copied()
+                .filter(|&p| {
+                    old_cols.get(p).map(|span| span.0) == Some(start)
+                        && old_prefix.get(p).copied().unwrap_or(0) == lineno
+                })
+                .collect();
+            let spine_ops_match = spine_old.len() == surviving.len()
+                && surviving.iter().enumerate().all(|(j, &(new_i, op))| {
+                    spine_old.get(j).is_some_and(|&p| {
+                        old_insns.get(p).and_then(binop_origin_op) == Some(op)
+                            && pair_valid(new_i, p)
+                    })
+                });
+            if spine_ops_match {
+                for (j, &(new_i, _)) in surviving.iter().enumerate() {
+                    suffix_binop_old_pos.insert(new_i, spine_old[j]);
+                }
+            }
+        }
+    }
+
+    // Helper: pin a fused `BinOpConst` / `BinOpImm` (or renumbered `BinOp`)
+    // within the current LCS anchor interval `[lo, hi)`.  Returns `Some(old_p)`
+    // only when a sound, unambiguous tier uniquely identifies the origin (or
+    // when an exact 1:1 count-matched diagonal exists within the interval).
+    let pin_binop_in_interval = |new_idx: usize,
+                                 lo: usize,
+                                 hi: usize,
+                                 new_hi: usize,
+                                 dst: u32,
+                                 lhs: u32,
+                                 op: crate::ast::BinaryOp,
+                                 const_idx: Option<u16>|
+     -> Option<usize> {
+        let start = old_binop_infos.partition_point(|info| info.pos < lo);
+        let end = old_binop_infos.partition_point(|info| info.pos < hi);
+        let slice = &old_binop_infos[start..end];
+        if slice.is_empty() {
+            return None;
+        }
+        // Compatibility guard: an old `BinOp` whose RHS came directly from
+        // `LoadConst(_, old_c)` cannot have fused into a different constant slot
+        // `new_c` (`pass_compact_consts` has not reindexed slots yet).  An old
+        // `BinOp` whose RHS was a computed expression (`rhs_const == None`) CAN
+        // fuse into a newly const-folded slot `new_c` (e.g. `b // (1 - 1)`).
+        let const_compatible = |info: &OldBinOpInfo| match (const_idx, info.rhs_const) {
+            (Some(c), Some(old_c)) => c == old_c,
+            _ => true,
+        };
+        let unique = |pred: &dyn Fn(&OldBinOpInfo) -> bool| -> Option<usize> {
+            let mut found = None;
+            for info in slice {
+                if pred(info) {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some(info.pos);
+                }
+            }
+            found
+        };
+
+        // Tier 1: exact `(dst, lhs, op, c)` match.
+        if let Some(c) = const_idx
+            && let Some(p) = unique(&|info| {
+                info.dst == dst && info.lhs == lhs && info.op == op && info.rhs_const == Some(c)
+            })
+        {
+            return Some(p);
+        }
+        // Tier 2: exact `(lhs, op, c)` match (survives `pass_copy_prop` retargeting `dst`).
+        if let Some(c) = const_idx
+            && let Some(p) =
+                unique(&|info| info.lhs == lhs && info.op == op && info.rhs_const == Some(c))
+        {
+            return Some(p);
+        }
+        // Tier 3: `(dst, lhs, op)` with compatible constant slot (covers folded RHS
+        // like `b // (1 - 1)` and `BinOpImm` / renumbered `BinOp`).
+        if let Some(p) = unique(&|info| {
+            info.dst == dst && info.lhs == lhs && info.op == op && const_compatible(info)
+        }) {
+            return Some(p);
+        }
+        // Tier 4: `(lhs, op)` with compatible constant slot (folded RHS + copy-propped `dst`).
+        if let Some(p) = unique(&|info| info.lhs == lhs && info.op == op && const_compatible(info))
+        {
+            return Some(p);
+        }
+        // Tier 5: exact 1:1 count-matched diagonal for repeated identical `(dst, lhs, op, c)`
+        // within the same interval `[new_idx, new_hi)`.
+        if let Some(c) = const_idx {
+            let old_matches: Vec<usize> = slice
+                .iter()
+                .filter(|info| {
+                    info.dst == dst && info.lhs == lhs && info.op == op && info.rhs_const == Some(c)
+                })
+                .map(|info| info.pos)
+                .collect();
+            if old_matches.len() > 1 {
+                let new_matches = new_insns[new_idx..new_hi]
+                    .iter()
+                    .filter(|insn| {
+                        matches!(
+                            insn,
+                            Insn::BinOpConst(nd, nl, nop, nc, false)
+                                if *nd == dst && *nl == lhs && *nop == op && *nc == c
+                        )
+                    })
+                    .count();
+                if new_matches == old_matches.len() {
+                    return Some(old_matches[0]);
+                }
+            }
+        }
+        None
+    };
+
     let mut old_pos: usize = 0;
     let mut linenos = Vec::with_capacity(new_insns.len());
     let mut cols = vec![(0, 0, 0, 0); new_insns.len()];
@@ -678,33 +892,59 @@ fn remap_lineno_and_col_tables_with_source_prefix(
                 // (a const-folded `LoadConst`, a peephole `Move`/`Jump`) on the
                 // running-prefix line — preserving the #1962/#2002 contract for those.
                 //
-                // The col anchor (#2411) is carried from the *same* matched position
-                // `i`: a side-effecting opcode is renumbered, never duplicated or
-                // deleted, so the diagonally-aligned `i` is the instruction's true
-                // origin — the very position whose line we trust here.  Trusting it
-                // for the line but not the column would leave nearly every binary
-                // op / subscript / call caret-free (their registers are routinely
-                // renumbered), defeating the feature.  Only carry it when the
-                // discriminant's anchored occurrences are unambiguous (or the
-                // count-preserving `disc_diag_sound` diagonal recovery applies) —
-                // here, unlike the LCS-matched branch above, the true 1:1 origin
-                // is not known, so a per-opcode ambiguity must suppress the col.
-                let disc_matched = if insn_anchor_by_discriminant(new_insn) {
+                // For a renumbered `BinOp`, prefer the interval-bounded `(d, l, op)`
+                // pin before falling back to discriminant order — otherwise a `BinOp`
+                // after an earlier fused `BinOpConst` can claim the earlier op's old
+                // `BinOp` slot (#2905).
+                let interval_hi = next_aligned_old[new_idx];
+                let interval_new_hi = next_aligned_new[new_idx];
+                let binop_pinned = if let Insn::BinOp(d, l, op, _) = new_insn {
+                    pin_binop_in_interval(
+                        new_idx,
+                        old_pos,
+                        interval_hi,
+                        interval_new_hi,
+                        *d,
+                        *l,
+                        *op,
+                        new_binop_const_idx(new_idx, new_insn),
+                    )
+                } else {
+                    None
+                };
+                let disc_matched = if let Some(i) = binop_pinned {
+                    Some((i, true))
+                } else if let Insn::BinOp(_, _, op, _) = new_insn {
+                    let new_c = new_binop_const_idx(new_idx, new_insn);
+                    let start = old_binop_infos.partition_point(|info| info.pos < old_pos);
+                    old_binop_infos[start..]
+                        .iter()
+                        .take_while(|info| info.pos < interval_hi)
+                        .find(|info| {
+                            info.op == *op && const_slots_compatible(new_c, info.rhs_const)
+                        })
+                        .map(|info| (info.pos, false))
+                } else if insn_anchor_by_discriminant(new_insn) {
                     disc_positions
                         .get(&std::mem::discriminant(new_insn))
                         .and_then(|locs| {
                             let k = locs.partition_point(|&p| p < old_pos);
-                            locs.get(k).copied()
+                            locs.get(k)
+                                .copied()
+                                .filter(|&p| p < interval_hi)
+                                .map(|p| (p, false))
                         })
                 } else {
                     None
                 };
                 match disc_matched {
-                    Some(i) => {
+                    Some((i, exact_pin)) => {
                         linenos.push(old_linenos.get(i).copied().unwrap_or(0));
                         let disc = std::mem::discriminant(new_insn);
                         if want_cols
-                            && (!disc_ambiguous.contains(&disc) || disc_diag_sound.contains(&disc))
+                            && (exact_pin
+                                || !disc_ambiguous.contains(&disc)
+                                || disc_diag_sound.contains(&disc))
                         {
                             *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
                         }
@@ -715,8 +955,8 @@ fn remap_lineno_and_col_tables_with_source_prefix(
                         // match.  For a fused binary op (`BinOpConst`/`BinOpImm`)
                         // recover the originating `BinOp`'s position — by a
                         // monotone scan over `old_binop_positions` (issue #2411),
-                        // or, when a fold made that scan unsound, by the surviving
-                        // op's `(dst, lhs)` register pair (issue #2580).
+                        // or, when a fold made that scan unsound, by the
+                        // interval-bounded `(dst, lhs, op, c_idx)` pin (#2580 / #2905).
                         let fused_origin = if !insn_is_fused_binop(new_insn) {
                             None
                         } else if binop_recovery_sound {
@@ -725,48 +965,52 @@ fn remap_lineno_and_col_tables_with_source_prefix(
                             {
                                 binop_col_cursor += 1;
                             }
-                            let found = old_binop_positions.get(binop_col_cursor).copied();
+                            let found = old_binop_positions
+                                .get(binop_col_cursor)
+                                .copied()
+                                .filter(|&p| p < interval_hi);
                             if found.is_some() {
                                 binop_col_cursor += 1;
                             }
                             found
                         } else {
-                            // The monotone recovery is unsound (an inner binop was
-                            // folded away, so the surviving op is not the next old
-                            // `BinOp` in order — issue #2580).  Pin the origin by the
-                            // surviving op's `(dst, lhs)` registers: fusion preserves
-                            // them, so a *unique* old `BinOp` at-or-after the cursor
-                            // with the same register pair is unambiguously the origin.
-                            // A non-unique match stays anchor-free (never a wrong one).
-                            let new_regs = match new_insn {
-                                Insn::BinOpConst(d, l, _, _, _) | Insn::BinOpImm(d, l, _, _, _) => {
-                                    Some((*d, *l))
-                                }
+                            match *new_insn {
+                                Insn::BinOpConst(d, l, op, c, false) => pin_binop_in_interval(
+                                    new_idx,
+                                    old_pos,
+                                    interval_hi,
+                                    interval_new_hi,
+                                    d,
+                                    l,
+                                    op,
+                                    Some(c),
+                                ),
+                                Insn::BinOpImm(d, l, op, _, false) => pin_binop_in_interval(
+                                    new_idx,
+                                    old_pos,
+                                    interval_hi,
+                                    interval_new_hi,
+                                    d,
+                                    l,
+                                    op,
+                                    None,
+                                ),
                                 _ => None,
-                            };
-                            new_regs
-                                .and_then(|key| old_binop_reg_positions.get(&key))
-                                .and_then(|locs| {
-                                    let candidates: Vec<usize> =
-                                        locs.iter().copied().filter(|&p| p >= old_pos).collect();
-                                    match candidates[..] {
-                                        [i] => Some(i),
-                                        _ => None,
-                                    }
-                                })
+                            }
                         };
-                        // The folded-statement suffix alignment (issues #2577 /
-                        // #2578) pins this op's origin exactly when it applies and
-                        // is authoritative — it already overrides the caret below,
-                        // so it must decide the line too, or a fused op gets one
-                        // statement's caret printed under another's line.  The
-                        // binop-derived diagonal is the last resort: it is the only
-                        // recovery that fires for a fused op in a loop whose header
-                        // comparison became a `Cmp*Jump*` (#2889).
-                        let fused_origin = suffix_binop_old_pos
-                            .get(&new_idx)
-                            .copied()
-                            .or(fused_origin)
+                        // Order of preference for fused binary ops:
+                        //   1. Interval-bounded exact pin (`fused_origin`) — uses
+                        //      register + operator + constant-slot identity inside
+                        //      the current LCS interval.
+                        //   2. Folded-statement suffix/left-spine alignment
+                        //      (`suffix_binop_old_pos`, #2577/#2578/#2586) — recovers
+                        //      folded single-expression chains even if copy-prop
+                        //      renamed `lhs`.
+                        //   3. Global binop-derived 1:1 diagonal (`binop_derived_origin`,
+                        //      #2889) — last resort when no fold occurred and a loop
+                        //      header comparison became `Cmp*Jump*`.
+                        let fused_origin = fused_origin
+                            .or_else(|| suffix_binop_old_pos.get(&new_idx).copied())
                             .or_else(|| {
                                 insn_is_fused_binop(new_insn)
                                     .then(|| binop_derived_origin.get(&new_idx).copied())
@@ -789,6 +1033,12 @@ fn remap_lineno_and_col_tables_with_source_prefix(
                         );
                         if want_cols && let Some(i) = fused_origin {
                             *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
+                        }
+                        if let Some(i) = fused_origin
+                            && i >= old_pos
+                            && i < interval_hi
+                        {
+                            old_pos = i + 1;
                         }
                         // Recover the caret anchor of a conditional jump synthesized
                         // from `UnaryOp(Not) + JumpIf*` by `pass_not_invert` (issue
@@ -815,12 +1065,15 @@ fn remap_lineno_and_col_tables_with_source_prefix(
             }
         }
         // Folded-statement suffix recovery (issues #2577 / #2578): a surviving
-        // binary op whose foldable sibling collapsed gets its origin col from the
-        // suffix alignment computed above.  Authoritative for these ops — the
-        // exact/discriminant paths cannot have a correct match for a fused
-        // `BinOpConst` (it has no old counterpart), and a plain surviving `BinOp`
-        // in a folded statement is `disc_ambiguous` so it was left caret-free.
-        if want_cols && let Some(&i) = suffix_binop_old_pos.get(&new_idx) {
+        // binary op whose foldable sibling collapsed and which had no caret
+        // anchor yet (e.g. a plain surviving `BinOp` that was `disc_ambiguous`)
+        // gets its origin col from the interval-checked suffix alignment above,
+        // provided it matches the line already assigned to this instruction.
+        if want_cols
+            && *out_col == (0, 0, 0, 0)
+            && let Some(&i) = suffix_binop_old_pos.get(&new_idx)
+            && old_prefix.get(i).copied().unwrap_or(0) == linenos[new_idx]
+        {
             *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
         }
     }

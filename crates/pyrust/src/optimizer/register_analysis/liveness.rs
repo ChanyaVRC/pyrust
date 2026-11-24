@@ -57,7 +57,6 @@ fn reg_is_read_in(insns: &[Insn], r: u32) -> bool {
 fn scratch_dead_after(insns: &[Insn], start: usize, r: u32) -> bool {
     const WINDOW: usize = 6;
     let end = (start + WINDOW).min(insns.len());
-    let mut written = HashSet::new();
     for insn in &insns[start..end] {
         // Any branch / suspend / return ends the straight-line region.
         if matches!(
@@ -81,15 +80,137 @@ fn scratch_dead_after(insns: &[Insn], start: usize, r: u32) -> bool {
         if insn_reads_reg(insn, r) {
             return false; // read before any overwrite → value is live
         }
-        written.clear();
-        collect_writes(insn, &mut written);
-        if written.contains(&r) {
+        let mut overwrote = false;
+        for_each_write(insn, |w| {
+            if w == r {
+                overwrote = true;
+            }
+        });
+        if overwrote {
             return true; // overwritten before any read → old value is dead
         }
     }
     // Hit the true end of the stream without a read → dead; otherwise (window
     // edge reached mid-stream) be conservative.
     end == insns.len()
+}
+
+/// Stack-backed bitset for dense temp-register offsets (`r - num_locals`).
+/// Covers the first 256 temps with zero heap allocations and spills to a
+/// `Vec<u64>` only for unusually wide frames (issue #2905).
+struct TempBitset {
+    inline: [u64; 4],
+    overflow: Vec<u64>,
+}
+
+impl TempBitset {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            inline: [0; 4],
+            overflow: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.inline = [0; 4];
+        if !self.overflow.is_empty() {
+            self.overflow.fill(0);
+        }
+    }
+
+    #[inline]
+    fn insert(&mut self, bit: usize) {
+        if bit < 256 {
+            self.inline[bit >> 6] |= 1u64 << (bit & 63);
+        } else {
+            let word = (bit - 256) >> 6;
+            if word >= self.overflow.len() {
+                self.overflow.resize(word + 1, 0);
+            }
+            self.overflow[word] |= 1u64 << (bit & 63);
+        }
+    }
+
+    #[inline]
+    fn contains(&self, bit: usize) -> bool {
+        if bit < 256 {
+            (self.inline[bit >> 6] & (1u64 << (bit & 63))) != 0
+        } else {
+            let word = (bit - 256) >> 6;
+            self.overflow
+                .get(word)
+                .is_some_and(|&w| (w & (1u64 << (bit & 63))) != 0)
+        }
+    }
+}
+
+/// Small stack-backed `bool` buffer (zero heap allocation for functions with
+/// `<= 128` instructions, issue #2905).
+enum InlineBoolBuf {
+    Inline([bool; 128]),
+    Heap(Vec<bool>),
+}
+
+impl InlineBoolBuf {
+    #[inline]
+    fn new(len: usize, init: bool) -> Self {
+        if len <= 128 {
+            Self::Inline([init; 128])
+        } else {
+            Self::Heap(vec![init; len])
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[bool] {
+        match self {
+            Self::Inline(arr) => arr.as_slice(),
+            Self::Heap(vec) => vec.as_slice(),
+        }
+    }
+
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [bool] {
+        match self {
+            Self::Inline(arr) => arr.as_mut_slice(),
+            Self::Heap(vec) => vec.as_mut_slice(),
+        }
+    }
+}
+
+/// Small stack-backed `usize` array for per-temp liveness slots (zero heap
+/// allocation for functions with `<= 64` temporaries, issue #2905).
+struct TempSlotBuf {
+    inline: [usize; 64],
+    heap: Vec<usize>,
+}
+
+impl TempSlotBuf {
+    #[inline]
+    fn new(len: usize, init: usize) -> Self {
+        if len <= 64 {
+            Self {
+                inline: [init; 64],
+                heap: Vec::new(),
+            }
+        } else {
+            Self {
+                inline: [0; 64],
+                heap: vec![init; len],
+            }
+        }
+    }
+
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [usize] {
+        if self.heap.is_empty() {
+            self.inline.as_mut_slice()
+        } else {
+            self.heap.as_mut_slice()
+        }
+    }
 }
 
 /// For every index `i`, whether a `LoadConst` at `i` writes a scratch temp
@@ -128,50 +249,58 @@ fn scratch_dead_after(insns: &[Insn], start: usize, r: u32) -> bool {
 fn load_const_dead_after_use(
     insns: &[Insn],
     num_locals: u32,
-    jump_targets: &HashSet<usize>,
-) -> Vec<bool> {
+    is_jump_target: &[bool],
+) -> InlineBoolBuf {
     let n = insns.len();
-    let mut dead = vec![false; n];
+    let mut dead_buf = InlineBoolBuf::new(n, false);
     if n == 0 {
-        return dead;
+        return dead_buf;
     }
 
-    let mut reads: HashSet<u32> = HashSet::new();
-    let mut writes: HashSet<u32> = HashSet::new();
-
-    // Pass 1 (forward): which temps are block-local, and how many register
-    // slots the reverse pass needs.
-    let mut max_reg: u32 = num_locals;
-    let mut defined: HashSet<u32> = HashSet::new();
-    let mut escaping: HashSet<u32> = HashSet::new();
+    // Pass 1 (forward): which temps are block-local, and how many temp-register
+    // slots the reverse pass needs.  Uses zero-allocation `for_each_read` /
+    // `for_each_write` visitors and stack-backed bitsets (issue #2905).
+    let mut has_temp = false;
+    let mut max_temp: u32 = num_locals;
+    let mut defined = TempBitset::new();
+    let mut escaping = TempBitset::new();
     for (idx, insn) in insns.iter().enumerate() {
         // Control can enter here from elsewhere, so nothing carries over.
-        if jump_targets.contains(&idx) {
+        if is_jump_target[idx] {
             defined.clear();
         }
-        reads.clear();
-        collect_reads(insn, &mut reads);
-        for &r in &reads {
-            max_reg = max_reg.max(r);
-            if r >= num_locals && !defined.contains(&r) {
-                escaping.insert(r);
+        for_each_read(insn, |r| {
+            if r >= num_locals {
+                has_temp = true;
+                max_temp = max_temp.max(r);
+                let bit = (r - num_locals) as usize;
+                if !defined.contains(bit) {
+                    escaping.insert(bit);
+                }
             }
-        }
+        });
         // Reads are folded in before writes so an instruction that both reads
         // and writes `r` is judged against the *previous* definition.
-        writes.clear();
-        collect_writes(insn, &mut writes);
-        for &w in &writes {
-            max_reg = max_reg.max(w);
-            defined.insert(w);
-        }
+        for_each_write(insn, |w| {
+            if w >= num_locals {
+                has_temp = true;
+                max_temp = max_temp.max(w);
+                defined.insert((w - num_locals) as usize);
+            }
+        });
+    }
+    if !has_temp {
+        return dead_buf;
     }
 
-    // Pass 2 (reverse): nearest upcoming read / write per register, and the
-    // nearest upcoming jump target.
-    let slots = max_reg as usize + 1;
-    let mut next_read = vec![n; slots];
-    let mut next_write = vec![n; slots];
+    // Pass 2 (reverse): nearest upcoming read / write per temp register, and
+    // the nearest upcoming jump target.
+    let dead = dead_buf.as_mut_slice();
+    let temp_slots = (max_temp - num_locals) as usize + 1;
+    let mut next_read_buf = TempSlotBuf::new(temp_slots, n);
+    let mut next_write_buf = TempSlotBuf::new(temp_slots, n);
+    let next_read = next_read_buf.as_mut_slice();
+    let next_write = next_write_buf.as_mut_slice();
     let mut next_target = n;
     for idx in (0..n).rev() {
         // The running state describes positions `> idx`.  At `idx` that is
@@ -180,30 +309,32 @@ fn load_const_dead_after_use(
         if idx > 0
             && let Insn::LoadConst(r, _) = insns[idx - 1]
             && r >= num_locals
-            && !escaping.contains(&r)
         {
-            let (read_at, write_at) = (next_read[r as usize], next_write[r as usize]);
-            // Live only if a read comes strictly before the first jump target
-            // (a read at the target is reached by an incoming edge, so it sees
-            // a different definition) and at or before the next write (a
-            // same-instruction read+write reads the old value).
-            dead[idx - 1] = !(read_at < next_target && read_at <= write_at);
+            let slot = (r - num_locals) as usize;
+            if !escaping.contains(slot) {
+                let (read_at, write_at) = (next_read[slot], next_write[slot]);
+                // Live only if a read comes strictly before the first jump target
+                // (a read at the target is reached by an incoming edge, so it sees
+                // a different definition) and at or before the next write (a
+                // same-instruction read+write reads the old value).
+                dead[idx - 1] = !(read_at < next_target && read_at <= write_at);
+            }
         }
-        if jump_targets.contains(&idx) {
+        if is_jump_target[idx] {
             next_target = idx;
         }
-        reads.clear();
-        collect_reads(&insns[idx], &mut reads);
-        for &r in &reads {
-            next_read[r as usize] = idx;
-        }
-        writes.clear();
-        collect_writes(&insns[idx], &mut writes);
-        for &w in &writes {
-            next_write[w as usize] = idx;
-        }
+        for_each_read(&insns[idx], |r| {
+            if r >= num_locals {
+                next_read[(r - num_locals) as usize] = idx;
+            }
+        });
+        for_each_write(&insns[idx], |w| {
+            if w >= num_locals {
+                next_write[(w - num_locals) as usize] = idx;
+            }
+        });
     }
-    dead
+    dead_buf
 }
 
 /// True if the register(s) backing a `KwCallName` include `r`.
@@ -214,15 +345,12 @@ fn kwcall_name_reads(name: &crate::bytecode::KwCallName, r: u32) -> bool {
     }
 }
 
-/// Insert the register(s) backing a `KwCallName` into a read set.
-fn kwcall_name_insert(name: &crate::bytecode::KwCallName, reads: &mut HashSet<u32>) {
+/// Visit the register(s) backing a `KwCallName`.
+#[inline]
+fn kwcall_name_for_each(name: &crate::bytecode::KwCallName, f: &mut impl FnMut(u32)) {
     match name {
-        crate::bytecode::KwCallName::Callee(reg) => {
-            reads.insert(*reg);
-        }
-        crate::bytecode::KwCallName::Method { obj, .. } => {
-            reads.insert(*obj);
-        }
+        crate::bytecode::KwCallName::Callee(reg) => f(*reg),
+        crate::bytecode::KwCallName::Method { obj, .. } => f(*obj),
     }
 }
 
@@ -441,10 +569,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
     }
 }
 
-/// Collect every register read by `insn` into `reads`.  O(1) per instruction
-/// (amortised O(ranges) for range-based instructions).  Use this instead of
-/// calling `insn_reads_reg` in a loop to avoid the O(n × k) inner loop.
-fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
+/// Visit every register read by `insn` without allocating.  O(1) per
+/// instruction (amortised O(ranges) for range-based instructions).
+fn for_each_read(insn: &Insn, mut f: impl FnMut(u32)) {
     use Insn::*;
     match insn {
         LoadConst(..)
@@ -473,7 +600,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
 
         LoadClassName(_, local, _) => {
             if *local != crate::bytecode::NO_CLASS_LOCAL {
-                reads.insert(*local);
+                f(*local);
             }
         }
 
@@ -514,12 +641,10 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | RecordClassStore(s)
         | RecordClassDel(s)
         | PushExcContext(s)
-        | SyncModuleGlobal(s, _) => {
-            reads.insert(*s);
-        }
+        | SyncModuleGlobal(s, _) => f(*s),
         MatchExceptStar(type_r, src, _, _) => {
-            reads.insert(*type_r);
-            reads.insert(*src);
+            f(*type_r);
+            f(*src);
         }
 
         BinOp(_, a, _, b)
@@ -537,30 +662,30 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | GetItemSeqIntOrExit(_, a, b, _)
         | FormatValueSpec(_, a, b)
         | DeleteItem(a, b) => {
-            reads.insert(*a);
-            reads.insert(*b);
+            f(*a);
+            f(*b);
         }
 
         ListExtendCall { list, src, name } => {
-            reads.insert(*list);
-            reads.insert(*src);
-            kwcall_name_insert(name, reads);
+            f(*list);
+            f(*src);
+            kwcall_name_for_each(name, &mut f);
         }
 
         SetAttr(obj, _, val) | SetTypeVarAttr(obj, _, val) => {
-            reads.insert(*obj);
-            reads.insert(*val);
+            f(*obj);
+            f(*val);
         }
         SetItem(a, b, c) => {
-            reads.insert(*a);
-            reads.insert(*b);
-            reads.insert(*c);
+            f(*a);
+            f(*b);
+            f(*c);
         }
 
         DictMergeKwCall { dict, src, name } => {
-            reads.insert(*dict);
-            reads.insert(*src);
-            kwcall_name_insert(name, reads);
+            f(*dict);
+            f(*src);
+            kwcall_name_for_each(name, &mut f);
         }
         SetItemKwCall {
             dict,
@@ -568,27 +693,27 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             val,
             name,
         } => {
-            reads.insert(*dict);
-            reads.insert(*key);
-            reads.insert(*val);
-            kwcall_name_insert(name, reads);
+            f(*dict);
+            f(*key);
+            f(*val);
+            kwcall_name_for_each(name, &mut f);
         }
 
         Call(base, argc) | CallMemo(base, argc) => {
             for r in *base..=(*base + *argc as u32) {
-                reads.insert(r);
+                f(r);
             }
         }
         CallKw { func, total, .. } => {
             for r in *func..=(*func + *total as u32) {
-                reads.insert(r);
+                f(r);
             }
         }
         CallEx { func, npos, kwargs } => {
             for r in *func..=(*func + *npos as u32) {
-                reads.insert(r);
+                f(r);
             }
-            reads.insert(*kwargs);
+            f(*kwargs);
         }
         CallExArgs {
             func,
@@ -599,37 +724,37 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             ..
         } => {
             for r in *func..=(*func + *npos as u32 + *nkw as u32) {
-                reads.insert(r);
+                f(r);
             }
-            reads.insert(*args_splat);
+            f(*args_splat);
             if *kwargs != crate::bytecode::NO_KWARGS {
-                reads.insert(*kwargs);
+                f(*kwargs);
             }
         }
         BuildList(_, base, n) | BuildTuple(_, base, n) => {
             for r in *base..*base + *n {
-                reads.insert(r);
+                f(r);
             }
         }
         BuildString(_, base, n) => {
             for r in *base..*base + *n as u32 {
-                reads.insert(r);
+                f(r);
             }
         }
         BuildSlice(_, base) => {
             for r in *base..*base + 3 {
-                reads.insert(r);
+                f(r);
             }
         }
         GetSlice(_, obj, base) => {
-            reads.insert(*obj);
+            f(*obj);
             for r in *base..*base + 3 {
-                reads.insert(r);
+                f(r);
             }
         }
         BuildDict(_, base, n, _) => {
             for r in *base..*base + 2 * *n {
-                reads.insert(r);
+                f(r);
             }
         }
         CallMethod {
@@ -638,9 +763,9 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             nargs,
             ..
         } => {
-            reads.insert(*obj);
+            f(*obj);
             for r in *args_base..*args_base + *nargs as u32 {
-                reads.insert(r);
+                f(r);
             }
         }
         CallMethodKw {
@@ -649,9 +774,9 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             total,
             ..
         } => {
-            reads.insert(*obj);
+            f(*obj);
             for r in *args_base..*args_base + *total as u32 {
-                reads.insert(r);
+                f(r);
             }
         }
         CallMethodExpanded {
@@ -660,70 +785,75 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             kw_dict,
             ..
         } => {
-            reads.insert(*obj);
-            reads.insert(*pos_list);
-            reads.insert(*kw_dict);
+            f(*obj);
+            f(*pos_list);
+            f(*kw_dict);
         }
         MakeFunction(_, _, defs_base, defs_n, annots_base, annots_n) => {
             for r in *defs_base..*defs_base + *defs_n {
-                reads.insert(r);
+                f(r);
             }
             if *annots_n > 0 {
                 for r in *annots_base..*annots_base + *annots_n {
-                    reads.insert(r);
+                    f(r);
                 }
             }
         }
         MakeClass(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n) => {
             for r in *bases_base..*bases_base + *bases_n {
-                reads.insert(r);
+                f(r);
             }
             for r in *kwarg_base..*kwarg_base + *kwarg_n {
-                reads.insert(r);
+                f(r);
             }
         }
         MakeClassMeta(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n, meta_reg) => {
-            reads.insert(*meta_reg);
+            f(*meta_reg);
             for r in *bases_base..*bases_base + *bases_n {
-                reads.insert(r);
+                f(r);
             }
             for r in *kwarg_base..*kwarg_base + *kwarg_n {
-                reads.insert(r);
+                f(r);
             }
         }
         MakeTypeAlias(_, _, value_reg, params_reg) => {
-            reads.insert(*value_reg);
-            reads.insert(*params_reg);
+            f(*value_reg);
+            f(*params_reg);
         }
         MakeTypeVar(_, _) => {}
-        Yield { src, .. } => {
-            reads.insert(*src);
-        }
+        Yield { src, .. } => f(*src),
         YieldFrom {
             iter_reg, sent_reg, ..
         } => {
-            reads.insert(*iter_reg);
-            reads.insert(*sent_reg);
+            f(*iter_reg);
+            f(*sent_reg);
         }
-        UnpackEx { src, .. } => {
-            reads.insert(*src);
-        }
+        UnpackEx { src, .. } => f(*src),
         LoadNoneRange { .. } => {}
         Concat { base, count, .. } => {
             for r in *base..*base + *count as u32 {
-                reads.insert(r);
+                f(r);
             }
         }
         // MatchClassPositional reads subj and cls.
         MatchClassPositional { subj, cls, .. } => {
-            reads.insert(*subj);
-            reads.insert(*cls);
+            f(*subj);
+            f(*cls);
         }
 
         CallInlineBinOp { callee, a, b, .. } => {
-            reads.insert(*callee);
-            reads.insert(*a);
-            reads.insert(*b);
+            f(*callee);
+            f(*a);
+            f(*b);
         }
     }
+}
+
+/// Collect every register read by `insn` into `reads`.  O(1) per instruction
+/// (amortised O(ranges) for range-based instructions).  Use this instead of
+/// calling `insn_reads_reg` in a loop to avoid the O(n × k) inner loop.
+fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
+    for_each_read(insn, |r| {
+        reads.insert(r);
+    });
 }

@@ -760,3 +760,240 @@ TypeError: unsupported operand type(s) for +: 'int' and 'str'
 ";
     assert_eq!(stderr, expected, "got:\n{stderr}");
 }
+
+#[test]
+fn loop_constfold_sibling_with_fused_binop_caret_is_byte_exact() {
+    // Issue #2905: a constant-folded sibling (`x = 1 + 2`) inside a loop drops
+    // the global binop count below the pre-optimization count, disabling the
+    // whole-function 1:1 binop recovery.  The interval-bounded `(dst, lhs, op,
+    // const_idx)` pin must still recover both the line and caret of `b // 0`.
+    let src = "\
+def f(b):
+    i = 0
+    while i < 3:
+        x = 1 + 2
+        y = b // 0
+        i += 1
+f(10)
+";
+    let stderr = run_pyrust_stderr("loop_cf_fused.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"loop_cf_fused.py\", line 7, in <module>
+    f(10)
+  File \"loop_cf_fused.py\", line 5, in f
+    y = b // 0
+        ~~^^~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn loop_copyprop_retargeted_fused_binop_caret_is_byte_exact() {
+    // Issue #2905: `pass_copy_prop` retargets the fused op's destination onto
+    // `res` while a sibling constant fold disables the global 1:1 count guard.
+    let src = "\
+def f(b):
+    i = 0
+    while i < 3:
+        t = (2 + 3) * 4
+        res = (b + 1) // 0
+        i += 1
+f(10)
+";
+    let stderr = run_pyrust_stderr("loop_copyprop_fused.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"loop_copyprop_fused.py\", line 7, in <module>
+    f(10)
+  File \"loop_copyprop_fused.py\", line 5, in f
+    res = (b + 1) // 0
+          ~~~~~~~~^^~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn loop_earlier_same_op_before_folded_rhs_div_zero_keeps_line_and_caret() {
+    // Issue #2905: `acc = b // 2` fuses into `BinOpConst(..., 2)` while the
+    // later `b // (2 - 2)` survives as a plain `BinOp` on the same scratch
+    // registers after `2 - 2` folds to `LoadConst(t, 0)`.  LCS must not
+    // rank-match the surviving `BinOp` onto the earlier fused `b // 2`.
+    let src = "\
+def f(b):
+    acc = 0
+    for i in range(5):
+        acc = b // 2
+        if i == 2:
+            b // (2 - 2)
+        b * 2
+f(10)
+";
+    let stderr = run_pyrust_stderr("loop_folded_rhs_div0.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"loop_folded_rhs_div0.py\", line 8, in <module>
+    f(10)
+  File \"loop_folded_rhs_div0.py\", line 6, in f
+    b // (2 - 2)
+    ~~^^~~~~~~~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn loop_later_constfold_same_op_does_not_steal_earlier_fused_caret() {
+    // Issue #2905: when `res = s + 1` is the sole surviving binop and a later
+    // statement `c3 = c1 + c2` folds away, suffix recovery must not hijack
+    // `res = s + 1` onto line 7 (`c1 + c2`).
+    let src = "\
+def f(s):
+    i = 0
+    acc = 0
+    while i < 4:
+        res = s + 1
+        t = 3 * 4
+        c1 = 10; c2 = 20; c3 = c1 + c2
+        acc += 2
+        i += 1
+f(\"hi\")
+";
+    let stderr = run_pyrust_stderr("loop_later_fold_no_steal.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"loop_later_fold_no_steal.py\", line 10, in <module>
+    f(\"hi\")
+  File \"loop_later_fold_no_steal.py\", line 5, in f
+    res = s + 1
+          ~~^~~
+TypeError: can only concatenate str (not \"int\") to str
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn straightline_folded_rhs_and_repeated_augassign_keeps_line_and_caret() {
+    // Issue #2905: `acc += 1` appears 3 times in the unoptimized stream and
+    // folds away at line 4, leaving 2 surviving copies at lines 9 and 11.
+    // Bounded Hunt-Szymanski slack in `lcs_align` keeps lines 9 and 11 aligned
+    // to their true positions instead of collapsing the interval before line 6.
+    let src = "\
+def f(b):
+    i = 0
+    acc = 0
+    acc += 1
+    b / 2
+    b // (2 - 2)
+    acc = b // 2
+    if b > 0:
+        acc += 1
+    if i % 2 == 0:
+        acc += 1
+f(10)
+";
+    let stderr = run_pyrust_stderr("straightline_slack.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"straightline_slack.py\", line 12, in <module>
+    f(10)
+  File \"straightline_slack.py\", line 6, in f
+    b // (2 - 2)
+    ~~^^~~~~~~~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn loop_folded_rhs_before_if_zero_comparison_keeps_line_and_caret() {
+    // Issue #2905: `2 - 2` folds to `LoadConst(t, 0)` right before `b // t`,
+    // matching the raw instruction of `if b > 0:`'s fused-away `LoadConst(t, 0)`.
+    // LCS must not align the synthesized `LoadConst` onto `if b > 0:` and jump
+    // `old_pos` past `b // (2 - 2)`.
+    let src = "\
+def f(b):
+    i = 0
+    acc = 0
+    while i < 4:
+        if i % 2 == 0:
+            acc += 1
+        acc = b // 2
+        b // (2 - 2)
+        if b > 0:
+            acc += 1
+        i += 1
+f(10)
+";
+    let stderr = run_pyrust_stderr("loop_folded_rhs_if0.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"loop_folded_rhs_if0.py\", line 12, in <module>
+    f(10)
+  File \"loop_folded_rhs_if0.py\", line 8, in f
+    b // (2 - 2)
+    ~~^^~~~~~~~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn generator_constfold_with_yield_and_fused_raise_caret_is_byte_exact() {
+    // Issue #2905: generator loop with a constant fold, `yield`, and a fused
+    // raising division must keep exact line and caret.
+    let src = "\
+def gen(n):
+    i = 0
+    while i < n:
+        c = 2 * 3
+        yield i * 2
+        if i == 2:
+            i // 0
+        i += 1
+list(gen(5))
+";
+    let stderr = run_pyrust_stderr("gen_cf_fused.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"gen_cf_fused.py\", line 9, in <module>
+    list(gen(5))
+  File \"gen_cf_fused.py\", line 7, in gen
+    i // 0
+    ~~^^~~
+ZeroDivisionError: integer division or modulo by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn nested_if_and_try_except_with_constfold_and_fused_raise_caret_is_byte_exact() {
+    // Issue #2905: `try`/`except` inside a loop with a constant fold and a
+    // non-caught fused raising `% 0` must keep exact line and caret.
+    let src = "\
+def f(b):
+    i = 0
+    while i < 3:
+        try:
+            a = 1 + 2
+            b / 2
+            b % 0
+        except ValueError:
+            pass
+        i += 1
+f(8)
+";
+    let stderr = run_pyrust_stderr("loop_try_cf_fused.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"loop_try_cf_fused.py\", line 11, in <module>
+    f(8)
+  File \"loop_try_cf_fused.py\", line 7, in f
+    b % 0
+    ~~^~~
+ZeroDivisionError: integer modulo by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}

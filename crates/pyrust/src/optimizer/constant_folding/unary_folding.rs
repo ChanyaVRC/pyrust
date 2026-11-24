@@ -18,13 +18,14 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
     // else-branch load made the then-branch — which jumps onto the `UnaryOp` —
     // use the else-branch constant).  Same guard as `pass_binop_const_fusion` /
     // `pass_cmpjump_fusion`.
-    let mut jump_targets: HashSet<usize> = HashSet::new();
+    let mut is_jump_target_buf = InlineBoolBuf::new(n, false);
+    let is_jump_target = &mut is_jump_target_buf.as_mut_slice()[..n];
     let mut needs_dead_source = false;
     for (idx, insn) in transformed.iter().enumerate() {
         if let Some(k) = insn_jump_off(insn) {
             let target = idx as i64 + 1 + k as i64;
             if target >= 0 && (target as usize) < n {
-                jump_targets.insert(target as usize);
+                is_jump_target[target as usize] = true;
             }
         }
         needs_dead_source |= matches!(
@@ -43,11 +44,11 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
     // avoiding the per-candidate tail scans that made a later, unrelated back
     // edge reject every literal negation in the function (issue #2907).
     let dead_after_use = needs_dead_source
-        .then(|| load_const_dead_after_use(&transformed, num_locals, &jump_targets));
+        .then(|| load_const_dead_after_use(&transformed, num_locals, is_jump_target));
 
     let mut i = 0;
     while i + 1 < n {
-        if jump_targets.contains(&(i + 1)) {
+        if is_jump_target[i + 1] {
             i += 1;
             continue;
         }
@@ -61,7 +62,7 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
                     && (*dst == *lc_reg
                         || dead_after_use
                             .as_ref()
-                            .is_some_and(|dead| dead[i])) =>
+                            .is_some_and(|dead| dead.as_slice()[i])) =>
             {
                 let c = &consts[*c_idx as usize];
                 // Fold through canonical built-in unary semantics rather than

@@ -318,8 +318,8 @@ fn pass_licm(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     insns
 }
 
-/// Collect all registers *written* (defined) by `insn` into `written`.
-fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
+/// Visit every register *written* (defined) by `insn` without allocating.
+fn for_each_write(insn: &Insn, mut f: impl FnMut(u32)) {
     use Insn::*;
     match insn {
         LoadConst(r, _)
@@ -368,41 +368,35 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | CallExArgs { func: r, .. }
         | Move(r, _)
         | CopyReg(r, _)
-        | DeleteLocal(r, _, _) => {
-            written.insert(*r);
-        }
+        | DeleteLocal(r, _, _) => f(*r),
         MatchExceptStar(_, src, dst, _) => {
-            written.insert(*src); // src_group is updated to remaining
-            written.insert(*dst); // matched_dst gets the sub-group
+            f(*src); // src_group is updated to remaining
+            f(*dst); // matched_dst gets the sub-group
         }
         LoadNoneRange { start, count } => {
             for i in 0..*count as u32 {
-                written.insert(start + i);
+                f(start + i);
             }
         }
         CallMethod { dst, .. }
         | CallMethodKw { dst, .. }
         | CallMethodExpanded { dst, .. }
-        | Yield { dst, .. } => {
-            written.insert(*dst);
-        }
+        | Yield { dst, .. } => f(*dst),
         YieldFrom {
             result_reg,
             sent_reg,
             ..
         } => {
-            written.insert(*result_reg);
+            f(*result_reg);
             // sent_reg is also written (to None before suspension and to the
             // sent value on each resume), so the optimizer must not assume it
             // retains its pre-YieldFrom value after this instruction.
-            written.insert(*sent_reg);
+            f(*sent_reg);
         }
-        ForIter(dst, _, _) => {
-            written.insert(*dst);
-        }
+        ForIter(dst, _, _) => f(*dst),
         Unpack(base, _, n) => {
             for i in 0..*n {
-                written.insert(base + i);
+                f(base + i);
             }
         }
         UnpackEx {
@@ -412,12 +406,10 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
             ..
         } => {
             for i in 0..(*before as u32 + 1 + *after) {
-                written.insert(dst_base + i);
+                f(dst_base + i);
             }
         }
-        Concat { dst, .. } => {
-            written.insert(*dst);
-        }
+        Concat { dst, .. } => f(*dst),
         // Instructions that don't write to any register.
         StoreGlobal(..)
         | StoreCell(..)
@@ -473,10 +465,17 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         // MatchClassPositional writes dst_base..dst_base+n.
         MatchClassPositional { dst_base, n, .. } => {
             for i in 0..*n {
-                written.insert(dst_base + i);
+                f(dst_base + i);
             }
         }
     }
+}
+
+/// Collect all registers *written* (defined) by `insn` into `written`.
+fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
+    for_each_write(insn, |r| {
+        written.insert(r);
+    });
 }
 
 /// Returns `true` if `insn` is a pure, loop-invariant instruction.
