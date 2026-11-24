@@ -1,12 +1,11 @@
 // `statistics` module — body for the `statistics` entry in
 // `pyrust_builtin_modules!` (issue #2811).
 //
-// CPython's `statistics` module is pure Python.  It internally relies on
-// `fractions.Fraction` for exact rational arithmetic, but pyrust ships
-// neither `fractions` nor `decimal`, so `statistics_py.py` is a float-based
-// adaptation that still returns an exact `int` from `mean` when the inputs
-// are integral and divide evenly (the load-bearing parity case
-// `statistics.mean([1, 2, 3, 4, 5]) == 3`).
+// CPython's `statistics` module is pure Python.  `statistics_py.py` is a
+// lightweight adaptation that uses `numbers.Integral` for exact-integer fast
+// paths (returning an exact `int` from `mean` / `variance` / `pvariance` when
+// integral inputs divide evenly, matching `statistics.mean([1, 2, 3, 4, 5]) == 3`)
+// and floating-point arithmetic otherwise.
 //
 // The native `pyrust_module!` block is intentionally empty — it exists only
 // so the `pyrust_builtin_modules!` plumbing (`module()` / `regs()`) is
@@ -57,6 +56,8 @@ pub(crate) fn inject_python_members(
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<Option<Value>> {
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
+    let numbers_mod = interp.load_module("numbers")?;
+    ns.dict_insert(PyKey::str_from("numbers"), numbers_mod)?;
     interp.exec_source(STATISTICS_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()

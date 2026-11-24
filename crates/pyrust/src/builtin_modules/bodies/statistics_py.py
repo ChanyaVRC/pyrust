@@ -1,11 +1,13 @@
 """Basic statistics module.
 
 A pure-Python subset of CPython's `statistics` module (targeting 3.12
-behaviour), adapted to avoid dependencies pyrust does not yet ship
-(`fractions`, `decimal`).  CPython uses `fractions.Fraction` internally for
-exact rational arithmetic; here the averages are computed with floating
-point and `mean` returns an exact `int` when every input is integral and the
-sum divides evenly (matching `statistics.mean([1, 2, 3, 4, 5]) == 3`).
+behaviour).  Uses ``numbers.Integral`` for exact-integer fast paths (returning
+an exact ``int`` from ``mean`` / ``variance`` / ``pvariance`` when integral
+inputs divide evenly, matching ``statistics.mean([1, 2, 3, 4, 5]) == 3``) and
+floating-point arithmetic otherwise.
+
+``numbers`` is pre-seeded into this module's namespace by
+``statistics.rs::inject_python_members``.
 
 Reference: https://docs.python.org/3/library/statistics.html
 """
@@ -45,7 +47,7 @@ def _coerce_data(data):
 
 def _all_integral(data):
     for x in data:
-        if not isinstance(x, int):
+        if not isinstance(x, numbers.Integral):
             return False
     return True
 
@@ -257,7 +259,7 @@ def variance(data, xbar=None):
     if _all_integral(data):
         if xbar is None:
             return _exact_or_float(_ss_integral(data), n * (n - 1))
-        if isinstance(xbar, int):
+        if isinstance(xbar, numbers.Integral):
             return _exact_or_float(_ss_integral_c(data, xbar), n - 1)
     return _ss(data, xbar) / (n - 1)
 
@@ -271,7 +273,7 @@ def pvariance(data, mu=None):
     if _all_integral(data):
         if mu is None:
             return _exact_or_float(_ss_integral(data), n * n)
-        if isinstance(mu, int):
+        if isinstance(mu, numbers.Integral):
             return _exact_or_float(_ss_integral_c(data, mu), n)
     return _ss(data, mu) / n
 

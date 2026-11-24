@@ -8,11 +8,10 @@
 // onto the module by `inject_python_members` (mirrors `json` / `dataclasses`).
 //
 // The upstream `_pydecimal.py` pulls in a few modules pyrust does not ship
-// (`numbers`, `contextvars`, optionally `locale`).  Those are stubbed inside
+// (`contextvars`, optionally `locale`).  Those are stubbed inside
 // `decimal_py.py` itself (see the `pyrust note:` comments there).  The
-// dependencies pyrust *does* ship (`math`, `re`, `collections`, `sys`,
-// `itertools`) are imported at the top of the Python source and resolve through
-// the normal `import` machinery in the exec namespace.
+// dependencies pyrust *does* ship (`math`, `numbers`, `re`, `collections`,
+// `sys`, `itertools`) are pre-seeded into the exec namespace below.
 //
 // The native `pyrust_module!` block is intentionally empty — it exists only so
 // the `pyrust_builtin_modules!` plumbing (`module()` / `regs()`) is generated
@@ -122,6 +121,7 @@ pub(crate) fn inject_python_members(
     for (alias, module_name) in [
         ("sys", "sys"),
         ("_math", "math"),
+        ("_numbers", "numbers"),
         ("re", "re"),
         ("_collections", "collections"),
         ("_itertools", "itertools"),

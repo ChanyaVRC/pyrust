@@ -1,16 +1,11 @@
 # Fraction, infinite-precision, rational numbers.
 #
-# Adapted from CPython 3.12's Lib/fractions.py.  The reference module inherits
-# from ``numbers.Rational`` and special-cases ``decimal.Decimal``; pyrust does
-# not yet ship ``numbers`` or ``decimal``, so those dependencies are removed:
-# ``Fraction`` is a plain class and the ``isinstance(x, numbers.Rational)`` /
-# ``isinstance(x, Decimal)`` checks collapse to the concrete ``int`` / ``float``
-# / ``Fraction`` cases pyrust supports.  All arithmetic, comparison, hashing,
-# string parsing, ``limit_denominator`` and ``__format__`` logic is a faithful
-# port.
+# Adapted from CPython 3.12's Lib/fractions.py.  ``Fraction`` inherits from
+# ``numbers.Rational`` and uses the ``numbers`` ABC hierarchy for mixed-type
+# arithmetic and comparisons.
 #
-# NOTE: ``functools``, ``math``, ``operator`` and ``re`` are NOT imported here.
-# They are pre-seeded into this module's namespace from Rust
+# NOTE: ``functools``, ``math``, ``numbers``, ``operator`` and ``re`` are NOT
+# imported here.  They are pre-seeded into this module's namespace from Rust
 # (``fractions.rs::inject_python_members``) before this source is exec'd,
 # because a top-level ``import X`` inside an explicit-dict exec namespace does
 # not bind the name for module-top-level reads.
@@ -120,17 +115,7 @@ _FLOAT_FORMAT_SPECIFICATION_MATCHER = re.compile(r"""
 """, re.DOTALL | re.VERBOSE).fullmatch
 
 
-def _numer(x):
-    """numerator of an int or Fraction."""
-    return x.numerator if isinstance(x, Fraction) else x
-
-
-def _denom(x):
-    """denominator of an int or Fraction."""
-    return x.denominator if isinstance(x, Fraction) else 1
-
-
-class Fraction:
+class Fraction(numbers.Rational):
     """This class implements rational numbers.
 
     In the two-argument form of the constructor, Fraction(8, 6) will
@@ -168,7 +153,7 @@ class Fraction:
                 self._denominator = 1
                 return self
 
-            elif isinstance(numerator, Fraction):
+            elif isinstance(numerator, numbers.Rational):
                 self._numerator = numerator.numerator
                 self._denominator = numerator.denominator
                 return self
@@ -213,11 +198,11 @@ class Fraction:
         elif type(numerator) is int is type(denominator):
             pass  # *very* normal case
 
-        elif (isinstance(numerator, (int, Fraction)) and
-              isinstance(denominator, (int, Fraction))):
+        elif (isinstance(numerator, numbers.Rational) and
+              isinstance(denominator, numbers.Rational)):
             numerator, denominator = (
-                _numer(numerator) * _denom(denominator),
-                _numer(denominator) * _denom(numerator)
+                numerator.numerator * denominator.denominator,
+                denominator.numerator * numerator.denominator
                 )
         else:
             raise TypeError("both arguments should be "
@@ -240,7 +225,7 @@ class Fraction:
 
         Beware that Fraction.from_float(0.3) != Fraction(3, 10).
         """
-        if isinstance(f, int):
+        if isinstance(f, numbers.Integral):
             return cls(f)
         elif not isinstance(f, float):
             raise TypeError("%s.from_float() only takes floats, not %r (%s)" %
@@ -449,12 +434,12 @@ class Fraction:
         forward.__doc__ = monomorphic_operator.__doc__
 
         def reverse(b, a):
-            if isinstance(a, (int, Fraction)):
+            if isinstance(a, numbers.Rational):
                 # Includes ints.
                 return monomorphic_operator(Fraction(a), b)
-            elif isinstance(a, float):
+            elif isinstance(a, numbers.Real):
                 return fallback_operator(float(a), float(b))
-            elif isinstance(a, complex):
+            elif isinstance(a, numbers.Complex):
                 return fallback_operator(complex(a), complex(b))
             else:
                 return NotImplemented
@@ -563,7 +548,7 @@ class Fraction:
         since roots are generally irrational. If b is an integer, the
         result will be rational.
         """
-        if isinstance(b, (int, Fraction)):
+        if isinstance(b, numbers.Rational):
             if b.denominator == 1:
                 power = b.numerator
                 if power >= 0:
@@ -591,7 +576,7 @@ class Fraction:
             # If a is an int, keep it that way if possible.
             return a ** b._numerator
 
-        if isinstance(a, (int, Fraction)):
+        if isinstance(a, numbers.Rational):
             return Fraction(a.numerator, a.denominator) ** b
 
         if b._denominator == 1:
@@ -617,19 +602,6 @@ class Fraction:
             return _index(-(-a._numerator // a._denominator))
         else:
             return _index(a._numerator // a._denominator)
-
-    def __float__(a):
-        """float(self) = self.numerator / self.denominator
-
-        Provided directly (CPython inherits it from numbers.Rational, which
-        pyrust does not ship).  Uses integer true division so ratios of huge
-        integers convert without overflowing.
-        """
-        return a._numerator / a._denominator
-
-    def __complex__(a):
-        """complex(self)"""
-        return complex(float(a))
 
     def __trunc__(a):
         """math.trunc(a)"""
@@ -678,15 +650,10 @@ class Fraction:
         """a == b"""
         if type(b) is int:
             return a._numerator == b and a._denominator == 1
-        # CPython uses ``isinstance(b, numbers.Rational)`` here, which covers
-        # ``int`` and ``bool`` (both registered as ``Rational``) as well as
-        # ``Fraction``.  pyrust ships no ``numbers`` ABC, so spell out the
-        # concrete rational types -- ``int`` here includes ``bool``, and an
-        # ``int``/``bool`` exposes ``.numerator`` / ``.denominator``.
-        if isinstance(b, (int, Fraction)):
+        if isinstance(b, numbers.Rational):
             return (a._numerator == b.numerator and
                     a._denominator == b.denominator)
-        if isinstance(b, complex) and b.imag == 0:
+        if isinstance(b, numbers.Complex) and b.imag == 0:
             b = b.real
         if isinstance(b, float):
             if math.isnan(b) or math.isinf(b):
@@ -703,7 +670,7 @@ class Fraction:
     def _richcmp(self, other, op):
         """Helper for comparison operators, for internal use only."""
         # convert other to a Fraction instance where reasonable.
-        if isinstance(other, (int, Fraction)):
+        if isinstance(other, numbers.Rational):
             return op(self._numerator * other.denominator,
                       self._denominator * other.numerator)
         if isinstance(other, float):

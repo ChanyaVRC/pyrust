@@ -46,13 +46,28 @@ def abstractstaticmethod(callable):
     return staticmethod(callable)
 
 
+def _is_abstract(value):
+    """Return True if *value* represents an abstract method or descriptor."""
+    if getattr(value, "__isabstractmethod__", False):
+        return True
+    if isinstance(value, property):
+        return (
+            getattr(value.fget, "__isabstractmethod__", False)
+            or getattr(value.fset, "__isabstractmethod__", False)
+            or getattr(value.fdel, "__isabstractmethod__", False)
+        )
+    if isinstance(value, (classmethod, staticmethod)):
+        return getattr(getattr(value, "__func__", None), "__isabstractmethod__", False)
+    return False
+
+
 def abstractproperty(fget):
     """A decorator indicating abstract properties.
 
     Deprecated since Python 3.3: use ``property`` with ``abstractmethod``.
     """
-    p = property(fget)
-    return p
+    fget.__isabstractmethod__ = True
+    return property(fget)
 
 
 # A monotonically increasing token bumped whenever the ABC virtual-subclass
@@ -74,14 +89,14 @@ class ABCMeta(type):
         abstracts = set()
         # Names flagged abstract in this class body.
         for key, value in namespace.items():
-            if getattr(value, "__isabstractmethod__", False):
+            if _is_abstract(value):
                 abstracts.add(key)
         # Inherited abstract methods that have not been overridden with a
         # concrete implementation.
         for base in bases:
             for key in getattr(base, "__abstractmethods__", set()):
                 value = getattr(cls, key, None)
-                if getattr(value, "__isabstractmethod__", False):
+                if _is_abstract(value):
                     abstracts.add(key)
         cls.__abstractmethods__ = frozenset(abstracts)
         # Per-class registry of virtual subclasses registered via .register().
@@ -113,6 +128,8 @@ class ABCMeta(type):
             raise TypeError("Can only register classes")
         if issubclass(subclass, cls):
             return subclass  # Already a subclass.
+        if issubclass(cls, subclass):
+            raise RuntimeError("Refusing to create an inheritance cycle")
         cls._abc_registry.add(subclass)
         global _abc_invalidation_counter
         _abc_invalidation_counter += 1
@@ -120,7 +137,11 @@ class ABCMeta(type):
 
     def __instancecheck__(cls, instance):
         """Override for isinstance(instance, cls)."""
-        return cls.__subclasscheck__(type(instance))
+        subclass = instance.__class__
+        subtype = type(instance)
+        if subtype is subclass:
+            return cls.__subclasscheck__(subtype)
+        return cls.__subclasscheck__(subclass) or cls.__subclasscheck__(subtype)
 
     def __subclasscheck__(cls, subclass):
         """Override for issubclass(subclass, cls)."""
@@ -141,13 +162,18 @@ class ABCMeta(type):
         for klass in subclass.__mro__:
             if klass is cls:
                 return True
-        # Virtual subclasses registered on cls or any class in cls's MRO.
-        for klass in cls.__mro__:
-            registry = getattr(klass, "_abc_registry", None)
-            if registry:
-                for registered in registry:
-                    if issubclass(subclass, registered):
-                        return True
+        # Virtual subclasses registered directly on cls.
+        registry = getattr(cls, "_abc_registry", None)
+        if registry:
+            for registered in registry:
+                if issubclass(subclass, registered):
+                    return True
+        # Real subclasses of cls (may have virtual subclasses registered on
+        # them — e.g. `Integral.register(int)` makes `issubclass(int, Number)`
+        # True via `Number -> Complex -> Real -> Rational -> Integral`).
+        for scls in cls.__subclasses__():
+            if issubclass(subclass, scls):
+                return True
         return False
 
 
@@ -182,10 +208,10 @@ def update_abstractmethods(cls):
     for base in cls.__bases__:
         for key in getattr(base, "__abstractmethods__", set()):
             value = getattr(cls, key, None)
-            if getattr(value, "__isabstractmethod__", False):
+            if _is_abstract(value):
                 abstracts.add(key)
     for key, value in cls.__dict__.items():
-        if getattr(value, "__isabstractmethod__", False):
+        if _is_abstract(value):
             abstracts.add(key)
     cls.__abstractmethods__ = frozenset(abstracts)
     return cls
