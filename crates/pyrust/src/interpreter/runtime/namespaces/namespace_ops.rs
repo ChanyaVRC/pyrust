@@ -391,19 +391,26 @@ impl Interpreter {
                 if let Some(e) = err {
                     return Err(e);
                 }
+                let is_package = self.module_has_package_path(&mod_val)?;
                 let mut out = Vec::with_capacity(names.len());
                 let mut attr_err: Option<(String, String)> = None;
                 for name in &names {
-                    match m.borrow().get_attr_value(name) {
+                    let existing = m.borrow().get_attr_value(name);
+                    match existing {
                         Some(value) if !value.is_unset() => out.push((name.clone(), value)),
-                        None => {
-                            attr_err = Some((
-                                format!("module '{}' has no attribute '{}'", module_name, name,),
-                                name.clone(),
-                            ));
-                            break;
-                        }
-                        Some(_) => {
+                        _ => {
+                            if is_package {
+                                let sub_name = format!("{module_name}.{name}");
+                                match self.load_module(&sub_name) {
+                                    Ok(sub_val) => {
+                                        out.push((name.clone(), sub_val));
+                                        continue;
+                                    }
+                                    Err(load_err)
+                                        if self.is_missing_module_error(&load_err, &sub_name) => {}
+                                    Err(load_err) => return Err(load_err),
+                                }
+                            }
                             attr_err = Some((
                                 format!("module '{}' has no attribute '{}'", module_name, name,),
                                 name.clone(),
