@@ -714,17 +714,12 @@ mod tests {
     }
 
     #[test]
-    fn environment_storage_is_mutually_exclusive_namespace_or_cells() {
+    fn environment_storage_is_namespace_only_with_zero_enum_overhead() {
         let root = Environment::new(None);
-        assert!(root.borrow().try_namespace_values().is_some());
-        assert!(root.borrow().cells().is_none());
-
-        let slot = super::CellSlot::new(Value::int(7));
-        let mut cells = smallvec::SmallVec::new();
-        cells.push(slot.clone());
-        let cell_env = Environment::new_cells(Some(root.clone()), cells);
-        assert!(cell_env.borrow().try_namespace_values().is_none());
-        assert_eq!(cell_env.borrow().cells().map(<[_]>::len), Some(1));
-        assert!(cell_env.borrow().cells().unwrap()[0].ptr_eq(&slot));
+        assert!(root.borrow().namespace_values().is_empty());
+        assert_eq!(
+            std::mem::size_of::<super::EnvironmentStorage>(),
+            std::mem::size_of::<super::EnvValues>()
+        );
     }
 }

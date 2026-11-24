@@ -681,9 +681,10 @@ mod vm_tests {
     #[test]
     fn generator_drive_hot_struct_sizes_stay_compact() {
         use super::{
-            GenDriveFrame, GeneratorFrame, IterCacheBuf, IterState, ItersBuf, LoopFastOutcome,
-            LoopIteratorAdvance,
+            GenColdState, GenDriveFrame, GeneratorFrame, IterCacheBuf, IterState, ItersBuf,
+            LoopFastOutcome, LoopIteratorAdvance,
         };
+        use crate::interpreter::InterpreterColdState;
         use std::mem::size_of;
 
         assert!(
@@ -718,9 +719,18 @@ mod vm_tests {
             "LoopFastOutcome grew to {} B (expected 16 B with boxed PyError)",
             size_of::<LoopFastOutcome>()
         );
+        eprintln!(
+            "STRUCT SIZES (#3162): GeneratorFrame={} B, GenColdState={} B, Interpreter={} B, InterpreterColdState={} B, EnvironmentStorage={} B, Environment={} B",
+            size_of::<GeneratorFrame>(),
+            size_of::<GenColdState>(),
+            size_of::<Interpreter>(),
+            size_of::<InterpreterColdState>(),
+            size_of::<pyrust_core::EnvironmentStorage>(),
+            size_of::<pyrust_core::Environment>(),
+        );
         assert!(
-            size_of::<GeneratorFrame>() <= 304,
-            "GeneratorFrame grew to {} B (guard <= 304 B)",
+            size_of::<GeneratorFrame>() <= 224,
+            "GeneratorFrame grew to {} B (guard <= 224 B; keep cold exc/async/frame state in GenColdState)",
             size_of::<GeneratorFrame>()
         );
         assert!(
@@ -728,6 +738,96 @@ mod vm_tests {
             "GenDriveFrame grew to {} B (guard <= 256 B)",
             size_of::<GenDriveFrame>()
         );
+        assert!(
+            size_of::<Interpreter>() <= 320,
+            "Interpreter grew to {} B (guard <= 320 B; keep cold tables/buffers in InterpreterColdState)",
+            size_of::<Interpreter>()
+        );
+        assert_eq!(
+            size_of::<pyrust_core::EnvironmentStorage>(),
+            size_of::<pyrust_core::EnvValues>(),
+            "EnvironmentStorage must carry zero discriminant overhead after removing Cells"
+        );
+    }
+
+    #[test]
+    fn generator_cold_state_remains_unallocated_on_happy_path_and_allocates_lazily() {
+        use super::GeneratorFrame;
+        use pyrust_core::ValueKind;
+
+        let mut interp = Interpreter::default();
+        interp
+            .exec_source(
+                r#"
+def plain_gen():
+    yield 1
+    yield 2
+    return 3
+
+def exc_gen():
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        yield 42
+
+g = plain_gen()
+first = next(g)
+assert first == 1
+
+eg = exc_gen()
+exc_first = next(eg)
+assert exc_first == 42
+"#,
+                None,
+                None,
+            )
+            .expect("generator setup must execute");
+
+        let g_val = interp.lookup_name("g").unwrap().unwrap();
+        let ValueKind::Generator(g_cell) = g_val.kind() else {
+            panic!("g must be a generator");
+        };
+        {
+            let borrow = g_cell.borrow();
+            let frame = borrow
+                .downcast_ref::<GeneratorFrame>()
+                .expect("g must hold a GeneratorFrame");
+            assert!(
+                frame.cold.borrow().is_none(),
+                "plain yield/resume generator must not allocate GenColdState"
+            );
+        }
+
+        // Introspecting gi_frame lazily allocates GenColdState with frame_cache.
+        interp
+            .exec_source("f = g.gi_frame\nassert f is not None\n", None, None)
+            .expect("gi_frame introspection must succeed");
+        {
+            let borrow = g_cell.borrow();
+            let frame = borrow
+                .downcast_ref::<GeneratorFrame>()
+                .expect("g must hold a GeneratorFrame");
+            assert!(
+                frame.has_frame_cache(),
+                "gi_frame introspection must lazily populate frame_cache"
+            );
+        }
+
+        // Yielding inside an except block lazily allocates GenColdState with exc state.
+        let eg_val = interp.lookup_name("eg").unwrap().unwrap();
+        let ValueKind::Generator(eg_cell) = eg_val.kind() else {
+            panic!("eg must be a generator");
+        };
+        {
+            let borrow = eg_cell.borrow();
+            let frame = borrow
+                .downcast_ref::<GeneratorFrame>()
+                .expect("eg must hold a GeneratorFrame");
+            assert!(
+                frame.has_exc_state(),
+                "generator yielding inside except must persist exc state in GenColdState"
+            );
+        }
     }
 
     #[test]

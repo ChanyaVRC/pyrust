@@ -142,37 +142,14 @@ impl ExcClasses {
     }
 }
 
-pub struct Interpreter {
-    pub(crate) env: EnvRef,
-    pub(crate) active_exception: Option<Value>,
-    /// Stack of currently-handled exceptions (PEP 3134 `__context__`).
-    /// An entry is pushed when an exception handler catches an exception
-    /// (matching CPython's per-frame "exc_info" stack), and popped when
-    /// the handler exits — either normally via `EndExcept`, or because
-    /// a new exception propagates out of the handler body.
-    ///
-    /// The top of this stack is the exception whose handler we are
-    /// currently inside, and it is the value attached as `__context__`
-    /// to any *new* exception raised inside that handler body.
-    ///
-    /// Note: this differs from `active_exception`, which can be cleared
-    /// transiently while the handler body is running (e.g. by an inner
-    /// `EndExcept`).  The stack lets us restore the outer context.
-    handled_exc_stack: Vec<Value>,
-    /// Parallel save-stack for `active_exception` across nested `except`
-    /// blocks.  One entry is pushed (recording the *previous*
-    /// `active_exception`) each time `handle_vm_error` dispatches an
-    /// exception to a handler, and one entry is popped on `EndExcept` (normal
-    /// exit) or `RaiseReRaise` (re-raise).  The popped value is restored to
-    /// `active_exception`, so the outer handler's exception is visible again
-    /// after an inner handler exits.
-    ///
-    /// This mirrors CPython's per-frame `_PyErr_StackItem` chain.  Without
-    /// it, the dedup-pop inside `handle_vm_error` (which removes the outer
-    /// exception from `handled_exc_stack` when a new inner exception is
-    /// dispatched) means `EndExcept`'s `handled_exc_stack.last()` lookup
-    /// returns `None` instead of the outer exception.
-    exc_saved_active: Vec<Option<Value>>,
+/// Cold, rarely-used interpreter metadata, caches, and diagnostic/guard tables
+/// extracted behind a single `Box<InterpreterColdState>` (issue #3162).
+///
+/// Keeping these out of line shrinks `size_of::<Interpreter>()` from ~1008 B
+/// to ~272 B so hot VM state (`env`, `active_exception`, `vm_frame_views`,
+/// `tramp_arena`, `tramp_stack`, `gen_drive_stack`, call buffers) stays
+/// densely packed in the first few cache lines.
+pub(crate) struct InterpreterColdState {
     script_dir: Option<PathBuf>,
     /// Path to the top-level script being executed, used to populate the
     /// `filename` field of `FrameInfo` when formatting tracebacks.
@@ -217,31 +194,6 @@ pub struct Interpreter {
     /// the first slot because its process-canonical receiver cannot itself
     /// identify the active Interpreter's reload generation.
     module_class_cache: Option<Box<ModuleClassCache>>,
-    /// Canonical filter and recording-context state for the `warnings` module.
-    ///
-    /// The concrete policy data remains private to the built-in module. Root
-    /// interpreters own independent handles; filesystem-import children clone
-    /// the handle because they are an implementation detail of the same
-    /// Python interpreter and share `sys.modules` with their parent.
-    pub(crate) warnings_state: Rc<crate::builtin_modules::warnings::WarningsState>,
-    /// Shared per-interpreter `sys` runtime state (switch interval, coroutine
-    /// origin tracking depth, profile/trace/asyncgen/audit hooks — issue
-    /// #2970). Shared via `Rc` with child filesystem-import interpreters.
-    pub(crate) sys_state: Rc<RefCell<SysRuntimeState>>,
-    /// Decimal integer string-conversion limit configured through
-    /// `sys.set_int_max_str_digits` (0 means unlimited).
-    ///
-    /// The core value layer consumes this through a scoped TLS adapter only
-    /// while this interpreter is executing. Keeping the authoritative value
-    /// here prevents independent roots on one host thread from leaking policy.
-    int_max_str_digits: usize,
-    /// Maximum Python call depth for this interpreter.
-    ///
-    /// The active depth remains thread-local because nested Interpreter calls
-    /// share one host stack. The configurable limit is interpreter-owned so
-    /// independent roots on the same thread cannot change one another's
-    /// `sys.setrecursionlimit` setting.
-    recursion_limit: usize,
     env_pool: Vec<EnvRef>,
     /// Automatic memoization of pure scalar functions (#2234): caches the result
     /// of a `CallMemo` (statically-pure callee) keyed by `(fn_id, integer
@@ -259,22 +211,14 @@ pub struct Interpreter {
     /// explicit frame trampoline enforce the Python recursion limit without
     /// growing the native Rust stack.
     memo_in_flight: std::collections::HashSet<MemoKey>,
-    /// Reusable argument buffer for VM Call instructions — avoids a per-call
-    /// heap allocation in the common (non-recursive) case.
-    call_arg_buf: Vec<ExpandedCallArg>,
     /// Reusable argument buffer for `invoke_class_method`'s `BuiltinFunction`
-    /// path — avoids a per-invocation heap allocation on the hot dunder
+    /// path — avoids a per-invocation heap allocation on the dunder
     /// dispatch path (`__add__`, `__iter__`, `__next__`, `__len__`, …).
     /// Pattern: `std::mem::take`, clear, fill `self + args`, call dispatch,
     /// then restore so subsequent invocations reuse the grown capacity.
     /// On recursive entry the field is empty (already taken), so a fresh
     /// SmallVec is allocated only for the nested frame.
     pub(crate) invoke_arg_buf: ExpandedArgBuf,
-    /// Reusable positional-args buffer for the builtin bound-method dispatch
-    /// path — avoids a per-call heap allocation on the hot path (issue #276).
-    /// Pattern: `std::mem::take`, clear, fill, use (borrow or drain), then
-    /// restore so subsequent calls reuse the grown capacity.
-    bound_method_pos_buf: Vec<Value>,
     /// Stack of class-namespace store-order lists, pushed by `MakeClass` before
     /// running a class body and popped after.  Each entry tracks the slot numbers
     /// for class-body locals in the **order stores actually executed** at
@@ -285,6 +229,111 @@ pub struct Interpreter {
     /// evaluators plus the lazily materialized live class-frame namespace.
     /// Class-store opcodes update only the state for their exact body.
     pub(crate) class_annotation_scopes: Vec<ActiveClassAnnotationScopes>,
+    /// Legacy recursion stack for aggregate set/view comparisons. Direct
+    /// list, dict, and deque comparisons use the exception-capable pair stack
+    /// below so a structural back-edge raises `RecursionError`.
+    pub(crate) eq_in_progress: Vec<(i64, i64)>,
+    /// Ordered container pairs active under CPython's exception-capable rich
+    /// comparison policy. Call depth plus a comparison-dispatch epoch lets a
+    /// user callback make finite progress without hiding a pure structural
+    /// cycle.
+    pub(crate) comparison_pair_stack: Vec<ComparisonFrame>,
+    pub(crate) comparison_active_contexts: ActiveComparisonContexts,
+    pub(crate) comparison_dispatch_epoch: u64,
+    /// Number of retained native container-comparison frames.
+    pub(crate) comparison_recursion_cost: usize,
+    /// Structural-only root cost not charged to Python callback entry.
+    pub(crate) comparison_structural_cost_bias: usize,
+    /// Pre-resolved table of built-in exception classes, populated once
+    /// at interpreter startup by [`Interpreter::default`] after
+    /// `install_exception_builtins` registers the classes into `env`.
+    ///
+    /// The table maps the class name (`"TypeError"`, `"ValueError"`, …)
+    /// to the `Rc<RefCell<PyClass>>` stored in `env`.  Using this cache
+    /// the VM dispatch loop can construct [`PyError::Class`] errors
+    /// directly — no env-hierarchy name lookup at the raise site.
+    ///
+    /// [`ExcClasses`] is a newtype that exposes a `get(&str)` method so
+    /// callers stay legible and the HashMap detail stays local.
+    pub(crate) exc_classes: ExcClasses,
+    /// Stack of `(handled_exc_stack_len, exc_saved_active_len)` marks recorded
+    /// by `PushExcContext` and restored by `PopExcContext` (used for inlined
+    /// `finally` blocks and PEP 654 `except*` handler scopes).  While the
+    /// active exception sits at or below `saved_handled_len + 1`,
+    /// `handle_vm_error` must NOT dedup-pop the pushed context entry.
+    pub(crate) push_exc_ctx_marks: Vec<(usize, usize)>,
+    /// When an inlined comprehension (`FnCode::is_inlined_comp`, PEP 709) exits
+    /// with an error via a non-trampolined call or coroutine resume, it skips
+    /// recording a `<listcomp>`/`<setcomp>`/`<dictcomp>` traceback frame and
+    /// stashes its inner PEP 657 caret anchor here so the enclosing frame's
+    /// `vm_try!` adopts that anchor instead of clobbering it (#2993).
+    pub(crate) inlined_comp_escaped_span: Option<Option<(u32, u32, u32, u32)>>,
+}
+
+impl Default for InterpreterColdState {
+    fn default() -> Self {
+        Self {
+            script_dir: None,
+            script_filename: None,
+            script_define_file_dunder: true,
+            script_package: None,
+            script_argv: Vec::new(),
+            script_argv_initialized: false,
+            module_cache: Rc::new(RefCell::new(HashMap::new())),
+            bootstrap_module_registry: Value::dict(PyDict::default()),
+            import_module_registry_cache: RefCell::new(None),
+            module_class_cache: None,
+            env_pool: Vec::new(),
+            memo_cache: std::collections::HashMap::new(),
+            memo_stats: std::collections::HashMap::new(),
+            memo_in_flight: std::collections::HashSet::new(),
+            invoke_arg_buf: ExpandedArgBuf::new(),
+            class_store_order: Vec::new(),
+            class_annotation_scopes: Vec::new(),
+            eq_in_progress: Vec::new(),
+            comparison_pair_stack: Vec::new(),
+            comparison_active_contexts: HashMap::new(),
+            comparison_dispatch_epoch: 0,
+            comparison_recursion_cost: 0,
+            comparison_structural_cost_bias: 0,
+            exc_classes: ExcClasses::uninitialized(),
+            push_exc_ctx_marks: Vec::new(),
+            inlined_comp_escaped_span: None,
+        }
+    }
+}
+
+pub struct Interpreter {
+    pub(crate) env: EnvRef,
+    pub(crate) active_exception: Option<Value>,
+    /// Stack of currently-handled exceptions (PEP 3134 `__context__`).
+    /// An entry is pushed when an exception handler catches an exception
+    /// (matching CPython's per-frame "exc_info" stack), and popped when
+    /// the handler exits — either normally via `EndExcept`, or because
+    /// a new exception propagates out of the handler body.
+    ///
+    /// The top of this stack is the exception whose handler we are
+    /// currently inside, and it is the value attached as `__context__`
+    /// to any *new* exception raised inside that handler body.
+    ///
+    /// Note: this differs from `active_exception`, which can be cleared
+    /// transiently while the handler body is running (e.g. by an inner
+    /// `EndExcept`).  The stack lets us restore the outer context.
+    handled_exc_stack: Vec<Value>,
+    /// Parallel save-stack for `active_exception` across nested `except`
+    /// blocks.  One entry is pushed (recording the *previous*
+    /// `active_exception`) each time `handle_vm_error` dispatches an
+    /// exception to a handler, and one entry is popped on `EndExcept` (normal
+    /// exit) or `RaiseReRaise` (re-raise).  The popped value is restored to
+    /// `active_exception`, so the outer handler's exception is visible again
+    /// after an inner handler exits.
+    ///
+    /// This mirrors CPython's per-frame `_PyErr_StackItem` chain.  Without
+    /// it, the dedup-pop inside `handle_vm_error` (which removes the outer
+    /// exception from `handled_exc_stack` when a new inner exception is
+    /// dispatched) means `EndExcept`'s `handled_exc_stack.last()` lookup
+    /// returns `None` instead of the outer exception.
+    exc_saved_active: Vec<Option<Value>>,
     /// Stack of active VM frame views (issue #389).  Pushed before each
     /// `run_bytecode` invocation and popped immediately afterwards by:
     ///   * `try_exec_vm_script_with_index` (kind = `Script`), and
@@ -323,6 +372,14 @@ pub struct Interpreter {
     pub(crate) tramp_stack: Vec<TrampFrame>,
     /// Reusable stack of active inline-driven generator frames across nested VM entries (#3159).
     pub(crate) gen_drive_stack: Vec<GenDriveFrame>,
+    /// Reusable argument buffer for VM Call instructions — avoids a per-call
+    /// heap allocation in the common (non-recursive) case.
+    call_arg_buf: Vec<ExpandedCallArg>,
+    /// Reusable positional-args buffer for the builtin bound-method dispatch
+    /// path — avoids a per-call heap allocation on the hot path (issue #276).
+    /// Pattern: `std::mem::take`, clear, fill, use (borrow or drain), then
+    /// restore so subsequent calls reuse the grown capacity.
+    bound_method_pos_buf: Vec<Value>,
     /// Lazily allocated frame-object caches parallel to `vm_frame_views` for
     /// non-generator activations that have actually been introspected. The
     /// vector ends at its highest materialized slot; generator activations own
@@ -330,39 +387,34 @@ pub struct Interpreter {
     /// The extra box intentionally keeps this cold field to one word.
     #[allow(clippy::box_collection)]
     pub(crate) vm_frame_caches: Option<Box<Vec<Option<Box<VmFrameCache>>>>>,
-    /// Legacy recursion stack for aggregate set/view comparisons. Direct
-    /// list, dict, and deque comparisons use the exception-capable pair stack
-    /// below so a structural back-edge raises `RecursionError`.
-    pub(crate) eq_in_progress: Vec<(i64, i64)>,
-    /// Ordered container pairs active under CPython's exception-capable rich
-    /// comparison policy. Call depth plus a comparison-dispatch epoch lets a
-    /// user callback make finite progress without hiding a pure structural
-    /// cycle.
-    pub(crate) comparison_pair_stack: Vec<ComparisonFrame>,
-    pub(crate) comparison_active_contexts: ActiveComparisonContexts,
-    pub(crate) comparison_dispatch_epoch: u64,
-    /// Number of retained native container-comparison frames.
-    pub(crate) comparison_recursion_cost: usize,
-    /// Structural-only root cost not charged to Python callback entry.
-    pub(crate) comparison_structural_cost_bias: usize,
-    /// Pre-resolved table of built-in exception classes, populated once
-    /// at interpreter startup by [`Interpreter::default`] after
-    /// `install_exception_builtins` registers the classes into `env`.
+    /// Decimal integer string-conversion limit configured through
+    /// `sys.set_int_max_str_digits` (0 means unlimited).
     ///
-    /// The table maps the class name (`"TypeError"`, `"ValueError"`, …)
-    /// to the `Rc<RefCell<PyClass>>` stored in `env`.  Using this cache
-    /// the VM dispatch loop can construct [`PyError::Class`] errors
-    /// directly — no env-hierarchy name lookup at the raise site.
+    /// The core value layer consumes this through a scoped TLS adapter only
+    /// while this interpreter is executing. Keeping the authoritative value
+    /// here prevents independent roots on one host thread from leaking policy.
+    int_max_str_digits: usize,
+    /// Maximum Python call depth for this interpreter.
     ///
-    /// [`ExcClasses`] is a newtype that exposes a `get(&str)` method so
-    /// callers stay legible and the HashMap detail stays local.
-    pub(crate) exc_classes: ExcClasses,
-    /// Stack of `(handled_exc_stack_len, exc_saved_active_len)` marks recorded
-    /// by `PushExcContext` and restored by `PopExcContext` (used for inlined
-    /// `finally` blocks and PEP 654 `except*` handler scopes).  While the
-    /// active exception sits at or below `saved_handled_len + 1`,
-    /// `handle_vm_error` must NOT dedup-pop the pushed context entry.
-    pub(crate) push_exc_ctx_marks: Vec<(usize, usize)>,
+    /// The active depth remains thread-local because nested Interpreter calls
+    /// share one host stack. The configurable limit is interpreter-owned so
+    /// independent roots on the same thread cannot change one another's
+    /// `sys.setrecursionlimit` setting.
+    recursion_limit: usize,
+    /// Canonical filter and recording-context state for the `warnings` module.
+    ///
+    /// The concrete policy data remains private to the built-in module. Root
+    /// interpreters own independent handles; filesystem-import children clone
+    /// the handle because they are an implementation detail of the same
+    /// Python interpreter and share `sys.modules` with their parent.
+    pub(crate) warnings_state: Rc<crate::builtin_modules::warnings::WarningsState>,
+    /// Shared per-interpreter `sys` runtime state (switch interval, coroutine
+    /// origin tracking depth, profile/trace/asyncgen/audit hooks — issue
+    /// #2970). Shared via `Rc` with child filesystem-import interpreters.
+    pub(crate) sys_state: Rc<RefCell<SysRuntimeState>>,
+    /// Boxed cold interpreter state: memo/comparison maps, `invoke_arg_buf`,
+    /// class-only `env_pool`, script/import caches, and diagnostic tables (#3162).
+    pub(crate) cold: Box<InterpreterColdState>,
     /// Set by a bare `raise` / implicit re-raise (`RaiseReRaise`) and consumed
     /// by the next catch site (issue #2367).  When set, the catch rebuilds the
     /// traceback from the captured unwind frames rather than *prepending* onto
@@ -371,12 +423,6 @@ pub struct Interpreter {
     /// An explicit `raise e` / `raise e.with_traceback(...)` clears it, so the
     /// prepend path (issue #2367's actual scope) runs for those.
     pub(crate) reraise_is_bare: bool,
-    /// When an inlined comprehension (`FnCode::is_inlined_comp`, PEP 709) exits
-    /// with an error via a non-trampolined call or coroutine resume, it skips
-    /// recording a `<listcomp>`/`<setcomp>`/`<dictcomp>` traceback frame and
-    /// stashes its inner PEP 657 caret anchor here so the enclosing frame's
-    /// `vm_try!` adopts that anchor instead of clobbering it (#2993).
-    pub(crate) inlined_comp_escaped_span: Option<Option<(u32, u32, u32, u32)>>,
 }
 
 /// Per-interpreter mutable state backing `sys` runtime getters/setters and
@@ -704,44 +750,19 @@ impl Default for Interpreter {
             active_exception: None,
             handled_exc_stack: Vec::new(),
             exc_saved_active: Vec::new(),
-            script_dir: None,
-            script_filename: None,
-            script_define_file_dunder: true,
-            script_package: None,
-            script_argv: Vec::new(),
-            script_argv_initialized: false,
-            module_cache: Rc::new(RefCell::new(HashMap::new())),
-            bootstrap_module_registry: Value::dict(PyDict::default()),
-            import_module_registry_cache: RefCell::new(None),
-            module_class_cache: None,
-            warnings_state: Rc::new(crate::builtin_modules::warnings::WarningsState::default()),
-            sys_state: Rc::new(RefCell::new(SysRuntimeState::default())),
-            int_max_str_digits: pyrust_core::INT_MAX_STR_DIGITS_DEFAULT,
-            recursion_limit: DEFAULT_RECURSION_LIMIT,
-            env_pool: Vec::new(),
-            memo_cache: std::collections::HashMap::new(),
-            memo_stats: std::collections::HashMap::new(),
-            memo_in_flight: std::collections::HashSet::new(),
-            call_arg_buf: Vec::new(),
-            invoke_arg_buf: ExpandedArgBuf::new(),
-            bound_method_pos_buf: Vec::new(),
-            class_store_order: Vec::new(),
-            class_annotation_scopes: Vec::new(),
             vm_frame_views: Vec::new(),
             tramp_arena: Vec::new(),
             tramp_stack: Vec::new(),
             gen_drive_stack: Vec::new(),
+            call_arg_buf: Vec::new(),
+            bound_method_pos_buf: Vec::new(),
             vm_frame_caches: None,
-            eq_in_progress: Vec::new(),
-            comparison_pair_stack: Vec::new(),
-            comparison_active_contexts: HashMap::new(),
-            comparison_dispatch_epoch: 0,
-            comparison_recursion_cost: 0,
-            comparison_structural_cost_bias: 0,
-            exc_classes: ExcClasses::uninitialized(),
-            push_exc_ctx_marks: Vec::new(),
+            int_max_str_digits: pyrust_core::INT_MAX_STR_DIGITS_DEFAULT,
+            recursion_limit: DEFAULT_RECURSION_LIMIT,
+            warnings_state: Rc::new(crate::builtin_modules::warnings::WarningsState::default()),
+            sys_state: Rc::new(RefCell::new(SysRuntimeState::default())),
+            cold: Box::default(),
             reraise_is_bare: false,
-            inlined_comp_escaped_span: None,
         }
     }
 }

@@ -329,7 +329,8 @@ impl Interpreter {
         num_locals: crate::bytecode::Reg,
     ) -> Result<()> {
         let val = vm_read(regs, src, num_locals)?;
-        self.push_exc_ctx_marks
+        self.cold
+            .push_exc_ctx_marks
             .push((self.handled_exc_stack.len(), self.exc_saved_active.len()));
         self.exc_saved_active.push(self.active_exception.clone());
         self.handled_exc_stack.push(val.clone());
@@ -343,7 +344,7 @@ impl Interpreter {
         exc_ctx_frame_base: usize,
         exc_saved_active_frame_base: usize,
     ) {
-        if let Some((saved_handled_len, saved_active_len)) = self.push_exc_ctx_marks.pop() {
+        if let Some((saved_handled_len, saved_active_len)) = self.cold.push_exc_ctx_marks.pop() {
             let target_handled = saved_handled_len.max(exc_ctx_frame_base);
             self.handled_exc_stack.truncate(target_handled);
             let target_active = saved_active_len.max(exc_saved_active_frame_base);
@@ -466,7 +467,7 @@ impl Interpreter {
             .get(raise_pc)
             .copied()
             .filter(|&s| s != (0, 0, 0, 0));
-        let col_span = match self.inlined_comp_escaped_span.take() {
+        let col_span = match self.cold.inlined_comp_escaped_span.take() {
             Some(comp_span) => comp_span.or(insn_col_span),
             None => insn_col_span,
         };

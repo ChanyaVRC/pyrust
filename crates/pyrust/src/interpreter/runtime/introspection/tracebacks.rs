@@ -230,6 +230,7 @@ impl Interpreter {
                     // an imported child has been dropped. Retain this source
                     // identity instead of consulting the later materializer.
                     filename: self
+                        .cold
                         .script_filename
                         .clone()
                         .unwrap_or_else(|| std::sync::Arc::from("<unknown>")),

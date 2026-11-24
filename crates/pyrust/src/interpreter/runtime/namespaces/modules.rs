@@ -78,6 +78,7 @@ impl Interpreter {
     ) -> Result<Rc<RefCell<PyClass>>> {
         debug_assert!(slot.0 < MODULE_CLASS_CACHE_SLOT_COUNT);
         if let Some(entry) = self
+            .cold
             .module_class_cache
             .as_ref()
             .and_then(|cache| cache.entries.get(slot.0))
@@ -146,7 +147,7 @@ impl Interpreter {
             .import_module_registry_with_owner_state()
             .ok()
             .and_then(|(registry, registry_owner_state)| {
-                if !values_are_identical(&registry, &self.bootstrap_module_registry) {
+                if !values_are_identical(&registry, &self.cold.bootstrap_module_registry) {
                     return None;
                 }
                 let registry_owner_state = registry_owner_state?;
@@ -165,10 +166,11 @@ impl Interpreter {
                 })
             });
         if let Some(entry) = cache_entry {
-            self.module_class_cache
+            self.cold
+                .module_class_cache
                 .get_or_insert_with(|| Box::new(ModuleClassCache::default()))
                 .entries[slot.0] = Some(entry);
-        } else if let Some(cache) = self.module_class_cache.as_mut() {
+        } else if let Some(cache) = self.cold.module_class_cache.as_mut() {
             cache.entries[slot.0] = None;
         }
         Ok(class)
@@ -190,7 +192,7 @@ impl Interpreter {
     /// registered object behind would make the next `import` return a
     /// half-initialized module instead of retrying its body.
     fn unregister_failed_module(&mut self, name: &str) {
-        self.module_cache.borrow_mut().remove(name);
+        self.cold.module_cache.borrow_mut().remove(name);
         let _ = self.remove_import_registry(name);
     }
 
@@ -213,6 +215,7 @@ impl Interpreter {
             return;
         };
         let initial_path = self
+            .cold
             .script_dir
             .as_ref()
             .map(|dir| Value::string(dir.to_string_lossy()))
@@ -240,10 +243,10 @@ impl Interpreter {
         sys.insert_attr("path".to_string(), Value::list(vec![initial_path]));
         sys.insert_attr(
             "modules".to_string(),
-            self.bootstrap_module_registry.clone(),
+            self.cold.bootstrap_module_registry.clone(),
         );
         // Fresh per-interpreter mutable sys containers and aliases (#2970).
-        let orig_argv: Vec<Value> = self.script_argv.iter().map(Value::string).collect();
+        let orig_argv: Vec<Value> = self.cold.script_argv.iter().map(Value::string).collect();
         sys.insert_attr("orig_argv".to_string(), Value::list(orig_argv));
         sys.insert_attr("warnoptions".to_string(), Value::list(Vec::new()));
         sys.insert_attr("meta_path".to_string(), Value::list(Vec::new()));
@@ -273,12 +276,17 @@ impl Interpreter {
     /// Before `sys` is imported, preserve the legacy script-directory lookup
     /// so a script can still import a sibling module as its very first import.
     fn user_module_search_dirs(&self) -> Vec<PathBuf> {
-        let sys_path = self.module_cache.borrow().get("sys").and_then(|module| {
-            let ValueKind::PyModule(sys) = module.kind() else {
-                return None;
-            };
-            sys.borrow().get_attr_value("path")
-        });
+        let sys_path = self
+            .cold
+            .module_cache
+            .borrow()
+            .get("sys")
+            .and_then(|module| {
+                let ValueKind::PyModule(sys) = module.kind() else {
+                    return None;
+                };
+                sys.borrow().get_attr_value("path")
+            });
 
         if let Some(path) = sys_path
             && let ValueKind::List(entries) = path.kind()
@@ -289,7 +297,7 @@ impl Interpreter {
                 .collect();
         }
 
-        self.script_dir.iter().cloned().collect()
+        self.cold.script_dir.iter().cloned().collect()
     }
 
     /// Notify all registered `sys.addaudithook` callbacks of an audit event.
@@ -324,10 +332,7 @@ impl Interpreter {
         if let Some(val) = root_ref.namespace_fastlocal_value(name) {
             return (!val.is_unset()).then_some(val);
         }
-        if let Some(val) = root_ref
-            .try_namespace_values()
-            .and_then(|values| values.get(name).cloned())
-        {
+        if let Some(val) = root_ref.namespace_values().get(name).cloned() {
             return (!val.is_unset()).then_some(val);
         }
         namespace
@@ -535,9 +540,9 @@ impl Interpreter {
         // Present in PyRust's object-owner map but absent from both import
         // registries means the Python-visible cache entry was deleted. Drop the
         // stale owner and load a fresh object.
-        let present_internally = self.module_cache.borrow().contains_key(name);
+        let present_internally = self.cold.module_cache.borrow().contains_key(name);
         if present_internally {
-            self.module_cache.borrow_mut().remove(name);
+            self.cold.module_cache.borrow_mut().remove(name);
         }
         // Built-in modules — declared in
         // `crates/pyrust/src/builtin_modules/mod.rs::pyrust_builtin_modules!`.
@@ -546,7 +551,8 @@ impl Interpreter {
         let builtin = crate::builtin_modules::load_builtin_module(name);
         if let Some(val) = builtin {
             crate::builtin_modules::prepare_builtin_module(name, self, &val);
-            self.module_cache
+            self.cold
+                .module_cache
                 .borrow_mut()
                 .insert(name.to_string(), val.clone());
             let initialization = (|| -> Result<()> {
@@ -671,14 +677,6 @@ impl Interpreter {
             let (program, linenos) = Self::parse_source_to_stmts_with_linenos(&src)?;
             // Subinterpreter shares the same module_cache so results are visible to parent
             let mut sub = Interpreter {
-                script_dir: self.script_dir.clone(),
-                script_filename: Some(std::sync::Arc::from(module_filename.as_str())),
-                // Imported modules run in the top-level script's process
-                // context, so a later `import sys` must see the original
-                // command-line arguments rather than an empty vector.
-                script_argv: self.script_argv.clone(),
-                module_cache: Rc::clone(&self.module_cache),
-                bootstrap_module_registry: self.bootstrap_module_registry.clone(),
                 // Filesystem imports execute through a child object but
                 // remain inside the parent's Python interpreter. Sharing
                 // warnings state mirrors the singleton `warnings` module
@@ -693,6 +691,17 @@ impl Interpreter {
                 // Imported Python modules execute in a child Interpreter
                 // but share the parent's recursion policy.
                 recursion_limit: self.recursion_limit,
+                cold: Box::new(InterpreterColdState {
+                    script_dir: self.cold.script_dir.clone(),
+                    script_filename: Some(std::sync::Arc::from(module_filename.as_str())),
+                    // Imported modules run in the top-level script's process
+                    // context, so a later `import sys` must see the original
+                    // command-line arguments rather than an empty vector.
+                    script_argv: self.cold.script_argv.clone(),
+                    module_cache: Rc::clone(&self.cold.module_cache),
+                    bootstrap_module_registry: self.cold.bootstrap_module_registry.clone(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
             // CPython 3.12 `__package__` rules:
@@ -742,7 +751,8 @@ impl Interpreter {
             // Register before executing the body so a circular import sees
             // this partial object. Script writes are mirrored into its live
             // backing immediately, making already-executed bindings visible.
-            self.module_cache
+            self.cold
+                .module_cache
                 .borrow_mut()
                 .insert(name.to_string(), module.clone());
             if let Err(error) = self.register_in_sys_modules(name, &module) {

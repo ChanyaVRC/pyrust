@@ -40,7 +40,8 @@ impl Interpreter {
     /// because this reads its shared backing on every probe.
     #[inline]
     pub(super) fn lookup_internal_import_registry(&self, name: &str) -> Option<Value> {
-        self.bootstrap_module_registry
+        self.cold
+            .bootstrap_module_registry
             .dict_with(|registry| registry.get(&StrKey(name)).cloned())
             .flatten()
     }
@@ -53,12 +54,12 @@ impl Interpreter {
     /// guards.
     #[inline]
     fn cached_import_registry_dict(&self) -> Option<Rc<RefCell<PyDict>>> {
-        let module_cache = self.module_cache.borrow();
+        let module_cache = self.cold.module_cache.borrow();
         let system_module = module_cache.get("sys")?;
         let ValueKind::PyModule(system_module) = system_module.kind() else {
             return None;
         };
-        let cache = self.import_module_registry_cache.borrow();
+        let cache = self.cold.import_module_registry_cache.borrow();
         let cached = cache.as_ref()?;
         if cached.system_module.as_ptr() != Rc::as_ptr(system_module)
             || !cached
@@ -87,15 +88,15 @@ impl Interpreter {
         &self,
     ) -> Result<(Value, Option<CollectionMutationState>)> {
         let system_module = {
-            let module_cache = self.module_cache.borrow();
+            let module_cache = self.cold.module_cache.borrow();
             let Some(system_module) = module_cache.get("sys") else {
-                return Ok((self.bootstrap_module_registry.clone(), None));
+                return Ok((self.cold.bootstrap_module_registry.clone(), None));
             };
             let ValueKind::PyModule(system_module) = system_module.kind() else {
                 debug_assert!(false, "the internal sys cache entry must be a module");
-                return Ok((self.bootstrap_module_registry.clone(), None));
+                return Ok((self.cold.bootstrap_module_registry.clone(), None));
             };
-            if let Some(cached) = self.import_module_registry_cache.borrow().as_ref()
+            if let Some(cached) = self.cold.import_module_registry_cache.borrow().as_ref()
                 && cached.system_module.as_ptr() == Rc::as_ptr(system_module)
                 && cached
                     .registry_owner_state
@@ -132,15 +133,16 @@ impl Interpreter {
             pyrust_core::WeakValueCache::new(&visible_registry),
         ) && let Some(registry_owner_version) = owner_state.cache_version()
         {
-            *self.import_module_registry_cache.borrow_mut() = Some(CachedImportModuleRegistry {
-                system_module: Rc::downgrade(&system_module),
-                registry_owner_state: owner_state.clone(),
-                registry_owner_version,
-                registry: registry_cache,
-            });
+            *self.cold.import_module_registry_cache.borrow_mut() =
+                Some(CachedImportModuleRegistry {
+                    system_module: Rc::downgrade(&system_module),
+                    registry_owner_state: owner_state.clone(),
+                    registry_owner_version,
+                    registry: registry_cache,
+                });
             return Ok((visible_registry, Some(owner_state.clone())));
         }
-        *self.import_module_registry_cache.borrow_mut() = None;
+        *self.cold.import_module_registry_cache.borrow_mut() = None;
         Ok((visible_registry, owner_state))
     }
 

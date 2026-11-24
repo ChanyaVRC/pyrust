@@ -111,7 +111,7 @@ impl Interpreter {
         let filename = fncode
             .as_ref()
             .map(|c| c.filename.to_string())
-            .or_else(|| self.script_filename.as_ref().map(|s| s.to_string()))
+            .or_else(|| self.cold.script_filename.as_ref().map(|s| s.to_string()))
             .unwrap_or_else(|| "<unknown>".to_string());
 
         // co_cellvars: cell variables this function defines (locals captured by

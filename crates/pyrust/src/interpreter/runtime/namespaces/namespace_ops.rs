@@ -507,9 +507,7 @@ impl Interpreter {
                 let is_module_scope = env_ref.parent.is_none();
                 (
                     is_module_scope,
-                    env_ref
-                        .try_namespace_values()
-                        .is_some_and(|values| values.get(name.as_str()).is_some()),
+                    env_ref.namespace_values().get(name.as_str()).is_some(),
                     if is_module_scope {
                         env_ref.namespace_fastlocal_value(name.as_str())
                     } else {
@@ -541,8 +539,8 @@ impl Interpreter {
             let from_env = self
                 .env
                 .borrow_mut()
-                .try_namespace_values_mut()
-                .and_then(|values| values.remove(name.as_str()));
+                .namespace_values_mut()
+                .remove(name.as_str());
             let from_dict = globals.and_then(|globals| {
                 globals
                     .dict_shift_remove(&PyKey::str_from(name.as_str()))

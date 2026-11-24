@@ -61,11 +61,10 @@ fn with_frame_cache<R>(
         // SAFETY: `gen_frame` points to the heap-stable `GeneratorFrame` for
         // exactly as long as this active view is on `vm_frame_views`; both VM
         // entry paths pop the view before the frame can move or be dropped.
-        // Reconstruct only a shared reference and access only the cache's
+        // Reconstruct only a shared reference and access only the cold state's
         // `RefCell`. The borrow is scoped to this non-reentrant callback.
         let gen_frame = unsafe { gen_frame.as_ref() };
-        let cache = gen_frame.frame_cache.borrow();
-        read(cache.as_deref())
+        gen_frame.with_frame_cache(read)
     } else {
         let cache = interp
             .vm_frame_caches
@@ -86,8 +85,7 @@ fn with_frame_cache_mut<R>(
         // creates a raw-derived `&mut GeneratorFrame`; mutation is confined to
         // the dedicated `RefCell`, whose short borrow ends before this returns.
         let gen_frame = unsafe { gen_frame.as_ref() };
-        let mut cache = gen_frame.frame_cache.borrow_mut();
-        update(&mut cache)
+        gen_frame.with_frame_cache_mut(update)
     } else {
         let caches = interp
             .vm_frame_caches
@@ -257,12 +255,11 @@ impl Interpreter {
         if self.vm_frame_views.is_empty() {
             return;
         }
-        let cached = frame
-            .frame_cache
-            .borrow()
-            .as_deref()
-            .and_then(|cache| cache.object.as_ref())
-            .and_then(pyrust_core::WeakValueCache::upgrade);
+        let cached = frame.with_frame_cache(|cache| {
+            cache
+                .and_then(|cache| cache.object.as_ref())
+                .and_then(pyrust_core::WeakValueCache::upgrade)
+        });
         if let Some(frame_object) = cached
             && frame_obj::stored_back(&frame_object).is_none_or(|b| b.is_none())
         {
@@ -325,7 +322,7 @@ impl Interpreter {
         };
         let has_cache = self.vm_frame_views[view_index]
             .gen_frame()
-            .is_some_and(|gen_frame| unsafe { gen_frame.as_ref() }.frame_cache.borrow().is_some());
+            .is_some_and(|gen_frame| unsafe { gen_frame.as_ref() }.has_frame_cache());
         if has_cache {
             self.sync_cached_function_locals_at(view_index);
         }
@@ -680,6 +677,7 @@ impl Interpreter {
                     // (#2438) so `sys._getframe().f_code.co_filename` reports
                     // the source file rather than `<unknown>`.
                     let filename = self
+                        .cold
                         .script_filename
                         .as_ref()
                         .map(|s| s.to_string())
@@ -800,9 +798,7 @@ impl Interpreter {
                 .unwrap_or(frame.code.first_lineno) as i64
         };
 
-        let (cached_frame, retained_locals) = {
-            let cache = frame.frame_cache.borrow();
-            let cache = cache.as_deref();
+        let (cached_frame, retained_locals) = frame.with_frame_cache(|cache| {
             (
                 cache
                     .and_then(|cache| cache.object.as_ref())
@@ -816,7 +812,7 @@ impl Interpreter {
                     })
                 }),
             )
-        };
+        });
         if let Some(cached_frame) = cached_frame {
             refresh_cached_frame_state(&cached_frame, lineno);
             return cached_frame;
@@ -834,26 +830,27 @@ impl Interpreter {
         let object = pyrust_core::WeakValueCache::new(&frame_object)
             .expect("frame BuiltinObject must support weak caching");
         let function_locals = Rc::downgrade(&locals);
-        let mut cache = frame.frame_cache.borrow_mut();
-        if let Some(cache) = cache.as_deref_mut() {
-            cache.object = Some(object);
-            if cache
-                .function_locals
-                .as_ref()
-                .and_then(std::rc::Weak::upgrade)
-                .is_none()
-            {
-                cache.function_locals = Some(function_locals);
+        frame.with_frame_cache_mut(|cache| {
+            if let Some(cache) = cache.as_deref_mut() {
+                cache.object = Some(object);
+                if cache
+                    .function_locals
+                    .as_ref()
+                    .and_then(std::rc::Weak::upgrade)
+                    .is_none()
+                {
+                    cache.function_locals = Some(function_locals);
+                }
+            } else {
+                *cache = Some(Box::new(VmFrameCache {
+                    object: Some(object),
+                    function_locals: Some(function_locals),
+                    persistent_function_locals: None,
+                    function_local_names: Vec::new(),
+                    live_token: Rc::new(()),
+                }));
             }
-        } else {
-            *cache = Some(Box::new(VmFrameCache {
-                object: Some(object),
-                function_locals: Some(function_locals),
-                persistent_function_locals: None,
-                function_local_names: Vec::new(),
-                live_token: Rc::new(()),
-            }));
-        }
+        });
         frame_object
     }
 }

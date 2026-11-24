@@ -45,8 +45,9 @@ pub(crate) fn module_env(env: &EnvRef) -> EnvRef {
 pub(crate) fn lookup_name_in_module(env: &EnvRef, name: &str) -> Option<Value> {
     module_env(env)
         .borrow()
-        .try_namespace_values()
-        .and_then(|values| values.get(name).cloned())
+        .namespace_values()
+        .get(name)
+        .cloned()
         .or_else(|| lookup_exc_class(name).map(Value::py_class))
 }
 
@@ -117,9 +118,7 @@ pub(crate) fn lookup_enclosing_function_value(env: &EnvRef, name: &str) -> Optio
             let borrowed = candidate.borrow();
             (
                 borrowed.parent.is_some(),
-                borrowed
-                    .try_namespace_values()
-                    .and_then(|values| values.get(name).cloned()),
+                borrowed.namespace_values().get(name).cloned(),
                 borrowed.parent.clone(),
             )
         };
@@ -167,9 +166,7 @@ fn lookup_name_in_env_as_free(env: &EnvRef, name: &str) -> Result<Option<Value>>
 ///     scope.
 fn lookup_name_in_env_impl(env: &EnvRef, name: &str, as_free: bool) -> Result<Option<Value>> {
     let borrowed = env.borrow();
-    let value = borrowed
-        .try_namespace_values()
-        .and_then(|values| values.get(name).cloned());
+    let value = borrowed.namespace_values().get(name).cloned();
     let class_annotation_value = borrowed.class_annotation_binding(name);
     let is_local_name = borrowed.local_names.contains(name);
     let parent = borrowed.parent.clone();

@@ -45,15 +45,16 @@ fn vm_recursive_memo_pure_fn_fib() {
                 let function_id = function.id;
                 let top_key = (function_id, smallvec::smallvec![30]);
                 let has_top_result =
-                    interpreter.memo_cache.get(&top_key) == Some(&Value::int(832040));
+                    interpreter.cold.memo_cache.get(&top_key) == Some(&Value::int(832040));
                 let has_cache_hit = interpreter
+                    .cold
                     .memo_stats
                     .get(&function_id)
                     .is_some_and(|(_, hits, _)| *hits > 0);
                 result
                     && has_top_result
                     && has_cache_hit
-                    && interpreter.memo_in_flight.is_empty()
+                    && interpreter.cold.memo_in_flight.is_empty()
             })
             .unwrap()
             .join()
@@ -80,6 +81,7 @@ fn callmemo_uses_precomputed_high_arity_shape() {
     assert_eq!(function.memo_positional_parameter_count, 8);
     assert!(
         interpreter
+            .cold
             .memo_stats
             .get(&function.id)
             .is_some_and(|(_, hits, _)| *hits > 0),

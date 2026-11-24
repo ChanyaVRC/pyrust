@@ -198,7 +198,7 @@ impl Interpreter {
         let mut pre_order: Vec<crate::bytecode::Reg> = Vec::new();
         pre_order.extend(module_slot);
         pre_order.extend(annotations_slot);
-        self.class_store_order.push(pre_order);
+        self.cold.class_store_order.push(pre_order);
         let has_type_alias = class_code
             .insns
             .iter()
@@ -265,6 +265,7 @@ impl Interpreter {
         self.env = previous_env;
         self.free_env(class_env_rc.clone());
         let store_order = self
+            .cold
             .class_store_order
             .pop()
             .expect("class_store_order stack popped to empty");

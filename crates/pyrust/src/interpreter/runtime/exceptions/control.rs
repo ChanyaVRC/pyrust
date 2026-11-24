@@ -12,7 +12,7 @@ impl Interpreter {
         Ok(match error.into_kind() {
             pyrust_core::PyErrorKind::Raised(value) => value,
             pyrust_core::PyErrorKind::Runtime(message) => {
-                if let Some(class) = self.exc_classes.get("RuntimeError") {
+                if let Some(class) = self.cold.exc_classes.get("RuntimeError") {
                     instantiate_exception(class, vec![Value::string(message)])
                 } else {
                     self.instantiate_named_exception("RuntimeError", message)?
@@ -141,6 +141,7 @@ impl Interpreter {
     /// Construct an AssertionError and attach the active implicit context.
     pub(crate) fn prepare_assertion_error(&self, message: Option<Value>) -> Result<Value> {
         let class = self
+            .cold
             .exc_classes
             .get("AssertionError")
             .or_else(|| lookup_exc_class("AssertionError"))
@@ -322,7 +323,7 @@ impl Interpreter {
     #[inline]
     pub(super) fn recursion_limit_error(&self) -> Result<PyError> {
         const MESSAGE: &str = "maximum recursion depth exceeded";
-        let exception = if let Some(class) = self.exc_classes.get("RecursionError") {
+        let exception = if let Some(class) = self.cold.exc_classes.get("RecursionError") {
             instantiate_exception(class, vec![Value::string(MESSAGE)])
         } else {
             self.instantiate_named_exception("RecursionError", MESSAGE.to_string())?
@@ -335,7 +336,7 @@ impl Interpreter {
     /// remains independent of the exception registry and object layout.
     #[inline]
     pub(super) fn generator_completion_error(&self, args: Vec<Value>) -> Result<PyError> {
-        if let Some(class) = self.exc_classes.get("StopIteration") {
+        if let Some(class) = self.cold.exc_classes.get("StopIteration") {
             Ok(PyError::raised(instantiate_exception(class, args)))
         } else if args.is_empty() {
             Ok(pyrust_core::py_err!("StopIteration", String::new()))

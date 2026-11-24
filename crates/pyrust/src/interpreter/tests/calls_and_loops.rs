@@ -20,7 +20,7 @@ except RecursionError:
             interp.exec_program(&program, false).unwrap();
             let caught = interp.lookup_name("caught").unwrap() == Some(Value::bool_(true));
             assert!(
-                interp.memo_in_flight.is_empty(),
+                interp.cold.memo_in_flight.is_empty(),
                 "an errored memo miss must remove its in-flight key"
             );
             caught
@@ -51,7 +51,7 @@ except RecursionError:
             interp.exec_program(&program, false).unwrap();
             let caught = interp.lookup_name("caught").unwrap() == Some(Value::bool_(true));
             assert!(
-                interp.memo_in_flight.is_empty(),
+                interp.cold.memo_in_flight.is_empty(),
                 "unwinding trampoline frames must cancel every distinct memo key"
             );
             caught
@@ -122,7 +122,7 @@ except RecursionError as error:
                             .as_int()
                             .is_some_and(|depth| depth <= LIMIT as i64 + 2)
                     })
-                && interp.memo_in_flight.is_empty()
+                && interp.cold.memo_in_flight.is_empty()
                 && get_call_depth() == 0
         })
         .unwrap()

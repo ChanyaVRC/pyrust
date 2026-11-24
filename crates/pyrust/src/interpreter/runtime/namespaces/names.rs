@@ -144,7 +144,7 @@ impl Interpreter {
     }
 
     pub(super) fn alloc_env(&mut self, parent: Option<EnvRef>) -> EnvRef {
-        if let Some(env) = self.env_pool.pop() {
+        if let Some(env) = self.cold.env_pool.pop() {
             {
                 let mut e = env.borrow_mut();
                 e.reset_for_reuse(parent);
@@ -156,8 +156,8 @@ impl Interpreter {
     }
 
     pub(super) fn free_env(&mut self, env: EnvRef) {
-        if self.env_pool.len() < ENV_POOL_MAX && Rc::strong_count(&env) == 1 {
-            self.env_pool.push(env);
+        if self.cold.env_pool.len() < ENV_POOL_MAX && Rc::strong_count(&env) == 1 {
+            self.cold.env_pool.push(env);
         }
     }
 }

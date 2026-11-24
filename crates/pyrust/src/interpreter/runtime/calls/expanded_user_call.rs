@@ -379,7 +379,7 @@ impl Interpreter {
                     if code.is_inlined_comp {
                         // PEP 709 (#2993): suppress `<listcomp>`/`<setcomp>`/`<dictcomp>`
                         // frame and propagate the inner caret anchor to the caller.
-                        self.inlined_comp_escaped_span =
+                        self.cold.inlined_comp_escaped_span =
                             Some(pyrust_core::get_current_vm_col_span());
                     } else {
                         // Callee's own code-object filename (#2438): an imported

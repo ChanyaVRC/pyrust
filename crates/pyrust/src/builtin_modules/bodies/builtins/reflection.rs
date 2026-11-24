@@ -661,9 +661,10 @@ pyrust_module! {
             let mut names: Vec<String> = _interp
                 .env
                 .borrow()
-                .try_namespace_values()
-                .map(|values| values.keys().map(String::from).collect())
-                .unwrap_or_default();
+                .namespace_values()
+                .keys()
+                .map(String::from)
+                .collect();
             names.sort();
             names.dedup();
             return Ok(Value::list(names.into_iter().map(Value::string).collect()));
