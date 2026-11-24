@@ -53,6 +53,14 @@ pub(crate) fn register_virtual_mapping(class: &Rc<RefCell<PyClass>>) {
     register_virtual_subclass(&mapping, class);
 }
 
+/// Register a class (e.g. `weakref.WeakSet`) as a virtual subclass of
+/// `collections.abc.MutableSet`.
+pub(crate) fn register_virtual_mutable_set(class: &Rc<RefCell<PyClass>>) {
+    ensure_abc_initialized();
+    let mut_set = Abc::MutableSet.class();
+    register_virtual_subclass(&mut_set, class);
+}
+
 fn set_bases(sub: &Rc<RefCell<PyClass>>, bases: &[&Rc<RefCell<PyClass>>]) {
     let Some((first, rest)) = bases.split_first() else {
         return;

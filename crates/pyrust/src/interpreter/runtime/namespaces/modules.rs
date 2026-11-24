@@ -703,6 +703,7 @@ impl Interpreter {
                 // already shared through `module_cache`/`sys.modules`.
                 warnings_state: Rc::clone(&self.warnings_state),
                 sys_state: Rc::clone(&self.sys_state),
+                vm_hooks_flags: self.vm_hooks_flags,
                 // This child is an implementation detail of importing a
                 // module into the same Python interpreter. Start with the
                 // parent's integer conversion policy; changes are copied

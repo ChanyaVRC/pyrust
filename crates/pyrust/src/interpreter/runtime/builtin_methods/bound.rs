@@ -291,6 +291,7 @@ impl Interpreter {
         let mut pos = std::mem::take(&mut self.bound_method_pos_buf);
         let result =
             self.bound_method_dispatch_inner(name_rc, receiver_owned, args, &mut pos, origin);
+        pos.clear();
         self.bound_method_pos_buf = pos;
         result
     }

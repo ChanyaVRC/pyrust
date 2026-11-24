@@ -61,6 +61,9 @@ impl Interpreter {
         number_of_locals: crate::bytecode::Reg,
         function: &Value,
     ) -> Result<MemoCallProbe> {
+        if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) != 0 {
+            return Ok(MemoCallProbe::Bypass);
+        }
         let (function_id, positional_parameter_count) = match function.kind() {
             ValueKind::UserFunction(function) if function.is_memo_pure => {
                 (function.id, function.memo_positional_parameter_count)
@@ -170,6 +173,7 @@ impl Interpreter {
         }
         let owned_key = self.claim_memoized_call(key);
         let call_result = self.call_function_expanded(function.clone(), &buffer);
+        buffer.clear();
         self.call_arg_buf = buffer;
         match call_result {
             Ok(result) => {
@@ -289,7 +293,13 @@ impl Interpreter {
             BuiltinCallProbe::Vector(_) => {
                 unreachable!("vector tokens are consumed by the opcode loop")
             }
-            BuiltinCallProbe::Expanded(dispatch) => dispatch(self, arguments),
+            BuiltinCallProbe::Expanded(dispatch) => {
+                if self.vm_hooks_flags & VM_HOOK_PROFILE != 0 {
+                    self.call_function_expanded(function, arguments)
+                } else {
+                    dispatch(self, arguments)
+                }
+            }
             BuiltinCallProbe::ClassAfterPrimitiveMiss => {
                 let ValueKind::PyClass(class) = function.kind() else {
                     unreachable!("a negative class token must retain its class callee")
@@ -319,7 +329,11 @@ impl Interpreter {
                         },
                     )),
                 );
-                (registration.dispatch)(self, arguments)
+                if self.vm_hooks_flags & VM_HOOK_PROFILE != 0 {
+                    self.call_builtin_function_value(&function, arguments)
+                } else {
+                    (registration.dispatch)(self, arguments)
+                }
             }
             BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::Class) => {
                 let ValueKind::PyClass(class) = function.kind() else {
@@ -434,6 +448,7 @@ impl Interpreter {
             })()
         };
         if let Err(error) = fill_result {
+            buffer.clear();
             self.call_arg_buf = buffer;
             return Err(error);
         }
@@ -466,6 +481,8 @@ impl Interpreter {
                 registers[(function_register + 1 + offset as crate::bytecode::Reg) as usize] =
                     argument.value;
             }
+        } else {
+            buffer.clear();
         }
         self.call_arg_buf = buffer;
         result

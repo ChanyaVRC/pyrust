@@ -69,6 +69,13 @@ impl Interpreter {
         let IterState::UserDefined(iterator) = state else {
             unreachable!("only user iterators bypass the fast-state step");
         };
+        if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) != 0 {
+            return match self.call_next(iterator, None) {
+                Ok(value) => Ok(ForIterUserOutcome::Item(value)),
+                Err(error) if is_stop_iteration_error(&error) => Ok(ForIterUserOutcome::Exhausted),
+                Err(error) => Err(error),
+            };
+        }
         match self.advance_loop_iterator(iterator, cached_next) {
             LoopIteratorAdvance::DriveGenerator(state) => {
                 Ok(ForIterUserOutcome::DriveGenerator(state))
@@ -470,6 +477,14 @@ impl Interpreter {
         };
         pyrust_core::set_current_vm_col_span(col_span);
         let raise_line = code.line_at(raise_pc);
+        let err = if self.vm_hooks_flags & VM_HOOK_TRACE != 0 {
+            match self.vm_hook_exception(&err, raise_line) {
+                Ok(()) => err,
+                Err(trace_err) => trace_err,
+            }
+        } else {
+            err
+        };
         match self.handle_vm_error(
             err,
             st.exc_handlers,

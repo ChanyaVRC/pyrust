@@ -299,6 +299,24 @@ impl Interpreter {
             {
                 pyrust_builtins::cell::delete_cell_contents(&target)
             }
+            ValueKind::BuiltinObject { .. } if pyrust_builtins::frame::is_frame(&target) => {
+                match name {
+                    "f_trace" => {
+                        pyrust_builtins::frame::set_trace(&target, Value::none());
+                        Ok(())
+                    }
+                    "f_trace_lines" | "f_trace_opcodes" => Err(pyrust_core::type_err!(
+                        "can't delete numeric/char attribute"
+                    )),
+                    "f_code" | "f_back" | "f_globals" | "f_locals" | "f_builtins" | "f_lasti" => {
+                        Err(pyrust_core::py_err!("AttributeError", "readonly attribute"))
+                    }
+                    _ => Err(pyrust_core::py_err!(
+                        "AttributeError",
+                        "'frame' object has no attribute '{name}'"
+                    )),
+                }
+            }
             _ => {
                 let type_name = pyrust_core::error_type_name(&target);
                 let data_descriptor_owner = dict_view_mapping_descriptor_owner(&target, name);

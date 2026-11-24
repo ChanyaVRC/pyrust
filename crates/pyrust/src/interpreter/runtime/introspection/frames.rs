@@ -169,6 +169,7 @@ fn install_materialized_frame_cache(
         } else {
             *slot = Some(Box::new(VmFrameCache {
                 object: Some(object),
+                traced_frame: None,
                 function_locals,
                 persistent_function_locals: None,
                 function_local_names,
@@ -408,12 +409,14 @@ impl Interpreter {
                 .vm_frame_caches
                 .as_deref_mut()
                 .expect("cache vector checked by finish_pop_vm_frame_view");
-            for slot in caches.drain(new_len..) {
-                if let Some(cache) = slot
-                    && let Some(frame) = cache
-                        .object
-                        .as_ref()
-                        .and_then(pyrust_core::WeakValueCache::upgrade)
+            for mut cache in caches.drain(new_len..).flatten() {
+                // Drop any activation-owned trace frame pin first so only
+                // genuinely user-escaped frame objects survive upgrade.
+                cache.traced_frame = None;
+                if let Some(frame) = cache
+                    .object
+                    .as_ref()
+                    .and_then(pyrust_core::WeakValueCache::upgrade)
                 {
                     escaping_frames.push(frame);
                 }
@@ -489,6 +492,7 @@ impl Interpreter {
             let cache = slot.get_or_insert_with(|| {
                 Box::new(VmFrameCache {
                     object: None,
+                    traced_frame: None,
                     function_locals: None,
                     persistent_function_locals: None,
                     function_local_names: Vec::new(),
@@ -555,6 +559,7 @@ impl Interpreter {
                         let weak_token = Rc::downgrade(&live_token);
                         *slot = Some(Box::new(VmFrameCache {
                             object: None,
+                            traced_frame: None,
                             function_locals: Some(weak_locals),
                             persistent_function_locals: None,
                             function_local_names,
@@ -670,6 +675,7 @@ impl Interpreter {
             } else {
                 *slot = Some(Box::new(VmFrameCache {
                     object: None,
+                    traced_frame: None,
                     function_locals: Some(weak_locals),
                     persistent_function_locals: Some(locals),
                     function_local_names,
@@ -678,6 +684,120 @@ impl Interpreter {
             }
         });
         locals_value
+    }
+
+    /// Return the cached live frame object for `view_index` without allocating
+    /// a new one (used by `sys.settrace` line/exception/return hooks).
+    pub(crate) fn cached_frame_object_for_trace(&self, view_index: usize) -> Option<Value> {
+        with_frame_cache(self, view_index, |cache| {
+            cache.and_then(|c| {
+                c.traced_frame.clone().or_else(|| {
+                    c.object
+                        .as_ref()
+                        .and_then(pyrust_core::WeakValueCache::upgrade)
+                })
+            })
+        })
+    }
+
+    /// Pin `frame` strongly inside `view_index`'s `VmFrameCache` so per-frame
+    /// `f_trace` state persists for the duration of the activation.
+    pub(crate) fn pin_traced_frame_in_cache(&mut self, view_index: usize, frame: Value) {
+        with_frame_cache_mut(self, view_index, |slot| {
+            if let Some(cache) = slot.as_deref_mut() {
+                cache.traced_frame = Some(frame);
+            }
+        });
+    }
+
+    /// Resolve `(frame, local_trace)` for a `'line'` trace event on
+    /// `view_index` when `f_trace` is non-`None` and `f_trace_lines` is `true`,
+    /// updating `frame.f_lineno` to `cur_line`.
+    pub(crate) fn prepare_line_trace_frame(
+        &self,
+        view_index: usize,
+        cur_line: u32,
+    ) -> Option<(Value, Value)> {
+        let frame = self.cached_frame_object_for_trace(view_index)?;
+        if !frame_obj::get_trace_lines(&frame) {
+            return None;
+        }
+        let local_trace = frame_obj::get_trace(&frame)?;
+        if local_trace.is_none() {
+            return None;
+        }
+        frame_obj::set_lineno(&frame, cur_line as i64);
+        Some((frame, local_trace))
+    }
+
+    /// Resolve `(frame, local_trace)` for a `'return'` trace event on
+    /// `view_index` when `f_trace` is non-`None`.
+    pub(crate) fn active_frame_local_trace(&self, view_index: usize) -> Option<(Value, Value)> {
+        let frame = self.cached_frame_object_for_trace(view_index)?;
+        let local_trace = frame_obj::get_trace(&frame)?;
+        if local_trace.is_none() {
+            return None;
+        }
+        Some((frame, local_trace))
+    }
+
+    /// Update `frame.f_trace` (and pin `frame` in `view_index`'s cache when
+    /// `pin_view` is `Some` and `trace` is non-`None`).
+    pub(crate) fn set_frame_trace_for_vm(
+        &mut self,
+        frame: &Value,
+        pin_view: Option<usize>,
+        trace: Value,
+    ) {
+        let should_pin = !trace.is_none();
+        frame_obj::set_trace(frame, trace);
+        if should_pin && let Some(view_index) = pin_view {
+            self.pin_traced_frame_in_cache(view_index, frame.clone());
+        }
+    }
+
+    /// Resolve `(frame, local_trace, (exc_type, exc_val, exc_tb))` for an
+    /// `'exception'` trace event on `view_index`, or `None` if `view_index` is
+    /// not locally traced.
+    pub(crate) fn prepare_exception_trace_event(
+        &mut self,
+        view_index: usize,
+        err: &PyError,
+        raise_line: u32,
+    ) -> Result<Option<(Value, Value, Value)>> {
+        let Some((frame, local_trace)) = self.active_frame_local_trace(view_index) else {
+            return Ok(None);
+        };
+        if raise_line != 0 {
+            frame_obj::set_lineno(&frame, raise_line as i64);
+        }
+        let exc_val = self.materialize_pyerror(err.clone())?;
+        let exc_type = value_class(&exc_val);
+        let existing_tb = self.exception_traceback_value(&exc_val);
+        let tb_node = tb_obj::traceback_node(frame.clone(), existing_tb, raise_line as i64, -1);
+        let exc_tuple = Value::tuple(vec![exc_type, exc_val, tb_node]);
+        Ok(Some((frame, local_trace, exc_tuple)))
+    }
+
+    /// When Python code assigns `frame.f_trace = func` on a live frame, pin or
+    /// unpin that frame in its `VmFrameCache`.
+    pub(crate) fn update_live_frame_trace_pin(&mut self, frame: &Value, pin: bool) {
+        let view_index = self
+            .vm_frame_views
+            .iter()
+            .enumerate()
+            .rposition(|(view_index, _)| {
+                cached_frame_object(self, view_index)
+                    .as_ref()
+                    .is_some_and(|cached| values_are_identical(cached, frame))
+            });
+        if let Some(view_index) = view_index {
+            with_frame_cache_mut(self, view_index, |slot| {
+                if let Some(cache) = slot.as_deref_mut() {
+                    cache.traced_frame = pin.then(|| frame.clone());
+                }
+            });
+        }
     }
 
     /// Refresh a live function frame's persistent locals mapping when Python
@@ -977,6 +1097,7 @@ impl Interpreter {
             } else {
                 *cache = Some(Box::new(VmFrameCache {
                     object: Some(object),
+                    traced_frame: None,
                     function_locals: Some(function_locals),
                     persistent_function_locals: None,
                     function_local_names: Vec::new(),

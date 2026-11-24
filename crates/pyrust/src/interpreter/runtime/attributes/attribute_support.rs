@@ -19,6 +19,40 @@ struct InstanceLayoutAdditions {
     names: Vec<String>,
 }
 
+/// Return whether instances of `class` support weak references (CPython 3.12).
+///
+/// Matches CPython's `tp_weaklistoffset != 0` rule: normal user heap classes
+/// support weakrefs unless `__slots__` is declared without `'__weakref__'` and
+/// no ancestor provides a weakref slot. Builtin `object`, built-in exceptions,
+/// and variable-sized immutable builtins (`int`, `str`, `bytes`, `tuple`) do
+/// not provide weakref slots.
+pub(crate) fn class_supports_weakref(class: &Rc<RefCell<PyClass>>) -> bool {
+    fn has_non_weakrefable_varsize_base(cls: &Rc<RefCell<PyClass>>) -> bool {
+        let (tag, base, extra) = {
+            let b = cls.borrow();
+            (b.canonical_tag, b.base.clone(), b.extra_bases.clone())
+        };
+        if matches!(
+            tag,
+            Some(
+                pyrust_core::CanonicalClassTag::Int
+                    | pyrust_core::CanonicalClassTag::Bool
+                    | pyrust_core::CanonicalClassTag::Str
+                    | pyrust_core::CanonicalClassTag::Bytes
+                    | pyrust_core::CanonicalClassTag::Tuple
+            )
+        ) {
+            return true;
+        }
+        base.as_ref().is_some_and(has_non_weakrefable_varsize_base)
+            || extra.iter().any(has_non_weakrefable_varsize_base)
+    }
+    if has_non_weakrefable_varsize_base(class) {
+        return false;
+    }
+    class_layout_features(class).1
+}
+
 fn class_layout_features(class: &Rc<RefCell<PyClass>>) -> (bool, bool) {
     let (tag, builtin_exception, slots, base, extra_bases) = {
         let borrowed = class.borrow();

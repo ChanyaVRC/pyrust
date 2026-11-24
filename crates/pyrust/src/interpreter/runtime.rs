@@ -82,6 +82,7 @@ pub(crate) use call_state::{
 
 mod calls {
     use super::classes::{PrimitiveLayout, classify_primitive_layout, primitive_layout_for_class};
+    use super::execution::{VM_HOOK_PROFILE, VM_HOOK_TRACE, VM_HOOK_WEAKREF};
     use super::{
         CallDepthGuard, CellSlice, CellsBuf, ExpandedArgBuf, ExpandedCallArg, FnCode,
         GeneratorFrame, GeneratorKind, InstanceAttrs, Interpreter, PyClass, PyDict, PyError,
@@ -126,6 +127,7 @@ mod builtin_methods {
         set_has_object_key, set_items_from_value, set_subset_cmp,
         value_iterable_needs_runtime_key_semantics,
     };
+    use super::execution::VM_HOOK_PROFILE;
     use super::{
         AnextAwaitable, AsyncGenASend, BinaryOp, CanonicalSlot, ExpandedArgBuf, ExpandedCallArg,
         GeneratorKind, GetItemIter, IndexMap, Interpreter, NativeIterFrame, NativeIteratorClass,
@@ -194,7 +196,7 @@ mod fast_path {
     use super::builtin_methods::{
         BuiltinContainerKind, ResolvedMethodCallShape, iterator_direct_method_keyword_error,
     };
-    use super::execution::vm_read;
+    use super::execution::{VM_HOOK_PROFILE, VM_HOOK_TRACE, vm_read};
     use super::{
         BigRangeState, BinaryOp, CallBuiltinCacheEntry, CellSlice, ExpandedCallArg, GeneratorKind,
         GlobalCacheEntry, GlobalResolutionCache, Interpreter, IterState, LiveDictViewItem, MemoKey,
@@ -261,8 +263,8 @@ mod attributes {
 }
 pub(crate) use attributes::{
     ReadAttributeCachePlan, ReadMethodCachePlan, call_descriptor_get,
-    class_descriptor_display_name, dispatch_property_method, read_attribute_cache_plan,
-    read_method_cache_plan, write_attribute_cache_class,
+    class_descriptor_display_name, class_supports_weakref, dispatch_property_method,
+    read_attribute_cache_plan, read_method_cache_plan, write_attribute_cache_class,
 };
 use attributes::{class_direct_subclasses, class_mro_items};
 
@@ -384,14 +386,14 @@ mod execution {
         try_scalar_truthiness_fast, try_tagged_int_unary, value_is_builtin_len,
     };
     use super::{
-        CallDepthGuard, CellSlice, EnvRef, GeneratorCell, Interpreter, IterCacheBuf, IterState,
-        ItersBuf, KwCallMappingMerge, LoopIteratorAdvance, MemoKey, PyError, Rc, RegSlice, Result,
-        Value, ValueKind, VmFrameCache, VmFrameView, bump_global_struct_version, call_depth,
-        callable_error_name, duplicate_keyword_error, extract_stop_iteration_value,
-        initialize_typevar_attr, is_stop_iteration_error, keyword_mapping_operand_error,
-        lookup_class_attr, make_slice_value, make_type_alias_from_syntax,
-        make_type_param_from_syntax, max_call_depth, star_operand_error, unbound_binding_error,
-        value_class_object, value_type_name_str,
+        CallDepthGuard, CellSlice, EnvRef, ExpandedCallArg, GeneratorCell, Interpreter,
+        IterCacheBuf, IterState, ItersBuf, KwCallMappingMerge, LoopIteratorAdvance, MemoKey,
+        PyError, Rc, RegSlice, Result, Value, ValueKind, VmFrameCache, VmFrameView,
+        bump_global_struct_version, call_depth, callable_error_name, duplicate_keyword_error,
+        extract_stop_iteration_value, format_single_exc_line, initialize_typevar_attr,
+        is_stop_iteration_error, keyword_mapping_operand_error, lookup_class_attr,
+        make_slice_value, make_type_alias_from_syntax, make_type_param_from_syntax, max_call_depth,
+        star_operand_error, unbound_binding_error, value_class_object, value_type_name_str,
     };
     include!("runtime/vm.rs");
     include!("runtime/vm/tests.rs");
@@ -423,10 +425,10 @@ pub(crate) use generator_protocols::{
 
 mod introspection {
     use super::{
-        FrameKind, GeneratorFrame, Interpreter, PyDict, PyKey, Rc, UserFunction, Value, ValueKind,
-        VmFrameCache, VmFrameView, class_frame_identity, class_frame_locals_value,
-        compiler_owned_frame_local_keys, lookup_enclosing_function_value,
-        resolve_frame_source_line, snapshot_view_locals, values_are_identical,
+        FrameKind, GeneratorFrame, Interpreter, PyDict, PyError, PyKey, Rc, Result, UserFunction,
+        Value, ValueKind, VmFrameCache, VmFrameView, class_frame_identity,
+        class_frame_locals_value, compiler_owned_frame_local_keys, lookup_enclosing_function_value,
+        resolve_frame_source_line, snapshot_view_locals, value_class, values_are_identical,
     };
     include!("runtime/introspection.rs");
 }

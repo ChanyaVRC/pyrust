@@ -2,6 +2,7 @@ include!("trampoline.rs");
 include!("control_ops.rs");
 include!("match_ops.rs");
 include!("cold_ops.rs");
+include!("hooks.rs");
 
 impl Interpreter {
     #[allow(clippy::too_many_arguments)]
@@ -49,6 +50,8 @@ impl Interpreter {
         let tramp_base: usize = self.tramp_stack.len();
         let gen_base: usize = self.gen_drive_stack.len();
         let mut tramp_active_base: usize = usize::MAX;
+        let mut last_traced_line: u32 = 0;
+        let mut last_traced_pc: usize = 0;
 
         'vm: loop {
             // Re-derive the active frame's `code` from `code_ptr` (updated on a
@@ -255,6 +258,16 @@ impl Interpreter {
                 }
                 return Err(err);
             };
+            if self.vm_hooks_flags != 0 {
+                vm_try!(self.vm_dispatch_step_hooks(
+                    code,
+                    pc,
+                    &mut regs,
+                    num_locals,
+                    &mut last_traced_line,
+                    &mut last_traced_pc,
+                ));
+            }
             pc += 1;
 
             match insn {
@@ -403,16 +416,18 @@ impl Interpreter {
                 }
                 Insn::CallInlineBinOp(desc_idx, skip) => {
                     let desc = code.descs[*desc_idx as usize].as_call_inline_binop();
-                    if self.exec_call_inline_binop(
-                        &mut regs,
-                        code,
-                        desc.callee,
-                        desc.dst,
-                        desc.a,
-                        desc.op,
-                        desc.b,
-                        desc.proto,
-                    ) {
+                    if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) == 0
+                        && self.exec_call_inline_binop(
+                            &mut regs,
+                            code,
+                            desc.callee,
+                            desc.dst,
+                            desc.a,
+                            desc.op,
+                            desc.b,
+                            desc.proto,
+                        )
+                    {
                         pc = jump_pc!(*skip);
                     }
                 }
@@ -450,11 +465,23 @@ impl Interpreter {
                             pc - 1,
                             PositionalCallCacheProbe::Probed(BuiltinCallProbe::Uncacheable),
                         ));
+                        if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0 {
+                            self.vm_clear_call_arg_temps(
+                                code,
+                                pc,
+                                &mut regs,
+                                *func_reg + 1,
+                                u32::from(*argc),
+                                num_locals,
+                            );
+                        }
                         continue 'vm;
                     }
                     let probe = {
                         let function = &regs[*func_reg as usize];
-                        if *argc == 1
+                        let profile_disabled = self.vm_hooks_flags & VM_HOOK_PROFILE == 0;
+                        if profile_disabled
+                            && *argc == 1
                             && let Some(argument) = regs.get((*func_reg + 1) as usize)
                             && let Some(identity) =
                                 Self::try_identity_builtin_call(function, argument)
@@ -469,12 +496,16 @@ impl Interpreter {
                                 function,
                                 &(*regs)[argument_base..argument_end],
                             ) {
-                                BuiltinCallProbe::Vector(dispatch) => {
+                                BuiltinCallProbe::Vector(dispatch) if profile_disabled => {
                                     PlainCallProbe::Fast(dispatch)
                                 }
                                 cache_probe => PlainCallProbe::Slow {
                                     function: function.clone(),
-                                    cache_probe,
+                                    cache_probe: if profile_disabled {
+                                        cache_probe
+                                    } else {
+                                        BuiltinCallProbe::Uncacheable
+                                    },
                                 },
                             }
                         }
@@ -488,6 +519,16 @@ impl Interpreter {
                             let base = (*func_reg + 1) as usize;
                             let res = dispatch(self, &(*regs)[base..(base + *argc as usize)]);
                             regs[*func_reg as usize] = vm_try!(res);
+                            if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0 {
+                                self.vm_clear_call_arg_temps(
+                                    code,
+                                    pc,
+                                    &mut regs,
+                                    *func_reg + 1,
+                                    u32::from(*argc),
+                                    num_locals,
+                                );
+                            }
                             continue 'vm;
                         }
                         PlainCallProbe::Slow {
@@ -520,6 +561,16 @@ impl Interpreter {
                         pc - 1,
                         PositionalCallCacheProbe::Probed(cache_probe),
                     ));
+                    if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0 {
+                        self.vm_clear_call_arg_temps(
+                            code,
+                            pc,
+                            &mut regs,
+                            *func_reg + 1,
+                            u32::from(*argc),
+                            num_locals,
+                        );
+                    }
                 }
 
                 Insn::CallMemo(func_reg, argc) => {
@@ -566,6 +617,16 @@ impl Interpreter {
                         pc - 1,
                     );
                     regs[*dst as usize] = vm_try!(r);
+                    if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0 {
+                        self.vm_clear_call_arg_temps(
+                            code,
+                            pc,
+                            &mut regs,
+                            *args_base,
+                            u32::from(*nargs),
+                            num_locals,
+                        );
+                    }
                 }
 
                 // ── Hot returns, append, yield & iteration ───────────────

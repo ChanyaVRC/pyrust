@@ -176,6 +176,9 @@ impl Interpreter {
         func: Rc<pyrust_core::UserFunction>,
         st: &mut UnwindState,
     ) -> Result<TrampEnter<Rc<pyrust_core::UserFunction>>> {
+        if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) != 0 {
+            return Ok(TrampEnter::Fallback(func));
+        }
         let Some((callee_code, base)) = vm_tramp_check_gate(
             &func,
             code,
@@ -236,6 +239,9 @@ impl Interpreter {
         memo_key: Option<MemoKey>,
         st: &mut UnwindState,
     ) -> Result<TrampEnter<()>> {
+        if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) != 0 {
+            return Ok(TrampEnter::Fallback(()));
+        }
         let ValueKind::UserFunction(f) = func_val.kind() else {
             return Ok(TrampEnter::Fallback(()));
         };
@@ -302,6 +308,9 @@ impl Interpreter {
         argc: u8,
         st: &mut UnwindState,
     ) -> Result<TrampEnter<()>> {
+        if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) != 0 {
+            return Ok(TrampEnter::Fallback(()));
+        }
         let Some((callee_code, base)) = vm_tramp_check_gate(
             f,
             code,

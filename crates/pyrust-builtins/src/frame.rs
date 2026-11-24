@@ -27,6 +27,12 @@ pub struct FrameState {
     pub globals: Value,
     /// `f_locals` — the frame's local namespace snapshot.
     pub locals: Value,
+    /// `f_trace` — the per-frame local trace function, or `None`.
+    pub trace: Value,
+    /// `f_trace_lines` — whether `'line'` events are emitted for this frame.
+    pub trace_lines: bool,
+    /// `f_trace_opcodes` — whether `'opcode'` events are emitted for this frame.
+    pub trace_opcodes: bool,
 }
 
 pub struct FrameOps;
@@ -77,9 +83,10 @@ impl BuiltinTypeOps for FrameOps {
             // stable bytecode offset, so report `-1` (the value CPython uses for
             // a frame that has not yet executed an instruction).
             "f_lasti" => Some(Value::int(-1)),
-            // `f_trace` is the per-frame trace function; pyrust has no tracing
-            // hook, so it is always `None` (matching an untraced CPython frame).
-            "f_trace" => Some(Value::none()),
+            // `f_trace` is the per-frame trace function (writable, defaults to None).
+            "f_trace" => Some(s.trace.clone()),
+            "f_trace_lines" => Some(Value::bool_(s.trace_lines)),
+            "f_trace_opcodes" => Some(Value::bool_(s.trace_opcodes)),
             _ => None,
         }
     }
@@ -93,6 +100,9 @@ pub fn frame(code: Value, lineno: i64, back: Value, globals: Value, locals: Valu
         back,
         globals,
         locals,
+        trace: Value::none(),
+        trace_lines: true,
+        trace_opcodes: false,
     });
     Value::builtin_object(FRAME_OPS, state)
 }
@@ -126,5 +136,87 @@ pub fn set_back(value: &Value, back: Value) {
     let mut borrow = state.borrow_mut();
     if let Some(s) = borrow.downcast_mut::<FrameState>() {
         s.back = back;
+    }
+}
+
+/// Return the frame's per-frame `f_trace` value (`Value::none()` if unset).
+pub fn get_trace(value: &Value) -> Option<Value> {
+    let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return None;
+    };
+    if !builtin_ops_is::<FrameOps>(ops) {
+        return None;
+    }
+    let borrow = state.borrow();
+    borrow.downcast_ref::<FrameState>().map(|s| s.trace.clone())
+}
+
+/// Set the frame's per-frame `f_trace` value.
+pub fn set_trace(value: &Value, trace: Value) {
+    let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return;
+    };
+    if !builtin_ops_is::<FrameOps>(ops) {
+        return;
+    }
+    let mut borrow = state.borrow_mut();
+    if let Some(s) = borrow.downcast_mut::<FrameState>() {
+        s.trace = trace;
+    }
+}
+
+/// Return whether `f_trace_lines` is enabled on this frame.
+pub fn get_trace_lines(value: &Value) -> bool {
+    let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return true;
+    };
+    if !builtin_ops_is::<FrameOps>(ops) {
+        return true;
+    }
+    let borrow = state.borrow();
+    borrow
+        .downcast_ref::<FrameState>()
+        .is_none_or(|s| s.trace_lines)
+}
+
+/// Set `f_trace_lines` on this frame.
+pub fn set_trace_lines(value: &Value, enabled: bool) {
+    let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return;
+    };
+    if !builtin_ops_is::<FrameOps>(ops) {
+        return;
+    }
+    let mut borrow = state.borrow_mut();
+    if let Some(s) = borrow.downcast_mut::<FrameState>() {
+        s.trace_lines = enabled;
+    }
+}
+
+/// Set `f_trace_opcodes` on this frame.
+pub fn set_trace_opcodes(value: &Value, enabled: bool) {
+    let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return;
+    };
+    if !builtin_ops_is::<FrameOps>(ops) {
+        return;
+    }
+    let mut borrow = state.borrow_mut();
+    if let Some(s) = borrow.downcast_mut::<FrameState>() {
+        s.trace_opcodes = enabled;
+    }
+}
+
+/// Update `f_lineno` on this frame.
+pub fn set_lineno(value: &Value, lineno: i64) {
+    let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return;
+    };
+    if !builtin_ops_is::<FrameOps>(ops) {
+        return;
+    }
+    let mut borrow = state.borrow_mut();
+    if let Some(s) = borrow.downcast_mut::<FrameState>() {
+        s.lineno = lineno;
     }
 }

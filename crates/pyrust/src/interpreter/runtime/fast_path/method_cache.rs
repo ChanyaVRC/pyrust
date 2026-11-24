@@ -227,6 +227,7 @@ impl Interpreter {
             });
         }
         let r = invoke_class_method(self, unbound, inst_val, &buf);
+        buf.clear();
         self.call_arg_buf = buf;
         Ok(Some(r?))
     }

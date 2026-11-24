@@ -213,18 +213,39 @@ impl Interpreter {
         if inject_exc.is_some() && frame.pc != 0 {
             pyrust_core::set_current_vm_line(frame.suspended_line);
         }
-        let result = self.run_bytecode_inner(
-            &frame.code,
-            regs_slice,
-            cells_slice,
-            std::mem::take(&mut frame.iters),
-            gen_exc_handlers,
-            frame.pc,
-            inject_exc,
-            gen_handled,
-            gen_active,
-            gen_exc_saved_active,
-        );
+        let call_hook_res = if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) != 0 {
+            self.vm_hook_function_call(&frame.code)
+        } else {
+            Ok(())
+        };
+        let result = match call_hook_res {
+            Ok(()) => self.run_bytecode_inner(
+                &frame.code,
+                regs_slice,
+                cells_slice,
+                std::mem::take(&mut frame.iters),
+                gen_exc_handlers,
+                frame.pc,
+                inject_exc,
+                gen_handled,
+                gen_active,
+                gen_exc_saved_active,
+            ),
+            Err(e) => Err(e),
+        };
+        let result = if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) != 0 {
+            let ret_val_ref = match &result {
+                Ok(FrameOutcome::Yielded { value, .. }) => Some(value),
+                Ok(FrameOutcome::Returned(value)) => Some(value),
+                Err(_) => None,
+            };
+            match self.vm_hook_function_return(&frame.code, ret_val_ref) {
+                Ok(()) => result,
+                Err(e) => Err(e),
+            }
+        } else {
+            result
+        };
         // Lazy traceback: record the generator frame's `FrameInfo` only when an
         // exception propagated out of the body (issue #908).  On yield
         // (Ok(Yielded)) the body suspended successfully — nothing to record.
@@ -384,6 +405,11 @@ impl Interpreter {
         self.exc_saved_active.truncate(exc_saved_active_entry_depth);
         self.active_exception = saved_active;
         self.cold.push_exc_ctx_marks = saved_push_exc_ctx_marks;
+        if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0
+            && pyrust_core::has_pending_weakref_callbacks()
+        {
+            self.drain_pending_weakref_callbacks();
+        }
         result
     }
 
