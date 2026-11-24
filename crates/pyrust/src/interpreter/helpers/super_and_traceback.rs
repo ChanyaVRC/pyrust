@@ -36,14 +36,14 @@ pub(crate) fn resolve_zero_arg_super(interp: &Interpreter) -> crate::error::Resu
         .vm_frame_views
         .iter()
         .rev()
-        .find(|v| v.kind == FrameKind::Function);
+        .find(|v| v.kind() == FrameKind::Function);
 
     let Some(view) = innermost_fn_frame else {
         // Called at module/script scope — no function frame at all.
         return Err(PyError::runtime("super(): no arguments".to_string()));
     };
 
-    if !view.is_class_method {
+    if !view.is_class_method() {
         // Innermost function is not a direct class method (e.g. nested inner
         // function, standalone function).
         return Err(PyError::runtime("super(): no arguments".to_string()));
@@ -792,7 +792,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
         &mut visited_functions,
     );
     for view in &interp.vm_frame_views {
-        if let Some(env) = view.env.as_ref() {
+        if let Some(env) = view.env() {
             scan_environment_chain(
                 env,
                 del_rc,
@@ -803,9 +803,9 @@ pub(crate) fn call_del_if_last_binding_in_env(
                 &mut visited_functions,
             );
         }
-        if let Some(gen_frame) = view.gen_frame {
+        if let Some(gen_frame) = view.gen_frame() {
             // SAFETY: this is the same shared-reference reconstruction used by
-            // `with_frame_cache`. `VmFrameView::gen_frame` is heap-stable while
+            // `with_frame_cache`. `VmFrameView::gen_frame()` is heap-stable while
             // the live view remains on the stack and is popped before the
             // GeneratorFrame can move or be dropped.
             let gen_frame = unsafe { gen_frame.as_ref() };
@@ -847,7 +847,7 @@ pub(crate) fn call_del_if_last_binding_in_env(
                 }
             });
         }
-        for register in view.local_index.values() {
+        for register in view.local_index().values() {
             let index = *register as usize;
             if index >= view.regs_len {
                 continue;

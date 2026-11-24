@@ -61,7 +61,7 @@ pub(crate) fn sync_module_env_to_globals_dict(interp: &mut Interpreter) {
     let at_script_scope = interp
         .vm_frame_views
         .last()
-        .is_some_and(|view| view.kind == FrameKind::Script);
+        .is_some_and(|view| view.kind() == FrameKind::Script);
     if explicit_globals.is_some() && !at_script_scope {
         // A function created by explicit exec already has a live authoritative
         // globals dict. Copying its captured EnvValues snapshot back here would

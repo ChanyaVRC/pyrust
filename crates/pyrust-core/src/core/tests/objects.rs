@@ -362,6 +362,7 @@ fn make_user_function() -> Rc<UserFunction> {
         params: Vec::new(),
         param_binds: Rc::new(Vec::new()),
         memo_positional_parameter_count: 0,
+        trampoline_arity: UserFunction::TRAMPOLINE_INELIGIBLE,
         self_bind: None,
         local_names: Rc::new(HashSet::new()),
         local_index: Rc::new(HashMap::new()),
@@ -402,6 +403,16 @@ fn with_function_kind_reuses_original_id() {
     assert_eq!(sm_fn.id, original_id, "staticmethod must reuse id");
     assert_eq!(cm_fn.kind, UserFunctionKind::ClassMethod);
     assert_eq!(sm_fn.kind, UserFunctionKind::StaticMethod);
+    assert_eq!(
+        cm_fn.trampoline_arity,
+        UserFunction::TRAMPOLINE_INELIGIBLE,
+        "classmethod wrapper must never be trampoline-eligible"
+    );
+    assert_eq!(
+        sm_fn.trampoline_arity,
+        UserFunction::TRAMPOLINE_INELIGIBLE,
+        "staticmethod wrapper must never be trampoline-eligible"
+    );
 }
 
 #[test]

@@ -68,15 +68,31 @@ impl Interpreter {
                 is_positional_only: param_spec.is_positional_only[i],
             });
         }
-        let memo_positional_parameter_count = u16::try_from(
-            params
-                .iter()
-                .filter(|parameter| {
-                    !parameter.is_args && !parameter.is_kwargs && !parameter.is_keyword_only
-                })
-                .count(),
-        )
-        .unwrap_or(u16::MAX);
+        let mut positional_count = 0usize;
+        let mut has_non_plain_param = false;
+        for parameter in &params {
+            if parameter.is_args || parameter.is_kwargs || parameter.is_keyword_only {
+                has_non_plain_param = true;
+            } else {
+                positional_count += 1;
+            }
+        }
+        let memo_positional_parameter_count = u16::try_from(positional_count).unwrap_or(u16::MAX);
+        let trampoline_arity = if !has_non_plain_param
+            && proto_global_names.is_empty()
+            && !proto_code.is_generator
+            && !proto_code.is_coroutine
+            && proto_code.num_iters == 0
+            && !proto_code.has_exc_handlers
+            && !proto_code.has_own_cells()
+        {
+            u16::try_from(params.len())
+                .ok()
+                .filter(|&arity| arity < pyrust_core::UserFunction::TRAMPOLINE_INELIGIBLE)
+                .unwrap_or(pyrust_core::UserFunction::TRAMPOLINE_INELIGIBLE)
+        } else {
+            pyrust_core::UserFunction::TRAMPOLINE_INELIGIBLE
+        };
         let mut annotations_map: PyDict = PyDict::default();
         for (i, key) in annotation_keys.iter().enumerate() {
             let val = vm_read(regs, annots_base + i as u32, num_locals)?;
@@ -110,6 +126,7 @@ impl Interpreter {
             params,
             param_binds: proto_param_binds,
             memo_positional_parameter_count,
+            trampoline_arity,
             self_bind: proto_self_bind,
             local_names: proto_local_names,
             local_index: proto_local_index,

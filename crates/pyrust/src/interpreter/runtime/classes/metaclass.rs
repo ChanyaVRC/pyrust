@@ -227,21 +227,15 @@ impl Interpreter {
         let class_regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(class_regs.as_mut_ptr()) };
         let class_regs_len = class_regs.len();
         let class_cells_slice = CellSlice::from_slice(&class_cells);
-        self.vm_frame_views.push(VmFrameView {
-            kind: FrameKind::Class,
-            // SAFETY: SmallVec/Vec allocation is always non-null.  `class_regs`
-            // lives on this stack frame for the full duration of `run_bytecode`;
-            // the view is popped before `class_regs` / `class_cells` are dropped.
-            regs_ptr: class_regs_ptr,
-            regs_len: class_regs_len,
-            cells: class_cells_slice,
-            local_index: Rc::clone(local_index),
-            nonlocal_names: None,
-            env: None,
-            is_class_method: false,
-            function: None,
-            gen_frame: None,
-        });
+        // SAFETY: SmallVec/Vec allocation is always non-null.  `class_regs`
+        // lives on this stack frame for the full duration of `run_bytecode`;
+        // the view is popped before `class_regs` / `class_cells` are dropped.
+        self.vm_frame_views.push(VmFrameView::class_frame(
+            class_regs_ptr,
+            class_regs_len,
+            class_cells_slice,
+            Rc::clone(local_index),
+        ));
         // SAFETY: class_regs_ptr is valid for class_regs_len Values for the
         // lifetime of class_regs.  No &mut [Value] referencing class_regs is
         // held while the dispatch loop runs (issue #547, PR #646).

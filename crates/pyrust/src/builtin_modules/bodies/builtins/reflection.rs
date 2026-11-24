@@ -279,7 +279,7 @@ pyrust_module! {
             let is_module_scope = _interp
                 .vm_frame_views
                 .last()
-                .map(|v| v.kind == crate::interpreter::FrameKind::Script)
+                .map(|v| v.kind() == crate::interpreter::FrameKind::Script)
                 .unwrap_or(true);
             if is_module_scope {
                 sync_module_env_to_globals_dict(_interp);
@@ -356,7 +356,7 @@ pyrust_module! {
         let is_module_scope = _interp
             .vm_frame_views
             .last()
-            .map(|v| v.kind == crate::interpreter::FrameKind::Script)
+            .map(|v| v.kind() == crate::interpreter::FrameKind::Script)
             .unwrap_or(true);
         if is_module_scope {
             sync_module_env_to_globals_dict(_interp);
@@ -392,7 +392,7 @@ pyrust_module! {
             && _interp
                 .vm_frame_views
                 .last()
-                .is_some_and(|view| view.kind == crate::interpreter::FrameKind::Function)
+                .is_some_and(|view| view.kind() == crate::interpreter::FrameKind::Function)
         {
             let active_env = Rc::clone(&_interp.env);
             globals_opt = Some(_interp.globals_for_environment(&active_env));

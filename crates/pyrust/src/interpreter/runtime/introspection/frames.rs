@@ -57,7 +57,7 @@ fn with_frame_cache<R>(
     read: impl FnOnce(Option<&VmFrameCache>) -> R,
 ) -> R {
     let view = &interp.vm_frame_views[view_index];
-    if let Some(gen_frame) = view.gen_frame {
+    if let Some(gen_frame) = view.gen_frame() {
         // SAFETY: `gen_frame` points to the heap-stable `GeneratorFrame` for
         // exactly as long as this active view is on `vm_frame_views`; both VM
         // entry paths pop the view before the frame can move or be dropped.
@@ -81,7 +81,7 @@ fn with_frame_cache_mut<R>(
     view_index: usize,
     update: impl FnOnce(&mut Option<Box<VmFrameCache>>) -> R,
 ) -> R {
-    if let Some(gen_frame) = interp.vm_frame_views[view_index].gen_frame {
+    if let Some(gen_frame) = interp.vm_frame_views[view_index].gen_frame() {
         // SAFETY: same lifetime guarantee as `with_frame_cache`. This never
         // creates a raw-derived `&mut GeneratorFrame`; mutation is confined to
         // the dedicated `RefCell`, whose short borrow ends before this returns.
@@ -124,7 +124,7 @@ fn cached_function_locals(
 }
 
 fn is_inlined_comprehension_view(view: &VmFrameView) -> bool {
-    if let Some(func) = &view.function {
+    if let Some(func) = view.function() {
         if let Some(code_any) = func.precompiled_code.as_ref()
             && let Ok(code) = Rc::clone(code_any).downcast::<crate::bytecode::FnCode>()
             && code.is_inlined_comp
@@ -136,7 +136,7 @@ fn is_inlined_comprehension_view(view: &VmFrameView) -> bool {
             "<listcomp>" | "<setcomp>" | "<dictcomp>"
         );
     }
-    if let Some(gen_frame) = view.gen_frame {
+    if let Some(gen_frame) = view.gen_frame() {
         // SAFETY: `gen_frame` points to the live boxed `GeneratorFrame` for
         // the lifetime of this active view on `vm_frame_views`.
         let gframe = unsafe { gen_frame.as_ref() };
@@ -216,7 +216,7 @@ impl Interpreter {
         }
         let view = self.vm_frame_views.pop()?;
         debug_assert!(
-            view.gen_frame.is_none(),
+            view.gen_frame().is_none(),
             "generator frame views must use the direct hot-path pop"
         );
         Some(view)
@@ -324,7 +324,7 @@ impl Interpreter {
             return;
         };
         let has_cache = self.vm_frame_views[view_index]
-            .gen_frame
+            .gen_frame()
             .is_some_and(|gen_frame| unsafe { gen_frame.as_ref() }.frame_cache.borrow().is_some());
         if has_cache {
             self.sync_cached_function_locals_at(view_index);
@@ -395,7 +395,7 @@ impl Interpreter {
         &mut self,
         view_index: usize,
     ) -> (Option<Value>, std::rc::Weak<()>) {
-        match self.vm_frame_views[view_index].kind {
+        match self.vm_frame_views[view_index].kind() {
             FrameKind::Script => (None, self.ensure_live_frame_cache_token(view_index)),
             FrameKind::Class => {
                 let locals = class_frame_locals_value(self, &self.vm_frame_views[view_index]);
@@ -451,7 +451,7 @@ impl Interpreter {
         let Some(view_index) = self.vm_frame_views.len().checked_sub(1) else {
             return (None, None);
         };
-        let kind = self.vm_frame_views[view_index].kind;
+        let kind = self.vm_frame_views[view_index].kind();
         if kind == FrameKind::Script {
             return (None, None);
         }
@@ -479,7 +479,7 @@ impl Interpreter {
     fn sync_cached_function_locals_at(&mut self, view_index: usize) {
         let (cached_locals, compiler_owned_names) = {
             let view = &self.vm_frame_views[view_index];
-            if view.kind != FrameKind::Function {
+            if view.kind() != FrameKind::Function {
                 return;
             }
             (
@@ -512,7 +512,7 @@ impl Interpreter {
             .len()
             .checked_sub(1)
             .expect("implicit function exec requires an active frame");
-        debug_assert_eq!(self.vm_frame_views[view_index].kind, FrameKind::Function);
+        debug_assert_eq!(self.vm_frame_views[view_index].kind(), FrameKind::Function);
 
         if let Some(locals) = cached_function_locals(self, view_index) {
             self.sync_cached_function_locals_at(view_index);
@@ -591,7 +591,7 @@ impl Interpreter {
                     .as_ref()
                     .is_some_and(|cached| values_are_identical(cached, frame))
             })?;
-        if self.vm_frame_views[view_index].gen_frame.is_some() {
+        if self.vm_frame_views[view_index].gen_frame().is_some() {
             return Some(
                 self.enclosing_visible_view_index(view_index)
                     .map(|parent_idx| self.build_frame_object_at_view(parent_idx, 0))
@@ -641,7 +641,7 @@ impl Interpreter {
         let back = Value::none();
         let view = &self.vm_frame_views[view_index];
 
-        let (code, effective_lineno) = match (&view.function, view.gen_frame) {
+        let (code, effective_lineno) = match (view.function(), view.gen_frame()) {
             (Some(func), _) => (self.build_code_object(func), lineno),
             (None, Some(gen_frame)) => {
                 // Running generator / coroutine / async-generator frame
@@ -660,7 +660,7 @@ impl Interpreter {
                 (self.build_code_object(&gen_frame.function), line)
             }
             (None, None) => {
-                if view.kind == FrameKind::Class
+                if view.kind() == FrameKind::Class
                     && let Some((class_name, filename)) = class_frame_identity(self, view)
                 {
                     (
@@ -693,10 +693,9 @@ impl Interpreter {
         };
 
         let env = view
-            .env
-            .as_ref()
+            .env()
             .or_else(|| {
-                view.gen_frame
+                view.gen_frame()
                     .map(|gen_frame| &unsafe { gen_frame.as_ref() }.function.env)
             })
             .unwrap_or(&self.env);
@@ -711,7 +710,7 @@ impl Interpreter {
         // provider `globals()` uses or the `f_locals is f_globals` identity
         // (and mutation-through-f_locals) would not hold. Class frames likewise
         // expose their live namespace; only function frames retain snapshots.
-        let frame_kind = view.kind;
+        let frame_kind = view.kind();
         let (locals, function_local_names) = match frame_kind {
             FrameKind::Script => (self.frame_locals_for_module_environment(env), Vec::new()),
             FrameKind::Class => (class_frame_locals_value(self, view), Vec::new()),
@@ -757,7 +756,7 @@ impl Interpreter {
     ) -> Option<Value> {
         let target = cell.frame_ptr()?;
         let view_index = self.vm_frame_views.iter().rposition(|view| {
-            view.gen_frame
+            view.gen_frame()
                 .is_some_and(|frame| frame.as_ptr().cast::<()>() == target.as_ptr())
         })?;
         let lineno = if view_index + 1 == self.vm_frame_views.len() {

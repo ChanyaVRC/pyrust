@@ -23,11 +23,16 @@ impl Interpreter {
         regs: RegSlice,
         cells: CellSlice,
     ) -> Result<Value> {
+        let iters_init = if code.num_iters == 0 {
+            ItersBuf::new()
+        } else {
+            smallvec::smallvec![None; code.num_iters as usize]
+        };
         match self.run_bytecode_inner(
             code,
             regs,
             cells,
-            smallvec::smallvec![None; code.num_iters as usize],
+            iters_init,
             ExcHandlersBuf::new(),
             0,
             None,
@@ -57,26 +62,15 @@ impl Interpreter {
         &mut self,
         frame: &mut GeneratorFrame,
     ) -> (std::ptr::NonNull<Value>, usize, CellSlice) {
-        let gen_nonlocal_names = if frame.function.nonlocal_names.is_empty() {
-            None
-        } else {
-            Some(Rc::clone(&frame.function.nonlocal_names))
-        };
         let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(frame.regs.as_mut_ptr()) };
         let regs_len = frame.regs.len();
         let cells_slice = CellSlice::from_slice(&frame.cells);
-        self.vm_frame_views.push(VmFrameView {
-            kind: FrameKind::Function,
+        self.vm_frame_views.push(VmFrameView::generator_frame(
             regs_ptr,
             regs_len,
-            cells: cells_slice,
-            local_index: Rc::clone(&frame.function.local_index),
-            nonlocal_names: gen_nonlocal_names,
-            env: None,
-            is_class_method: frame.code.is_class_method,
-            function: None,
-            gen_frame: Some(std::ptr::NonNull::from(&*frame)),
-        });
+            cells_slice,
+            std::ptr::NonNull::from(&*frame),
+        ));
         (regs_ptr, regs_len, cells_slice)
     }
 
@@ -279,6 +273,7 @@ impl Interpreter {
         match result {
             Ok(FrameOutcome::Yielded { value, saved }) => {
                 // Generator suspended: restore frame state from the outcome.
+                let saved = *saved;
                 frame.iters = saved.iters;
                 frame.exc_handlers = saved.exc_handlers;
                 frame.pc = saved.pc;
@@ -366,6 +361,9 @@ impl Interpreter {
         let exc_ctx_entry_depth = self.handled_exc_stack.len();
         let exc_saved_active_entry_depth = self.exc_saved_active.len();
         let saved_active = self.active_exception.clone();
+        let tramp_arena_entry_len = self.tramp_arena.len();
+        let tramp_stack_entry_len = self.tramp_stack.len();
+        let gen_drive_entry_len = self.gen_drive_stack.len();
         // Save and reset push_exc_ctx_marks: PushExcContext/PopExcContext are
         // always emitted as matched pairs within a single function body, but if
         // the block raises out of the frame, PopExcContext is never executed.
@@ -384,6 +382,25 @@ impl Interpreter {
             gen_active_exception,
             gen_exc_saved_active,
         );
+
+        debug_assert_eq!(
+            self.tramp_stack.len(),
+            tramp_stack_entry_len,
+            "tramp_stack imbalanced across run_bytecode_inner_impl"
+        );
+        debug_assert_eq!(
+            self.gen_drive_stack.len(),
+            gen_drive_entry_len,
+            "gen_drive_stack imbalanced across run_bytecode_inner_impl"
+        );
+        debug_assert_eq!(
+            self.tramp_arena.len(),
+            tramp_arena_entry_len,
+            "tramp_arena imbalanced across run_bytecode_inner_impl"
+        );
+        if self.tramp_arena.len() > tramp_arena_entry_len {
+            self.tramp_arena.truncate(tramp_arena_entry_len);
+        }
 
         // For `Yielded`, the `Yield` opcode already stripped the generator's
         // exc-stack entries and cleared `active_exception` before returning, so
@@ -443,30 +460,16 @@ impl Interpreter {
         let gen_regs_len = gframe.regs.len();
         let gen_cells_slice = CellSlice::from_slice(&gframe.cells);
         // Publish the generator's frame view (mirrors `resume_generator_with_exc`).
-        let gen_nonlocal_names = if gframe.function.nonlocal_names.is_empty() {
-            None
-        } else {
-            Some(Rc::clone(&gframe.function.nonlocal_names))
-        };
-        self.vm_frame_views.push(VmFrameView {
-            kind: FrameKind::Function,
-            regs_ptr: gen_regs_ptr,
-            regs_len: gen_regs_len,
-            cells: gen_cells_slice,
-            local_index: Rc::clone(&gframe.function.local_index),
-            nonlocal_names: gen_nonlocal_names,
-            env: None,
-            is_class_method: gframe.code.is_class_method,
-            function: None,
-            // Issue #2445/#2471: see the matching site in
-            // `resume_generator_with_exc`.  `gframe` is a `Box<GeneratorFrame>`
-            // whose heap allocation is stable across the move into
-            // `GenDriveFrame::gframe` below (only the box pointer moves), so the
-            // pointer remains valid while this view is on the stack.
-            gen_frame: Some(std::ptr::NonNull::from(&*gframe)),
-            // See the native resume site above: no cache moves through this
-            // trampoline's ordinary enter/yield path.
-        });
+        // `gframe` is a `Box<GeneratorFrame>` whose heap allocation is stable
+        // across the move into `GenDriveFrame::gframe` below (only the box
+        // pointer moves), so the pointer remains valid while this view is on
+        // the stack (issues #2445/#2471/#3159).
+        self.vm_frame_views.push(VmFrameView::generator_frame(
+            gen_regs_ptr,
+            gen_regs_len,
+            gen_cells_slice,
+            std::ptr::NonNull::from(&*gframe),
+        ));
         // SAFETY: `gframe` lives inside `GenDriveFrame::gframe` on
         // `gen_drive_stack` for the entire drive (until `Yield`, `YieldFrom`,
         // return, or unwind restores `saved_code_ptr`), keeping `gframe.code`
@@ -483,7 +486,8 @@ impl Interpreter {
         } else {
             smallvec::smallvec![None; gen_iters_len]
         };
-        st.gen_drive_stack.push(GenDriveFrame {
+        let tramp_floor = self.tramp_stack.len();
+        self.gen_drive_stack.push(GenDriveFrame {
             _depth_guard: CallDepthGuard::enter(),
             state_rc,
             gframe,
@@ -497,13 +501,12 @@ impl Interpreter {
             saved_base: *st.tramp_active_base,
             saved_cur_line: *st.cur_line,
             saved_code_ptr: *st.code_ptr,
-            saved_active_code_rc: st.active_code_rc.take(),
             saved_num_locals: *st.num_locals,
             saved_env: std::mem::replace(&mut self.env, gen_env),
             saved_iters: std::mem::replace(st.iters, gen_iters),
             saved_iter_cache: std::mem::replace(st.iter_next_cache, gen_iter_cache),
             saved_exc_handlers: std::mem::replace(st.exc_handlers, gen_exc_handlers),
-            tramp_floor: st.tramp_stack.len(),
+            tramp_floor,
         });
         // Rebind the dispatch state to the generator.  `regs` / `iters` /
         // `iter_next_cache` / `exc_handlers` were swapped in place above.
@@ -543,9 +546,13 @@ impl Interpreter {
         // this span; the rest stay caret-free (a missing caret beats a wrong one).
         let mut innermost_col = pyrust_core::get_current_vm_col_span();
         loop {
-            let floor = st.gen_drive_stack.last().map_or(0, |g| g.tramp_floor);
-            while st.tramp_stack.len() > floor {
-                let saved = st.tramp_stack.pop().unwrap();
+            let floor = if self.gen_drive_stack.len() > st.gen_base {
+                self.gen_drive_stack.last().unwrap().tramp_floor
+            } else {
+                st.tramp_base
+            };
+            while self.tramp_stack.len() > floor {
+                let saved = self.tramp_stack.pop().unwrap();
                 if let Some(key) = saved.memo_key.as_deref() {
                     self.cancel_memoized_call(key);
                 }
@@ -558,9 +565,9 @@ impl Interpreter {
                 // caller's resume pc (already advanced past the call), so the
                 // raising instruction's index is `saved_pc - 1`; `(0,0,0,0)` means
                 // "no anchor" and stays caret-free.  SAFETY: `saved_code_ptr`
-                // points at the caller's `FnCode`, kept alive by
-                // `saved_active_code_rc` (or the still-live bottom frame) until this
-                // frame is restored.
+                // points at the caller's `FnCode`, kept alive by the caller's
+                // `VmFrameView` / `GenDriveFrame` (or the still-live bottom frame)
+                // until this frame is restored.
                 let caller_call_col = {
                     let caller_code: &crate::bytecode::FnCode = unsafe { &*saved.saved_code_ptr };
                     caller_code
@@ -573,7 +580,7 @@ impl Interpreter {
                 let top_is_inlined_comp = self
                     .vm_frame_views
                     .last()
-                    .and_then(|v| v.function.as_ref())
+                    .and_then(|v| v.function())
                     .and_then(|f| f.precompiled_code.as_ref())
                     .and_then(|rc| Rc::clone(rc).downcast::<crate::bytecode::FnCode>().ok())
                     .is_some_and(|c| c.is_inlined_comp);
@@ -583,7 +590,7 @@ impl Interpreter {
                     self.capture_unwinding_traceback_frame(tb_lineno)
                 };
                 let view = self.detach_vm_frame_view();
-                st.tramp_arena.truncate(*st.tramp_active_base);
+                self.tramp_arena.truncate(*st.tramp_active_base);
                 *st.tramp_active_base = saved.saved_base;
                 *st.cells = saved.saved_cells;
                 if let Some(saved_env) = saved.saved_env {
@@ -592,7 +599,7 @@ impl Interpreter {
                 self.finish_pop_vm_frame_view();
                 let mut callee_is_inlined_comp = false;
                 if let Some(view) = view
-                    && let Some(func) = view.function
+                    && let Some(func) = view.into_function()
                 {
                     let callee_code = func
                         .precompiled_code
@@ -634,9 +641,10 @@ impl Interpreter {
                     line = saved.saved_cur_line;
                 }
             }
-            let Some(mut gd) = st.gen_drive_stack.pop() else {
+            if self.gen_drive_stack.len() <= st.gen_base {
                 break;
-            };
+            }
+            let mut gd = self.gen_drive_stack.pop().unwrap();
             // The error escaped the generator body: finalize it.
             gd.gframe.done = true;
             let tb_lineno = if line == 0 { None } else { Some(line) };
@@ -670,7 +678,6 @@ impl Interpreter {
             *st.cells = gd.saved_cells;
             line = gd.saved_cur_line;
             *st.code_ptr = gd.saved_code_ptr;
-            *st.active_code_rc = gd.saved_active_code_rc;
             *st.num_locals = gd.saved_num_locals;
             self.env = gd.saved_env;
             *st.iters = gd.saved_iters;

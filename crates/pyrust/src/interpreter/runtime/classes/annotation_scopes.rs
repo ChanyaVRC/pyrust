@@ -53,7 +53,7 @@ impl Interpreter {
         if !self
             .vm_frame_views
             .last()
-            .is_some_and(|frame| frame.kind == FrameKind::Class)
+            .is_some_and(|frame| frame.kind() == FrameKind::Class)
         {
             return;
         }
