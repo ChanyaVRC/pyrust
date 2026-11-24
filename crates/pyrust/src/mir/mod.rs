@@ -12,6 +12,7 @@
 //!   and exact `lineno_table`/`col_table` emission (`MirFn` -> `FnCode`)
 //! - [`lower_ast`]: AST -> MIR entry points and `--emit mir` source driver
 
+pub(crate) mod insn_info;
 pub mod ir;
 pub mod lower_ast;
 pub mod lower_bytecode;
