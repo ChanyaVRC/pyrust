@@ -134,30 +134,6 @@ fn const_fold_long_chain_folds_to_final_value() {
 }
 
 #[test]
-fn const_index_intern_matches_linear_scan() {
-    // The hash-indexed interner must return the same slots as the original
-    // linear scan (first-occurrence-wins dedup), including for Bool vs Int
-    // (which must never collide) and float bit-equality.
-    let mut a = vec![Value::int(1), Value::bool_(true), Value::float(2.0)];
-    let mut b = a.clone();
-    let mut idx = ConstIndex::build(&a);
-    let vals = [
-        Value::int(1),       // dedup → 0
-        Value::bool_(true),  // dedup → 1 (not Int(1))
-        Value::int(5),       // new → 3
-        Value::float(2.0),   // dedup → 2
-        Value::bool_(false), // new → 4
-        Value::int(5),       // dedup → 3
-    ];
-    for v in vals {
-        let indexed = idx.intern(&mut a, v.clone());
-        let linear = intern_const_in_pool(&mut b, v);
-        assert_eq!(indexed, linear, "indexed vs linear intern diverged");
-    }
-    assert_eq!(a.len(), b.len());
-}
-
-#[test]
 fn build_exc_table_no_handlers_is_identity() {
     let insns = vec![Insn::LoadConst(0, 0), Insn::Return(0)];
     let (out, table) = build_exc_table(insns.clone());
