@@ -1,19 +1,11 @@
-// Dict-subclass backing and mapping-protocol adapters shared by Counter and
-// defaultdict.
-//
-// Counter-specific update and arithmetic policy lives in counter.rs; this file
-// only owns storage access plus generic mapping ingestion.
+// Dict-subclass backing, shared mapping methods, and mapping-protocol adapters
+// shared by `Counter` and `defaultdict`.
 
-/// Snapshot the Counter's builtin-subclass backing dict.
-///
-/// Use this only when the operation needs an owned stable map while it may run
-/// Python code (Counter algebra) or must create an independent copy. Simple
-/// read-only methods borrow the live backing directly instead.
-///
-/// If the internal backing was overwritten externally,
-/// returns a `TypeError` rather than the internal-error path — the
-/// failure is *user-caused*, not an interpreter bug.
-fn snapshot_counts(args: &[ExpandedCallArg], fn_name: &str) -> Result<PyDict> {
+fn snapshot_dict_backing(
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+    type_name: &str,
+) -> Result<PyDict> {
     let inst = expect_self(args, fn_name)?;
     let borrow = inst.borrow();
     match borrow.attrs.builtin_data() {
@@ -22,7 +14,7 @@ fn snapshot_counts(args: &[ExpandedCallArg], fn_name: &str) -> Result<PyDict> {
             _ => Err(PyError::named(
                 "TypeError",
                 format!(
-                    "{fn_name}: Counter backing store has been overwritten with a non-dict; \
+                    "{fn_name}: {type_name} backing store has been overwritten with a non-dict; \
                      don't assign to internal attributes",
                 ),
             )),
@@ -31,12 +23,12 @@ fn snapshot_counts(args: &[ExpandedCallArg], fn_name: &str) -> Result<PyDict> {
     }
 }
 
+/// Snapshot the Counter's builtin-subclass backing dict.
+fn snapshot_counts(args: &[ExpandedCallArg], fn_name: &str) -> Result<PyDict> {
+    snapshot_dict_backing(args, fn_name, "Counter")
+}
+
 /// Return the live `builtin_data` dict `Value` for Counter/defaultdict.
-///
-/// Cloning the `Value` only increments the backing `Rc`; it does not clone the
-/// `IndexMap`.  Read paths can therefore use `Interpreter::dict_lookup`
-/// directly, while its object-key slow path still releases the map borrow
-/// before dispatching user `__eq__`.
 fn collection_backing(args: &[ExpandedCallArg], fn_name: &str, type_name: &str) -> Result<Value> {
     let inst = expect_self(args, fn_name)?;
     {
@@ -71,33 +63,92 @@ fn defaultdict_backing(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value>
 }
 
 fn read_items(args: &[ExpandedCallArg], fn_name: &str) -> Result<PyDict> {
-    let inst = expect_self(args, fn_name)?;
-    let borrow = inst.borrow();
-    match borrow.attrs.builtin_data() {
-        Some(v) => match v.kind() {
-            ValueKind::Dict(map) => Ok(map.clone()),
-            _ => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "{fn_name}: defaultdict backing store has been overwritten with a non-dict; \
-                     don't assign to internal attributes",
-                ),
-            )),
-        },
-        None => Ok(PyDict::default()),
+    snapshot_dict_backing(args, fn_name, "defaultdict")
+}
+
+// ── Shared dict-subclass method bodies (Counter & defaultdict) ───────────────
+
+fn dict_subclass_setitem(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+    type_name: &str,
+) -> Result<Value> {
+    expect_self(args, fn_name)?;
+    if args.len() != 3 {
+        return Err(PyError::Runtime(format!(
+            "{fn_name}() takes exactly 2 arguments",
+        )));
     }
+    let key = require_key_arg(args, 1, fn_name)?.clone();
+    let backing = collection_backing(args, fn_name, type_name)?;
+    interp.dict_set_value(&backing, key, args[2].value.clone())?;
+    Ok(Value::none())
+}
+
+fn dict_subclass_contains(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+    type_name: &str,
+) -> Result<Value> {
+    let backing = collection_backing(args, fn_name, type_name)?;
+    let key = require_key_arg(args, 1, fn_name)?;
+    Ok(Value::bool_(
+        interp.dict_lookup_value(&backing, key)?.is_some(),
+    ))
+}
+
+fn dict_subclass_len(args: &[ExpandedCallArg], fn_name: &str, type_name: &str) -> Result<Value> {
+    let backing = collection_backing(args, fn_name, type_name)?;
+    let len = backing
+        .dict_with(|items| items.len())
+        .ok_or_else(|| PyError::Runtime(format!("internal: {type_name} backing is not a dict")))?;
+    Ok(Value::int(len as i64))
+}
+
+fn dict_subclass_iter(args: &[ExpandedCallArg], fn_name: &str, type_name: &str) -> Result<Value> {
+    let backing = collection_backing(args, fn_name, type_name)?;
+    Ok(make_guarded_dict_subclass_iter(backing))
+}
+
+fn dict_subclass_get(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+    type_name: &str,
+) -> Result<Value> {
+    let backing = collection_backing(args, fn_name, type_name)?;
+    let user = &args[1..];
+    if user.is_empty() || user.len() > 2 {
+        return Err(PyError::named(
+            "TypeError",
+            "get() takes 1 or 2 arguments".to_string(),
+        ));
+    }
+    let key = require_key_arg(args, 1, fn_name)?;
+    Ok(match interp.dict_lookup_value(&backing, key)? {
+        Some((_, value)) => value,
+        None => user
+            .get(1)
+            .cloned()
+            .map(|a| a.value)
+            .unwrap_or_else(Value::none),
+    })
+}
+
+fn dict_subclass_view(
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+    type_name: &str,
+    view_name: &str,
+) -> Result<Value> {
+    require_no_args(args, view_name)?;
+    let backing = collection_backing(args, fn_name, type_name)?;
+    crate::Interpreter::dict_view_for_backing(&backing, view_name, false)
 }
 
 /// Build the ordinary live key iterator for a `Counter` / `defaultdict`.
-///
-/// The iterator owns only a cursor at construction time.  Short walks are
-/// therefore O(1) in both time and memory; long mutation-free walks reuse the
-/// adaptive snapshot in `NativeIterFrame::live_keys`.  The cursor retains the
-/// shared backing `Rc` and its mutation generation, so advancing a normal
-/// Counter neither re-resolves `__builtin_data__` nor needs a second size guard
-/// on every key. Counter/defaultdict mutation paths update that backing in
-/// place, retaining dict's size/key-change errors and value-only mutation
-/// behavior.
 fn make_guarded_dict_subclass_iter(backing: Value) -> Value {
     Value::generator(Box::new(NativeIterFrame::live_keys(
         backing,
@@ -115,27 +166,18 @@ fn require_key_arg<'a>(args: &'a [ExpandedCallArg], i: usize, fn_name: &str) -> 
     Ok(&v.value)
 }
 
-/// `__eq__`-aware `get` against an owned `_counts`/`_items` snapshot map
-/// (issue #1919).  Routes `PyKey::Object` keys through the interpreter's
-/// `dict_lookup_in` (the same `__hash__`-then-`__eq__` path the builtin dict
-/// uses); primitive keys hit the raw `IndexMap::get` fast path inside
-/// `dict_lookup_in`.  The snapshot is a local copy, so running user `__eq__`
-/// against it cannot alias the live store.
+/// `__eq__`-aware `get` against an owned `_counts`/`_items` snapshot map (#1919).
 fn map_get_eq(interp: &mut crate::Interpreter, map: &PyDict, key: &PyKey) -> Result<Option<Value>> {
     Ok(interp.dict_lookup_in(map, key)?.map(|(_, v)| v))
 }
 
-/// `__eq__`-aware `contains_key` against an owned snapshot map (issue #1919).
+/// `__eq__`-aware `contains_key` against an owned snapshot map (#1919).
 fn map_contains_eq(interp: &mut crate::Interpreter, map: &PyDict, key: &PyKey) -> Result<bool> {
     Ok(interp.dict_lookup_in(map, key)?.is_some())
 }
 
-/// Mirror of the `callable()` builtin (builtins.rs): decide whether `v` may be
-/// used as `defaultdict`'s `default_factory`.  CPython accepts *any* callable,
-/// not just functions/types — a class with `__call__`, a bound method, or a
-/// `functools.partial` are all valid factories.  Keep this in sync with the
-/// `callable()` body; the earlier hand-rolled `matches!` here wrongly rejected
-/// `__call__` instances and `partial` (#2099 review).
+/// Mirror of the `callable()` builtin: decide whether `v` may be used as
+/// `defaultdict`'s `default_factory`.
 fn value_is_callable(v: &Value) -> bool {
     match v.kind() {
         ValueKind::UserFunction(_)
@@ -152,13 +194,7 @@ fn value_is_callable(v: &Value) -> bool {
     }
 }
 
-/// Apply `dict.__init__`/`dict.update` semantics into `items`: an optional
-/// positional mapping-or-iterable-of-pairs followed by string-keyed keyword
-/// arguments (#2099 — `defaultdict(factory, mapping)` / `(factory, pairs)` /
-/// `(factory, **kw)`).  Mirrors CPython: a mapping (anything with `keys()`) is
-/// copied key/value; any other positional is iterated as length-2
-/// `(key, value)` pairs.  Insertion is `__eq__`-aware via [`map_insert_eq`] so
-/// equal user-keys dedup (#1919).
+/// Apply `dict.__init__`/`dict.update` semantics into `backing`.
 fn dict_init_into_backing(
     interp: &mut crate::Interpreter,
     backing: &Value,
@@ -166,10 +202,6 @@ fn dict_init_into_backing(
     kwargs: &[&ExpandedCallArg],
 ) -> Result<()> {
     if let Some(arg) = positional {
-        // Mapping form: a plain dict is copied verbatim, matching CPython's
-        // `dict(mapping)`. Snapshot before insertion so
-        // defaultdict.__init__(factory, its_own_backing) does not hold an
-        // immutable RefCell borrow while mutating the same map.
         if let Some(entries) = arg.dict_with(|map| {
             map.iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
@@ -179,7 +211,6 @@ fn dict_init_into_backing(
                 interp.dict_insert_value(backing, key, value)?;
             }
         } else if let Some(cls_rc) = pyrust_builtins::mapping_proxy::as_class_rc(arg) {
-            // Class-backed `mappingproxy` (`vars(C)`): copy attrs verbatim.
             let entries = cls_rc
                 .borrow()
                 .attrs
@@ -190,7 +221,6 @@ fn dict_init_into_backing(
                 interp.dict_insert_value(backing, key, value)?;
             }
         } else if let Some(dict_rc) = pyrust_builtins::mapping_proxy::as_dict_rc(arg) {
-            // Dict-backed `mappingproxy` (`d.keys().mapping`, #2679): copy pairs.
             let entries = dict_rc
                 .borrow()
                 .iter()
@@ -204,17 +234,8 @@ fn dict_init_into_backing(
             arg,
             |interp, key, value| interp.dict_insert_value(backing, key, value),
         )? {
-            // Any `keys()`-bearing mapping (dict subclasses like Counter /
-            // defaultdict / OrderedDict, ChainMap, UserDict, duck-typed user
-            // mappings) — keyed via `keys()` + `__getitem__`, exactly like
-            // `dict(mapping)`. Each completed __getitem__ is inserted before
-            // the next key lookup, preserving CPython's partial update if a
-            // later lookup fails.
+            // Handled via mapping protocol (`keys()` + `__getitem__`).
         } else {
-            // Iterable-of-pairs form: each element must be a length-2
-            // sequence, unpacked into `(key, value)`. Drive and commit one
-            // element at a time so a later source error leaves its completed
-            // prefix visible.
             let iterator = crate::interpreter::make_iterator(interp, arg)?;
             let exhausted = Value::list(Vec::new());
             let exhausted_id = exhausted.value_id();
@@ -268,7 +289,6 @@ fn dict_init_into_backing(
             }
         }
     }
-    // Keyword arguments overlay the positional data, matching CPython order.
     for kw in kwargs {
         let name = kw.name.as_deref().unwrap_or("");
         interp.dict_insert_value(backing, PyKey::str_from(name), kw.value.clone())?;

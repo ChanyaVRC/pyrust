@@ -1,14 +1,233 @@
-// Counter update, tally, arithmetic, unary, and comparison policy.
-//
-// Storage/view mechanics live in backing.rs.  Count values are intentionally
-// Python objects: only the exact small-int/bool case is handled here, while
-// BigInt, float, subclasses, and arbitrary objects go through Python's binary
-// and rich-comparison protocols.
+// Counter class method implementations, tallying, and count arithmetic
+// primitives. Multiset binary/unary/in-place algebra and comparisons live in
+// `counter_algebra.rs`.
+
+fn counter_repeat_entry(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    if args.len() != 1 || args[0].name.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes exactly one positional argument"),
+        ));
+    }
+    let (element, count) = match args[0].value.kind() {
+        ValueKind::Tuple(items) if items.len() == 2 => (items[0].clone(), items[1].clone()),
+        _ => {
+            return Err(PyError::Runtime(
+                "internal: Counter.items() yielded a non-pair".to_string(),
+            ));
+        }
+    };
+    let count = interp.value_to_isize(&count, "Python int too large to convert to C ssize_t")?;
+    Ok(native_iterators::repeat(element, count.max(0) as usize))
+}
+
+fn counter_fromkeys(args: &[ExpandedCallArg]) -> Result<Value> {
+    // The classmethod descriptor prepends `cls`.
+    if args.len() < 2 {
+        return Err(PyError::named(
+            "TypeError",
+            "Counter.fromkeys() missing 1 required positional argument: 'iterable'",
+        ));
+    }
+    if args.len() > 3 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "Counter.fromkeys() takes from 2 to 3 positional arguments but {} were given",
+                args.len()
+            ),
+        ));
+    }
+    Err(PyError::named(
+        "NotImplementedError",
+        "Counter.fromkeys() is undefined.  Use Counter(iterable) instead.",
+    ))
+}
+
+fn counter_init(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    apply_delta::<false>(interp, args, fn_name)
+}
+
+fn counter_getitem(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let backing = counter_backing(args, fn_name)?;
+    let key = require_key_arg(args, 1, fn_name)?;
+    Ok(interp
+        .dict_lookup_value(&backing, key)?
+        .map(|(_, value)| value)
+        .unwrap_or_else(|| Value::int(0)))
+}
+
+fn counter_delitem(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    expect_self(args, fn_name)?;
+    if args.len() != 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes exactly 1 argument"),
+        ));
+    }
+    let key = require_key_arg(args, 1, fn_name)?;
+    let backing = counter_backing(args, fn_name)?;
+    if let Some((index, _)) = interp.dict_lookup_value(&backing, key)? {
+        backing
+            .dict_with_mut(|counts| {
+                counts.shift_remove_index(index);
+            })
+            .ok_or_else(|| {
+                PyError::Runtime("internal: Counter backing is not a dict".to_string())
+            })?;
+    }
+    Ok(Value::none())
+}
+
+fn counter_repr(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    let backing = counter_backing(args, fn_name)?;
+    let pairs: Vec<(PyKey, Value)> = backing
+        .dict_with(|counts| {
+            counts
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .ok_or_else(|| PyError::Runtime("internal: Counter backing is not a dict".to_string()))?;
+    if pairs.is_empty() {
+        return Ok(Value::string(format!(
+            "{}()",
+            inst.borrow().class.borrow().name
+        )));
+    }
+    let ordered = match most_common::select(interp, pairs.clone(), None) {
+        Ok(ordered) => ordered,
+        Err(error) if error.class_name_is("TypeError") => pairs,
+        Err(error) => return Err(error),
+    };
+    let inner: Vec<String> = ordered
+        .iter()
+        .map(|(k, v)| format!("{}: {}", key_repr(k), v.repr_raw()))
+        .collect();
+    Ok(Value::string(format!(
+        "{}({{{}}})",
+        inst.borrow().class.borrow().name,
+        inner.join(", ")
+    )))
+}
+
+fn counter_most_common(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let user = &args[1..];
+    if user.len() > 1 {
+        return Err(PyError::named(
+            "TypeError",
+            "most_common() takes at most 1 argument".to_string(),
+        ));
+    }
+    let backing = counter_backing(args, fn_name)?;
+    let pairs: Vec<(PyKey, Value)> = backing
+        .dict_with(|counts| {
+            counts
+                .iter()
+                .map(|(key, count)| (key.clone(), count.clone()))
+                .collect()
+        })
+        .ok_or_else(|| PyError::Runtime("internal: Counter backing is not a dict".to_string()))?;
+    let selected =
+        most_common::select(interp, pairs, user.first().map(|argument| &argument.value))?;
+    Ok(Value::list(
+        selected
+            .into_iter()
+            .map(|(key, count)| Value::tuple(vec![crate::interpreter::key_to_value(key), count]))
+            .collect(),
+    ))
+}
+
+fn counter_elements(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let user = &args[1..];
+    if !user.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            "elements() takes no arguments".to_string(),
+        ));
+    }
+    let counter_class = Rc::clone(&expect_self(args, fn_name)?.borrow().class);
+    let chain_class = counter_elements_chain_class(&counter_class);
+    let backing = counter_backing(args, fn_name)?;
+    let items_view = Interpreter::dict_view_for_backing(&backing, "items", false)?;
+    let items_iter = crate::interpreter::make_iterator(interp, &items_view)?;
+    let mut sources = IterSrcBuf::new();
+    sources.push(items_iter);
+    let repeaters = Value::generator(Box::new(MapIter {
+        func: Value::builtin_function("collections._counter_repeat_entry"),
+        sources,
+        done: false,
+    }));
+    Ok(native_iterators::elements(chain_class, repeaters))
+}
+
+fn counter_total(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    require_no_args(args, "total")?;
+    let backing = counter_backing(args, fn_name)?;
+    let values = Interpreter::dict_view_for_backing(&backing, "values", false)?;
+    interp.call_function_expanded(
+        Value::builtin_function("sum"),
+        &[ExpandedCallArg {
+            name: None,
+            value: values,
+        }],
+    )
+}
+
+fn counter_copy(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let counts = snapshot_counts(args, fn_name)?;
+    let user = &args[1..];
+    if !user.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            "copy() takes no arguments".to_string(),
+        ));
+    }
+    let inst = expect_self(args, fn_name)?;
+    let class = Rc::clone(&inst.borrow().class);
+    let mut attrs = InstanceAttrs::new();
+    attrs.set_builtin_data(Value::dict(counts));
+    Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
+        class,
+        attrs,
+    }))))
+}
 
 /// Apply `update`/`subtract` semantics to an optional positional source and
-/// keyword counts.  Each completed item is committed immediately, preserving
-/// the visible prefix if a later iterator, hash, comparison, or count operation
-/// raises.
+/// keyword counts.
 fn apply_delta<const SUBTRACT: bool>(
     interp: &mut crate::Interpreter,
     args: &[ExpandedCallArg],
@@ -43,8 +262,6 @@ fn exact_small_integer(value: &Value) -> Option<i64> {
     }
 }
 
-/// Exact-int/bool hot path with arbitrary-precision promotion.  Everything
-/// else must retain Python's `left + right` dispatch order.
 #[inline]
 fn counter_add_values(interp: &mut crate::Interpreter, left: Value, right: Value) -> Result<Value> {
     if let (Some(left), Some(right)) = (exact_small_integer(&left), exact_small_integer(&right)) {
@@ -56,8 +273,6 @@ fn counter_add_values(interp: &mut crate::Interpreter, left: Value, right: Value
     interp.eval_binary(left, BinaryOp::Add, right)
 }
 
-/// Exact-int/bool hot path with arbitrary-precision promotion.  Everything
-/// else must retain Python's `left - right` dispatch order.
 #[inline]
 fn counter_sub_values(interp: &mut crate::Interpreter, left: Value, right: Value) -> Result<Value> {
     if let (Some(left), Some(right)) = (exact_small_integer(&left), exact_small_integer(&right)) {
@@ -78,9 +293,6 @@ enum CountComparison {
     Ge,
 }
 
-/// Rich-compare two count objects and truth-test the result.  Integer counts
-/// stay allocation/dispatch-free; all other values retain reflected dunders
-/// and arbitrary truth conversion.
 #[inline]
 fn counter_compare_values(
     interp: &mut crate::Interpreter,
@@ -124,9 +336,7 @@ fn counter_negative(interp: &mut crate::Interpreter, value: &Value) -> Result<bo
     counter_compare_values(interp, value, &Value::int(0), CountComparison::Lt)
 }
 
-/// Apply one mapping count.  The operand order is observable:
-/// `update` evaluates `incoming + current`, while `subtract` evaluates
-/// `current - incoming`.
+/// Apply one mapping count (`update`: `incoming + current`, `subtract`: `current - incoming`).
 fn counter_apply_mapping_entry<const SUBTRACT: bool>(
     interp: &mut crate::Interpreter,
     backing: &Value,
@@ -137,7 +347,7 @@ fn counter_apply_mapping_entry<const SUBTRACT: bool>(
     if preserve {
         return interp.dict_insert_value(backing, key, incoming);
     }
-    let key_value = key_to_value(key);
+    let key_value = crate::interpreter::key_to_value(key);
     let lookup_key = interp.value_to_pykey(&key_value)?;
     let current = interp
         .dict_lookup(backing, &lookup_key)?
@@ -153,9 +363,7 @@ fn counter_apply_mapping_entry<const SUBTRACT: bool>(
     interp.dict_insert_value(backing, insert_key, result)
 }
 
-/// Tally one positional source.  Plain dict/Counter inputs are snapshotted so
-/// aliased updates are safe; other mappings use the shared streaming mapping
-/// adapter; non-mappings remain lazy element streams.
+/// Tally one positional source into a Counter's backing dict.
 fn counter_tally_into_backing<const SUBTRACT: bool>(
     interp: &mut crate::Interpreter,
     backing: &Value,
@@ -182,11 +390,6 @@ fn counter_tally_into_backing<const SUBTRACT: bool>(
         return Ok(());
     }
 
-    // `dict.update` and `**` accept `keys()` alone when it yields no keys, but
-    // Counter's mapping/element split is stricter: without `__getitem__` the
-    // source falls through to ordinary iteration even when keys() is empty.
-    // Keep that Counter-specific classification outside the shared mapping
-    // visitor so the dict-family consumers retain their CPython behaviour.
     let exposes_getitem = match other.kind() {
         ValueKind::PyInstance(instance) => {
             let class = Rc::clone(&instance.borrow().class);
@@ -228,8 +431,7 @@ fn counter_tally_into_backing<const SUBTRACT: bool>(
     Ok(())
 }
 
-/// Apply keyword counts as a separate mapping update/subtract, including the
-/// empty-Counter verbatim-copy rule used by `Counter.update(kwds)`.
+/// Apply keyword counts as a separate mapping update/subtract.
 fn counter_apply_kwargs_to_backing<const SUBTRACT: bool>(
     interp: &mut crate::Interpreter,
     backing: &Value,
@@ -254,499 +456,4 @@ fn counter_apply_kwargs_to_backing<const SUBTRACT: bool>(
         )?;
     }
     Ok(())
-}
-
-fn key_to_value(key: PyKey) -> Value {
-    match key {
-        PyKey::Int(v) => Value::int(v),
-        PyKey::BigInt(v) => Value::bigint(*v),
-        PyKey::Float(bits) => Value::float_from_bits(bits),
-        PyKey::Str(s) => s,
-        PyKey::Bool(b) => Value::bool_(b),
-        PyKey::None => Value::none(),
-        PyKey::Ellipsis => Value::ellipsis(),
-        PyKey::FrozenSet(key) => pyrust_builtins::frozenset::frozenset_key(key),
-        PyKey::Tuple(items) => Value::tuple(items.into_iter().map(key_to_value).collect()),
-        PyKey::Bytes(rc) => Value::bytes((*rc).clone()),
-        PyKey::Complex(re, im) => Value::complex(re, im),
-        PyKey::Object { value, .. } => value,
-    }
-}
-
-// ── Counter algebra ─────────────────────────────────────────────────────────
-
-#[derive(Copy, Clone)]
-enum CounterOp {
-    Add,
-    Sub,
-    And,
-    Or,
-}
-
-/// Extract a stable Counter backing snapshot.  Regular multiset operations
-/// accept Counter instances only; a non-Counter receives `NotImplemented`.
-fn counts_of(other: &Value) -> Option<PyDict> {
-    let ValueKind::PyInstance(inst) = other.kind() else {
-        return None;
-    };
-    let borrow = inst.borrow();
-    if !is_canonical_collection_class_or_subclass(&borrow.class, CanonicalCollectionKind::Counter) {
-        return None;
-    }
-    match borrow.attrs.builtin_data() {
-        Some(v) => match v.kind() {
-            ValueKind::Dict(map) => Some(map.clone()),
-            _ => Some(PyDict::default()),
-        },
-        None => Some(PyDict::default()),
-    }
-}
-
-fn fresh_base_counter(receiver: &Rc<RefCell<PyInstance>>, counts: PyDict) -> Result<Value> {
-    let receiver_class = Rc::clone(&receiver.borrow().class);
-    let Some(class) =
-        canonical_collection_base_for_receiver(&receiver_class, CanonicalCollectionKind::Counter)
-    else {
-        return Err(PyError::Runtime(
-            "internal: canonical Counter class is not registered".to_string(),
-        ));
-    };
-    let mut attrs = InstanceAttrs::new();
-    attrs.set_builtin_data(Value::dict(counts));
-    Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
-        class,
-        attrs,
-    }))))
-}
-
-/// Compute one LHS-key algebra result and apply Counter's positive filter.
-///
-/// Keeping the exact-int comparison in the same branch as the arithmetic
-/// avoids constructing a `Value` only to classify it again on the overwhelmingly
-/// common integer-count path.
-#[inline]
-fn merge_positive_count<const OP: u8>(
-    interp: &mut crate::Interpreter,
-    left: &Value,
-    right: &Value,
-) -> Result<Option<Value>> {
-    if let (Some(left), Some(right)) = (exact_small_integer(left), exact_small_integer(right)) {
-        let small = match OP {
-            0 => left.checked_add(right),
-            1 => left.checked_sub(right),
-            2 => Some(left.min(right)),
-            3 => Some(left.max(right)),
-            _ => unreachable!(),
-        };
-        if let Some(value) = small {
-            return Ok((value > 0).then(|| Value::int(value)));
-        }
-        let value = match OP {
-            0 => value_from_bigint(PyBigInt::from(left) + PyBigInt::from(right)),
-            1 => value_from_bigint(PyBigInt::from(left) - PyBigInt::from(right)),
-            _ => unreachable!(),
-        };
-        return Ok(counter_positive(interp, &value)?.then_some(value));
-    }
-
-    let value = match OP {
-        0 => counter_add_values(interp, left.clone(), right.clone())?,
-        1 => counter_sub_values(interp, left.clone(), right.clone())?,
-        2 => {
-            if counter_compare_values(interp, left, right, CountComparison::Lt)? {
-                left.clone()
-            } else {
-                right.clone()
-            }
-        }
-        3 => {
-            if counter_compare_values(interp, left, right, CountComparison::Lt)? {
-                right.clone()
-            } else {
-                left.clone()
-            }
-        }
-        _ => unreachable!(),
-    };
-    Ok(counter_positive(interp, &value)?.then_some(value))
-}
-
-/// Merge two Counter snapshots using CPython's operation-specific evaluation
-/// order.  In particular, RHS-only add/union entries are copied verbatim and
-/// RHS-only subtraction evaluates `0 - count` only after `count < 0`.
-///
-/// `OP` is monomorphized (0 add, 1 subtract, 2 intersection, 3 union), so the
-/// plain-integer loop does not re-dispatch the operation for every key.
-fn merge_counts_for<const OP: u8>(
-    interp: &mut crate::Interpreter,
-    lhs: &PyDict,
-    rhs: &PyDict,
-) -> Result<PyDict> {
-    let mut out = PyDict::default();
-    for (key, left) in lhs {
-        let right = map_get_eq(interp, rhs, key)?.unwrap_or_else(|| Value::int(0));
-        if let Some(result) = merge_positive_count::<OP>(interp, left, &right)? {
-            out.insert(key.clone(), result);
-        }
-    }
-
-    if OP == 2 {
-        return Ok(out);
-    }
-    for (key, right) in rhs {
-        if map_contains_eq(interp, lhs, key)? {
-            continue;
-        }
-        match OP {
-            0 | 3 => {
-                if counter_positive(interp, right)? {
-                    out.insert(key.clone(), right.clone());
-                }
-            }
-            1 => {
-                if counter_negative(interp, right)? {
-                    let result = counter_sub_values(interp, Value::int(0), right.clone())?;
-                    out.insert(key.clone(), result);
-                }
-            }
-            2 => unreachable!(),
-            _ => unreachable!(),
-        }
-    }
-    Ok(out)
-}
-
-fn merge_counts(
-    interp: &mut crate::Interpreter,
-    lhs: &PyDict,
-    rhs: &PyDict,
-    op: CounterOp,
-) -> Result<PyDict> {
-    match op {
-        CounterOp::Add => merge_counts_for::<0>(interp, lhs, rhs),
-        CounterOp::Sub => merge_counts_for::<1>(interp, lhs, rhs),
-        CounterOp::And => merge_counts_for::<2>(interp, lhs, rhs),
-        CounterOp::Or => merge_counts_for::<3>(interp, lhs, rhs),
-    }
-}
-
-fn counter_binop(
-    interp: &mut crate::Interpreter,
-    args: &[ExpandedCallArg],
-    op: CounterOp,
-) -> Result<Value> {
-    let receiver = expect_self(args, "Counter.__binop__")?;
-    let lhs = snapshot_counts(args, "Counter.__binop__")?;
-    let user = &args[1..];
-    if user.len() != 1 {
-        return Err(PyError::named(
-            "TypeError",
-            "Counter arithmetic op takes exactly 1 argument".to_string(),
-        ));
-    }
-    let rhs = match counts_of(&user[0].value) {
-        Some(map) => map,
-        None => return Ok(Value::not_implemented()),
-    };
-    fresh_base_counter(&receiver, merge_counts(interp, &lhs, &rhs, op)?)
-}
-
-#[derive(Copy, Clone)]
-enum CounterUnaryOp {
-    Positive,
-    Negative,
-}
-
-fn counter_unary(
-    interp: &mut crate::Interpreter,
-    args: &[ExpandedCallArg],
-    op: CounterUnaryOp,
-) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(PyError::named(
-            "TypeError",
-            "Counter unary operation takes no arguments".to_string(),
-        ));
-    }
-    let receiver = expect_self(args, "Counter.__unary__")?;
-    let counts = snapshot_counts(args, "Counter.__unary__")?;
-    let mut out = PyDict::default();
-    for (key, count) in counts {
-        match op {
-            CounterUnaryOp::Positive if counter_positive(interp, &count)? => {
-                out.insert(key, count);
-            }
-            CounterUnaryOp::Negative if counter_negative(interp, &count)? => {
-                let negated = counter_sub_values(interp, Value::int(0), count)?;
-                out.insert(key, negated);
-            }
-            _ => {}
-        }
-    }
-    fresh_base_counter(&receiver, out)
-}
-
-// ── In-place algebra ────────────────────────────────────────────────────────
-
-fn unpack_counter_item(interp: &mut crate::Interpreter, pair: Value) -> Result<(PyKey, Value)> {
-    let values = match pair.kind() {
-        ValueKind::Tuple(values) => values.to_vec(),
-        ValueKind::List(values) => values.iter().cloned().collect(),
-        _ => interp.collect_iterable(&pair)?,
-    };
-    if values.len() < 2 {
-        return Err(PyError::named(
-            "ValueError",
-            format!(
-                "not enough values to unpack (expected 2, got {})",
-                values.len()
-            ),
-        ));
-    }
-    if values.len() > 2 {
-        return Err(PyError::named(
-            "ValueError",
-            "too many values to unpack (expected 2)".to_string(),
-        ));
-    }
-    let key = interp.value_to_pykey(&values[0])?;
-    Ok((key, values[1].clone()))
-}
-
-fn visit_counter_item_iterator(
-    interp: &mut crate::Interpreter,
-    iterator: &Value,
-    mut visit: impl FnMut(&mut crate::Interpreter, PyKey, Value) -> Result<()>,
-) -> Result<()> {
-    loop {
-        let pair = match interp.call_next(iterator, None) {
-            Ok(pair) => pair,
-            Err(error) if crate::interpreter::is_stop_iteration_error(&error) => break,
-            Err(error) => return Err(error),
-        };
-        let (key, count) = unpack_counter_item(interp, pair)?;
-        visit(interp, key, count)?;
-    }
-    Ok(())
-}
-
-/// Resolve `other.items()` lazily.  In-place Counter operations intentionally
-/// accept ordinary dicts and mapping-like objects, as CPython's Python-level
-/// implementation does.
-fn counter_operand_items_iterator(interp: &mut crate::Interpreter, other: &Value) -> Result<Value> {
-    if other.dict_with(|_| ()).is_some() {
-        let view = Interpreter::dict_view_for_backing(other, "items", false)?;
-        return crate::interpreter::make_iterator(interp, &view);
-    }
-    if let ValueKind::PyInstance(inst) = other.kind() {
-        let class = Rc::clone(&inst.borrow().class);
-        if let Some(method) = lookup_class_attr(&class, "items") {
-            let items = invoke_class_method(interp, method, other.clone(), &[])?;
-            return crate::interpreter::make_iterator(interp, &items);
-        }
-    }
-    Err(PyError::named(
-        "AttributeError",
-        format!(
-            "'{}' object has no attribute 'items'",
-            pyrust_core::error_type_name(other)
-        ),
-    ))
-}
-
-fn counter_mapping_getitem(
-    interp: &mut crate::Interpreter,
-    other: &Value,
-    key: &PyKey,
-) -> Result<Value> {
-    let key_value = key_to_value(key.clone());
-    if other.dict_with(|_| ()).is_some() {
-        let lookup_key = interp.value_to_pykey(&key_value)?;
-        return interp
-            .dict_lookup(other, &lookup_key)?
-            .map(|(_, value)| value)
-            .ok_or_else(|| PyError::key_error(key_value));
-    }
-    if let ValueKind::PyInstance(inst) = other.kind() {
-        let class = Rc::clone(&inst.borrow().class);
-        if let Some(method) = lookup_class_attr(&class, "__getitem__") {
-            return invoke_class_method(
-                interp,
-                method,
-                other.clone(),
-                &[ExpandedCallArg {
-                    name: None,
-                    value: key_value,
-                }],
-            );
-        }
-    }
-    Err(PyError::named(
-        "TypeError",
-        format!(
-            "'{}' object is not subscriptable",
-            pyrust_core::error_type_name(other)
-        ),
-    ))
-}
-
-/// Match `_keep_positive`: finish all `count > 0` tests first, then delete the
-/// collected keys.  A comparison failure therefore performs no cleanup, while
-/// arithmetic mutations completed before cleanup remain visible.
-fn counter_keep_positive(interp: &mut crate::Interpreter, backing: &Value) -> Result<()> {
-    let items_view = Interpreter::dict_view_for_backing(backing, "items", false)?;
-    let iterator = crate::interpreter::make_iterator(interp, &items_view)?;
-    let mut nonpositive = Vec::new();
-    visit_counter_item_iterator(interp, &iterator, |interp, key, count| {
-        if !counter_positive(interp, &count)? {
-            nonpositive.push(key);
-        }
-        Ok(())
-    })?;
-    backing.dict_shift_remove_many(nonpositive)?;
-    Ok(())
-}
-
-fn counter_inplace_op(
-    interp: &mut crate::Interpreter,
-    args: &[ExpandedCallArg],
-    op: CounterOp,
-) -> Result<Value> {
-    let inst = expect_self(args, "Counter.__inplace__")?;
-    let user = &args[1..];
-    if user.len() != 1 {
-        return Err(PyError::named(
-            "TypeError",
-            "Counter arithmetic op takes exactly 1 argument".to_string(),
-        ));
-    }
-    let other = user[0].value.clone();
-    let backing = counter_backing(args, "Counter.__inplace__")?;
-
-    match op {
-        CounterOp::Add | CounterOp::Sub | CounterOp::Or => {
-            let iterator = counter_operand_items_iterator(interp, &other)?;
-            visit_counter_item_iterator(interp, &iterator, |interp, key, incoming| {
-                let current = interp
-                    .dict_lookup(&backing, &key)?
-                    .map(|(_, value)| value)
-                    .unwrap_or_else(|| Value::int(0));
-                let result = match op {
-                    CounterOp::Add => counter_add_values(interp, current, incoming)?,
-                    CounterOp::Sub => counter_sub_values(interp, current, incoming)?,
-                    CounterOp::Or => {
-                        if counter_compare_values(interp, &incoming, &current, CountComparison::Gt)?
-                        {
-                            incoming
-                        } else {
-                            return Ok(());
-                        }
-                    }
-                    CounterOp::And => unreachable!(),
-                };
-                interp.dict_insert_value(&backing, key, result)
-            })?;
-        }
-        CounterOp::And => {
-            let items_view = Interpreter::dict_view_for_backing(&backing, "items", false)?;
-            let iterator = crate::interpreter::make_iterator(interp, &items_view)?;
-            visit_counter_item_iterator(interp, &iterator, |interp, key, current| {
-                let incoming = counter_mapping_getitem(interp, &other, &key)?;
-                if counter_compare_values(interp, &incoming, &current, CountComparison::Lt)? {
-                    interp.dict_insert_value(&backing, key, incoming)?;
-                }
-                Ok(())
-            })?;
-        }
-    }
-    counter_keep_positive(interp, &backing)?;
-    Ok(Value::py_instance(inst))
-}
-
-// ── Missing-is-zero rich comparisons ───────────────────────────────────────
-
-#[derive(Copy, Clone)]
-enum CounterCompareOp {
-    Eq,
-    Ne,
-    Le,
-    Lt,
-    Ge,
-    Gt,
-}
-
-/// Evaluate `all(self[e] OP other[e] for c in (self, other) for e in c)`.
-/// Shared keys are deliberately visited twice because count methods can make
-/// that duplication observable.
-fn counter_all_relation(
-    interp: &mut crate::Interpreter,
-    lhs: &PyDict,
-    rhs: &PyDict,
-    op: CountComparison,
-) -> Result<bool> {
-    for (key, left) in lhs {
-        let right = map_get_eq(interp, rhs, key)?.unwrap_or_else(|| Value::int(0));
-        if !counter_compare_values(interp, left, &right, op)? {
-            return Ok(false);
-        }
-    }
-    for (key, right) in rhs {
-        let left = map_get_eq(interp, lhs, key)?.unwrap_or_else(|| Value::int(0));
-        if !counter_compare_values(interp, &left, right, op)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn counter_compare(
-    interp: &mut crate::Interpreter,
-    args: &[ExpandedCallArg],
-    op: CounterCompareOp,
-) -> Result<Value> {
-    let lhs = snapshot_counts(args, "Counter.__compare__")?;
-    let user = &args[1..];
-    if user.len() != 1 {
-        return Err(PyError::named(
-            "TypeError",
-            "Counter comparison takes exactly 1 argument".to_string(),
-        ));
-    }
-    let rhs = match counts_of(&user[0].value) {
-        Some(map) => map,
-        None if matches!(op, CounterCompareOp::Eq | CounterCompareOp::Ne)
-            && user[0].value.dict_with(|_| ()).is_some() =>
-        {
-            // Counter.__eq__ returns NotImplemented for non-Counters, after
-            // which the plain dict operand compares the actual stored mapping
-            // (without missing-is-zero semantics). Route that fallback through
-            // the primitive dict comparator explicitly because the RHS sees
-            // this native Counter as a PyInstance wrapper.
-            return interp.eval_binary(
-                Value::dict(lhs),
-                if matches!(op, CounterCompareOp::Eq) {
-                    BinaryOp::Eq
-                } else {
-                    BinaryOp::Ne
-                },
-                user[0].value.clone(),
-            );
-        }
-        None => return Ok(Value::not_implemented()),
-    };
-    let result = match op {
-        CounterCompareOp::Eq => counter_all_relation(interp, &lhs, &rhs, CountComparison::Eq)?,
-        CounterCompareOp::Ne => !counter_all_relation(interp, &lhs, &rhs, CountComparison::Eq)?,
-        CounterCompareOp::Le => counter_all_relation(interp, &lhs, &rhs, CountComparison::Le)?,
-        CounterCompareOp::Lt => {
-            counter_all_relation(interp, &lhs, &rhs, CountComparison::Le)?
-                && !counter_all_relation(interp, &lhs, &rhs, CountComparison::Eq)?
-        }
-        CounterCompareOp::Ge => counter_all_relation(interp, &lhs, &rhs, CountComparison::Ge)?,
-        CounterCompareOp::Gt => {
-            counter_all_relation(interp, &lhs, &rhs, CountComparison::Ge)?
-                && !counter_all_relation(interp, &lhs, &rhs, CountComparison::Eq)?
-        }
-    };
-    Ok(Value::bool_(result))
 }
