@@ -377,6 +377,16 @@ pyrust_builtin_modules! {
     // helpers built on `base64`, `hmac.compare_digest`, and `random.SystemRandom`
     // injected from `secrets_py.py`.
     secrets @inject,
+    // `traceback` (issue #3152): pure-Python stack/exception extraction and
+    // formatting (`FrameSummary`, `StackSummary`, `TracebackException`,
+    // `format_exception`, `format_exc`, `extract_tb`, `extract_stack`, …)
+    // injected from `traceback_py.py`.
+    traceback @inject,
+    // `inspect` (issue #3152): live-object introspection predicates, PEP 362
+    // `Signature`/`Parameter`/`BoundArguments`, frame/stack/closure/generator
+    // inspection, and source/docstring helpers injected from `inspect_py.py`
+    // with a private native bytecode-name classifier in `inspect.rs`.
+    inspect @inject,
 }
 
 include!("finalization.rs");
