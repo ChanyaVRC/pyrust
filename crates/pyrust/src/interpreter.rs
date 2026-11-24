@@ -180,10 +180,22 @@ pub struct Interpreter {
     /// Stored as `Arc<str>` so that each call frame can clone the filename
     /// with a reference-count bump rather than a heap allocation.
     pub(crate) script_filename: Option<Arc<str>>,
+    /// Whether `seed_module_dunders` should expose `__file__` from
+    /// `script_filename`. `false` for `-c` / `-` invocations where code
+    /// objects carry `<string>` / `<stdin>` for tracebacks without defining a
+    /// global `__file__`.
+    script_define_file_dunder: bool,
+    /// Optional `__package__` value for top-level `-m` module execution
+    /// (`""` for a top-level `.py` module, `"pkg"` for `pkg.sub` or
+    /// `pkg/__main__.py`). `None` seeds `__package__ = None`.
+    script_package: Option<String>,
     /// The process-level argument vector visible to a script as `sys.argv`.
     /// Empty when the interpreter has no script invocation context (for
     /// example, a library caller executing an in-memory program).
     script_argv: Vec<String>,
+    /// Guards `initialize_script_argv` from overwriting `sys.argv` once it has
+    /// already been populated for the current interpreter invocation.
+    script_argv_initialized: bool,
     module_cache: ModuleCache,
     /// Bootstrap `sys.modules` dictionary for this interpreter.
     ///
@@ -694,7 +706,10 @@ impl Default for Interpreter {
             exc_saved_active: Vec::new(),
             script_dir: None,
             script_filename: None,
+            script_define_file_dunder: true,
+            script_package: None,
             script_argv: Vec::new(),
+            script_argv_initialized: false,
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             bootstrap_module_registry: Value::dict(PyDict::default()),
             import_module_registry_cache: RefCell::new(None),

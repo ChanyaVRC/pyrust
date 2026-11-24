@@ -86,9 +86,149 @@ impl Interpreter {
         Self {
             script_dir: Some(dir),
             script_filename: Some(std::sync::Arc::from(path)),
+            script_define_file_dunder: true,
+            script_package: None,
             script_argv,
             ..Default::default()
         }
+    }
+
+    /// Create an interpreter for `-c <command> [args...]`.
+    ///
+    /// Matches CPython 3.12: `sys.argv = ['-c', args...]`, `sys.path[0] == ""`
+    /// (current working directory), code objects and tracebacks use filename
+    /// `"<string>"`, and `__file__` is not defined in `__main__`.
+    pub fn with_command_args(args: &[String]) -> Self {
+        let mut script_argv = Vec::with_capacity(args.len() + 1);
+        script_argv.push("-c".to_string());
+        script_argv.extend(args.iter().cloned());
+        Self {
+            script_dir: Some(std::path::PathBuf::from("")),
+            script_filename: Some(std::sync::Arc::from("<string>")),
+            script_define_file_dunder: false,
+            script_package: None,
+            script_argv,
+            ..Default::default()
+        }
+    }
+
+    /// Create an interpreter for `-` (stdin execution) with `[args...]`.
+    ///
+    /// Matches CPython 3.12: `sys.argv = ['-', args...]`, `sys.path[0] == ""`,
+    /// code objects and tracebacks use `"<stdin>"`, and `__file__` is omitted.
+    pub fn with_stdin_args(args: &[String]) -> Self {
+        let mut script_argv = Vec::with_capacity(args.len() + 1);
+        script_argv.push("-".to_string());
+        script_argv.extend(args.iter().cloned());
+        Self {
+            script_dir: Some(std::path::PathBuf::from("")),
+            script_filename: Some(std::sync::Arc::from("<stdin>")),
+            script_define_file_dunder: false,
+            script_package: None,
+            script_argv,
+            ..Default::default()
+        }
+    }
+
+    /// Create an interpreter configured for `-m <module> [args...]`.
+    ///
+    /// Prepends the current working directory to `sys.path` and starts with
+    /// `sys.argv = ['-m', args...]` while importing parent packages; once the
+    /// target file is resolved, [`Self::run_module_as_main`] updates
+    /// `sys.argv[0]`, `__file__`, and `__package__` before running the body.
+    pub fn with_module_args(args: &[String]) -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(""));
+        let mut script_argv = Vec::with_capacity(args.len() + 1);
+        script_argv.push("-m".to_string());
+        script_argv.extend(args.iter().cloned());
+        Self {
+            script_dir: Some(cwd),
+            script_filename: None,
+            script_define_file_dunder: true,
+            script_package: None,
+            script_argv,
+            ..Default::default()
+        }
+    }
+
+    /// Exit the current process if `err` is an uncaught `SystemExit` instance,
+    /// matching CPython's exit-code extraction rules.
+    fn exit_if_system_exit(err: &PyError) {
+        if let pyrust_core::PyErrorKind::Raised(exc) = err.kind()
+            && let ValueKind::PyInstance(inst) = exc.kind()
+        {
+            let class = Rc::clone(&inst.borrow().class);
+            if pyrust_core::class_chain_contains_builtin_exception(&class, "SystemExit") {
+                let code = match inst.borrow().attrs.get_slot("args") {
+                    Some(args_val) => match args_val.kind() {
+                        ValueKind::Tuple(args) if !args.is_empty() => match args[0].kind() {
+                            ValueKind::Int(n) => n as i32,
+                            ValueKind::Bool(b) => b as i32,
+                            ValueKind::None => 0,
+                            _ => 1,
+                        },
+                        _ => 0,
+                    },
+                    None => 0,
+                };
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+                std::process::exit(code);
+            }
+        }
+    }
+
+    /// Resolve and execute `module_name` as `__main__` (`pyrust -m <module>`).
+    pub fn run_module_as_main(&mut self, module_name: &str, prog: &str) -> Result<()> {
+        let _int_max_str_digits_guard = IntMaxStrDigitsExecutionGuard::enter(self);
+        self.ensure_main_module_registered();
+        self.initialize_script_argv()?;
+
+        let target = match self.resolve_module_for_main(module_name) {
+            Ok(target) => target,
+            Err(crate::interpreter::namespaces::MainModuleResolveError::Message(msg)) => {
+                return Err(PyError::runtime(format!("{prog}: {msg}")));
+            }
+            Err(crate::interpreter::namespaces::MainModuleResolveError::ImportException(
+                err,
+                mut frames,
+            )) => {
+                Self::exit_if_system_exit(&err);
+                for fi in &mut frames {
+                    if fi.source_line.is_none() {
+                        fi.source_line = resolve_frame_source_line(&fi.filename, fi.lineno, "", "");
+                    }
+                }
+                let error_line = self.format_error_line(&err);
+                let formatted = if frames.is_empty() {
+                    error_line
+                } else {
+                    pyrust_core::format_traceback(&frames, &error_line)
+                };
+                return Err(PyError::runtime(formatted));
+            }
+        };
+
+        let src = std::fs::read_to_string(&target.file_path).map_err(|e| {
+            PyError::runtime(format!(
+                "failed to read '{}': {e}",
+                target.file_path.display()
+            ))
+        })?;
+        let (program, linenos) = Self::parse_source_to_stmts_with_linenos(&src)?;
+
+        let resolved_path = target.file_path.to_string_lossy().into_owned();
+        self.script_filename = Some(std::sync::Arc::from(resolved_path.as_str()));
+        self.script_define_file_dunder = true;
+        self.script_package = Some(target.package_name);
+        if let Some(arg0) = self.script_argv.first_mut() {
+            *arg0 = resolved_path.clone();
+        } else {
+            self.script_argv.push(resolved_path.clone());
+        }
+        self.update_sys_argv0(&resolved_path)?;
+
+        self.exec_program_with_linenos(&program, &linenos, &src, false)
     }
 
     pub fn exec_program(&mut self, program: &[Stmt], repl_mode: bool) -> Result<()> {
@@ -125,27 +265,8 @@ impl Interpreter {
             Err(PyError::runtime("compilation failed".to_string()))
         };
         // Intercept SystemExit so finally/with handlers run before the process exits.
-        if let Err(err) = &result
-            && let pyrust_core::PyErrorKind::Raised(exc) = err.kind()
-            && let ValueKind::PyInstance(inst) = exc.kind()
-        {
-            let class = Rc::clone(&inst.borrow().class);
-            if pyrust_core::class_chain_contains_builtin_exception(&class, "SystemExit") {
-                // Extract exit code from args[0]; default to 0.
-                let code = match inst.borrow().attrs.get_slot("args") {
-                    Some(args_val) => match args_val.kind() {
-                        ValueKind::Tuple(args) if !args.is_empty() => match args[0].kind() {
-                            ValueKind::Int(n) => n as i32,
-                            ValueKind::Bool(b) => b as i32,
-                            ValueKind::None => 0,
-                            _ => 1,
-                        },
-                        _ => 0,
-                    },
-                    None => 0,
-                };
-                std::process::exit(code);
-            }
+        if let Err(err) = &result {
+            Self::exit_if_system_exit(err);
         }
         result
     }
@@ -280,10 +401,19 @@ impl Interpreter {
         //   module-scope annotations (`SETUP_ANNOTATIONS`).
         seed_env!("__name__", intern_string("__main__"));
         seed_env!("__doc__", Value::none());
-        seed_env!("__package__", Value::none());
+        let package_val = self
+            .script_package
+            .as_deref()
+            .map(Value::string)
+            .unwrap_or_else(Value::none);
+        seed_env!("__package__", package_val);
         seed_env!("__loader__", Value::none());
         seed_env!("__spec__", Value::none());
-        let script_file = self.script_filename.as_deref().map(Value::string);
+        let script_file = if self.script_define_file_dunder {
+            self.script_filename.as_deref().map(Value::string)
+        } else {
+            None
+        };
         let mut dunders: Vec<&'static str> = Vec::with_capacity(9);
         dunders.extend_from_slice(&[
             "__name__",
@@ -362,7 +492,9 @@ impl Interpreter {
     /// instruction. Loading `sys` here also ensures imported modules share the
     /// top-level script's argument vector, even when they import `sys` first.
     fn initialize_script_argv(&mut self) -> Result<()> {
-        if self.script_filename.is_none() {
+        if self.script_argv_initialized
+            || (self.script_filename.is_none() && self.script_argv.is_empty())
+        {
             return Ok(());
         }
         let sys = self.load_module("sys")?;
@@ -373,7 +505,160 @@ impl Interpreter {
             "argv".to_string(),
             Value::list(self.script_argv.iter().map(Value::string).collect()),
         );
+        self.script_argv_initialized = true;
         Ok(())
+    }
+
+    /// Update `sys.argv[0]` in-place after resolving the `-m` target path.
+    fn update_sys_argv0(&mut self, argv0: &str) -> Result<()> {
+        let sys = self.load_module("sys")?;
+        let ValueKind::PyModule(module) = sys.kind() else {
+            return Err(PyError::runtime("sys is not a module".to_string()));
+        };
+        if let Some(argv_val) = module.borrow().get_attr_value("argv")
+            && argv_val
+                .list_with_mut(|items| {
+                    if let Some(first) = items.first_mut() {
+                        *first = Value::string(argv0);
+                    } else {
+                        items.push(Value::string(argv0));
+                    }
+                })
+                .is_some()
+        {
+            return Ok(());
+        }
+        module.borrow_mut().insert_attr(
+            "argv".to_string(),
+            Value::list(self.script_argv.iter().map(Value::string).collect()),
+        );
+        Ok(())
+    }
+
+    /// Format the final exception summary line (e.g. `ValueError: boom`) for
+    /// uncaught tracebacks.
+    fn format_error_line(&mut self, e: &PyError) -> String {
+        match e.kind() {
+            pyrust_core::PyErrorKind::Lex(s) => format!("Lex error: {s}"),
+            pyrust_core::PyErrorKind::Parse(s) => format!("Parse error: {s}"),
+            pyrust_core::PyErrorKind::Runtime(s) => format!("RuntimeError: {s}"),
+            // CPython omits the `: msg` suffix when the exception's
+            // message is empty (e.g. internal `StopIteration` from an
+            // exhausted iterator displays as `StopIteration`, not
+            // `StopIteration: `).
+            pyrust_core::PyErrorKind::Named(cls, s) if s.is_empty() => cls.to_string(),
+            pyrust_core::PyErrorKind::Named(cls, s) => format!("{cls}: {s}"),
+            pyrust_core::PyErrorKind::Class(cls, s) if s.is_empty() => cls.borrow().name.clone(),
+            pyrust_core::PyErrorKind::Class(cls, s) => format!("{}: {s}", cls.borrow().name),
+            pyrust_core::PyErrorKind::KeyError(key) => {
+                // The raw-key fast-path variant: dispatch the key's
+                // __repr__ like CPython's traceback printer (issue
+                // #2390 review); a raising dunder falls back to the
+                // data-only repr.
+                let key_repr = if matches!(key.kind(), ValueKind::PyInstance(_)) {
+                    let key_cloned = key.clone();
+                    render_instance_repr(self, &key_cloned).unwrap_or_else(|_| key.repr_raw())
+                } else {
+                    key.repr_raw()
+                };
+                format!("KeyError: {key_repr}")
+            }
+            pyrust_core::PyErrorKind::NameError {
+                class_name,
+                message,
+                ..
+            } => {
+                format!("{class_name}: {message}")
+            }
+            pyrust_core::PyErrorKind::AttributeError { message, .. } => {
+                format!("AttributeError: {message}")
+            }
+            pyrust_core::PyErrorKind::ImportError {
+                class_name,
+                message,
+                ..
+            } => {
+                format!("{class_name}: {message}")
+            }
+            pyrust_core::PyErrorKind::OsError {
+                class_name,
+                errno,
+                strerror,
+                filename,
+                ..
+            } => {
+                if let Some(fname) = filename {
+                    format!("{class_name}: [Errno {errno}] {strerror}: '{fname}'")
+                } else {
+                    format!("{class_name}: [Errno {errno}] {strerror}")
+                }
+            }
+            pyrust_core::PyErrorKind::UnicodeDecodeError {
+                encoding,
+                object,
+                start,
+                end,
+                reason,
+            } => {
+                let msg =
+                    pyrust_core::format_unicode_decode_str(encoding, object, *start, *end, reason);
+                format!("UnicodeDecodeError: {msg}")
+            }
+            pyrust_core::PyErrorKind::UnicodeEncodeError {
+                encoding,
+                object,
+                start,
+                end,
+                reason,
+            } => {
+                let msg =
+                    pyrust_core::format_unicode_encode_str(encoding, object, *start, *end, reason);
+                format!("UnicodeEncodeError: {msg}")
+            }
+            pyrust_core::PyErrorKind::Raised(value) => match value.kind() {
+                ValueKind::PyInstance(inst) => {
+                    let class_name = inst.borrow().class.borrow().name.clone();
+                    // exception_str_with_dispatch handles KeyError (repr of
+                    // single arg) and multi-arg exceptions (tuple notation),
+                    // dispatching arg __repr__/__str__ overrides like CPython's
+                    // traceback printer; a raising dunder falls back to the
+                    // data-only core renderer.
+                    let inst_rc = Rc::clone(inst);
+                    let cls = Rc::clone(&inst_rc.borrow().class);
+                    let msg = exception_str_with_dispatch(self, value, &inst_rc, &cls)
+                        .unwrap_or_else(|_| value.to_py_str());
+                    let mut line = if msg.is_empty() {
+                        class_name
+                    } else {
+                        format!("{class_name}: {msg}")
+                    };
+                    // PEP 678: append each note from `__notes__` after the
+                    // error message, matching CPython's traceback printer
+                    // (`add_note` / `__set_name__` notes). CPython iterates
+                    // `str()` of each item only when `__notes__` is a list or
+                    // tuple; any other object is printed once as `repr()`.
+                    let notes = inst_rc.borrow().attrs.get_cloned("__notes__");
+                    if let Some(notes) = notes.as_ref() {
+                        let items = if let Some(tuple) = notes.as_tuple() {
+                            Some(tuple.to_vec())
+                        } else {
+                            notes.as_list().map(|list| list.to_vec())
+                        };
+                        if let Some(items) = items {
+                            for note in &items {
+                                line.push('\n');
+                                line.push_str(&note.to_py_str());
+                            }
+                        } else {
+                            line.push('\n');
+                            line.push_str(&notes.repr_raw());
+                        }
+                    }
+                    line
+                }
+                _ => format!("Uncaught exception: {}", value.repr_raw()),
+            },
+        }
     }
 
     fn try_exec_vm_script_with_index(
@@ -659,134 +944,7 @@ impl Interpreter {
                             }
                         }
                     }
-                    let error_line = match e.kind() {
-                        pyrust_core::PyErrorKind::Lex(s) => format!("Lex error: {s}"),
-                        pyrust_core::PyErrorKind::Parse(s) => format!("Parse error: {s}"),
-                        pyrust_core::PyErrorKind::Runtime(s) => format!("RuntimeError: {s}"),
-                        // CPython omits the `: msg` suffix when the exception's
-                        // message is empty (e.g. internal `StopIteration` from an
-                        // exhausted iterator displays as `StopIteration`, not
-                        // `StopIteration: `).
-                        pyrust_core::PyErrorKind::Named(cls, s) if s.is_empty() => cls.to_string(),
-                        pyrust_core::PyErrorKind::Named(cls, s) => format!("{cls}: {s}"),
-                        pyrust_core::PyErrorKind::Class(cls, s) if s.is_empty() => {
-                            cls.borrow().name.clone()
-                        }
-                        pyrust_core::PyErrorKind::Class(cls, s) => {
-                            format!("{}: {s}", cls.borrow().name)
-                        }
-                        pyrust_core::PyErrorKind::KeyError(key) => {
-                            // The raw-key fast-path variant: dispatch the key's
-                            // __repr__ like CPython's traceback printer (issue
-                            // #2390 review); a raising dunder falls back to the
-                            // data-only repr.
-                            let key_repr = if matches!(key.kind(), ValueKind::PyInstance(_)) {
-                                let key_cloned = key.clone();
-                                render_instance_repr(self, &key_cloned)
-                                    .unwrap_or_else(|_| key.repr_raw())
-                            } else {
-                                key.repr_raw()
-                            };
-                            format!("KeyError: {key_repr}")
-                        }
-                        pyrust_core::PyErrorKind::NameError {
-                            class_name,
-                            message,
-                            ..
-                        } => {
-                            format!("{class_name}: {message}")
-                        }
-                        pyrust_core::PyErrorKind::AttributeError { message, .. } => {
-                            format!("AttributeError: {message}")
-                        }
-                        pyrust_core::PyErrorKind::ImportError {
-                            class_name,
-                            message,
-                            ..
-                        } => {
-                            format!("{class_name}: {message}")
-                        }
-                        pyrust_core::PyErrorKind::OsError {
-                            class_name,
-                            errno,
-                            strerror,
-                            filename,
-                            ..
-                        } => {
-                            if let Some(fname) = filename {
-                                format!("{class_name}: [Errno {errno}] {strerror}: '{fname}'")
-                            } else {
-                                format!("{class_name}: [Errno {errno}] {strerror}")
-                            }
-                        }
-                        pyrust_core::PyErrorKind::UnicodeDecodeError {
-                            encoding,
-                            object,
-                            start,
-                            end,
-                            reason,
-                        } => {
-                            let msg = pyrust_core::format_unicode_decode_str(
-                                encoding, object, *start, *end, reason,
-                            );
-                            format!("UnicodeDecodeError: {msg}")
-                        }
-                        pyrust_core::PyErrorKind::UnicodeEncodeError {
-                            encoding,
-                            object,
-                            start,
-                            end,
-                            reason,
-                        } => {
-                            let msg = pyrust_core::format_unicode_encode_str(
-                                encoding, object, *start, *end, reason,
-                            );
-                            format!("UnicodeEncodeError: {msg}")
-                        }
-                        pyrust_core::PyErrorKind::Raised(value) => match value.kind() {
-                            ValueKind::PyInstance(inst) => {
-                                let class_name = inst.borrow().class.borrow().name.clone();
-                                // exception_str_with_dispatch handles KeyError (repr of
-                                // single arg) and multi-arg exceptions (tuple notation),
-                                // dispatching arg __repr__/__str__ overrides like CPython's
-                                // traceback printer; a raising dunder falls back to the
-                                // data-only core renderer.
-                                let inst_rc = Rc::clone(inst);
-                                let cls = Rc::clone(&inst_rc.borrow().class);
-                                let msg = exception_str_with_dispatch(self, value, &inst_rc, &cls)
-                                    .unwrap_or_else(|_| value.to_py_str());
-                                let mut line = if msg.is_empty() {
-                                    class_name
-                                } else {
-                                    format!("{class_name}: {msg}")
-                                };
-                                // PEP 678: append each note from `__notes__` after the
-                                // error message, matching CPython's traceback printer
-                                // (`add_note` / `__set_name__` notes). CPython iterates
-                                // `str()` of each item only when `__notes__` is a list or
-                                // tuple; any other object is printed once as `repr()`.
-                                let notes = inst_rc.borrow().attrs.get_cloned("__notes__");
-                                if let Some(notes) = notes.as_ref() {
-                                    let items = if let Some(tuple) = notes.as_tuple() {
-                                        Some(tuple.to_vec())
-                                    } else {
-                                        notes.as_list().map(|list| list.to_vec())
-                                    };
-                                    if let Some(items) = items {
-                                        for note in &items {
-                                            line.push('\n');
-                                            line.push_str(&note.to_py_str());
-                                        }
-                                    } else {
-                                        line.push('\n');
-                                        line.push_str(&notes.repr_raw());
-                                    }
-                                }
-                                line
-                            }
-                            _ => format!("Uncaught exception: {}", value.repr_raw()),
-                        },
-                    };
+                    let error_line = self.format_error_line(e);
                     // PEP 3134: walk __cause__ / __context__ and prepend each
                     // chained exception's line with the appropriate connecting
                     // banner ("The above exception was the direct cause of..."
