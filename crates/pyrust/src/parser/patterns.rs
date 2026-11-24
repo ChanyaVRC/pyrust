@@ -264,7 +264,7 @@ impl Parser {
                         // Dotted class pattern: `module.Class(pos, ..., kwarg=pat, ...)`
                         self.bump();
                         let mut positional: Vec<Pattern> = Vec::new();
-                        let mut kwargs: Vec<(String, Pattern)> = Vec::new();
+                        let mut kwargs: Vec<(pyrust_core::Symbol, Pattern)> = Vec::new();
                         while !self.is(&Token::RParen) && !self.is(&Token::Eof) {
                             // A keyword sub-pattern starts with `name =`; anything
                             // else is a positional sub-pattern.
@@ -303,7 +303,7 @@ impl Parser {
                     self.bump();
                     let cls = Expr::Var(name, None);
                     let mut positional: Vec<Pattern> = Vec::new();
-                    let mut kwargs: Vec<(String, Pattern)> = Vec::new();
+                    let mut kwargs: Vec<(pyrust_core::Symbol, Pattern)> = Vec::new();
                     while !self.is(&Token::RParen) && !self.is(&Token::Eof) {
                         // A keyword sub-pattern starts with `name =`; anything
                         // else is a positional sub-pattern.
@@ -369,7 +369,7 @@ impl Parser {
             Some(Token::LBrace) => {
                 self.bump();
                 let mut pairs: Vec<(Expr, Pattern)> = Vec::new();
-                let mut rest: Option<String> = None;
+                let mut rest: Option<pyrust_core::Symbol> = None;
                 while !self.is(&Token::RBrace) && !self.is(&Token::Eof) {
                     if self.is(&Token::StarStar) {
                         self.bump();

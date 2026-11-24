@@ -1,6 +1,6 @@
 #[derive(Debug, Clone)]
 pub struct UserFunctionParam {
-    pub name: String,
+    pub name: crate::Symbol,
     pub default: Option<Value>,
     pub is_args: bool,
     pub is_kwargs: bool,
@@ -362,7 +362,7 @@ impl UserFunction {
             if p.is_keyword_only
                 && let Some(def) = &p.default
             {
-                d.insert(PyKey::str_from(&p.name), def.clone());
+                d.insert(PyKey::str_from(p.name), def.clone());
             }
         }
         if d.is_empty() {

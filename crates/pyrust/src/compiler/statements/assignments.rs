@@ -288,8 +288,9 @@ impl Compiler {
     fn compile_ann_assign(&mut self, name: &str, annotation: &Expr, value: Option<&Expr>) {
         // 1. If there's a value, compile it as a regular assignment.
         if let Some(val_expr) = value {
-            self.compile_assign(&AssignTarget::Name(name.to_string()), val_expr);
-            self.mark_target_def(&AssignTarget::Name(name.to_string()));
+            let sym = Symbol::intern(name);
+            self.compile_assign(&AssignTarget::Name(sym), val_expr);
+            self.mark_target_def(&AssignTarget::Name(sym));
         }
         // 2. Function scope: annotations are NOT stored in __annotations__ at runtime.
         if self.is_function_scope {

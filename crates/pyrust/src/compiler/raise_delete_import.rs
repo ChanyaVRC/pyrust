@@ -260,7 +260,7 @@ impl Compiler {
         }
     }
 
-    fn compile_import(&mut self, names: &[(String, Option<String>)]) {
+    fn compile_import(&mut self, names: &[(Symbol, Option<Symbol>)]) {
         for (module_name, alias) in names {
             match alias {
                 Some(alias) => {
@@ -278,7 +278,7 @@ impl Compiler {
                     // (`a`), and `a.b.c` is reached via attribute chains on
                     // the loaded packages.
                     let top = module_name.split('.').next().unwrap_or(module_name);
-                    if top == module_name {
+                    if top == module_name.as_str() {
                         // Non-dotted: one import that binds directly under
                         // the name — no parent walk involved.
                         let mod_idx = self.intern_name(module_name);
@@ -308,7 +308,7 @@ impl Compiler {
         }
     }
 
-    fn compile_import_from(&mut self, module: &str, names: &[(String, Option<String>)]) {
+    fn compile_import_from(&mut self, module: &str, names: &[(Symbol, Option<Symbol>)]) {
         // `from __future__ import X` is a compiler directive in CPython — no
         // runtime import is performed.  Validate the feature name(s) and emit
         // nothing (no-op).  Unrecognised names or star-imports are SyntaxErrors
@@ -384,7 +384,7 @@ impl Compiler {
                 let attr_idx = self.intern_name(attr_name);
                 let val_reg = self.alloc_temp();
                 self.emit(Insn::ImportFromAttr(val_reg, mod_reg, attr_idx));
-                let bound = alias.as_deref().unwrap_or(attr_name);
+                let bound = alias.as_deref().unwrap_or(attr_name.as_str());
                 self.compile_store_name(bound, val_reg);
                 self.free_temp(val_reg);
             }

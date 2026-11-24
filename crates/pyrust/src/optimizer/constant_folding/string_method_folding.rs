@@ -14,7 +14,7 @@
 fn pass_str_method_const_fold(
     insns: Vec<Insn>,
     consts: &mut Vec<Value>,
-    names: &[String],
+    names: &[pyrust_core::Symbol],
     num_locals: u32,
 ) -> Vec<Insn> {
     fn is_foldable_str_method(method: &str) -> bool {

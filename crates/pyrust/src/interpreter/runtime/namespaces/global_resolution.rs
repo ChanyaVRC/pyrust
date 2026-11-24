@@ -182,7 +182,7 @@ fn undefined_name(name: &str) -> PyError {
 #[inline]
 pub(crate) fn comp_read_is_free(code: &crate::bytecode::FnCode, name: &str) -> bool {
     match &code.comp_enclosing_locals {
-        Some(locals) => !locals.contains(name),
+        Some(locals) => !locals.contains(&pyrust_core::Symbol::intern(name)),
         None => true,
     }
 }

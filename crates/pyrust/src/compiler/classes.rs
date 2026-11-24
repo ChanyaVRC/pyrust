@@ -6,7 +6,7 @@ impl Compiler {
     fn build_class_proto(
         &mut self,
         name: &str,
-        keywords: &[(String, Expr)],
+        keywords: &[(Symbol, Expr)],
         body: &[Stmt],
     ) -> Option<u16> {
         // Class body: zero-param function that returns its locals as class dict.
@@ -211,7 +211,7 @@ impl Compiler {
             is_memo_pure: false,
             annotation_keys: SmallVec::new(),
             docstring: class_docstring,
-            class_kwarg_names: keywords.iter().map(|(k, _)| k.clone()).collect(),
+            class_kwarg_names: keywords.iter().map(|(k, _)| *k).collect(),
         });
 
         Some(proto_idx)
@@ -224,7 +224,7 @@ impl Compiler {
     fn emit_class_bases_and_keywords(
         &mut self,
         bases: &[Expr],
-        keywords: &[(String, Expr)],
+        keywords: &[(Symbol, Expr)],
     ) -> Option<(Reg, u32, Reg, u32)> {
         // Compile base class expressions.
         let bases_n = match u32::try_from(bases.len()) {
@@ -306,7 +306,7 @@ impl Compiler {
         name: &str,
         bases: &[Expr],
         metaclass: Option<&Expr>,
-        keywords: &[(String, Expr)],
+        keywords: &[(Symbol, Expr)],
         body: &[Stmt],
         decorators: &[Expr],
         type_params: &[TypeParam],

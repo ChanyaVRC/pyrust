@@ -48,7 +48,7 @@ pub enum Token {
     Str(String),
     Bytes(Vec<u8>),
     FString(Vec<FStringPart>),
-    Ident(String),
+    Ident(pyrust_core::Symbol),
     // Arithmetic
     Plus,
     Minus,

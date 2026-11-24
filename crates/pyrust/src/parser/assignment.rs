@@ -29,12 +29,12 @@ fn lhs_to_assign_stmt(target: &Expr, rhs: Expr) -> Result<Stmt> {
         Expr::Var(name, _) if name == "__debug__" => {
             Err(PyError::Parse("cannot assign to __debug__".to_string()))
         }
-        Expr::Var(name, _) => Ok(Stmt::Assign(AssignTarget::Name(name.clone()), rhs)),
+        Expr::Var(name, _) => Ok(Stmt::Assign(AssignTarget::Name(*name), rhs)),
         Expr::Attr {
             target, name, span, ..
         } => Ok(Stmt::AttrAssign {
             target: *target.clone(),
-            name: name.clone(),
+            name: *name,
             expr: rhs,
             span: *span,
         }),
@@ -125,16 +125,16 @@ fn build_assign_stmts(groups: Vec<(Vec<Expr>, Vec<bool>, bool)>, rhs: Expr) -> R
     // name to avoid aliasing across sites.
     static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp_name = format!("<chain_assign {n}>");
+    let tmp_name = pyrust_core::Symbol::intern(&format!("<chain_assign {n}>"));
 
     let mut out: Vec<Stmt> = Vec::with_capacity(groups.len() + 1);
-    out.push(Stmt::Assign(AssignTarget::Name(tmp_name.clone()), rhs));
+    out.push(Stmt::Assign(AssignTarget::Name(tmp_name), rhs));
     for (items, flags, had_comma) in groups {
         out.push(group_to_assign_stmt(
             items,
             flags,
             had_comma,
-            Expr::Var(tmp_name.clone(), None),
+            Expr::Var(tmp_name, None),
         )?);
     }
     Ok(out)
@@ -145,10 +145,10 @@ fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
         Expr::Var(name, _) if name == "__debug__" => {
             Err(PyError::Parse("cannot assign to __debug__".to_string()))
         }
-        Expr::Var(name, _) => Ok(AssignTarget::Name(name.clone())),
+        Expr::Var(name, _) => Ok(AssignTarget::Name(*name)),
         Expr::Attr {
             target, name, span, ..
-        } => Ok(AssignTarget::Attr(target.clone(), name.clone(), *span)),
+        } => Ok(AssignTarget::Attr(target.clone(), *name, *span)),
         Expr::Index { target, index, .. } => Ok(AssignTarget::Index(target.clone(), index.clone())),
         Expr::Slice {
             target,

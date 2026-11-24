@@ -25,6 +25,8 @@ mod object_model;
 mod pool;
 #[path = "core/string_interning.rs"]
 mod string_interning;
+#[path = "core/symbol.rs"]
+mod symbol;
 #[path = "core/traceback.rs"]
 mod traceback;
 
@@ -67,6 +69,7 @@ pub use object_model::{
     scoped_int_max_str_digits, set_int_max_str_digits, value_may_exceed_int_str_limit,
 };
 pub use string_interning::{intern_string, intern_string_value};
+pub use symbol::Symbol;
 pub use traceback::{
     FrameGlobals, FrameInfo, captured_error_frames_len, clone_captured_error_frames,
     format_traceback, get_current_vm_col_span, get_current_vm_line, record_traceback_frame,

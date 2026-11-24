@@ -40,7 +40,8 @@ impl Compiler {
 
         // Pre-load the StopAsyncIteration type once, in a register that lives for
         // the whole loop (used by MatchExcept on every iteration's exit check).
-        let stop_async_reg = self.compile_expr(&Expr::Var("StopAsyncIteration".to_string(), None));
+        let stop_async_reg =
+            self.compile_expr(&Expr::Var(Symbol::intern("StopAsyncIteration"), None));
 
         let loop_start = self.pc();
         // Each iteration runs `await it.__anext__()` inside a SetupExcept so a

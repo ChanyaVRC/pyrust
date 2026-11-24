@@ -12,7 +12,7 @@ fn optimizer_keeps_dead_call_loaded_from_rebindable_builtin_name() {
         Insn::Call(2, 1),
         Insn::ReturnNone,
     ];
-    code.names = vec!["abs".to_string()];
+    code.names = vec![pyrust_core::Symbol::intern("abs")];
     code.consts = vec![Value::int(-5)];
     code.num_locals = 2;
     code.num_regs = 4;

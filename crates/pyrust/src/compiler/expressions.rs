@@ -242,7 +242,7 @@ impl Compiler {
                     // -dict path (issue #2339).  Everything else (true globals,
                     // builtins, module/class-scope free vars) keeps LoadGlobal.
                     self.set_col_span_for_next(span);
-                    if self.is_class_body && !self.class_direct_env_names.contains(name) {
+                    if self.is_class_body && !self.class_direct_env_names.contains(name.as_str()) {
                         self.emit(Insn::LoadClassName(
                             dst,
                             crate::bytecode::NO_CLASS_LOCAL,

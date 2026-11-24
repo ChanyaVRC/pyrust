@@ -63,19 +63,19 @@ impl Interpreter {
             .filter(|p| !p.is_args && !p.is_kwargs && !p.is_keyword_only)
         {
             param_names.insert(p.name.as_str());
-            varnames.push(Value::string(p.name.clone()));
+            varnames.push(Value::string(p.name.as_str()));
         }
         for p in function.params.iter().filter(|p| p.is_keyword_only) {
             param_names.insert(p.name.as_str());
-            varnames.push(Value::string(p.name.clone()));
+            varnames.push(Value::string(p.name.as_str()));
         }
         for p in function.params.iter().filter(|p| p.is_args) {
             param_names.insert(p.name.as_str());
-            varnames.push(Value::string(p.name.clone()));
+            varnames.push(Value::string(p.name.as_str()));
         }
         for p in function.params.iter().filter(|p| p.is_kwargs) {
             param_names.insert(p.name.as_str());
-            varnames.push(Value::string(p.name.clone()));
+            varnames.push(Value::string(p.name.as_str()));
         }
 
         // co_qualname (CPython 3.11+): the compile-time qualified name.  Unlike
@@ -117,12 +117,12 @@ impl Interpreter {
         // co_cellvars: cell variables this function defines (locals captured by
         // a nested scope), in CPython's sorted order.  Also used to exclude
         // those names from co_varnames.
-        let cellvar_set: std::collections::HashSet<String> = fncode
+        let cellvar_set: std::collections::HashSet<pyrust_core::Symbol> = fncode
             .as_ref()
-            .map(|c| c.cell_vars.iter().cloned().collect())
+            .map(|c| c.cell_vars.iter().copied().collect())
             .unwrap_or_default();
         let cellvars: Vec<Value> = {
-            let mut v: Vec<String> = cellvar_set.iter().cloned().collect();
+            let mut v: Vec<&str> = cellvar_set.iter().map(|s| s.as_str()).collect();
             v.sort();
             v.into_iter().map(Value::string).collect()
         };
@@ -135,7 +135,8 @@ impl Interpreter {
             .local_index
             .iter()
             .filter(|(name, _)| {
-                !param_names.contains(name.as_str()) && !cellvar_set.contains(name.as_str())
+                !param_names.contains(name.as_str())
+                    && !cellvar_set.contains(&pyrust_core::Symbol::intern(name.as_str()))
             })
             .map(|(name, &slot)| (slot, name.as_str()))
             .collect();
@@ -174,7 +175,7 @@ impl Interpreter {
             names = fncode
                 .names
                 .iter()
-                .map(|n| Value::string(n.clone()))
+                .map(|n| Value::string(n.as_str()))
                 .collect();
             // co_stacksize: CPython's max operand-stack depth.  pyrust is a
             // register VM with no operand stack, so report the register count —
@@ -239,15 +240,16 @@ impl Interpreter {
         };
 
         let mut found: Vec<(String, Value)> = Vec::new();
-        for name in fncode.free_var_candidates() {
+        for &name in fncode.free_var_candidates() {
+            let name_str = name.as_str();
             // An explicit `global`/`nonlocal` mismatch or own local is not a
             // closure free var.  `global` names target the module env;
             // own-local names never reach `LoadGlobal` for a free read.
-            if function.global_names.contains(name) || function.local_names.contains(name) {
+            if function.global_names.contains(name_str) || function.local_names.contains(name_str) {
                 continue;
             }
-            if let Some(value) = lookup_enclosing_function_value(&function.env, name) {
-                found.push((name.clone(), value));
+            if let Some(value) = lookup_enclosing_function_value(&function.env, name_str) {
+                found.push((name_str.to_owned(), value));
             }
         }
         // CPython reports `co_freevars` (and orders `__closure__` cells) sorted

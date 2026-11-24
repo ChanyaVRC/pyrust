@@ -19,14 +19,14 @@ fn collect_class_body_names_textual(
                 collect_assign_target_textual(target, ordered, seen, body_local);
             }
             Stmt::AnnAssign { name, .. }
-                if body_local.contains(name) && seen.insert(name.clone()) =>
+                if body_local.contains(name.as_str()) && seen.insert(name.to_string()) =>
             {
-                ordered.push(name.clone());
+                ordered.push(name.to_string());
             }
             Stmt::Def { name, .. } | Stmt::Class { name, .. } | Stmt::TypeAlias { name, .. }
-                if body_local.contains(name) && seen.insert(name.clone()) =>
+                if body_local.contains(name.as_str()) && seen.insert(name.to_string()) =>
             {
-                ordered.push(name.clone());
+                ordered.push(name.to_string());
             }
             Stmt::If {
                 branches,
@@ -77,8 +77,8 @@ fn collect_assign_target_textual(
 ) {
     match target {
         AssignTarget::Name(name) => {
-            if body_local.contains(name) && seen.insert(name.clone()) {
-                ordered.push(name.clone());
+            if body_local.contains(name.as_str()) && seen.insert(name.to_string()) {
+                ordered.push(name.to_string());
             }
         }
         AssignTarget::Tuple(targets) => {
@@ -358,7 +358,7 @@ fn collect_class_lambda_outer_refs_in_expr(
             collect_free_var_reads_in_expr(body, &mut body_uses);
             collect_transitive_free_vars_in_expr(body, &mut body_uses);
             for p in params {
-                body_uses.remove(&p.name);
+                body_uses.remove(p.name.as_str());
             }
             // Promote any name that the lambda reads from the enclosing function.
             // Note: we do NOT filter out class-body locals here.  Python class
