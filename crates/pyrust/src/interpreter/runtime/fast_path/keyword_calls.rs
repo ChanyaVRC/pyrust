@@ -24,7 +24,7 @@ impl Interpreter {
         kwnames_idx: u16,
         num_locals: crate::bytecode::Reg,
     ) -> Result<Value> {
-        use crate::bytecode::KwCallCacheEntry;
+        use crate::bytecode::{KwCallCacheEntry, KwCallSimpleCache};
         let total = total as u32;
         let nkw = nkw as usize;
         let npos = total as usize - nkw;
@@ -49,13 +49,12 @@ impl Interpreter {
             // Cache hit?
             let cached: Option<(u8, smallvec::SmallVec<[u32; 4]>)> = {
                 let cache = code.kwcall_cache.borrow();
-                match &cache[pc - 1] {
-                    KwCallCacheEntry::Simple {
-                        param_binds_ptr,
-                        npos: cnpos,
-                        slots,
-                    } if param_binds_ptr.as_ptr() == pbptr && *cnpos as usize == npos => {
-                        Some((*cnpos, slots.clone()))
+                match cache.get(pc - 1) {
+                    Some(KwCallCacheEntry::Simple(entry))
+                        if entry.param_binds_ptr.as_ptr() == pbptr
+                            && entry.npos as usize == npos =>
+                    {
+                        Some((entry.npos, entry.slots.clone()))
                     }
                     _ => None,
                 }
@@ -86,8 +85,8 @@ impl Interpreter {
             }
 
             // Cache empty (or shape changed): try to resolve this call as simple.
-            // Only fill on an `Empty` slot — a `Fallback` slot stays permanent.
-            let is_empty = matches!(code.kwcall_cache.borrow()[pc - 1], KwCallCacheEntry::Empty);
+            // Only fill when no slot exists yet — a `Fallback` slot stays permanent.
+            let is_empty = code.kwcall_cache.borrow().get(pc - 1).is_none();
             if is_empty {
                 let kwnames = match code
                     .consts
@@ -103,13 +102,14 @@ impl Interpreter {
                 };
                 match Self::kwcall_resolve_simple(&f, npos, &kwnames) {
                     Some(slots) => {
-                        let mut cache = code.kwcall_cache.borrow_mut();
-                        cache[pc - 1] = KwCallCacheEntry::Simple {
-                            param_binds_ptr: Rc::downgrade(&f.param_binds),
-                            npos: npos as u8,
-                            slots: slots.clone(),
-                        };
-                        drop(cache);
+                        code.kwcall_cache.borrow_mut().insert(
+                            pc - 1,
+                            KwCallCacheEntry::Simple(Box::new(KwCallSimpleCache {
+                                param_binds_ptr: Rc::downgrade(&f.param_binds),
+                                npos: npos as u8,
+                                slots: slots.clone(),
+                            })),
+                        );
                         let Some(callee_code) = self.get_or_compile_bytecode(&f) else {
                             return Err(PyError::Runtime(format!("no bytecode for '{}'", f.name)));
                         };
@@ -134,7 +134,9 @@ impl Interpreter {
                     }
                     None => {
                         // Not simple — permanent fallback to the general binder.
-                        code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::Fallback;
+                        code.kwcall_cache
+                            .borrow_mut()
+                            .insert(pc - 1, KwCallCacheEntry::Fallback);
                     }
                 }
             }
@@ -218,7 +220,7 @@ impl Interpreter {
         call_site_pc: usize,
         _cur_line: u32,
     ) -> Result<Value> {
-        use crate::bytecode::KwCallCacheEntry;
+        use crate::bytecode::{KwCallCacheEntry, KwCallSimpleCache};
         let total = total as u32;
         let nkw = nkw as usize;
         let npos_args = total as usize - nkw;
@@ -235,13 +237,12 @@ impl Interpreter {
             // Keyword-shape cache hit?
             let cached: Option<smallvec::SmallVec<[u32; 4]>> = {
                 let cache = code.kwcall_cache.borrow();
-                match &cache[call_site_pc] {
-                    KwCallCacheEntry::Simple {
-                        param_binds_ptr,
-                        npos: cnpos,
-                        slots,
-                    } if param_binds_ptr.as_ptr() == pbptr && *cnpos as usize == eff_npos => {
-                        Some(slots.clone())
+                match cache.get(call_site_pc) {
+                    Some(KwCallCacheEntry::Simple(entry))
+                        if entry.param_binds_ptr.as_ptr() == pbptr
+                            && entry.npos as usize == eff_npos =>
+                    {
+                        Some(entry.slots.clone())
                     }
                     _ => None,
                 }
@@ -253,10 +254,7 @@ impl Interpreter {
                     None
                 } else if let Some(slots) = cached {
                     Some(slots)
-                } else if matches!(
-                    code.kwcall_cache.borrow()[call_site_pc],
-                    KwCallCacheEntry::Empty
-                ) {
+                } else if code.kwcall_cache.borrow().get(call_site_pc).is_none() {
                     // Fill the shape cache once.  The keyword names map to parameters
                     // *after* the receiver-occupied param 0, so `eff_npos` positionals
                     // (receiver + plain positionals) fill the leading params.
@@ -274,18 +272,21 @@ impl Interpreter {
                     };
                     match Self::kwcall_resolve_simple(&f, eff_npos, &kwnames) {
                         Some(slots) => {
-                            code.kwcall_cache.borrow_mut()[call_site_pc] =
-                                KwCallCacheEntry::Simple {
+                            code.kwcall_cache.borrow_mut().insert(
+                                call_site_pc,
+                                KwCallCacheEntry::Simple(Box::new(KwCallSimpleCache {
                                     param_binds_ptr: Rc::downgrade(&f.param_binds),
                                     npos: eff_npos as u8,
                                     slots: slots.clone(),
-                                };
+                                })),
+                            );
                             Some(slots)
                         }
                         None => {
                             // Not simple — permanent fallback to the general binder.
-                            code.kwcall_cache.borrow_mut()[call_site_pc] =
-                                KwCallCacheEntry::Fallback;
+                            code.kwcall_cache
+                                .borrow_mut()
+                                .insert(call_site_pc, KwCallCacheEntry::Fallback);
                             None
                         }
                     }

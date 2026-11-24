@@ -138,7 +138,10 @@ fn build_exc_table_no_handlers_is_identity() {
     let insns = vec![Insn::LoadConst(0, 0), Insn::Return(0)];
     let (out, table) = build_exc_table(insns.clone());
     assert_eq!(out, insns, "stream unchanged when no SetupExcept present");
-    assert_eq!(table, vec![EXC_NO_HANDLER, EXC_NO_HANDLER]);
+    assert!(
+        table.is_empty() && table.capacity() == 0,
+        "handler-free function must allocate 0 bytes for exc_table"
+    );
     assert!(!has_exception_handlers(&out, &table));
 }
 

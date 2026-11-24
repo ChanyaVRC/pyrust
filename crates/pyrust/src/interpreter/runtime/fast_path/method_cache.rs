@@ -12,107 +12,105 @@ impl Interpreter {
         code: &crate::bytecode::FnCode,
         call_site_pc: usize,
     ) {
-        use crate::bytecode::AttrCacheEntry;
+        use crate::bytecode::{AttrCacheEntry, NativeClassMethodCacheEntry, is_attr_cache_site};
 
         // A deoptimized call site always uses generic lookup. In particular,
         // avoid re-running PyClass descriptor classification after an
         // ordinary Python classmethod/property has already been rejected.
         if matches!(
-            code.attr_cache.borrow()[call_site_pc],
-            AttrCacheEntry::Megamorphic | AttrCacheEntry::Uncacheable
+            code.attr_cache.borrow().get(call_site_pc),
+            Some(AttrCacheEntry::Megamorphic | AttrCacheEntry::Uncacheable)
         ) {
             return;
         }
         let plan = read_method_cache_plan(obj_val, method);
         let mut cache = code.attr_cache.borrow_mut();
-        match &cache[call_site_pc] {
-            AttrCacheEntry::Megamorphic | AttrCacheEntry::Uncacheable => {}
-            AttrCacheEntry::ClassAttr {
-                class_ptr: existing_ptr,
-                ..
-            } => {
+        let new_entry = match cache.get(call_site_pc) {
+            Some(AttrCacheEntry::Megamorphic | AttrCacheEntry::Uncacheable) => return,
+            Some(AttrCacheEntry::ClassAttr(entry)) => {
                 if let Some(inst_rc) = obj_val.as_py_instance_rc() {
                     let new_ptr = Rc::as_ptr(&inst_rc.borrow().class);
-                    if new_ptr != existing_ptr.as_ptr() {
+                    if new_ptr != entry.class_ptr.as_ptr() {
                         // Different class at this call site — go megamorphic.
-                        cache[call_site_pc] = AttrCacheEntry::Megamorphic;
+                        AttrCacheEntry::Megamorphic
                     } else {
                         // Same class but version changed (or instance shadow exists).
                         // Reset to Empty so the next slow-path execution refills
                         // with the current class version and updated method value.
-                        cache[call_site_pc] = AttrCacheEntry::Empty;
+                        AttrCacheEntry::Empty
                     }
                 } else if matches!(obj_val.kind(), ValueKind::PyClass(_)) {
-                    cache[call_site_pc] = AttrCacheEntry::Megamorphic;
+                    AttrCacheEntry::Megamorphic
+                } else {
+                    return;
                 }
             }
-            AttrCacheEntry::NativeClassMethod {
-                class_ptr: existing_ptr,
-                ..
-            } => {
+            Some(AttrCacheEntry::NativeClassMethod(entry)) => {
                 if let ValueKind::PyClass(class) = obj_val.kind() {
-                    if Rc::as_ptr(class) != existing_ptr.as_ptr() {
-                        cache[call_site_pc] = AttrCacheEntry::Megamorphic;
+                    if Rc::as_ptr(class) != entry.class_ptr.as_ptr() {
+                        AttrCacheEntry::Megamorphic
                     } else {
-                        cache[call_site_pc] = AttrCacheEntry::Empty;
+                        AttrCacheEntry::Empty
                     }
                 } else if obj_val.as_py_instance_rc().is_some() {
-                    cache[call_site_pc] = AttrCacheEntry::Megamorphic;
+                    AttrCacheEntry::Megamorphic
+                } else {
+                    return;
                 }
             }
-            AttrCacheEntry::Empty => {
-                cache[call_site_pc] = match plan {
-                    ReadMethodCachePlan::Class(unbound_value) => {
-                        let Some(inst_rc) = obj_val.as_py_instance_rc() else {
-                            return;
-                        };
-                        let inst = inst_rc.borrow();
-                        let Some((class_version, epoch)) = pyrust_core::class_cache_stamp(
-                            inst.class.borrow().mutation_version.get(),
-                        ) else {
-                            return;
-                        };
-                        AttrCacheEntry::class_attr(
-                            &inst.class,
-                            class_version,
-                            epoch,
-                            &unbound_value,
-                        )
+            None | Some(AttrCacheEntry::Empty) => match plan {
+                ReadMethodCachePlan::Class(unbound_value) => {
+                    let Some(inst_rc) = obj_val.as_py_instance_rc() else {
+                        return;
+                    };
+                    let inst = inst_rc.borrow();
+                    let Some((class_version, epoch)) =
+                        pyrust_core::class_cache_stamp(inst.class.borrow().mutation_version.get())
+                    else {
+                        return;
+                    };
+                    AttrCacheEntry::class_attr(&inst.class, class_version, epoch, &unbound_value)
+                }
+                ReadMethodCachePlan::NativeClassMethod(plan) => {
+                    let ValueKind::PyClass(class) = obj_val.kind() else {
+                        return;
+                    };
+                    let Some((class_version, epoch)) =
+                        pyrust_core::class_cache_stamp(class.borrow().mutation_version.get())
+                    else {
+                        return;
+                    };
+                    AttrCacheEntry::NativeClassMethod(Box::new(NativeClassMethodCacheEntry {
+                        class_ptr: Rc::downgrade(class),
+                        class_version,
+                        epoch,
+                        plan,
+                    }))
+                }
+                ReadMethodCachePlan::Uncacheable => {
+                    if matches!(obj_val.kind(), ValueKind::PyClass(_)) {
+                        AttrCacheEntry::Megamorphic
+                    } else {
+                        AttrCacheEntry::Uncacheable
                     }
-                    ReadMethodCachePlan::NativeClassMethod(plan) => {
-                        let ValueKind::PyClass(class) = obj_val.kind() else {
-                            return;
-                        };
-                        let Some((class_version, epoch)) =
-                            pyrust_core::class_cache_stamp(class.borrow().mutation_version.get())
-                        else {
-                            return;
-                        };
-                        AttrCacheEntry::NativeClassMethod {
-                            class_ptr: Rc::downgrade(class),
-                            class_version,
-                            epoch,
-                            plan,
-                        }
-                    }
-                    ReadMethodCachePlan::Uncacheable => {
-                        if matches!(obj_val.kind(), ValueKind::PyClass(_)) {
-                            AttrCacheEntry::Megamorphic
-                        } else {
-                            AttrCacheEntry::Uncacheable
-                        }
-                    }
-                };
-            }
+                }
+            },
             // InstanceAttr / SlotAttr / SetInstanceAttr are GetAttr / SetAttr-only
             // entries (#1912 / #2207 / #1998).  A CallMethod site never produces
             // them, but be defensive: drop to Empty so the next pass refills.
-            AttrCacheEntry::InstanceAttr { .. }
-            | AttrCacheEntry::SlotAttr { .. }
-            | AttrCacheEntry::SetInstanceAttr { .. } => {
-                cache[call_site_pc] = AttrCacheEntry::Empty;
-            }
-        }
+            Some(
+                AttrCacheEntry::InstanceAttr { .. }
+                | AttrCacheEntry::SlotAttr(_)
+                | AttrCacheEntry::SetInstanceAttr { .. },
+            ) => AttrCacheEntry::Empty,
+        };
+        cache.set_or_init(
+            &code.insns,
+            call_site_pc,
+            is_attr_cache_site,
+            || AttrCacheEntry::Empty,
+            new_entry,
+        );
     }
     /// Inline-cache fast path for `obj.method(...)` on a user-defined
     /// `PyInstance`, plus native classmethod calls on a `PyClass`. Returns
@@ -149,24 +147,19 @@ impl Interpreter {
         }
         let resolved = {
             let cache = code.attr_cache.borrow();
-            match &cache[call_site_pc] {
-                AttrCacheEntry::ClassAttr {
-                    class_ptr,
-                    class_version,
-                    epoch,
-                    value: unbound,
-                } => {
+            match cache.get(call_site_pc) {
+                Some(AttrCacheEntry::ClassAttr(entry)) => {
                     if let Some(inst_rc) = regs[obj as usize].as_py_instance_rc() {
                         let inst = inst_rc.borrow();
-                        let same_class = Rc::as_ptr(&inst.class) == class_ptr.as_ptr();
+                        let same_class = Rc::as_ptr(&inst.class) == entry.class_ptr.as_ptr();
                         let no_shadow = !inst.attrs.contains_key(method);
                         let stamp_ok = pyrust_core::class_cache_stamp_matches(
                             inst.class.borrow().mutation_version.get(),
-                            *class_version,
-                            *epoch,
+                            entry.class_version,
+                            entry.epoch,
                         );
                         if same_class && no_shadow && stamp_ok {
-                            match unbound.upgrade() {
+                            match entry.value.upgrade() {
                                 Some(unbound) => {
                                     let inst_rc_clone = Rc::clone(inst_rc);
                                     drop(inst);
@@ -181,22 +174,17 @@ impl Interpreter {
                         CachedMethodResolution::Miss
                     }
                 }
-                AttrCacheEntry::NativeClassMethod {
-                    class_ptr,
-                    class_version,
-                    epoch,
-                    plan,
-                } => {
+                Some(AttrCacheEntry::NativeClassMethod(entry)) => {
                     if let ValueKind::PyClass(class) = regs[obj as usize].kind() {
-                        let same_class = Rc::as_ptr(class) == class_ptr.as_ptr();
+                        let same_class = Rc::as_ptr(class) == entry.class_ptr.as_ptr();
                         let stamp_ok = pyrust_core::class_cache_stamp_matches(
                             class.borrow().mutation_version.get(),
-                            *class_version,
-                            *epoch,
+                            entry.class_version,
+                            entry.epoch,
                         );
                         if same_class && stamp_ok {
                             CachedMethodResolution::NativeClassMethod(
-                                plan.clone(),
+                                entry.plan.clone(),
                                 Rc::clone(class),
                             )
                         } else {
@@ -270,23 +258,17 @@ impl Interpreter {
     )> {
         use crate::bytecode::AttrCacheEntry;
         let cache = code.attr_cache.borrow();
-        let AttrCacheEntry::ClassAttr {
-            class_ptr,
-            class_version,
-            epoch,
-            value: unbound,
-        } = &cache[call_site_pc]
-        else {
+        let Some(AttrCacheEntry::ClassAttr(entry)) = cache.get(call_site_pc) else {
             return None;
         };
         let inst_rc = regs[obj as usize].as_py_instance_rc()?;
         let inst = inst_rc.borrow();
-        let same_class = Rc::as_ptr(&inst.class) == class_ptr.as_ptr();
+        let same_class = Rc::as_ptr(&inst.class) == entry.class_ptr.as_ptr();
         let no_shadow = !inst.attrs.contains_key(method);
         let stamp_ok = pyrust_core::class_cache_stamp_matches(
             inst.class.borrow().mutation_version.get(),
-            *class_version,
-            *epoch,
+            entry.class_version,
+            entry.epoch,
         );
         if !(same_class && no_shadow && stamp_ok) {
             return None;
@@ -294,7 +276,7 @@ impl Interpreter {
         // Upgrade directly to the function backing after all guards pass.
         // Constructing a temporary Value here would allocate an OpaqueSlot on
         // every trampolined method call only to extract this same Rc again.
-        let f = unbound.upgrade_user_function()?;
+        let f = entry.value.upgrade_user_function()?;
         // Only Regular user methods are trampolinable; BuiltinFunction methods
         // (list.append / backing-primitive routes) need the native path.
         if !matches!(f.kind, pyrust_core::UserFunctionKind::Regular) {

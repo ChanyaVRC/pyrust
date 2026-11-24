@@ -63,7 +63,7 @@ impl Interpreter {
         &mut self,
         value: &Value,
         spec_value: &Value,
-        cache: &RefCell<Vec<FmtSpecCacheEntry>>,
+        cache: &RefCell<crate::bytecode::SparsePcCache<FmtSpecCacheEntry>>,
         site: usize,
     ) -> Result<Value> {
         let spec = spec_value.as_str().unwrap_or("");

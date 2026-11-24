@@ -12,10 +12,13 @@ mod code;
 mod function;
 mod instruction;
 
-pub use cache::{AttrCacheEntry, KwCallCacheEntry};
+pub use cache::{
+    AttrCacheEntry, KwCallCacheEntry, KwCallExArgsCache, KwCallExSimpleCache, KwCallSimpleCache,
+    NativeClassMethodCacheEntry, SlotAttrCacheEntry,
+};
 pub(crate) use cache::{
-    BINOP_SPEC_THRESHOLD, BinOpCacheEntry, BinopTypeTag, GlobalCacheEntry,
-    global_cache_interest_mask,
+    BINOP_SPEC_THRESHOLD, BinOpCacheEntry, BinopTypeTag, GlobalCacheEntry, SiteCache,
+    SparsePcCache, global_cache_interest_mask, is_attr_cache_site, is_call_builtin_cache_site,
 };
 pub use code::FnCode;
 pub(crate) use code::{EXC_NO_HANDLER, MAX_FRAME_REGS};

@@ -131,12 +131,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     );
     let (insns, consts) = pass_compact_consts(insns, consts);
 
-    let insns_len = insns.len();
-    let names_len = names.len();
-    let global_cache_interest_masks = names
-        .iter()
-        .map(|name| crate::bytecode::global_cache_interest_mask(name))
-        .collect();
+    let global_cache_interest_masks = code.global_cache_interest_masks;
     FnCode {
         insns,
         filename: code.filename,
@@ -159,19 +154,13 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         is_function_scope: code.is_function_scope,
         is_inlined_comp: code.is_inlined_comp,
         comp_enclosing_locals: code.comp_enclosing_locals,
-        attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
-        global_cache: RefCell::new(vec![GlobalCacheEntry::Empty; names_len]),
+        attr_cache: RefCell::new(crate::bytecode::SiteCache::new()),
+        global_cache: RefCell::new(Vec::new()),
         global_cache_interest_masks,
-        binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
-        kwcall_cache: RefCell::new(vec![KwCallCacheEntry::Empty; insns_len]),
-        fmt_spec_cache: RefCell::new(vec![
-            crate::interpreter::FmtSpecCacheEntry::Empty;
-            insns_len
-        ]),
-        call_builtin_cache: RefCell::new(vec![
-            crate::interpreter::CallBuiltinCacheEntry::Empty;
-            insns_len
-        ]),
+        binop_cache: RefCell::new(Vec::new()),
+        kwcall_cache: RefCell::new(crate::bytecode::SparsePcCache::new()),
+        fmt_spec_cache: RefCell::new(crate::bytecode::SparsePcCache::new()),
+        call_builtin_cache: RefCell::new(crate::bytecode::SiteCache::new()),
         cached_code_object: RefCell::new(None),
         exc_table,
         has_exc_handlers,

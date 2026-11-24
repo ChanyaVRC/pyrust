@@ -8,7 +8,10 @@ use pyrust_core::{
     UserFunctionKind, Value, next_fn_id,
 };
 
-use super::{AttrCacheEntry, GlobalCacheEntry, KwCallCacheEntry};
+use super::{
+    AttrCacheEntry, BinOpCacheEntry, GlobalCacheEntry, KwCallCacheEntry, KwCallSimpleCache,
+    SiteCache, SparsePcCache, is_attr_cache_site, is_call_builtin_cache_site,
+};
 
 fn make_cache_user_function() -> Rc<UserFunction> {
     Rc::new(UserFunction {
@@ -183,9 +186,10 @@ fn method_cache_preserves_function_identity_without_owning_it() {
     let original = Value::user_function(Rc::clone(&function));
     let original_id = original.value_id();
     let entry = AttrCacheEntry::class_attr(&class, 0, 0, &original);
-    let AttrCacheEntry::ClassAttr { value, .. } = &entry else {
+    let AttrCacheEntry::ClassAttr(cached) = &entry else {
         panic!("regular methods must be weak-cacheable");
     };
+    let value = &cached.value;
 
     let hit = value.upgrade().expect("live method cache hit");
     assert_eq!(
@@ -241,21 +245,241 @@ fn cache_weak_identities_keep_dropped_allocations_reserved_against_aba() {
     assert_ne!(class_ptr.as_ptr(), Rc::as_ptr(&replacement_class));
 
     let binds = Rc::new(vec![ParamBind::Reg(0)]);
-    let kw_entry = KwCallCacheEntry::Simple {
+    let kw_entry = KwCallCacheEntry::Simple(Box::new(KwCallSimpleCache {
         param_binds_ptr: Rc::downgrade(&binds),
         npos: 0,
         slots: smallvec::SmallVec::new(),
-    };
+    }));
     let old_binds_ptr = Rc::as_ptr(&binds);
     drop(binds);
     let replacement_binds = Rc::new(vec![ParamBind::Reg(1)]);
-    let KwCallCacheEntry::Simple {
-        param_binds_ptr, ..
-    } = kw_entry
-    else {
+    let KwCallCacheEntry::Simple(cached_kw) = kw_entry else {
         unreachable!()
     };
-    assert!(param_binds_ptr.upgrade().is_none());
-    assert_eq!(param_binds_ptr.as_ptr(), old_binds_ptr);
-    assert_ne!(param_binds_ptr.as_ptr(), Rc::as_ptr(&replacement_binds));
+    assert!(cached_kw.param_binds_ptr.upgrade().is_none());
+    assert_eq!(cached_kw.param_binds_ptr.as_ptr(), old_binds_ptr);
+    assert_ne!(
+        cached_kw.param_binds_ptr.as_ptr(),
+        Rc::as_ptr(&replacement_binds)
+    );
+}
+
+#[test]
+fn inline_cache_entry_sizes_stay_compact() {
+    use std::mem::size_of;
+
+    assert!(
+        size_of::<KwCallCacheEntry>() <= 24,
+        "KwCallCacheEntry grew to {} B (guard <= 24 B; keep heavy variants boxed)",
+        size_of::<KwCallCacheEntry>()
+    );
+    assert!(
+        size_of::<AttrCacheEntry>() <= 32,
+        "AttrCacheEntry grew to {} B (guard <= 32 B; keep heavy variants boxed)",
+        size_of::<AttrCacheEntry>()
+    );
+    assert!(
+        size_of::<crate::interpreter::CallBuiltinCacheEntry>() <= 24,
+        "CallBuiltinCacheEntry grew to {} B (guard <= 24 B; keep Cached payload boxed)",
+        size_of::<crate::interpreter::CallBuiltinCacheEntry>()
+    );
+    assert!(
+        size_of::<BinOpCacheEntry>() <= 4,
+        "BinOpCacheEntry grew to {} B (guard <= 4 B)",
+        size_of::<BinOpCacheEntry>()
+    );
+}
+
+#[test]
+fn site_cache_and_sparse_pc_cache_allocate_zero_until_populated() {
+    use crate::bytecode::Insn;
+
+    let mut site_cache: SiteCache<AttrCacheEntry> = SiteCache::new();
+    assert!(site_cache.is_empty());
+    assert_eq!(site_cache.heap_bytes(), 0);
+    assert!(site_cache.get(0).is_none());
+
+    let insns = vec![
+        Insn::LoadNone(0),
+        Insn::GetAttr(1, 0, 0),
+        Insn::LoadNone(2),
+        Insn::SetAttr(0, 1, 2),
+        Insn::Return(1),
+    ];
+    site_cache.set_or_init(
+        &insns,
+        1,
+        is_attr_cache_site,
+        || AttrCacheEntry::Empty,
+        AttrCacheEntry::Megamorphic,
+    );
+    assert!(!site_cache.is_empty());
+    assert!(site_cache.get(0).is_none());
+    assert!(matches!(
+        site_cache.get(1),
+        Some(AttrCacheEntry::Megamorphic)
+    ));
+    assert!(site_cache.get(2).is_none());
+    assert!(matches!(site_cache.get(3), Some(AttrCacheEntry::Empty)));
+    assert!(site_cache.get(4).is_none());
+    // 5 bytes pc_to_slot + 2 * size_of::<AttrCacheEntry>() (vs 5 * 64 = 320 B before)
+    assert_eq!(
+        site_cache.heap_bytes(),
+        insns.len() + 2 * std::mem::size_of::<AttrCacheEntry>()
+    );
+
+    let mut builtin_cache: SiteCache<crate::interpreter::CallBuiltinCacheEntry> = SiteCache::new();
+    let call_insns = vec![Insn::LoadNone(0), Insn::Call(0, 0), Insn::Return(0)];
+    assert_eq!(builtin_cache.heap_bytes(), 0);
+    builtin_cache.set_or_init(
+        &call_insns,
+        1,
+        is_call_builtin_cache_site,
+        || crate::interpreter::CallBuiltinCacheEntry::Empty,
+        crate::interpreter::CallBuiltinCacheEntry::Empty,
+    );
+    assert_eq!(
+        builtin_cache.heap_bytes(),
+        call_insns.len() + std::mem::size_of::<crate::interpreter::CallBuiltinCacheEntry>()
+    );
+
+    let mut sparse: SparsePcCache<KwCallCacheEntry> = SparsePcCache::new();
+    assert!(sparse.is_empty());
+    assert_eq!(sparse.capacity(), 0);
+    assert_eq!(sparse.heap_bytes(), 0);
+    assert!(sparse.get(10).is_none());
+
+    // Insert out of order across the linear-scan/binary-search boundary (> 8 entries).
+    for pc in [50usize, 3, 25, 10, 99, 1, 40, 7, 18, 88] {
+        sparse.insert(pc, KwCallCacheEntry::Fallback);
+    }
+    for pc in [1usize, 3, 7, 10, 18, 25, 40, 50, 88, 99] {
+        assert!(matches!(sparse.get(pc), Some(KwCallCacheEntry::Fallback)));
+    }
+    assert!(sparse.get(2).is_none());
+    assert!(sparse.get(100).is_none());
+}
+
+fn compile_test_script(src: &str) -> crate::bytecode::FnCode {
+    let tokens = crate::lexer::Lexer::new(src).unwrap().into_tokens();
+    let mut parser = crate::parser::Parser::new(tokens);
+    let stmts = parser.parse_program().unwrap();
+    let empty = HashSet::new();
+    let names = crate::interpreter::collect_local_names(&[], &stmts, &empty, &empty);
+    let local_index = Rc::new(
+        (0u32..)
+            .zip(names)
+            .map(|(slot, name)| (name, slot))
+            .collect(),
+    );
+    crate::compiler::compile_script_with_linenos(&stmts, local_index, false, &[], "<test>").unwrap()
+}
+
+#[test]
+fn compiled_and_optimized_fncode_starts_with_zero_cache_and_handler_free_exc_table_ram() {
+    let src = "\
+def work(x, y):
+    a = x + y
+    return a * 2
+work(1, 2)
+";
+    let raw = compile_test_script(src);
+    let assert_zero_caches = |code: &crate::bytecode::FnCode, stage: &str| {
+        assert!(
+            code.attr_cache.borrow().is_empty(),
+            "{stage}: attr_cache must start unallocated"
+        );
+        assert_eq!(
+            code.global_cache.borrow().capacity(),
+            0,
+            "{stage}: global_cache must start unallocated"
+        );
+        assert_eq!(
+            code.binop_cache.borrow().capacity(),
+            0,
+            "{stage}: binop_cache must start unallocated"
+        );
+        assert_eq!(
+            code.kwcall_cache.borrow().capacity(),
+            0,
+            "{stage}: kwcall_cache must start unallocated"
+        );
+        assert_eq!(
+            code.fmt_spec_cache.borrow().capacity(),
+            0,
+            "{stage}: fmt_spec_cache must start unallocated"
+        );
+        assert!(
+            code.call_builtin_cache.borrow().is_empty(),
+            "{stage}: call_builtin_cache must start unallocated"
+        );
+        assert_eq!(
+            code.exc_table.capacity(),
+            0,
+            "{stage}: handler-free exc_table must allocate 0 bytes"
+        );
+        for proto in &code.fn_protos {
+            assert!(proto.code.attr_cache.borrow().is_empty());
+            assert_eq!(proto.code.global_cache.borrow().capacity(), 0);
+            assert_eq!(proto.code.binop_cache.borrow().capacity(), 0);
+            assert_eq!(proto.code.kwcall_cache.borrow().capacity(), 0);
+            assert_eq!(proto.code.fmt_spec_cache.borrow().capacity(), 0);
+            assert!(proto.code.call_builtin_cache.borrow().is_empty());
+            assert_eq!(proto.code.exc_table.capacity(), 0);
+        }
+    };
+
+    assert_zero_caches(&raw, "Compiler::finish");
+    let mir_lowered = crate::mir::optimize_fncode_via_mir(raw.clone());
+    assert_zero_caches(&mir_lowered, "lower_mir_to_fncode");
+    let optimized = crate::optimizer::optimize(raw);
+    assert_zero_caches(&optimized, "optimize_fn_code");
+    assert!(!optimized.has_exc_handlers);
+    assert!(!optimized.fn_protos[0].code.has_exc_handlers);
+}
+
+#[test]
+fn sparse_inline_caches_preserve_hits_and_reentrancy_safety() {
+    let src = r#"
+class Node:
+    def __init__(self, v):
+        self.v = v
+
+    def walk(self, depth, step=1):
+        if depth <= 0:
+            return f"{self.v:.1f}"
+        # Re-entrantly exercises CallMethod, CallKw, GetAttr, SetAttr,
+        # BinOp (float), FormatValueSpec, and builtin len() on the same FnCode.
+        self.v = self.v + float(step)
+        sub = self.walk(depth - 1, step=step)
+        return f"{len(sub)}:{sub}"
+
+class Slotted:
+    __slots__ = ("x",)
+    def __init__(self, x):
+        self.x = x
+
+def kw_target(a, b=2, c=3):
+    return a + b + c
+
+def run():
+    n = Node(1.5)
+    r1 = n.walk(4, step=2)
+    s = Slotted(41)
+    r2 = s.x + s.x - 41
+    d = {"b": 20, "c": 30}
+    r3 = kw_target(10, **d)
+    r4 = kw_target(*(10, 20), **{"c": 30})
+    return (r1, r2, r3, r4)
+
+result = run()
+assert result == ('9:7:5:3:9.5', 41, 60, 60), result
+"#;
+    let mut interp = crate::interpreter::Interpreter::default();
+    let tokens = crate::lexer::Lexer::new(src).unwrap().into_tokens();
+    let mut parser = crate::parser::Parser::new(tokens);
+    let stmts = parser.parse_program().unwrap();
+    interp
+        .exec_program(&stmts, false)
+        .expect("re-entrant inline caches must preserve exact results");
 }

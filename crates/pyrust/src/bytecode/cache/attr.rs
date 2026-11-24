@@ -34,6 +34,39 @@ use crate::value::Value;
 /// an allocator-reused address from making a different, newly-created class
 /// look like the cached class (the ABA problem), without creating a
 /// `FnCode -> class -> function -> FnCode` strong-reference cycle.
+/// Boxed payload for [`AttrCacheEntry::ClassAttr`] so the enum stays at 32 bytes
+/// while keeping hot [`AttrCacheEntry::InstanceAttr`] and
+/// [`AttrCacheEntry::SetInstanceAttr`] entries unboxed inline.
+#[derive(Clone)]
+pub struct ClassAttrCacheEntry {
+    /// Weak allocation identity of the class observed at cache fill.
+    pub class_ptr: std::rc::Weak<std::cell::RefCell<pyrust_core::PyClass>>,
+    /// Value of `PyClass::mutation_version` when the cache was filled.
+    pub class_version: u64,
+    /// Value of `pyrust_core::class_epoch()` when the cache was filled.
+    pub epoch: u64,
+    /// The unbound class-attr value from `lookup_class_attr`.
+    pub value: pyrust_core::WeakValueCache,
+}
+
+/// Boxed payload for [`AttrCacheEntry::NativeClassMethod`].
+#[derive(Clone)]
+pub struct NativeClassMethodCacheEntry {
+    pub class_ptr: std::rc::Weak<std::cell::RefCell<pyrust_core::PyClass>>,
+    pub class_version: u64,
+    pub epoch: u64,
+    pub plan: pyrust_builtins::classmethod::NativeClassMethodCachePlan,
+}
+
+/// Boxed payload for [`AttrCacheEntry::SlotAttr`].
+#[derive(Clone)]
+pub struct SlotAttrCacheEntry {
+    pub class_ptr: std::rc::Weak<std::cell::RefCell<pyrust_core::PyClass>>,
+    pub class_version: u64,
+    pub epoch: u64,
+    pub slot_id: pyrust_core::MemberSlotId,
+}
+
 #[derive(Clone)]
 pub enum AttrCacheEntry {
     /// No observation yet — slot is uninitialised.
@@ -44,18 +77,7 @@ pub enum AttrCacheEntry {
     /// execution or mislabelling a monomorphic site as megamorphic.
     Uncacheable,
     /// Monomorphic: one class seen.  Validated by pointer + version + epoch check.
-    ClassAttr {
-        /// Weak allocation identity of the class observed at cache fill.
-        class_ptr: std::rc::Weak<std::cell::RefCell<pyrust_core::PyClass>>,
-        /// Value of `PyClass::mutation_version` when the cache was filled.
-        class_version: u64,
-        /// Value of `pyrust_core::class_epoch()` when the cache was filled.
-        /// Any mutation to any class — including ancestor classes in the MRO —
-        /// advances the global epoch, causing this guard to fail.
-        epoch: u64,
-        /// The unbound class-attr value from `lookup_class_attr`.
-        value: pyrust_core::WeakValueCache,
-    },
+    ClassAttr(Box<ClassAttrCacheEntry>),
     /// Monomorphic native-classmethod descriptor read on a `PyClass` target.
     ///
     /// Unlike `ClassAttr`, whose target is a `PyInstance` and whose cached
@@ -68,12 +90,7 @@ pub enum AttrCacheEntry {
     /// The target class pointer, its mutation version, and the global class
     /// epoch guard class identity, direct monkeypatches, and inherited
     /// descriptor/MRO changes respectively.
-    NativeClassMethod {
-        class_ptr: std::rc::Weak<std::cell::RefCell<pyrust_core::PyClass>>,
-        class_version: u64,
-        epoch: u64,
-        plan: pyrust_builtins::classmethod::NativeClassMethodCachePlan,
-    },
+    NativeClassMethod(Box<NativeClassMethodCacheEntry>),
     /// Monomorphic instance-attribute read cache (mirrors CPython's
     /// `LOAD_ATTR_INSTANCE_VALUE`).  Filled when a `GetAttr` site resolves to
     /// the instance `__dict__` with **no data descriptor** shadowing the name
@@ -114,12 +131,7 @@ pub enum AttrCacheEntry {
     /// `AttributeError: '<cls>' object has no attribute '<name>'` (and honours
     /// `__getattr__`), preserving the descriptor path's unset-slot semantics
     /// byte-for-byte.
-    SlotAttr {
-        class_ptr: std::rc::Weak<std::cell::RefCell<pyrust_core::PyClass>>,
-        class_version: u64,
-        epoch: u64,
-        slot_id: pyrust_core::MemberSlotId,
-    },
+    SlotAttr(Box<SlotAttrCacheEntry>),
     /// Monomorphic instance-attribute write cache (mirrors CPython's
     /// `STORE_ATTR_INSTANCE_VALUE`).  Filled when a `SetAttr` site resolves to a
     /// plain instance `__dict__` write: no `__setattr__` override, no `__set__`
@@ -147,12 +159,12 @@ impl AttrCacheEntry {
         let Some(value) = pyrust_core::WeakValueCache::new(value) else {
             return Self::Uncacheable;
         };
-        Self::ClassAttr {
+        Self::ClassAttr(Box::new(ClassAttrCacheEntry {
             class_ptr: std::rc::Rc::downgrade(class),
             class_version,
             epoch,
             value,
-        }
+        }))
     }
 }
 
@@ -161,16 +173,13 @@ impl std::fmt::Debug for AttrCacheEntry {
         match self {
             AttrCacheEntry::Empty => write!(f, "Empty"),
             AttrCacheEntry::Uncacheable => write!(f, "Uncacheable"),
-            AttrCacheEntry::ClassAttr {
-                class_ptr,
-                class_version,
-                epoch,
-                ..
-            } => {
+            AttrCacheEntry::ClassAttr(entry) => {
                 write!(
                     f,
-                    "ClassAttr({:?}, v{class_version}, e{epoch})",
-                    class_ptr.as_ptr()
+                    "ClassAttr({:?}, v{}, e{})",
+                    entry.class_ptr.as_ptr(),
+                    entry.class_version,
+                    entry.epoch
                 )
             }
             AttrCacheEntry::InstanceAttr {
@@ -184,28 +193,22 @@ impl std::fmt::Debug for AttrCacheEntry {
                     class_ptr.as_ptr()
                 )
             }
-            AttrCacheEntry::NativeClassMethod {
-                class_ptr,
-                class_version,
-                epoch,
-                ..
-            } => {
+            AttrCacheEntry::NativeClassMethod(entry) => {
                 write!(
                     f,
-                    "NativeClassMethod({:?}, v{class_version}, e{epoch})",
-                    class_ptr.as_ptr()
+                    "NativeClassMethod({:?}, v{}, e{})",
+                    entry.class_ptr.as_ptr(),
+                    entry.class_version,
+                    entry.epoch
                 )
             }
-            AttrCacheEntry::SlotAttr {
-                class_ptr,
-                class_version,
-                epoch,
-                ..
-            } => {
+            AttrCacheEntry::SlotAttr(entry) => {
                 write!(
                     f,
-                    "SlotAttr({:?}, v{class_version}, e{epoch})",
-                    class_ptr.as_ptr()
+                    "SlotAttr({:?}, v{}, e{})",
+                    entry.class_ptr.as_ptr(),
+                    entry.class_version,
+                    entry.epoch
                 )
             }
             AttrCacheEntry::SetInstanceAttr {

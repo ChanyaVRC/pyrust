@@ -9,8 +9,8 @@ use crate::ast::{
     MatchArm, Pattern, Stmt, Symbol, TypeParam, TypeParamBound, UnaryOp,
 };
 use crate::bytecode::{
-    AttrCacheEntry, BinOpCacheEntry, CaptureSource, CellSlotMeta, CellVar, DictKeyKindHint, FnCode,
-    FnParamSpec, FnProto, GlobalCacheEntry, Insn, KwCallCacheEntry, MAX_FRAME_REGS, Reg,
+    CaptureSource, CellSlotMeta, CellVar, DictKeyKindHint, FnCode, FnParamSpec, FnProto, Insn,
+    MAX_FRAME_REGS, Reg,
 };
 use crate::error::PyError;
 use crate::interpreter::dispatch_numeric_binop;

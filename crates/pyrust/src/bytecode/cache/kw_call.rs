@@ -33,19 +33,46 @@ use smallvec::SmallVec;
 /// permit allocator-address reuse to apply the old slot plan to a different
 /// signature.  `Weak` prevents that ABA collision without retaining the
 /// function strongly.
+/// Boxed payload for [`KwCallCacheEntry::Simple`] so the enum stays compact
+/// (`<= 24` bytes instead of inlining `SmallVec<[u32; 4]>`).
+#[derive(Clone)]
+pub struct KwCallSimpleCache {
+    pub param_binds_ptr: std::rc::Weak<Vec<pyrust_core::ParamBind>>,
+    pub npos: u8,
+    /// One param index per keyword name, in `kwnames` tuple order.
+    pub slots: SmallVec<[u32; 4]>,
+}
+
+/// Boxed payload for [`KwCallCacheEntry::ExSimple`] so the enum stays compact
+/// (`<= 24` bytes instead of inlining `SmallVec<[Box<str>; 4]>` + `SmallVec<[u32; 4]>`).
+#[derive(Clone)]
+pub struct KwCallExSimpleCache {
+    pub param_binds_ptr: std::rc::Weak<Vec<pyrust_core::ParamBind>>,
+    pub npos: u8,
+    /// The `**d` dict's `str` keys, in iteration order, for the shape guard.
+    pub keyset: SmallVec<[Box<str>; 4]>,
+    /// One param index per key in `keyset` order.
+    pub slots: SmallVec<[u32; 4]>,
+}
+
+/// Boxed payload for [`KwCallCacheEntry::ExArgs`] so the enum stays compact
+/// (`<= 24` bytes instead of inlining `SmallVec<[Box<str>; 4]>` + `SmallVec<[u32; 4]>`).
+#[derive(Clone)]
+pub struct KwCallExArgsCache {
+    pub param_binds_ptr: std::rc::Weak<Vec<pyrust_core::ParamBind>>,
+    pub total_pos: u32,
+    /// The `**kw` dict's `str` keys, in iteration order (empty if no `**kw`).
+    pub keyset: SmallVec<[Box<str>; 4]>,
+    /// One param index per keyword in `keyset` order.
+    pub slots: SmallVec<[u32; 4]>,
+}
+
 #[derive(Clone)]
 pub enum KwCallCacheEntry {
-    /// No observation yet.
-    Empty,
     /// Monomorphic: one function prototype seen, and its binding is simple.
     /// `slots[i]` = param index for keyword `i`; `npos` positional args fill
     /// params `0..npos`.  Validated by `param_binds_ptr` identity.
-    Simple {
-        param_binds_ptr: std::rc::Weak<Vec<pyrust_core::ParamBind>>,
-        npos: u8,
-        /// One param index per keyword name, in `kwnames` tuple order.
-        slots: SmallVec<[u32; 4]>,
-    },
+    Simple(Box<KwCallSimpleCache>),
     /// This site is not simple (or went polymorphic) — always use the general
     /// binder.  Set permanently; never re-filled.
     Fallback,
@@ -59,14 +86,7 @@ pub enum KwCallCacheEntry {
     /// scan.  Any key-set change re-resolves (re-fills) rather than pinning to
     /// `Fallback`, so a call site cycling over a small number of stable shapes
     /// still gets the fast bind on the shape it most recently saw.
-    ExSimple {
-        param_binds_ptr: std::rc::Weak<Vec<pyrust_core::ParamBind>>,
-        npos: u8,
-        /// The `**d` dict's `str` keys, in iteration order, for the shape guard.
-        keyset: SmallVec<[Box<str>; 4]>,
-        /// One param index per key in `keyset` order.
-        slots: SmallVec<[u32; 4]>,
-    },
+    ExSimple(Box<KwCallExSimpleCache>),
     /// `Insn::CallExArgs` (`f(<pos…>, *args[, **kw])`) monomorphic shape cache.
     /// Both the `*args` length and the `**kw` keys are dynamic, so alongside the
     /// `param_binds_ptr` callee identity this records the exact `total_pos`
@@ -77,14 +97,7 @@ pub enum KwCallCacheEntry {
     /// pinning `Fallback`, so a wrapper forwarding a varying number of positionals
     /// still fast-binds on the arity it most recently saw.  `keyset` is empty when
     /// the call has no `**kw`.
-    ExArgs {
-        param_binds_ptr: std::rc::Weak<Vec<pyrust_core::ParamBind>>,
-        total_pos: u32,
-        /// The `**kw` dict's `str` keys, in iteration order (empty if no `**kw`).
-        keyset: SmallVec<[Box<str>; 4]>,
-        /// One param index per keyword in `keyset` order.
-        slots: SmallVec<[u32; 4]>,
-    },
+    ExArgs(Box<KwCallExArgsCache>),
     /// `Insn::CallExArgs` where the callee is a VARIADIC (`*args`/`**kwargs`)
     /// plain user function — the decorator-chain forward shape
     /// `wrapper(*a,**k) -> inner(*args, **kw)`.  Such callees can't fast-bind into
@@ -114,31 +127,26 @@ pub enum KwCallCacheEntry {
 impl std::fmt::Debug for KwCallCacheEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            KwCallCacheEntry::Empty => write!(f, "Empty"),
-            KwCallCacheEntry::Simple { npos, slots, .. } => {
-                write!(f, "Simple {{ npos: {npos}, slots: {slots:?} }}")
-            }
-            KwCallCacheEntry::Fallback => write!(f, "Fallback"),
-            KwCallCacheEntry::ExSimple {
-                npos,
-                keyset,
-                slots,
-                ..
-            } => {
+            KwCallCacheEntry::Simple(entry) => {
                 write!(
                     f,
-                    "ExSimple {{ npos: {npos}, keyset: {keyset:?}, slots: {slots:?} }}"
+                    "Simple {{ npos: {}, slots: {:?} }}",
+                    entry.npos, entry.slots
                 )
             }
-            KwCallCacheEntry::ExArgs {
-                total_pos,
-                keyset,
-                slots,
-                ..
-            } => {
+            KwCallCacheEntry::Fallback => write!(f, "Fallback"),
+            KwCallCacheEntry::ExSimple(entry) => {
                 write!(
                     f,
-                    "ExArgs {{ total_pos: {total_pos}, keyset: {keyset:?}, slots: {slots:?} }}"
+                    "ExSimple {{ npos: {}, keyset: {:?}, slots: {:?} }}",
+                    entry.npos, entry.keyset, entry.slots
+                )
+            }
+            KwCallCacheEntry::ExArgs(entry) => {
+                write!(
+                    f,
+                    "ExArgs {{ total_pos: {}, keyset: {:?}, slots: {:?} }}",
+                    entry.total_pos, entry.keyset, entry.slots
                 )
             }
             KwCallCacheEntry::ExArgsVariadic { .. } => write!(f, "ExArgsVariadic"),

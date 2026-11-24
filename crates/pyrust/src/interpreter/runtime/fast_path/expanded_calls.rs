@@ -29,7 +29,7 @@ impl Interpreter {
         kwargs: crate::bytecode::Reg,
         num_locals: crate::bytecode::Reg,
     ) -> Result<Value> {
-        use crate::bytecode::KwCallCacheEntry;
+        use crate::bytecode::{KwCallCacheEntry, KwCallExSimpleCache};
         let npos = npos as usize;
         let func_val = vm_read(regs, func, num_locals)?;
         let kwargs_val = vm_read(regs, kwargs, num_locals)?;
@@ -62,19 +62,15 @@ impl Interpreter {
             }
             let action = {
                 let cache = code.kwcall_cache.borrow();
-                match &cache[pc - 1] {
-                    KwCallCacheEntry::ExSimple {
-                        param_binds_ptr,
-                        npos: cnpos,
-                        keyset,
-                        slots,
-                    } if param_binds_ptr.as_ptr() == pbptr
-                        && *cnpos as usize == npos
-                        && dict_keys_match(&kwargs_val, keyset) =>
+                match cache.get(pc - 1) {
+                    Some(KwCallCacheEntry::ExSimple(entry))
+                        if entry.param_binds_ptr.as_ptr() == pbptr
+                            && entry.npos as usize == npos
+                            && dict_keys_match(&kwargs_val, &entry.keyset) =>
                     {
-                        Action::Hit(slots.clone())
+                        Action::Hit(entry.slots.clone())
                     }
-                    KwCallCacheEntry::Fallback => Action::Fallback,
+                    Some(KwCallCacheEntry::Fallback) => Action::Fallback,
                     _ => Action::Resolve,
                 }
             };
@@ -114,12 +110,15 @@ impl Interpreter {
                                 .iter()
                                 .map(|v| Box::<str>::from(v.as_str().unwrap_or("")))
                                 .collect();
-                            code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::ExSimple {
-                                param_binds_ptr: Rc::downgrade(&f.param_binds),
-                                npos: npos as u8,
-                                keyset,
-                                slots: slots.clone(),
-                            };
+                            code.kwcall_cache.borrow_mut().insert(
+                                pc - 1,
+                                KwCallCacheEntry::ExSimple(Box::new(KwCallExSimpleCache {
+                                    param_binds_ptr: Rc::downgrade(&f.param_binds),
+                                    npos: npos as u8,
+                                    keyset,
+                                    slots: slots.clone(),
+                                })),
+                            );
                             return self.call_ex_fast_bind(
                                 &f,
                                 regs,
@@ -133,7 +132,9 @@ impl Interpreter {
                         // Structurally not simple for this callee: pin Fallback so we
                         // don't rebuild kwnames every call (e.g. a `**kwargs` receiver,
                         // or a binding error the general binder will diagnose).
-                        code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::Fallback;
+                        code.kwcall_cache
+                            .borrow_mut()
+                            .insert(pc - 1, KwCallCacheEntry::Fallback);
                     }
                     // Non-str key (or could not borrow) → slow path; do NOT pin
                     // Fallback, the general binder raises the right TypeError.
@@ -201,7 +202,7 @@ impl Interpreter {
         kwargs: crate::bytecode::Reg,
         num_locals: crate::bytecode::Reg,
     ) -> Result<Value> {
-        use crate::bytecode::KwCallCacheEntry;
+        use crate::bytecode::{KwCallCacheEntry, KwCallExArgsCache};
         let func_val = vm_read(regs, func, num_locals)?;
         let args_splat_val = vm_read(regs, args_splat, num_locals)?;
         let kwargs_val = if kwargs != crate::bytecode::NO_KWARGS {
@@ -301,25 +302,21 @@ impl Interpreter {
                 };
                 let action = {
                     let cache = code.kwcall_cache.borrow();
-                    match &cache[pc - 1] {
-                        KwCallCacheEntry::ExArgs {
-                            param_binds_ptr,
-                            total_pos: ctp,
-                            keyset,
-                            slots,
-                        } if param_binds_ptr.as_ptr() == pbptr
-                            && *ctp == total_pos
-                            && kw_keys_match(keyset) =>
+                    match cache.get(pc - 1) {
+                        Some(KwCallCacheEntry::ExArgs(entry))
+                            if entry.param_binds_ptr.as_ptr() == pbptr
+                                && entry.total_pos == total_pos
+                                && kw_keys_match(&entry.keyset) =>
                         {
-                            Action::Hit(slots.clone())
+                            Action::Hit(entry.slots.clone())
                         }
-                        KwCallCacheEntry::ExArgsVariadic {
+                        Some(KwCallCacheEntry::ExArgsVariadic {
                             param_binds_ptr,
                             pure_forward,
-                        } if param_binds_ptr.as_ptr() == pbptr => Action::VariadicHit {
+                        }) if param_binds_ptr.as_ptr() == pbptr => Action::VariadicHit {
                             pure_forward: *pure_forward,
                         },
-                        KwCallCacheEntry::Fallback => Action::Fallback,
+                        Some(KwCallCacheEntry::Fallback) => Action::Fallback,
                         _ => Action::Resolve,
                     }
                 };
@@ -401,12 +398,15 @@ impl Interpreter {
                                     .iter()
                                     .map(|v| Box::<str>::from(v.as_str().unwrap_or("")))
                                     .collect();
-                                code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::ExArgs {
-                                    param_binds_ptr: Rc::downgrade(&f.param_binds),
-                                    total_pos,
-                                    keyset,
-                                    slots: slots.clone(),
-                                };
+                                code.kwcall_cache.borrow_mut().insert(
+                                    pc - 1,
+                                    KwCallCacheEntry::ExArgs(Box::new(KwCallExArgsCache {
+                                        param_binds_ptr: Rc::downgrade(&f.param_binds),
+                                        total_pos,
+                                        keyset,
+                                        slots: slots.clone(),
+                                    })),
+                                );
                                 return self.call_ex_args_fast_bind(
                                     &f,
                                     regs,
@@ -430,11 +430,13 @@ impl Interpreter {
                                 // shape once and cache it, so the shape check is
                                 // paid only on this (cold) resolve, not per call.
                                 let pure_forward = Self::is_pure_variadic_forward(&f);
-                                code.kwcall_cache.borrow_mut()[pc - 1] =
+                                code.kwcall_cache.borrow_mut().insert(
+                                    pc - 1,
                                     KwCallCacheEntry::ExArgsVariadic {
                                         param_binds_ptr: Rc::downgrade(&f.param_binds),
                                         pure_forward,
-                                    };
+                                    },
+                                );
                                 let bound = if pure_forward {
                                     self.call_ex_args_pure_forward_bind(
                                         &f,
@@ -463,7 +465,9 @@ impl Interpreter {
                                 }
                                 // Non-str `**kw` key / unexpected-keyword → slow path.
                             } else {
-                                code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::Fallback;
+                                code.kwcall_cache
+                                    .borrow_mut()
+                                    .insert(pc - 1, KwCallCacheEntry::Fallback);
                             }
                         }
                         // Non-str key → slow path; do NOT pin Fallback, the general
