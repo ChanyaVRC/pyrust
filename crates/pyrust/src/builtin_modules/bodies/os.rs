@@ -52,10 +52,10 @@ const ENVIRON_METHODS: &[(&str, &str)] = &[
 ];
 
 /// Internal registry identity used by the `terminal_size` result class.
-pub(super) const TERMINAL_SIZE_NEW_REGISTRY: &str = "os.terminal_size_new";
-pub(super) const TERMINAL_SIZE_REPR_REGISTRY: &str = "os.terminal_size_repr";
-pub(super) const STAT_RESULT_NEW_REGISTRY: &str = "os.stat_result_new";
-pub(super) const STAT_RESULT_REPR_REGISTRY: &str = "os.stat_result_repr";
+pub(super) const TERMINAL_SIZE_NEW_REGISTRY: &str = "os.terminal_size.__new__";
+pub(super) const TERMINAL_SIZE_REPR_REGISTRY: &str = "os.terminal_size.__repr__";
+pub(super) const STAT_RESULT_NEW_REGISTRY: &str = "os.stat_result.__new__";
+pub(super) const STAT_RESULT_REPR_REGISTRY: &str = "os.stat_result.__repr__";
 
 pyrust_module! {
     constants {
@@ -179,22 +179,22 @@ pyrust_module! {
     }
 
     /// Present an `os.terminal_size` result.
-    #[py_name = "terminal_size_repr"]
+    #[py_name = "terminal_size.__repr__"]
     fn terminal_size_repr(args) -> Result<Value> {
         result_types::terminal_size_repr(args, FN_NAME)
     }
 
-    #[py_name = "terminal_size_new"]
+    #[py_name = "terminal_size.__new__"]
     fn terminal_size_new(args) -> Result<Value> {
         result_types::terminal_size_new(_interp, args, FN_NAME)
     }
 
-    #[py_name = "stat_result_new"]
+    #[py_name = "stat_result.__new__"]
     fn stat_result_new(args) -> Result<Value> {
         result_types::stat_result_new(_interp, args, FN_NAME)
     }
 
-    #[py_name = "stat_result_repr"]
+    #[py_name = "stat_result.__repr__"]
     fn stat_result_repr(args) -> Result<Value> {
         result_types::stat_result_repr(args, FN_NAME)
     }

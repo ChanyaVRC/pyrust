@@ -198,6 +198,11 @@ struct ModuleFn {
     /// functions in dotted modules (`os.path.exists` → `exists()`).
     /// Defaults to `false` (qualified, as today).
     bare_name: bool,
+    /// `true` when `#[method_descriptor]` is present — explicitly marks an
+    /// undotted top-level `fn` (such as a receiver-reading `__class_getitem__`
+    /// slot helper in `typing`) as [`BuiltinCallableKind::MethodDescriptor`]
+    /// instead of [`BuiltinCallableKind::ModuleFunction`].
+    method_descriptor: bool,
     body: Block,
 }
 
@@ -337,12 +342,22 @@ impl Parse for ModuleInput {
             };
 
             if is_class {
-                // `#[py_name = "..."]` doesn't apply to class declarations.
+                // `#[py_name = "..."]` / `#[method_descriptor]` don't apply to class declarations.
                 if raw_attrs.iter().any(|a| a.path().is_ident("py_name")) {
                     return Err(syn::Error::new_spanned(
                         &raw_attrs[0],
                         "`#[py_name = \"...\"]` may not appear on a `class` declaration; \
                          use it on individual methods if a Python-level name needs overriding",
+                    ));
+                }
+                if raw_attrs
+                    .iter()
+                    .any(|a| a.path().is_ident("method_descriptor"))
+                {
+                    return Err(syn::Error::new_spanned(
+                        &raw_attrs[0],
+                        "`#[method_descriptor]` may only appear on a `fn` declaration; \
+                         methods inside a `class` block are always method descriptors",
                     ));
                 }
                 classes.push(Self::parse_class(input, raw_attrs)?);
@@ -370,6 +385,7 @@ impl ModuleInput {
         let mut arity_style = ArityStyle::Standard;
         let mut arity_style_set = false;
         let mut bare_name = false;
+        let mut method_descriptor = false;
         let mut attrs: Vec<syn::Attribute> = Vec::with_capacity(raw_attrs.len());
         for attr in raw_attrs {
             if attr.path().is_ident("arity_style") {
@@ -418,6 +434,21 @@ impl ModuleInput {
                     ));
                 }
                 bare_name = true;
+            } else if attr.path().is_ident("method_descriptor") {
+                // Marker attribute — path form only.
+                if !matches!(attr.meta, Meta::Path(_)) {
+                    return Err(syn::Error::new_spanned(
+                        &attr,
+                        "`#[method_descriptor]` is a marker attribute and takes no arguments",
+                    ));
+                }
+                if method_descriptor {
+                    return Err(syn::Error::new_spanned(
+                        &attr,
+                        "`#[method_descriptor]` may appear at most once per fn",
+                    ));
+                }
+                method_descriptor = true;
             } else if attr.path().is_ident("py_name") {
                 let nv = attr.meta.require_name_value().map_err(|_| {
                     syn::Error::new_spanned(
@@ -522,6 +553,7 @@ impl ModuleInput {
             args,
             arity_style,
             bare_name,
+            method_descriptor,
             body,
         })
     }
@@ -807,6 +839,7 @@ fn emit_fn_artefacts(
     f: &ModuleFn,
     name_suffix: &str,
     rust_ident_suffix: &str,
+    is_class_method: bool,
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream, Ident) {
     let short = &f.short_name;
     let rust_fn_ident = format_ident!("__pyfn_{}", rust_ident_suffix, span = short.span());
@@ -893,7 +926,7 @@ fn emit_fn_artefacts(
         #fast_fn_item
     };
 
-    let metadata = if name_suffix.contains('.') {
+    let metadata = if is_class_method || f.method_descriptor || name_suffix.contains('.') {
         if let Some(owner) = canonical_descriptor_owner(name_suffix, suffix_lit.span()) {
             quote! {
                 crate::builtin_registry::BuiltinCallableMetadata::canonical_method_descriptor(
@@ -945,6 +978,7 @@ fn synthesized_iter_self(span: Span) -> ModuleFn {
         args: ModuleFnArgs::Legacy { args_ident },
         arity_style: ArityStyle::Standard,
         bare_name: false,
+        method_descriptor: true,
         body,
     }
 }
@@ -1528,6 +1562,16 @@ fn emit_overload_set_artefacts(
                 ),
             ));
         }
+        if f.method_descriptor != head.method_descriptor {
+            return Err(syn::Error::new(
+                f.short_name.span(),
+                format!(
+                    "overload #{idx} disagrees on `#[method_descriptor]` with the \
+                     first overload — all overloads share one registry entry and \
+                     must agree on callable kind",
+                ),
+            ));
+        }
     }
     // Optional vectorcall fast entry: an overload set with no keyword-only
     // params (the CPython-builtin shape — `abs`, `ord`, …) can be dispatched
@@ -1575,7 +1619,7 @@ fn emit_overload_set_artefacts(
         };
     items.push(fast_fn_item);
 
-    let metadata = if py_short.contains('.') {
+    let metadata = if head.method_descriptor || py_short.contains('.') {
         if let Some(owner) = canonical_descriptor_owner(py_short, suffix_lit.span()) {
             quote! {
                 crate::builtin_registry::BuiltinCallableMetadata::canonical_method_descriptor(
@@ -1886,7 +1930,7 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
 
         let (group_fn_items, reg_entry, name_static_ident) = if group.len() == 1 {
             let (fn_item, reg_entry, name_static_ident) =
-                emit_fn_artefacts(group[0], &py_short, &rust_short);
+                emit_fn_artefacts(group[0], &py_short, &rust_short, false);
             (vec![fn_item], reg_entry, name_static_ident)
         } else {
             match emit_overload_set_artefacts(group, &py_short, &rust_short) {
@@ -1960,7 +2004,7 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
             // collisions between two classes' `__init__` etc.
             let rust_suffix = format!("{class_name_str}__{rust_short}");
             let (fn_item, reg_entry, name_static_ident) =
-                emit_fn_artefacts(method, &name_suffix, &rust_suffix);
+                emit_fn_artefacts(method, &name_suffix, &rust_suffix, true);
             fn_items.push(fn_item);
             reg_entries.push(reg_entry);
             method_attr_inserts.push(quote! {

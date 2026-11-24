@@ -137,7 +137,10 @@ impl Interpreter {
                             // the interpreter intercepts in
                             // `call_function_expanded` before the registry probe.
                             None => match value.kind() {
-                                ValueKind::BuiltinFunction(fn_name) => {
+                                ValueKind::BuiltinFunction(fn_name)
+                                    if builtin_callable_metadata(fn_name).kind
+                                        == crate::builtin_registry::BuiltinCallableKind::MethodDescriptor =>
+                                {
                                     pyrust_builtins::super_bound_builtin::super_bound_builtin(
                                         fn_name.to_string(),
                                         Value::py_instance(Rc::clone(&instance)),
@@ -284,7 +287,10 @@ impl Interpreter {
                                         None
                                     } else {
                                         match value.kind() {
-                                            ValueKind::BuiltinFunction(fn_name) => {
+                                            ValueKind::BuiltinFunction(fn_name)
+                                                if builtin_callable_metadata(fn_name).kind
+                                                    == crate::builtin_registry::BuiltinCallableKind::MethodDescriptor =>
+                                            {
                                                 Some(fn_name.to_string())
                                             }
                                             _ => None,

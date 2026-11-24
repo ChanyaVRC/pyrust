@@ -444,9 +444,9 @@ pyrust_module! {
 
     // ── version_info rich-comparison and sequence methods ────────────────────
     //
-    // These are registered as `"sys.version_info_*"` builtins; they are
-    // stored in `VERSION_INFO_CLASS.attrs` under the standard dunder names
-    // so that `try_dunder_binary` resolves them when comparing a
+    // These are registered as `"sys.version_info.__*__"` method descriptors;
+    // they are stored in `VERSION_INFO_CLASS.attrs` under the standard dunder
+    // names so that `try_dunder_binary` resolves them when comparing a
     // version_info instance against a tuple.  `args[0]` is always `self`
     // (the version_info instance); `args[1]` is the right-hand side.
     //
@@ -454,7 +454,7 @@ pyrust_module! {
     // interpreter's reflected-dunder machinery raise a proper TypeError.
 
     /// `sys.version_info >= other`
-    #[py_name = "version_info_ge"]
+    #[py_name = "version_info.__ge__"]
     fn version_info_ge(args) -> Result<Value> {
         match vi_cmp_args(args)? {
             None => Ok(Value::not_implemented()),
@@ -465,7 +465,7 @@ pyrust_module! {
     }
 
     /// `sys.version_info > other`
-    #[py_name = "version_info_gt"]
+    #[py_name = "version_info.__gt__"]
     fn version_info_gt(args) -> Result<Value> {
         match vi_cmp_args(args)? {
             None => Ok(Value::not_implemented()),
@@ -476,7 +476,7 @@ pyrust_module! {
     }
 
     /// `sys.version_info <= other`
-    #[py_name = "version_info_le"]
+    #[py_name = "version_info.__le__"]
     fn version_info_le(args) -> Result<Value> {
         match vi_cmp_args(args)? {
             None => Ok(Value::not_implemented()),
@@ -487,7 +487,7 @@ pyrust_module! {
     }
 
     /// `sys.version_info < other`
-    #[py_name = "version_info_lt"]
+    #[py_name = "version_info.__lt__"]
     fn version_info_lt(args) -> Result<Value> {
         match vi_cmp_args(args)? {
             None => Ok(Value::not_implemented()),
@@ -498,7 +498,7 @@ pyrust_module! {
     }
 
     /// `sys.version_info == other`
-    #[py_name = "version_info_eq"]
+    #[py_name = "version_info.__eq__"]
     fn version_info_eq(args) -> Result<Value> {
         match vi_cmp_args(args)? {
             None => Ok(Value::not_implemented()),
@@ -509,7 +509,7 @@ pyrust_module! {
     }
 
     /// `sys.version_info != other`
-    #[py_name = "version_info_ne"]
+    #[py_name = "version_info.__ne__"]
     fn version_info_ne(args) -> Result<Value> {
         match vi_cmp_args(args)? {
             None => Ok(Value::not_implemented()),
@@ -520,7 +520,7 @@ pyrust_module! {
     }
 
     /// `repr(sys.version_info)` — named-tuple style representation.
-    #[py_name = "version_info_repr"]
+    #[py_name = "version_info.__repr__"]
     fn version_info_repr(args) -> Result<Value> {
         if args.is_empty() {
             return Err(PyError::Runtime(
@@ -536,7 +536,7 @@ pyrust_module! {
 
     /// `sys.version_info[i]` — index access: 0→major, 1→minor, 2→micro,
     /// 3→releaselevel, 4→serial.
-    #[py_name = "version_info_getitem"]
+    #[py_name = "version_info.__getitem__"]
     fn version_info_getitem(args) -> Result<Value> {
         if args.len() < 2 {
             return Err(PyError::Runtime(
@@ -578,7 +578,7 @@ pyrust_module! {
     }
 
     /// `len(sys.version_info)` — always 5.
-    #[py_name = "version_info_len"]
+    #[py_name = "version_info.__len__"]
     fn version_info_len(args) -> Result<Value> {
         if args.is_empty() {
             return Err(PyError::Runtime(
@@ -937,43 +937,43 @@ thread_local! {
     static VERSION_INFO_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
         attrs.insert("__module__".to_string(), Value::string("sys"));
-        // Rich-comparison dunders — registered as `"sys.version_info_*"` in
+        // Rich-comparison dunders — registered as `"sys.version_info.__*__"` in
         // the pyrust_module! block above.
         attrs.insert(
             "__ge__".to_string(),
-            Value::builtin_function("sys.version_info_ge"),
+            Value::builtin_function("sys.version_info.__ge__"),
         );
         attrs.insert(
             "__gt__".to_string(),
-            Value::builtin_function("sys.version_info_gt"),
+            Value::builtin_function("sys.version_info.__gt__"),
         );
         attrs.insert(
             "__le__".to_string(),
-            Value::builtin_function("sys.version_info_le"),
+            Value::builtin_function("sys.version_info.__le__"),
         );
         attrs.insert(
             "__lt__".to_string(),
-            Value::builtin_function("sys.version_info_lt"),
+            Value::builtin_function("sys.version_info.__lt__"),
         );
         attrs.insert(
             "__eq__".to_string(),
-            Value::builtin_function("sys.version_info_eq"),
+            Value::builtin_function("sys.version_info.__eq__"),
         );
         attrs.insert(
             "__ne__".to_string(),
-            Value::builtin_function("sys.version_info_ne"),
+            Value::builtin_function("sys.version_info.__ne__"),
         );
         attrs.insert(
             "__repr__".to_string(),
-            Value::builtin_function("sys.version_info_repr"),
+            Value::builtin_function("sys.version_info.__repr__"),
         );
         attrs.insert(
             "__getitem__".to_string(),
-            Value::builtin_function("sys.version_info_getitem"),
+            Value::builtin_function("sys.version_info.__getitem__"),
         );
         attrs.insert(
             "__len__".to_string(),
-            Value::builtin_function("sys.version_info_len"),
+            Value::builtin_function("sys.version_info.__len__"),
         );
         Rc::new(RefCell::new(PyClass::new(
             "version_info",

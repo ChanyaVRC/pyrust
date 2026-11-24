@@ -287,6 +287,36 @@ mod tests {
             getitem.descriptor_owner_tag(),
             Some(pyrust_core::CanonicalClassTag::List)
         );
+
+        // Undotted typing `__class_getitem__` helpers carry explicit
+        // `#[method_descriptor]` metadata rather than relying on a dot in
+        // their registry key (#2960).
+        for cgi in [
+            "typing._generic_cgi",
+            "typing._protocol_cgi",
+            "typing._union_cgi",
+            "typing._optional_cgi",
+        ] {
+            let meta = lookup_metadata(cgi).unwrap_or_else(|| panic!("{cgi} must be registered"));
+            assert_eq!(meta.kind, BuiltinCallableKind::MethodDescriptor, "{cgi}");
+            assert_eq!(meta.python_module(), None, "{cgi}");
+        }
+
+        // Synthetic stdlib class methods register as method descriptors, while
+        // plain module functions remain `ModuleFunction`.
+        for desc in [
+            "sys.version_info.__repr__",
+            "sys.version_info.__len__",
+            "os.stat_result.__repr__",
+            "os.terminal_size.__repr__",
+        ] {
+            let meta = lookup_metadata(desc).unwrap_or_else(|| panic!("{desc} must be registered"));
+            assert_eq!(meta.kind, BuiltinCallableKind::MethodDescriptor, "{desc}");
+        }
+        for func in ["format", "len", "math.floor", "functools.reduce"] {
+            let meta = lookup_metadata(func).unwrap_or_else(|| panic!("{func} must be registered"));
+            assert_eq!(meta.kind, BuiltinCallableKind::ModuleFunction, "{func}");
+        }
     }
 
     #[test]

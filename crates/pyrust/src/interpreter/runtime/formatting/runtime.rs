@@ -26,19 +26,7 @@ impl Interpreter {
         if matches!(value.kind(), ValueKind::PyInstance(_))
             || native_iterator_class(value).is_some()
         {
-            return self.call_function_expanded(
-                Value::builtin_function("format"),
-                &[
-                    ExpandedCallArg {
-                        name: None,
-                        value: value.clone(),
-                    },
-                    ExpandedCallArg {
-                        name: None,
-                        value: Value::string(""),
-                    },
-                ],
-            );
+            return self.dispatch_dunder_format(value, "");
         }
         if matches!(
             value.kind(),
@@ -201,8 +189,18 @@ impl Interpreter {
         let inst_rc = Rc::clone(inst);
         let class = Rc::clone(&inst_rc.borrow().class);
         if let Some(method_val) = lookup_class_attr(&class, "__format__") {
-            // Only dispatch to user-defined __format__, not the object builtin.
-            if !matches!(method_val.kind(), ValueKind::BuiltinFunction(_)) {
+            // Route every custom `__format__` — including non-descriptor
+            // builtins/module functions (`format`, `math.sqrt`), method
+            // descriptors (`str.upper`, `int.__format__`), descriptors
+            // (`property`, `staticmethod`, `classmethod`, custom `__get__`),
+            // callable objects, and non-callables — through the shared slot
+            // router, skipping only the inherited `object.__format__` sentinel
+            // (#2960).
+            let is_object_format = crate::interpreter::value_is_canonical_slot(
+                &method_val,
+                crate::interpreter::CanonicalSlot::ObjectFormat,
+            );
+            if !is_object_format {
                 let result = invoke_class_method(
                     self,
                     method_val,
@@ -222,8 +220,14 @@ impl Interpreter {
                 };
             }
         }
-        // No user __format__ in MRO (or only the object builtin).
-        if let Some(backing) = builtin_data_backing(value) {
+        // Inherited `object.__format__` on a primitive subclass delegates to
+        // the backing primitive's format mini-language.  An explicit
+        // `__format__ = object.__format__` assignment on a non-`object` class
+        // shadows the primitive formatter and falls through to pure
+        // `object.__format__` semantics below.
+        let inherited_from_object = lookup_class_attr_owner(&class, "__format__")
+            .is_none_or(|owner| Rc::ptr_eq(&owner, &object_class_singleton()));
+        if inherited_from_object && let Some(backing) = builtin_data_backing(value) {
             // `object.__format__(self, "")` is defined as `str(self)` (#2386).
             // For subclasses whose `str()` differs from the backing's `str()`
             // — set/frozenset/bytearray, which prefix the class name — the
