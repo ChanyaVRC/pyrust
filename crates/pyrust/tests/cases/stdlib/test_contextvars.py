@@ -6,9 +6,12 @@ import contextvars
 import decimal
 
 # --- Module surface ---
+# Note: `collections.abc.Mapping.register(Context)` was added in CPython 3.13;
+# `Context` implements the Mapping interface (`Collection` structural check is
+# True in both CPython 3.12 and 3.13+).
 print("all:", contextvars.__all__)
-print("ctx_is_mapping_cls:", issubclass(contextvars.Context, collections.abc.Mapping))
-print("ctx_is_mapping_inst:", isinstance(contextvars.Context(), collections.abc.Mapping))
+print("ctx_is_collection_cls:", issubclass(contextvars.Context, collections.abc.Collection))
+print("ctx_is_collection_inst:", isinstance(contextvars.Context(), collections.abc.Collection))
 print("token_missing_repr:", repr(contextvars.Token.MISSING))
 
 # --- ContextVar creation & properties ---

@@ -291,12 +291,20 @@ buf2 = io.BytesIO(b"val = 2.5\n")
 print("load_parse_float:", tomllib.load(buf2, parse_float=decimal.Decimal))
 
 # --- Type errors for load / loads ---
-for bad in (b"a = 1", 123, None, ["a = 1"]):
+# Note: CPython 3.12.3 raises TypeError for bytes and AttributeError for other
+# non-str objects (changed to TypeError for all non-str in 3.12.4+/3.13+).
+try:
+    tomllib.loads(b"a = 1")
+    print("loads_bytes_fail")
+except TypeError:
+    print("loads_bytes_ok")
+
+for bad in (123, None, ["a = 1"]):
     try:
         tomllib.loads(bad)
-        print("loads_type_fail", type(bad).__name__)
-    except TypeError as e:
-        print("loads_type_ok", type(bad).__name__, str(e))
+        print("loads_non_str_fail", type(bad).__name__)
+    except (TypeError, AttributeError):
+        print("loads_non_str_ok", type(bad).__name__)
 
 try:
     tomllib.load(io.StringIO("a = 1"))
