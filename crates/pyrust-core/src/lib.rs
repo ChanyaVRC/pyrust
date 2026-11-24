@@ -17,7 +17,7 @@ mod environment;
 mod error_macros;
 #[path = "core/errors.rs"]
 mod errors;
-#[path = "core/numeric_ops.rs"]
+#[path = "core/numeric_ops/mod.rs"]
 mod numeric_ops;
 #[path = "core/object_identity.rs"]
 mod object_identity;
