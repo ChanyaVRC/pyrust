@@ -658,10 +658,7 @@ impl Interpreter {
             return Ok(bound);
         }
         if name == "__hash__"
-            && matches!(
-                pyrust_core::builtin_type_name(target).as_ref(),
-                "list" | "dict" | "set" | "bytearray"
-            )
+            && is_unhashable_builtin_type_name(&pyrust_core::builtin_type_name(target))
         {
             return Ok(Value::none());
         }

@@ -80,10 +80,12 @@ pyrust_module! {
                         &[],
                     )?;
                     _interp.normalize_len_result(&result)?
-                } else if let Some(backing) = instance_builtin_data(&inst_rc) {
-                    // No user __len__: delegate to backing primitive for
-                    // dict/list/set/frozenset/tuple subclasses constructed by
-                    // call_class_expanded (issue #976/#994).
+                } else if let Some(backing) =
+                    effective_builtin_receiver(&Value::py_instance(Rc::clone(&inst_rc)), &[])
+                {
+                    // No user __len__: delegate to validated backing primitive
+                    // for all builtin subclasses (including BuiltinObject-backed
+                    // bytearray and frozenset, issue #976/#994/#2386).
                     match backing.kind() {
                         ValueKind::Str(_) => backing.str_codepoint_len() as i64,
                         ValueKind::Bytes(rc) => rc.len() as i64,
@@ -91,25 +93,20 @@ pyrust_module! {
                         ValueKind::Dict(items) => items.len() as i64,
                         ValueKind::Set(items) => items.len() as i64,
                         ValueKind::Tuple(items) => items.len() as i64,
-                        ValueKind::BuiltinObject { ops, state }
-                            if ops.canonical_class_tag()
-                                == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
-                        {
-                            match ops.len(state) {
-                                Some(n) => n as i64,
-                                None => {
-                                    return Err(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "object of type '{}' has no len()",
-                                            pyrust_core::error_type_name(&Value::py_instance(
-                                                Rc::clone(&inst_rc)
-                                            )),
-                                        ),
-                                    ));
-                                }
+                        ValueKind::BuiltinObject { ops, state } => match ops.len(state) {
+                            Some(n) => n as i64,
+                            None => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "object of type '{}' has no len()",
+                                        pyrust_core::error_type_name(&Value::py_instance(
+                                            Rc::clone(&inst_rc)
+                                        )),
+                                    ),
+                                ));
                             }
-                        }
+                        },
                         _ => {
                             return Err(PyError::named(
                                 "TypeError",

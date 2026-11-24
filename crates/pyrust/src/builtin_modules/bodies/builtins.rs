@@ -75,7 +75,7 @@ mod numeric_functions {
         BinaryOp, ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyBigInt,
         PyBool, PyError, PyFloat, PyInt, PyValue, PyValueRef, PyZero, Rc, Result, Value, ValueKind,
         class_is_subclass_of, coerce_numeric, dispatch_numeric_binop, divmod_float_float,
-        divmod_int_int, instance_builtin_data, invoke_class_method, lookup_class_attr,
+        divmod_int_int, effective_builtin_receiver, invoke_class_method, lookup_class_attr,
         modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, pyint_to_f64, value_to_float,
         value_type_name_str,
     };
@@ -120,7 +120,8 @@ mod reflection {
 mod length {
     use super::{
         ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyError, PyToPrimitive, PyValue, Rc, Result,
-        Value, ValueKind, instance_builtin_data, invoke_class_method, lookup_class_attr, range_len,
+        Value, ValueKind, effective_builtin_receiver, invoke_class_method, lookup_class_attr,
+        range_len,
     };
     include!("builtins/length.rs");
 }
@@ -207,7 +208,7 @@ mod services {
     use super::{
         BuiltinTypeClass, ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg,
         PyDict, PyError, PyKey, PyStr, PyValue, PyValueRef, Rc, Result, Value, ValueKind,
-        builtin_type_new, class_is_subclass_of, instance_builtin_data, invoke_class_method,
+        builtin_type_new, class_is_subclass_of, effective_builtin_receiver, invoke_class_method,
         is_dict_subclass_instance, is_not_iterable_error, lookup_class_attr,
         mapping_pairs_via_protocol, render_instance_str, resolve_zero_arg_super,
         type_class_singleton, value_type_name_str,
@@ -218,8 +219,8 @@ mod services {
 mod container_protocols {
     use super::{
         ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyDict, PyError, PyKey, Rc, Result, Value,
-        ValueKind, builtin_data_backing, instance_builtin_data, invoke_class_method,
-        lookup_class_attr,
+        ValueKind, builtin_data_backing, effective_builtin_receiver, instance_builtin_data,
+        invoke_class_method, lookup_class_attr,
     };
     include!("builtins/container_protocols.rs");
 }
@@ -265,8 +266,8 @@ mod object_comparison {
 mod operators {
     use super::{
         BinaryOp, ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyDict, PyError, Rc, Result, Value,
-        ValueKind, coerce_numeric, coerce_subclass_backing, float_to_bigint, instance_builtin_data,
-        value_type_name_str,
+        ValueKind, coerce_numeric, coerce_subclass_backing, effective_builtin_receiver,
+        float_to_bigint, value_type_name_str,
     };
     include!("builtins/operators.rs");
 }

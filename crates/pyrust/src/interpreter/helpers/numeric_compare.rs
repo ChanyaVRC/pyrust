@@ -230,7 +230,21 @@ fn compare_values_with_op_inner(
             .unwrap_or(std::cmp::Ordering::Equal)),
         (ValueKind::Str(x), ValueKind::Str(y)) => Ok(x.cmp(y)),
         (ValueKind::Bytes(x), ValueKind::Bytes(y)) => Ok(x.as_slice().cmp(y.as_slice())),
-        // bytearray <=> bytearray comparison.
+        // bytes <=> bytearray and bytearray <=> bytearray lexicographic
+        // ordering (CPython compares both byte-for-byte via bytes_richcompare /
+        // bytearray_richcompare, including bytes/bytearray subclasses).
+        (ValueKind::Bytes(x), ValueKind::BuiltinObject { ops: bops, .. })
+            if bops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) =>
+        {
+            let b_rc = pyrust_builtins::bytearray::as_bytearray_rc(b).expect("bytearray rc");
+            Ok(x.as_slice().cmp(b_rc.borrow().as_slice()))
+        }
+        (ValueKind::BuiltinObject { ops: aops, .. }, ValueKind::Bytes(y))
+            if aops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) =>
+        {
+            let a_rc = pyrust_builtins::bytearray::as_bytearray_rc(a).expect("bytearray rc");
+            Ok(a_rc.borrow().as_slice().cmp(y.as_slice()))
+        }
         (
             ValueKind::BuiltinObject { ops: aops, .. },
             ValueKind::BuiltinObject { ops: bops, .. },

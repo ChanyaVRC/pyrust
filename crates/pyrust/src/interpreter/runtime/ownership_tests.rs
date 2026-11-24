@@ -1081,3 +1081,56 @@ fn builtin_modules_do_not_own_runtime_identity_or_import_services() {
         }
     }
 }
+
+#[test]
+fn instance_builtin_data_is_confined_to_boundary_and_storage_owners() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = Vec::new();
+    rust_sources_below(&root, &mut sources);
+
+    // Issue #2386: direct `instance_builtin_data(` calls are restricted to the
+    // substitutability boundary (`builtin_layout.rs`) and genuine low-level
+    // storage/iterator-carrier ownership primitives.  All general consumers
+    // must route through `effective_builtin_receiver` /
+    // `coerce_subclass_backing` instead of hand-rolling raw unwraps.
+    let allowed_call_sites = [
+        "interpreter/helpers/builtin_layout.rs",
+        "interpreter/helpers/class_semantics.rs",
+        "builtin_modules/bodies/builtins/container_protocols.rs",
+        "builtin_modules/bodies/builtins/iteration.rs",
+        "interpreter/runtime/generator_protocols/methods.rs",
+        "interpreter/runtime/iteration/reduce_copy.rs",
+        "interpreter/runtime/ownership_tests.rs",
+    ];
+
+    let mut violations = Vec::new();
+    for path in sources {
+        let relative = path
+            .strip_prefix(&root)
+            .expect("source path must be below src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if allowed_call_sites.contains(&relative.as_str()) {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()));
+        for (line_no, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.contains("instance_builtin_data(") {
+                violations.push(format!("{relative}:{}: {trimmed}", line_no + 1));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "direct `instance_builtin_data(` calls must stay confined to the substitutability \
+         boundary and low-level storage owners; route consumers through \
+         `effective_builtin_receiver` / `coerce_subclass_backing`:\n{}",
+        violations.join("\n"),
+    );
+}

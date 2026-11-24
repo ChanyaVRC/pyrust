@@ -1,3 +1,68 @@
+/// Render the inherited `repr()` of a builtin-subclass instance given its
+/// class and validated backing value (issues #1204/#1205/#2386).
+///
+/// Single shared formatter used by `render_value_repr`, `render_instance_str`,
+/// and unbound `<type>.__repr__` dispatch so scalar, container, `set`,
+/// `frozenset`, and `bytearray` subclasses cannot drift apart.
+pub(crate) fn render_builtin_subclass_repr(
+    interp: &mut Interpreter,
+    class: &Rc<RefCell<PyClass>>,
+    backing: &Value,
+) -> Result<Option<String>> {
+    if backing.is_list() || backing.is_dict() || backing.is_tuple() {
+        return render_value_repr(interp, backing).map(Some);
+    }
+    if let Some(is_empty) = backing.set_len().map(|len| len == 0) {
+        let class_name = class.borrow().name.clone();
+        if is_empty {
+            return Ok(Some(format!("{class_name}()")));
+        }
+        let inner = render_value_repr(interp, backing)?;
+        return Ok(Some(format!("{class_name}({inner})")));
+    }
+    match backing.kind() {
+        ValueKind::Str(_)
+        | ValueKind::Int(_)
+        | ValueKind::BigInt(_)
+        | ValueKind::Bool(_)
+        | ValueKind::Float(_)
+        | ValueKind::Complex(_, _)
+        | ValueKind::Bytes(_) => Ok(Some(backing.repr_raw())),
+        ValueKind::BuiltinObject { ops, .. }
+            if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
+        {
+            let class_name = class.borrow().name.clone();
+            let items = pyrust_builtins::frozenset::as_items(backing);
+            let is_empty = items.as_ref().is_none_or(|rc| rc.is_empty());
+            if is_empty {
+                return Ok(Some(format!("{class_name}()")));
+            }
+            // Render elements as `{e1, e2}` (without the outer
+            // `frozenset(...)` wrapper that render_value_repr adds).
+            let snapshot: Vec<_> = items.unwrap().iter().cloned().collect();
+            let mut parts = Vec::with_capacity(snapshot.len());
+            for k in &snapshot {
+                parts.push(render_key_repr(interp, k)?);
+            }
+            Ok(Some(format!("{class_name}({{{}}})", parts.join(", "))))
+        }
+        // bytearray subclass (#2386): CPython renders `ClassName(b'...')`
+        // — the subclass name wrapping the bytes-content repr — unlike a
+        // bytes subclass, which renders the bare base `b'...'` form.
+        ValueKind::BuiltinObject { ops, .. }
+            if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) =>
+        {
+            if let Some(data) = pyrust_builtins::bytearray::as_bytearray_snapshot(backing) {
+                let class_name = class.borrow().name.clone();
+                let inner = Value::bytes(data).repr_raw();
+                return Ok(Some(format!("{class_name}({inner})")));
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Format an i64 as Python's `bin()` output — `"0bN"` / `"-0bN"`.  Used
 /// by both the `PyInt` and `PyBool` overloads of the typed `bin`
 /// builtin (#400).  Widens through i128 first so `i64::MIN.abs()`
@@ -117,7 +182,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 return Ok(rendered);
             }
             if !is_object_repr
-                || (instance_builtin_data(&instance_rc).is_none()
+                || (effective_builtin_receiver(value, &[]).is_none()
                     && !pyrust_core::is_exception_instance(&instance_rc))
             {
                 let result =
@@ -135,72 +200,12 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 };
             }
         }
-        // Issue #1204: no __repr__ defined (or object.__repr__ skipped) —
-        // if the instance has a scalar
-        // primitive backing (str/int/float/bytes subclass), delegate repr()
-        // to the backing value so that repr(MyInt(42)) gives "42" rather
-        // than the default object repr.  (Counter/defaultdict/deque define
-        // their own __repr__ as BuiltinFunctions; the lookup above handles
-        // those; this path only fires when lookup returned None.)
-        // Issue #1205: extend to container backings (list/dict/tuple/set
-        // subclasses).  list/dict/tuple render the same as the backing
-        // container.  set/frozenset subclasses prefix the class name:
-        // `MySet({1, 2})` / `MySet()`, matching CPython's set_repr().
-        if let Some(backing) = instance_builtin_data(&instance_rc) {
-            if backing.is_list() || backing.is_dict() || backing.is_tuple() {
-                return render_value_repr(interp, &backing);
-            }
-            if let Some(is_empty) = backing.set_len().map(|len| len == 0) {
-                let class_name = class.borrow().name.clone();
-                if is_empty {
-                    return Ok(format!("{class_name}()"));
-                }
-                let inner = render_value_repr(interp, &backing)?;
-                return Ok(format!("{class_name}({inner})"));
-            }
-            match backing.kind() {
-                ValueKind::Str(_)
-                | ValueKind::Int(_)
-                | ValueKind::BigInt(_)
-                | ValueKind::Bool(_)
-                | ValueKind::Float(_)
-                | ValueKind::Complex(_, _)
-                | ValueKind::Bytes(_) => return Ok(backing.repr_raw()),
-                ValueKind::BuiltinObject { ops, .. }
-                    if ops.canonical_class_tag()
-                        == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
-                {
-                    let class_name = class.borrow().name.clone();
-                    let items = pyrust_builtins::frozenset::as_items(&backing);
-                    let is_empty = items.as_ref().is_none_or(|rc| rc.is_empty());
-                    if is_empty {
-                        return Ok(format!("{class_name}()"));
-                    }
-                    // Render elements as `{e1, e2}` (without the outer
-                    // `frozenset(...)` wrapper that render_value_repr adds).
-                    let snapshot: Vec<_> = items.unwrap().iter().cloned().collect();
-                    let mut parts = Vec::with_capacity(snapshot.len());
-                    for k in &snapshot {
-                        parts.push(render_key_repr(interp, k)?);
-                    }
-                    return Ok(format!("{class_name}({{{}}})", parts.join(", ")));
-                }
-                // bytearray subclass (#2386): CPython renders `ClassName(b'...')`
-                // — the subclass name wrapping the bytes-content repr — unlike a
-                // bytes subclass, which renders the bare base `b'...'` form.
-                ValueKind::BuiltinObject { ops, .. }
-                    if ops.canonical_class_tag()
-                        == Some(pyrust_core::CanonicalClassTag::Bytearray) =>
-                {
-                    if let Some(data) = pyrust_builtins::bytearray::as_bytearray_snapshot(&backing)
-                    {
-                        let class_name = class.borrow().name.clone();
-                        let inner = Value::bytes(data).repr_raw();
-                        return Ok(format!("{class_name}({inner})"));
-                    }
-                }
-                _ => {}
-            }
+        // Issue #1204/#1205/#2386: no user __repr__ defined (or object.__repr__
+        // skipped) — delegate to the shared builtin-subclass repr renderer.
+        if let Some(backing) = effective_builtin_receiver(value, &[])
+            && let Some(rendered) = render_builtin_subclass_repr(interp, &class, &backing)?
+        {
+            return Ok(rendered);
         }
         // No __repr__ defined — fall back to default object repr (handles
         // exception instances via exception_repr() and plain instances via

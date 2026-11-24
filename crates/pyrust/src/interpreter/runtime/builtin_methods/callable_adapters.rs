@@ -84,11 +84,8 @@ pub(crate) fn bind_legacy_builtin_subclass_backing(
     registry_key: &'static str,
     instance: &Value,
 ) -> Option<Value> {
-    let ValueKind::PyInstance(instance) = instance.kind() else {
-        return None;
-    };
     let (type_name, method) = registry_key.split_once('.')?;
-    let backing = instance_builtin_data(instance)?;
+    let backing = effective_builtin_receiver(instance, &[])?;
     (pyrust_core::builtin_type_name(&backing) == type_name)
         .then(|| pyrust_builtins::bound_method::bound_method(method, backing))
 }

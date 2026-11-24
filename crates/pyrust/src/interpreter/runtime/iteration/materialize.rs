@@ -3,7 +3,7 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
     // Keep the `inst_rc` binding (not just `builtin_data_backing`) so the
     // not-iterable error below can name the actual subclass, not the base.
     if let Some(inst_rc) = value.as_py_instance_rc()
-        && let Some(backing) = instance_builtin_data(inst_rc)
+        && let Some(backing) = effective_builtin_receiver(value, &[])
     {
         // A subclass of a *non-iterable* builtin (e.g. `class C(int): pass`)
         // is itself not iterable.  CPython reports the actual subclass name

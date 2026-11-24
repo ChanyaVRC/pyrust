@@ -164,25 +164,22 @@ impl Interpreter {
             return Ok(value);
         }
 
-        // Step 2b: numeric-tower read-only properties for int/float subclasses.
-        // CPython defines `real`, `imag`, `numerator`, `denominator` as
-        // getset_descriptor data descriptors on `int` and `float`, so int/float
-        // subclass instances inherit them.  Pyrust intercepts them via the
-        // backing `__builtin_data__` value rather than registering real
-        // descriptors on the primitive class (issue #1341).
-        if matches!(name, "real" | "imag" | "numerator" | "denominator")
-            && let Some(backing) = instance_builtin_data(&instance)
+        // Step 2b: numeric-tower read-only properties for int/float/complex
+        // subclasses.  CPython defines `real`, `imag`, `numerator`,
+        // `denominator` as getset_descriptor data descriptors on `int`,
+        // `float`, and `complex`, and `conjugate` on `complex` (issues #1341,
+        // #2544).  Resolve through the validated backing boundary so forged
+        // `__builtin_data__` attributes on plain classes cannot spoof them.
+        if matches!(
+            name,
+            "real" | "imag" | "numerator" | "denominator" | "conjugate"
+        ) && let Some(backing) =
+            effective_builtin_receiver(&Value::py_instance(Rc::clone(&instance)), &[])
             && let Some(v) =
                 pyrust_builtins::numeric_attrs_descriptor::numeric_tower_attr(&backing, name)
-        {
-            return Ok(v);
-        }
-        // Complex subclass instances (issue #2544): `complex` exposes
-        // `real`/`imag` getset_descriptors and the `conjugate` method, so a
-        // subclass instance must resolve them through the `complex` backing.
-        if matches!(name, "real" | "imag" | "conjugate")
-            && let Some(backing) = instance_builtin_data(&instance)
-            && let Some(v) = pyrust_builtins::numeric_attrs_descriptor::complex_attr(&backing, name)
+                    .or_else(|| {
+                        pyrust_builtins::numeric_attrs_descriptor::complex_attr(&backing, name)
+                    })
         {
             return Ok(v);
         }

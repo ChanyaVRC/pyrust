@@ -90,7 +90,7 @@ pyrust_module! {
                 // PyInstance with a backing dict (dict subclass).
                 ValueKind::PyInstance(inst) => {
                     let inst_rc = Rc::clone(inst);
-                    let dict_backing = instance_builtin_data(&inst_rc)
+                    let dict_backing = effective_builtin_receiver(&arg.value, &[])
                         .and_then(|backing| backing.as_dict().map(|dict| dict.clone()));
                     if let Some(map) = dict_backing {
                         // PyInstance with a backing dict (dict subclass).

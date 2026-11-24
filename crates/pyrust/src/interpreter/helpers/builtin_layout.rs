@@ -380,6 +380,47 @@ pub(crate) fn effective_builtin_receiver(v: &Value, override_dunders: &[&str]) -
     Some(backing)
 }
 
+/// Canonical predicate for built-in types whose Python subclasses store their
+/// underlying primitive/container representation in `__builtin_data__`
+/// (issue #2386).
+///
+/// Covers all 11 subclassable built-in kinds: numeric (`int`, `float`,
+/// `complex`), text/binary (`str`, `bytes`, `bytearray`), and containers
+/// (`list`, `tuple`, `dict`, `set`, `frozenset`).  Keep bound- and
+/// unbound-method dispatchers on this single predicate instead of maintaining
+/// per-site string whitelists that can drift apart.
+#[inline]
+pub(crate) fn is_subclassable_builtin_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "int"
+            | "float"
+            | "complex"
+            | "str"
+            | "bytes"
+            | "bytearray"
+            | "list"
+            | "tuple"
+            | "dict"
+            | "set"
+            | "frozenset"
+    )
+}
+
+/// Canonical predicate for built-in types whose `__hash__` is `None` in
+/// CPython (unhashable mutable built-ins).
+#[inline]
+pub(crate) fn is_unhashable_builtin_type_name(name: &str) -> bool {
+    matches!(name, "list" | "dict" | "set" | "bytearray")
+}
+
+/// Canonical predicate for mutable built-in container types handled by the
+/// cached `CallMethod` subclass fast path.
+#[inline]
+pub(crate) fn is_mutable_container_builtin_type_name(name: &str) -> bool {
+    matches!(name, "dict" | "list" | "set")
+}
+
 /// Whether the first MRO definition of `name` is owned by a canonical runtime
 /// primitive (or `object`) rather than copied/defined on a subclass.
 ///

@@ -278,6 +278,9 @@ impl Interpreter {
         args: Vec<Value>,
         kw: &PyDict,
     ) -> Result<Value> {
+        if method == "join" {
+            return self.call_bytes_join(receiver.clone(), args);
+        }
         if method == "splitlines" {
             let bound = self.bind_splitlines_keepends(&args, kw)?;
             return call_bytes_method_coerced_prevalidated(

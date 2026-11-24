@@ -147,30 +147,18 @@ pub(crate) fn render_instance_str(
     // never consults __repr__.  So the early-return for str/bytes backing must
     // happen AFTER a user __str__ but BEFORE the __repr__ dispatch.
     //
-    // For int/float/bool/BigInt subclasses: CPython's int.__str__ calls
-    // __repr__, so the early-return for numeric types must only happen when
-    // neither __str__ nor __repr__ is user-defined.
-    let has_user_str_dunder = lookup_class_attr(&class, "__str__")
-        .map(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
-        .unwrap_or(false);
-    let has_user_repr_dunder = lookup_class_attr(&class, "__repr__")
-        .map(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
-        .unwrap_or(false);
     // str/bytes backing: return early unless a user __str__ is defined.
     // (A user __repr__ does NOT override str.__str__ in CPython.)
-    if !has_user_str_dunder && let Some(backing) = instance_builtin_data(&inst_rc) {
+    if let Some(backing) = effective_builtin_receiver(value, &["__str__"]) {
         match backing.kind() {
             ValueKind::Str(_) | ValueKind::Bytes(_) => return Ok(backing.to_py_str()),
             _ => {}
         }
     }
-    // int/float/bool/BigInt backing: return early only when neither user
-    // __str__ nor user __repr__ is defined (matching CPython's int.__str__
-    // which calls __repr__).
-    if !has_user_str_dunder
-        && !has_user_repr_dunder
-        && let Some(backing) = instance_builtin_data(&inst_rc)
-    {
+    // int/float/bool/BigInt/complex backing: return early only when neither
+    // user __str__ nor user __repr__ is defined (matching CPython's
+    // int/float/complex `__str__` which delegates to `__repr__`).
+    if let Some(backing) = effective_builtin_receiver(value, &["__str__", "__repr__"]) {
         match backing.kind() {
             ValueKind::Int(_)
             | ValueKind::BigInt(_)
@@ -184,11 +172,12 @@ pub(crate) fn render_instance_str(
     // the instance has a primitive backing store.  Primitive types now set
     // `object` as an explicit MRO base, making these reachable for user
     // subclasses.  The backing-data path below renders the contents correctly.
+    let has_builtin_backing = effective_builtin_receiver(value, &[]).is_some();
     for dunder in &["__str__", "__repr__"] {
         if let Some(method_val) = lookup_class_attr(&class, dunder) {
             let is_object_dunder = crate::interpreter::CanonicalSlot::object_named(dunder)
                 .is_some_and(|slot| crate::interpreter::value_is_canonical_slot(&method_val, slot));
-            if is_object_dunder && instance_builtin_data(&inst_rc).is_some() {
+            if is_object_dunder && has_builtin_backing {
                 continue;
             }
             let result = invoke_class_method(
@@ -206,51 +195,14 @@ pub(crate) fn render_instance_str(
             };
         }
     }
-    // Issue #1205: no __str__ or __repr__ in MRO (or object.* sentinels
-    // skipped) — delegate to the backing
-    // container so that list/dict/tuple/set subclasses render their contents
-    // via str() just as they do via repr().
-    if let Some(backing) = instance_builtin_data(&inst_rc) {
-        if backing.is_list() || backing.is_dict() || backing.is_tuple() {
-            return render_value_repr(interp, &backing);
-        }
-        if let Some(is_empty) = backing.set_len().map(|len| len == 0) {
-            let class_name = class.borrow().name.clone();
-            if is_empty {
-                return Ok(format!("{class_name}()"));
-            }
-            let inner = render_value_repr(interp, &backing)?;
-            return Ok(format!("{class_name}({inner})"));
-        }
-        match backing.kind() {
-            ValueKind::BuiltinObject { ops, .. }
-                if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
-            {
-                let class_name = class.borrow().name.clone();
-                let items = pyrust_builtins::frozenset::as_items(&backing);
-                let is_empty = items.as_ref().is_none_or(|rc| rc.is_empty());
-                if is_empty {
-                    return Ok(format!("{class_name}()"));
-                }
-                // Render elements as `{e1, e2}` without the outer `frozenset(...)`
-                let snapshot: Vec<_> = items.unwrap().iter().cloned().collect();
-                let mut parts = Vec::with_capacity(snapshot.len());
-                for k in &snapshot {
-                    parts.push(render_key_repr(interp, k)?);
-                }
-                return Ok(format!("{class_name}({{{}}})", parts.join(", ")));
-            }
-            // bytearray subclass (#2386): `str(BA(...))` == `repr(BA(...))` in
-            // CPython (bytearray has no `__str__`, so `object.__str__` calls
-            // `__repr__`), rendering `ClassName(b'...')`.  Delegate to
-            // `render_value_repr`, which now handles the bytearray subclass.
-            ValueKind::BuiltinObject { ops, .. }
-                if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) =>
-            {
-                return render_value_repr(interp, value);
-            }
-            _ => {}
-        }
+    // Issue #1205/#2386: no __str__ or __repr__ in MRO (or object.* sentinels
+    // skipped) — delegate to the shared builtin-subclass repr renderer so that
+    // list/dict/tuple/set/frozenset/bytearray subclasses render consistently
+    // via str() and repr().
+    if let Some(backing) = effective_builtin_receiver(value, &[])
+        && let Some(rendered) = render_builtin_subclass_repr(interp, &class, &backing)?
+    {
+        return Ok(rendered);
     }
     Ok(value.repr_raw())
 }

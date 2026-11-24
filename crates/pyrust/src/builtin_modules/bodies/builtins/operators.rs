@@ -92,17 +92,44 @@ pyrust_module! {
         _interp.eval_binary(coerce_numeric(&a), BinaryOp::Mod, b)
     }
 
-    /// Issue #1256: `int.__pow__(self, value)`
+    /// Issue #1256/#2386: `int.__pow__(self, value, mod=None)`
     #[py_name = "int.__pow__"]
     fn int_pow_dunder(args) -> Result<Value> {
-        let (a, b) = match args {
-            [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__pow__", "int")),
+        let (a, b, m) = match args {
+            [a, b] => (a.value.clone(), b.value.clone(), None),
+            [a, b, m] => (a.value.clone(), b.value.clone(), Some(m.value.clone())),
+            [_] | [] => return Err(pyrust_core::descriptor_needs_arg!("__pow__", "int")),
+            _ => {
+                return Err(pyrust_core::type_err!(
+                    "expected at most 2 arguments, got {}",
+                    args.len() - 1
+                ));
+            }
         };
-        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+        let b_eff = effective_builtin_receiver(&b, &[]).unwrap_or(b);
+        if !matches!(b_eff.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(coerce_numeric(&a), BinaryOp::Pow, b)
+        if let Some(mod_val) = m.filter(|v| !v.is_none()) {
+            let m_eff = effective_builtin_receiver(&mod_val, &[]).unwrap_or(mod_val);
+            if !matches!(
+                m_eff.kind(),
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+            ) {
+                return Ok(Value::not_implemented());
+            }
+            let dispatch = crate::builtin_registry::lookup("pow")
+                .expect("pow must be in the registry");
+            return dispatch(
+                _interp,
+                &[
+                    ExpandedCallArg { name: None, value: coerce_numeric(&a) },
+                    ExpandedCallArg { name: None, value: b_eff },
+                    ExpandedCallArg { name: None, value: m_eff },
+                ],
+            );
+        }
+        _interp.eval_binary(coerce_numeric(&a), BinaryOp::Pow, b_eff)
     }
 
     /// Issue #1256: `int.__and__(self, value)`
@@ -527,17 +554,9 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__len__", "list")
         })?;
-        let self_val = coerce_numeric(&self_val);
-        match self_val.kind() {
+        let effective = effective_builtin_receiver(&self_val, &[]).unwrap_or_else(|| self_val.clone());
+        match effective.kind() {
             ValueKind::List(items) => Ok(Value::int(items.len() as i64)),
-            // Issue #1434: list subclasses arrive as PyInstance; delegate to backing data.
-            ValueKind::PyInstance(inst) => {
-                let inst_rc = Rc::clone(inst);
-                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
-                    Some(ValueKind::List(items)) => Ok(Value::int(items.len() as i64)),
-                    _ => Err(pyrust_core::descriptor_requires!("__len__", "list", inst_rc.borrow().class.borrow().name)),
-                }
-            }
             _ => Err(pyrust_core::descriptor_requires!("__len__", "list", value_type_name_str(&self_val))),
         }
     }
@@ -548,17 +567,9 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__len__", "tuple")
         })?;
-        let self_val = coerce_numeric(&self_val);
-        match self_val.kind() {
+        let effective = effective_builtin_receiver(&self_val, &[]).unwrap_or_else(|| self_val.clone());
+        match effective.kind() {
             ValueKind::Tuple(items) => Ok(Value::int(items.len() as i64)),
-            // Issue #1434: tuple subclasses arrive as PyInstance; delegate to backing data.
-            ValueKind::PyInstance(inst) => {
-                let inst_rc = Rc::clone(inst);
-                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
-                    Some(ValueKind::Tuple(items)) => Ok(Value::int(items.len() as i64)),
-                    _ => Err(pyrust_core::descriptor_requires!("__len__", "tuple", inst_rc.borrow().class.borrow().name)),
-                }
-            }
             _ => Err(pyrust_core::descriptor_requires!("__len__", "tuple", value_type_name_str(&self_val))),
         }
     }
@@ -569,17 +580,9 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__len__", "dict")
         })?;
-        let self_val = coerce_numeric(&self_val);
-        match self_val.kind() {
+        let effective = effective_builtin_receiver(&self_val, &[]).unwrap_or_else(|| self_val.clone());
+        match effective.kind() {
             ValueKind::Dict(items) => Ok(Value::int(items.len() as i64)),
-            // Issue #1434: dict subclasses arrive as PyInstance; delegate to backing data.
-            ValueKind::PyInstance(inst) => {
-                let inst_rc = Rc::clone(inst);
-                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
-                    Some(ValueKind::Dict(items)) => Ok(Value::int(items.len() as i64)),
-                    _ => Err(pyrust_core::descriptor_requires!("__len__", "dict", inst_rc.borrow().class.borrow().name)),
-                }
-            }
             _ => Err(pyrust_core::descriptor_requires!("__len__", "dict", value_type_name_str(&self_val))),
         }
     }
@@ -707,17 +710,9 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__len__", "set")
         })?;
-        let self_val = coerce_numeric(&self_val);
-        match self_val.kind() {
+        let effective = effective_builtin_receiver(&self_val, &[]).unwrap_or_else(|| self_val.clone());
+        match effective.kind() {
             ValueKind::Set(items) => Ok(Value::int(items.len() as i64)),
-            // Issue #1434: set subclasses arrive as PyInstance; delegate to backing data.
-            ValueKind::PyInstance(inst) => {
-                let inst_rc = Rc::clone(inst);
-                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
-                    Some(ValueKind::Set(items)) => Ok(Value::int(items.len() as i64)),
-                    _ => Err(pyrust_core::descriptor_requires!("__len__", "set", inst_rc.borrow().class.borrow().name)),
-                }
-            }
             _ => Err(pyrust_core::descriptor_requires!("__len__", "set", value_type_name_str(&self_val))),
         }
     }
@@ -728,17 +723,9 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__len__", "bytes")
         })?;
-        let self_val = coerce_numeric(&self_val);
-        match self_val.kind() {
+        let effective = effective_builtin_receiver(&self_val, &[]).unwrap_or_else(|| self_val.clone());
+        match effective.kind() {
             ValueKind::Bytes(b) => Ok(Value::int(b.len() as i64)),
-            // Issue #1434: bytes subclasses arrive as PyInstance; delegate to backing data.
-            ValueKind::PyInstance(inst) => {
-                let inst_rc = Rc::clone(inst);
-                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
-                    Some(ValueKind::Bytes(b)) => Ok(Value::int(b.len() as i64)),
-                    _ => Err(pyrust_core::descriptor_requires!("__len__", "bytes", inst_rc.borrow().class.borrow().name)),
-                }
-            }
             _ => Err(pyrust_core::descriptor_requires!("__len__", "bytes", value_type_name_str(&self_val))),
         }
     }
@@ -749,25 +736,12 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__len__", "frozenset")
         })?;
-        let self_val = coerce_numeric(&self_val);
-        match self_val.kind() {
+        let effective = effective_builtin_receiver(&self_val, &[]).unwrap_or_else(|| self_val.clone());
+        match effective.kind() {
             ValueKind::BuiltinObject { ops, state }
                 if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
             {
                 Ok(Value::int(ops.len(state).unwrap_or(0) as i64))
-            }
-            // Issue #1548: frozenset subclasses arrive as PyInstance; delegate to backing data.
-            ValueKind::PyInstance(inst) => {
-                let inst_rc = Rc::clone(inst);
-                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
-                    Some(ValueKind::BuiltinObject { ops, state })
-                        if ops.canonical_class_tag()
-                            == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
-                    {
-                        Ok(Value::int(ops.len(state).unwrap_or(0) as i64))
-                    }
-                    _ => Err(pyrust_core::descriptor_requires!("__len__", "frozenset", inst_rc.borrow().class.borrow().name)),
-                }
             }
             _ => Err(pyrust_core::descriptor_requires!("__len__", "frozenset", value_type_name_str(&self_val))),
         }

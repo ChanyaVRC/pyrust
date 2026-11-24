@@ -109,8 +109,9 @@ pyrust_module! {
                 ));
             }
         };
-        let backing = instance_builtin_data(&inst_rc).ok_or_else(|| {
-            pyrust_core::descriptor_requires!("__getitem__", "dict")
+        let backing = effective_builtin_receiver(&self_arg.value, &[]).ok_or_else(|| {
+            let actual = pyrust_core::builtin_type_name(&self_arg.value);
+            pyrust_core::descriptor_requires!("__getitem__", "dict", actual, method)
         })?;
         // #2657: a PyInstance receiver whose base is not `dict` (e.g. a list
         // subclass) must be rejected with CPython's method_descriptor wording
