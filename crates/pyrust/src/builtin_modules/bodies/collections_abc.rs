@@ -340,9 +340,21 @@ fn primitive_value_has_dunder(value: &Value, dunder: &str) -> bool {
             "__iter__" | "__len__" | "__contains__" | "__hash__" | "__reversed__"
         ),
 
-        // generator objects: have __iter__, __next__, send, throw, close
-        ValueKind::Generator(_) => {
-            matches!(dunder, "__iter__" | "__next__" | "send" | "throw" | "close")
+        // generator objects: have __iter__, __next__, send, throw, close;
+        // `anext_awaitable` also exposes `__await__` (issue #2983).
+        ValueKind::Generator(cell) => {
+            if cell.try_borrow().is_ok_and(|state| {
+                state
+                    .downcast_ref::<crate::interpreter::AnextAwaitable>()
+                    .is_some()
+            }) {
+                matches!(
+                    dunder,
+                    "__await__" | "__iter__" | "__next__" | "send" | "throw" | "close"
+                )
+            } else {
+                matches!(dunder, "__iter__" | "__next__" | "send" | "throw" | "close")
+            }
         }
 
         // BuiltinObject variants

@@ -81,6 +81,8 @@ pub(crate) fn value_class(value: &Value) -> Value {
                     .unwrap_or_else(|| Value::builtin_function(native.type_name))
             } else if state.downcast_ref::<AsyncGenASend>().is_some() {
                 Value::builtin_function("async_generator_asend")
+            } else if state.downcast_ref::<AnextAwaitable>().is_some() {
+                Value::builtin_function("anext_awaitable")
             } else {
                 Value::builtin_function("generator")
             }

@@ -171,30 +171,49 @@ impl Interpreter {
             }
 
             // Concrete lazy iterators share their one-step implementation with
-            // `call_next` and `ForIter`.
+            // `call_next` and `ForIter`.  Like CPython's `PyIter_Next`, any
+            // `StopIteration` raised by a wrapped callable (e.g. `map`/`filter`
+            // function or `iter(callable, sentinel)`) terminates collection
+            // cleanly without latching the iterator exhausted (issue #2983).
             macro_rules! collect_steps {
                 ($step:ident) => {{
                     let mut items = Vec::new();
-                    while let Some(value) = self.$step(&state_rc)? {
-                        items.push(value);
+                    loop {
+                        match self.$step(&state_rc) {
+                            Ok(Some(value)) => items.push(value),
+                            Ok(None) => break,
+                            Err(ref error) if is_stop_iteration_error(error) => break,
+                            Err(error) => return Err(error),
+                        }
                     }
                     return Ok(items);
                 }};
             }
 
-            if tid == TypeId::of::<CallableIter>() {
+            if tid == TypeId::of::<AsyncGenASend>() {
                 let mut items = Vec::new();
                 loop {
-                    match self.step_callable_iter(&state_rc) {
-                        Ok(Some(value)) => items.push(value),
-                        Ok(None) => break,
-                        // StopIteration raised by the callable stops iteration
-                        // exactly like reaching the sentinel.
+                    match self.step_async_gen_asend(&state_rc, Value::none(), true) {
+                        Ok(value) => items.push(value),
                         Err(ref error) if is_stop_iteration_error(error) => break,
                         Err(error) => return Err(error),
                     }
                 }
                 return Ok(items);
+            }
+            if tid == TypeId::of::<AnextAwaitable>() {
+                let mut items = Vec::new();
+                loop {
+                    match self.step_anext_awaitable_send(&state_rc, Value::none()) {
+                        Ok(value) => items.push(value),
+                        Err(ref error) if is_stop_iteration_error(error) => break,
+                        Err(error) => return Err(error),
+                    }
+                }
+                return Ok(items);
+            }
+            if tid == TypeId::of::<CallableIter>() {
+                collect_steps!(step_callable_iter);
             }
             if tid == TypeId::of::<GetItemIter>() {
                 collect_steps!(step_getitem_iter);

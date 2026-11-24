@@ -30,9 +30,12 @@ impl Interpreter {
             match state_rc.try_borrow() {
                 Ok(b) => {
                     // The `asend`/`__anext__` awaitable of an async generator
-                    // (#2280) is itself a self-driving awaitable: pass it through
-                    // for `YieldFrom` to step.
-                    if b.downcast_ref::<AsyncGenASend>().is_some() {
+                    // (#2280) and the `anext(aiter, default)` wrapper (#2983)
+                    // are self-driving awaitables: pass them through for
+                    // `YieldFrom` to step.
+                    if b.downcast_ref::<AsyncGenASend>().is_some()
+                        || b.downcast_ref::<AnextAwaitable>().is_some()
+                    {
                         return Ok(awaited.clone());
                     }
                     if let Some(frame) = b.downcast_ref::<GeneratorFrame>()
@@ -155,6 +158,15 @@ impl Interpreter {
                     .unwrap_or(false);
                 if is_asend {
                     return self.step_async_gen_asend(&state_rc, sent_val, true);
+                }
+
+                // Two-argument `anext(aiter, default)` awaitable (#2983).
+                let is_anext_awaitable = state_rc
+                    .try_borrow()
+                    .map(|b| b.downcast_ref::<AnextAwaitable>().is_some())
+                    .unwrap_or(false);
+                if is_anext_awaitable {
+                    return self.step_anext_awaitable_send(&state_rc, sent_val);
                 }
 
                 // All non-frame iterator states (range, map, enumerate, native
@@ -431,6 +443,7 @@ impl Interpreter {
                 "can't send non-None value to a just-started async generator"
             ));
         }
+        let prestart_throw = frame.pc == 0 && throw_exc.is_some();
         let resume = self.resume_generator_with_exc(
             frame,
             throw_exc,
@@ -468,7 +481,9 @@ impl Interpreter {
             // CPython: `__anext__`/`asend` then raise StopAsyncIteration with no
             // value (an async-gen `return v` with non-None v is a SyntaxError,
             // so the return value is always None and is discarded).
-            Err(ref e) if is_stop_iteration_error(e) => {
+            // A pre-start `athrow(StopIteration(...))` raises the thrown
+            // StopIteration verbatim without converting to StopAsyncIteration.
+            Err(ref e) if !prestart_throw && is_stop_iteration_error(e) => {
                 if is_aclose {
                     // aclose: a clean StopAsyncIteration/return means the close
                     // succeeded — complete the await with None.
@@ -487,7 +502,10 @@ impl Interpreter {
             // an async generator body converts to `RuntimeError("async generator
             // raised StopAsyncIteration")` with the original exception as
             // `__cause__` / `__context__` (owning the async generator's frames).
-            Err(e) if is_stop_async_iteration_error(&e) => {
+            // A pre-start `athrow(StopAsyncIteration(...))` raises the thrown
+            // exception verbatim without entering the body or PEP 479 wrapping
+            // (#2983).
+            Err(e) if !prestart_throw && is_stop_async_iteration_error(&e) => {
                 Err(self.pep479_wrap_stop_async_iteration(e))
             }
             Err(e) => Err(e),
@@ -558,6 +576,21 @@ impl Interpreter {
                     .try_borrow_mut()
                     .map_err(|_| pyrust_core::value_err!("generator already executing"))?;
 
+                // Two-argument `anext(aiter, default)` awaitable (#2983):
+                // forward the thrown exception through the wrapped awaitable
+                // and convert `StopAsyncIteration` to `StopIteration(default)`.
+                if borrow.downcast_ref::<AnextAwaitable>().is_some() {
+                    drop(borrow);
+                    let exc_val = match exc {
+                        PyError::Raised(v) => v,
+                        PyError::Named(name, msg) => {
+                            self.instantiate_named_exception(name.as_ref(), msg)?
+                        }
+                        other => return Err(other),
+                    };
+                    return self.step_anext_awaitable_throw(&state_rc, vec![exc_val]);
+                }
+
                 // GetItemIter and NativeIterFrame have no Python frame; propagate.
                 if borrow.downcast_mut::<GetItemIter>().is_some()
                     || borrow.downcast_mut::<NativeIterFrame>().is_some()
@@ -618,6 +651,220 @@ impl Interpreter {
             }
             // Other iterator types don't have throw() support.
             _ => Err(exc),
+        }
+    }
+
+    /// Implementation of the `anext(aiter[, default])` builtin (issue #2983).
+    ///
+    /// Resolves `__anext__` on `type(aiter)` (mirroring CPython's
+    /// `tp_as_async->am_anext` lookup — instance-dict `__anext__` is ignored),
+    /// calls it synchronously, and either returns the raw result (1-arg form)
+    /// or wraps it in an `AnextAwaitable` that maps `StopAsyncIteration` to
+    /// `default` without awaiting `default` (2-arg form).
+    pub(crate) fn call_anext(&mut self, aiter: &Value, default: Option<Value>) -> Result<Value> {
+        let awaitable = match aiter.kind() {
+            ValueKind::Generator(cell) if cell.kind() == GeneratorKind::AsyncGenerator => {
+                self.make_async_gen_asend(aiter, None, None, false)?
+            }
+            ValueKind::PyInstance(inst_rc) => {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                let Some(anext_method) = lookup_class_attr(&class, "__anext__") else {
+                    return Err(pyrust_core::type_err!(
+                        "'{}' object is not an async iterator",
+                        class.borrow().name
+                    ));
+                };
+                invoke_class_method(self, anext_method, aiter.clone(), &[])?
+            }
+            ValueKind::PyClass(class) => {
+                if let Some(anext_method) = metaclass_dunder(class, "__anext__") {
+                    invoke_class_method(self, anext_method, aiter.clone(), &[])?
+                } else {
+                    return Err(pyrust_core::type_err!(
+                        "'{}' object is not an async iterator",
+                        full_type_name_str(aiter)
+                    ));
+                }
+            }
+            _ => {
+                return Err(pyrust_core::type_err!(
+                    "'{}' object is not an async iterator",
+                    full_type_name_str(aiter)
+                ));
+            }
+        };
+        match default {
+            None => Ok(awaitable),
+            Some(default_value) => Ok(Value::generator(Box::new(AnextAwaitable {
+                wrapped: awaitable,
+                default_value,
+            }))),
+        }
+    }
+
+    /// Advance a two-argument `anext(aiter, default)` awaitable by one step
+    /// (`send(val)` / `__next__()` / `await`, issue #2983).
+    pub(crate) fn step_anext_awaitable_send(
+        &mut self,
+        aw_rc: &Rc<GeneratorCell>,
+        sent_val: Value,
+    ) -> Result<Value> {
+        let (wrapped, default_value) = {
+            let b = aw_rc.borrow();
+            let aw = b
+                .downcast_ref::<AnextAwaitable>()
+                .ok_or_else(|| PyError::Runtime("invalid anext_awaitable state".to_string()))?;
+            (aw.wrapped.clone(), aw.default_value.clone())
+        };
+        let iter_val = self.get_awaitable(&wrapped)?;
+        let step_res = match iter_val.kind() {
+            ValueKind::Generator(rc) => {
+                let is_sendable = rc
+                    .try_borrow()
+                    .map(|b| {
+                        b.is::<GeneratorFrame>()
+                            || b.is::<GenDriving>()
+                            || b.is::<AsyncGenASend>()
+                            || b.is::<AnextAwaitable>()
+                    })
+                    .unwrap_or(true);
+                if is_sendable {
+                    self.generator_send(iter_val.clone(), sent_val)
+                } else if sent_val.is_none() {
+                    self.call_next(&iter_val, None)
+                } else {
+                    self.call_generator_method(iter_val.clone(), "send", vec![sent_val])
+                }
+            }
+            ValueKind::PyInstance(inst_rc) => {
+                if sent_val.is_none() {
+                    self.call_next(&iter_val, None)
+                } else {
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    if let Some(send_method) = lookup_class_attr(&class, "send") {
+                        invoke_class_method(
+                            self,
+                            send_method,
+                            iter_val.clone(),
+                            &[ExpandedCallArg {
+                                name: None,
+                                value: sent_val,
+                            }],
+                        )
+                    } else {
+                        Err(PyError::attribute_error(
+                            format!("'{}' object has no attribute 'send'", class.borrow().name),
+                            Some("send".to_string()),
+                            Some(iter_val.clone()),
+                        ))
+                    }
+                }
+            }
+            _ => {
+                if sent_val.is_none() {
+                    self.call_next(&iter_val, None)
+                } else {
+                    let send_attr = self.get_attr(&iter_val, "send")?;
+                    self.call_function_expanded(
+                        send_attr,
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: sent_val,
+                        }],
+                    )
+                }
+            }
+        };
+        match step_res {
+            Ok(v) => Ok(v),
+            Err(ref e) if is_stop_async_iteration_error(e) => {
+                Err(self.make_stop_iteration_with_value(default_value))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Forward `throw(*args)` through a two-argument `anext(aiter, default)`
+    /// awaitable, converting `StopAsyncIteration` to `StopIteration(default)`.
+    pub(crate) fn step_anext_awaitable_throw(
+        &mut self,
+        aw_rc: &Rc<GeneratorCell>,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        let (wrapped, default_value) = {
+            let b = aw_rc.borrow();
+            let aw = b
+                .downcast_ref::<AnextAwaitable>()
+                .ok_or_else(|| PyError::Runtime("invalid anext_awaitable state".to_string()))?;
+            (aw.wrapped.clone(), aw.default_value.clone())
+        };
+        let iter_val = self.get_awaitable(&wrapped)?;
+        let step_res = match iter_val.kind() {
+            ValueKind::Generator(_) => self.call_generator_method(iter_val.clone(), "throw", args),
+            ValueKind::PyInstance(inst_rc) => {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(throw_method) = lookup_class_attr(&class, "throw") {
+                    let call_args: Vec<ExpandedCallArg> = args
+                        .into_iter()
+                        .map(|value| ExpandedCallArg { name: None, value })
+                        .collect();
+                    invoke_class_method(self, throw_method, iter_val.clone(), &call_args)
+                } else {
+                    Err(PyError::attribute_error(
+                        format!("'{}' object has no attribute 'throw'", class.borrow().name),
+                        Some("throw".to_string()),
+                        Some(iter_val.clone()),
+                    ))
+                }
+            }
+            _ => {
+                let throw_attr = self.get_attr(&iter_val, "throw")?;
+                let call_args: Vec<ExpandedCallArg> = args
+                    .into_iter()
+                    .map(|value| ExpandedCallArg { name: None, value })
+                    .collect();
+                self.call_function_expanded(throw_attr, &call_args)
+            }
+        };
+        match step_res {
+            Ok(v) => Ok(v),
+            Err(ref e) if is_stop_async_iteration_error(e) => {
+                Err(self.make_stop_iteration_with_value(default_value))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Forward `close()` through a two-argument `anext(aiter, default)` awaitable.
+    pub(crate) fn step_anext_awaitable_close(
+        &mut self,
+        aw_rc: &Rc<GeneratorCell>,
+    ) -> Result<Value> {
+        let wrapped = {
+            let b = aw_rc.borrow();
+            let aw = b
+                .downcast_ref::<AnextAwaitable>()
+                .ok_or_else(|| PyError::Runtime("invalid anext_awaitable state".to_string()))?;
+            aw.wrapped.clone()
+        };
+        let iter_val = self.get_awaitable(&wrapped)?;
+        match iter_val.kind() {
+            ValueKind::Generator(_) => self.generator_close(iter_val.clone()),
+            ValueKind::PyInstance(inst_rc) => {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(close_method) = lookup_class_attr(&class, "close") {
+                    invoke_class_method(self, close_method, iter_val.clone(), &[])
+                } else {
+                    Ok(Value::none())
+                }
+            }
+            _ => {
+                if let Ok(close_attr) = self.get_attr(&iter_val, "close") {
+                    self.call_function_expanded(close_attr, &[])
+                } else {
+                    Ok(Value::none())
+                }
+            }
         }
     }
 }

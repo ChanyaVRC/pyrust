@@ -108,6 +108,18 @@ impl Interpreter {
             return Err(self.generator_completion_error(Vec::new())?);
         }
 
+        // CPython (`gen_send_ex2`, FRAME_CREATED): injecting an exception into
+        // a just-started (never-resumed) generator, coroutine, or async
+        // generator closes it immediately and raises the thrown exception
+        // verbatim without executing the body or applying PEP 479 wrapping
+        // (issue #2983).
+        if frame.pc == 0
+            && let Some(exc) = inject_exc
+        {
+            frame.done = true;
+            return Err(exc);
+        }
+
         // PEP 380 throw forwarding: if we are suspended at a YieldFrom instruction
         // and an exception is being injected (generator.throw() / generator.close()),
         // forward the exception to the sub-iterator rather than injecting it into our

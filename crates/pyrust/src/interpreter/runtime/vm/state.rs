@@ -182,6 +182,17 @@ pub(crate) struct AsyncGenASend {
     pub(crate) is_aclose: bool,
 }
 
+/// Awaitable returned by two-argument `anext(aiter, default)` (issue #2983).
+/// Stores the raw value returned by `aiter.__anext__()` and the fallback
+/// `default_value`; driving it via `await`/`send`/`__next__`/`throw` resolves
+/// `wrapped` with `get_awaitable`, forwards the step, and turns any
+/// `StopAsyncIteration` (including subclasses) into `StopIteration(default_value)`
+/// without awaiting `default_value`.
+pub(crate) struct AnextAwaitable {
+    pub(crate) wrapped: Value,
+    pub(crate) default_value: Value,
+}
+
 /// Call-trampoline frame (#2234): what the caller needs restored when a
 /// trampolined Python→Python callee returns.  Module-scoped so the cold error
 /// unwinder ([`Interpreter::vm_unwind_error`]) can name it; the dispatch loop's
