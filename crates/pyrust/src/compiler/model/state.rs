@@ -116,6 +116,10 @@ struct Compiler {
     /// than the running script's path.  `<unknown>` until a compile entry point
     /// sets it.
     filename: std::sync::Arc<str>,
+    /// Compile-time qualified name for the code object being compiled — emitted
+    /// into `FnCode::qualname` (`co_qualname`, issue #2981).  Defaults to
+    /// `"<module>"` for module-level compilation.
+    qualname: std::sync::Arc<str>,
     consts: Vec<Value>,
     const_index: HashMap<crate::value::PyKey, u16>,
     names: Vec<String>,

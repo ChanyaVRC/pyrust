@@ -124,8 +124,8 @@ mod builtin_methods {
         value_iterable_needs_runtime_key_semantics,
     };
     use super::{
-        AnextAwaitable, BinaryOp, CanonicalSlot, ExpandedArgBuf, ExpandedCallArg, GeneratorKind,
-        GetItemIter, IndexMap, Interpreter, NativeIterFrame, NativeIteratorClass,
+        AnextAwaitable, AsyncGenASend, BinaryOp, CanonicalSlot, ExpandedArgBuf, ExpandedCallArg,
+        GeneratorKind, GetItemIter, IndexMap, Interpreter, NativeIterFrame, NativeIteratorClass,
         PrimitiveClassKind, PrintOptions, PyBigInt, PyClass, PyDict, PyError, PyInstance, PyKey,
         PySet, PyToPrimitive, Rc, RefCell, RegSlice, Result, Value, ValueKind, apply_format_spec,
         apply_format_spec_named, bind_class_level_method_wrapper, builtin_data_backing,
@@ -191,8 +191,8 @@ mod fast_path {
     };
     use super::execution::vm_read;
     use super::{
-        BigRangeState, BinaryOp, CallBuiltinCacheEntry, ExpandedCallArg, GlobalCacheEntry,
-        GlobalResolutionCache, Interpreter, IterState, LiveDictViewItem, MemoKey,
+        BigRangeState, BinaryOp, CallBuiltinCacheEntry, ExpandedCallArg, GeneratorKind,
+        GlobalCacheEntry, GlobalResolutionCache, Interpreter, IterState, LiveDictViewItem, MemoKey,
         NativeClassMethodCachePlan, OrderedIterationWatch, PyDict, PyError, PyKey, Rc,
         ReadAttributeCachePlan, ReadMethodCachePlan, RegSlice, Result, StrKey, UserFunction, Value,
         ValueKind, active_live_class_namespace, bind_builtin_attribute,
@@ -237,14 +237,15 @@ pub(crate) use expressions::{
 
 mod attributes {
     use super::{
-        ExceptionSlotPolicy, ExpandedCallArg, Interpreter, PyClass, PyDict, PyError, PyInstance,
-        PyKey, Rc, RefCell, Result, StrKey, UserFunction, UserFunctionKind, Value, ValueKind,
-        adapt_builtin_subclass_method, bind_builtin_class_special, builtin_callable_metadata,
-        builtin_class_doc, call_slot_value_unbound, canonical_class_by_tag,
-        class_chain_new_slot_wrapped, class_hash_inherits_builtin_none, class_is_subclass_of,
-        class_suppresses_instance_dict, descriptor_get_slot_raw_call, effective_builtin_receiver,
-        exception_slot_policy, instance_builtin_data, invoke_class_method, is_exception_class,
-        is_type_alias_class, is_typevar_class, lookup_class_attr, metaclass_dunder, metaclass_of,
+        ExceptionSlotPolicy, ExpandedCallArg, GeneratorKind, Interpreter, PyClass, PyDict, PyError,
+        PyInstance, PyKey, Rc, RefCell, Result, StrKey, UserFunction, UserFunctionKind, Value,
+        ValueKind, adapt_builtin_subclass_method, bind_builtin_class_special,
+        builtin_callable_metadata, builtin_class_doc, call_slot_value_unbound,
+        canonical_class_by_tag, class_chain_new_slot_wrapped, class_hash_inherits_builtin_none,
+        class_is_subclass_of, class_suppresses_instance_dict, descriptor_get_slot_raw_call,
+        effective_builtin_receiver, exception_slot_policy, full_type_name_str,
+        instance_builtin_data, invoke_class_method, is_exception_class, is_type_alias_class,
+        is_typevar_class, lookup_class_attr, metaclass_dunder, metaclass_of,
         mro_has_unslotted_ancestor, mro_slot_allows, native_iterator_class, object_class_singleton,
         primitive_owned_object_dunder, replace_instance_dict, type_alias_readonly_attr_error,
         type_class_singleton, typevar_readonly_attr_error, value_class, value_type_name_str,
@@ -405,7 +406,7 @@ mod generator_protocols {
 }
 use generator_protocols::extract_stop_iteration_value;
 pub(crate) use generator_protocols::{
-    is_async_generator_value, is_coroutine_value, is_stop_iteration_error,
+    is_async_gen_asend_value, is_async_generator_value, is_coroutine_value, is_stop_iteration_error,
 };
 
 mod introspection {

@@ -21,6 +21,10 @@ impl Interpreter {
             (true, false) => GeneratorKind::Coroutine,
             (false, _) => GeneratorKind::Generator,
         };
+        let display_names = Rc::new(std::cell::RefCell::new(pyrust_core::GeneratorNames {
+            name: std::sync::Arc::clone(&fn_name),
+            qualname,
+        }));
         let frame = GeneratorFrame {
             code: Rc::clone(code),
             regs: regs.into_vec(),
@@ -36,21 +40,21 @@ impl Interpreter {
             yield_dst: 0,
             suspended_line: 0,
             last_return_value: None,
-            fn_name: std::sync::Arc::clone(&fn_name),
+            fn_name,
             function: Rc::clone(function),
+            display_names: Rc::clone(&display_names),
             is_coroutine,
             async_gen_running_owner: None,
             frame_cache: std::cell::RefCell::new(None),
         };
-        // The frame keeps the name as its *compile-time* identity, behind
-        // tracebacks and `co_name`; the cell owns the writable `__name__` /
-        // `__qualname__` pair, which CPython likewise lets a user reassign
-        // without disturbing the code object.
+        // The frame keeps `fn_name` as its *compile-time* identity behind
+        // tracebacks and `co_name`, while `display_names` is shared with the
+        // cell so user `__qualname__` updates are visible both while running
+        // (#2978) and in the never-awaited coroutine warning (#2981).
         Value::generator_frame(
             Box::new(frame),
             kind,
-            fn_name,
-            qualname,
+            display_names,
             is_iterable_coroutine,
             Rc::clone(function),
         )

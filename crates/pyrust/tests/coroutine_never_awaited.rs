@@ -95,3 +95,40 @@ fn async_generator_does_not_warn() {
         "an async generator must not emit the coroutine warning; stderr was: {stderr:?}"
     );
 }
+
+#[test]
+fn never_awaited_method_coroutine_warns_with_qualname() {
+    let (_stdout, stderr) = run_pyrust(
+        "class WarnCls:\n    async def warn_meth(self):\n        pass\n\nc = WarnCls().warn_meth()\ndel c\n",
+    );
+    assert!(
+        stderr.contains("RuntimeWarning: coroutine 'WarnCls.warn_meth' was never awaited"),
+        "expected method qualname in never-awaited warning; stderr was: {stderr:?}"
+    );
+}
+
+#[test]
+fn never_awaited_coroutine_warns_with_mutated_qualname() {
+    let (_stdout, stderr) = run_pyrust(
+        "async def warn_top():\n    pass\n\nc = warn_top()\nc.__qualname__ = 'custom_q'\ndel c\n",
+    );
+    assert!(
+        stderr.contains("RuntimeWarning: coroutine 'custom_q' was never awaited"),
+        "expected mutated __qualname__ in never-awaited warning; stderr was: {stderr:?}"
+    );
+}
+
+#[test]
+fn never_awaited_coroutine_prefers_qualname_over_name() {
+    let (_stdout, stderr) = run_pyrust(
+        "async def warn_top():\n    pass\n\nc = warn_top()\nc.__name__ = 'custom_n'\ndel c\n",
+    );
+    assert!(
+        stderr.contains("RuntimeWarning: coroutine 'warn_top' was never awaited"),
+        "expected __qualname__ (not __name__) in never-awaited warning; stderr was: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("custom_n"),
+        "__name__ mutation must not overwrite the warning qualname; stderr was: {stderr:?}"
+    );
+}

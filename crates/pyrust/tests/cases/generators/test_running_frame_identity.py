@@ -148,8 +148,8 @@ except TypeError as e:
     print(e)
 
 
-# Reassigning the Python-visible name leaves the *code object's* name alone —
-# `co_name` is fixed at compile time, and the traceback keeps reporting it.
+# Reassigning the Python-visible name leaves the *code object's* name and
+# qualname alone — both `co_name` and `co_qualname` are fixed at compile time.
 def named():
     yield 1
 
@@ -157,7 +157,13 @@ def named():
 suspended = named()
 next(suspended)
 suspended.__name__ = "not-co-name"
-print(suspended.__name__, suspended.gi_frame.f_code.co_name)
+suspended.__qualname__ = "not-co-qualname"
+print(
+    suspended.__name__,
+    suspended.gi_frame.f_code.co_name,
+    suspended.__qualname__,
+    suspended.gi_frame.f_code.co_qualname,
+)
 
 
 # --- 6. Re-entrancy still reports itself as re-entrancy ----------------------

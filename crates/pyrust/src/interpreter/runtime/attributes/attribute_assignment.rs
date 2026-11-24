@@ -151,18 +151,22 @@ impl Interpreter {
                         iterator_class.full_type_name()
                     ));
                 }
+                // Built-in / native iterators (`map`, `filter`, `zip`,
+                // `enumerate`, `list_iterator`, …) share GeneratorCell storage
+                // but carry no writable `__name__`/`__qualname__` or `gi_*`
+                // slots (issues #2980, #2981).
                 let kind = cell.kind();
-                if kind == pyrust_core::GeneratorKind::Iterator {
-                    let obj_name = crate::interpreter::full_type_name_str(&target);
+                if kind == GeneratorKind::Iterator {
                     return Err(pyrust_core::py_err!(
                         "AttributeError",
-                        "'{obj_name}' object has no attribute '{name}'"
+                        "'{}' object has no attribute '{name}'",
+                        full_type_name_str(&target)
                     ));
                 }
                 // CPython 3.12 allows setting __name__ and __qualname__ on
                 // generator / coroutine / async_generator objects (str only;
                 // TypeError on non-string).  Read-only introspection slots
-                // match CPython 3.12's exact AttributeError wording (#2980).
+                // match CPython 3.12's exact AttributeError wording (#2980, #2981).
                 let type_name = kind.frame_type_name().unwrap_or("generator");
                 match (kind, name) {
                     (_, "__name__" | "__qualname__") => {
@@ -186,20 +190,20 @@ impl Interpreter {
                         }
                         Ok(())
                     }
-                    (pyrust_core::GeneratorKind::Coroutine, "cr_origin")
-                    | (pyrust_core::GeneratorKind::AsyncGenerator, "ag_running") => {
+                    (GeneratorKind::Coroutine, "cr_origin")
+                    | (GeneratorKind::AsyncGenerator, "ag_running") => {
                         Err(pyrust_core::py_err!("AttributeError", "readonly attribute"))
                     }
                     (
-                        pyrust_core::GeneratorKind::Generator,
+                        GeneratorKind::Generator,
                         "gi_running" | "gi_suspended" | "gi_yieldfrom" | "gi_frame" | "gi_code",
                     )
                     | (
-                        pyrust_core::GeneratorKind::Coroutine,
+                        GeneratorKind::Coroutine,
                         "cr_running" | "cr_suspended" | "cr_await" | "cr_frame" | "cr_code",
                     )
                     | (
-                        pyrust_core::GeneratorKind::AsyncGenerator,
+                        GeneratorKind::AsyncGenerator,
                         "ag_suspended" | "ag_await" | "ag_frame" | "ag_code",
                     ) => Err(pyrust_core::py_err!(
                         "AttributeError",

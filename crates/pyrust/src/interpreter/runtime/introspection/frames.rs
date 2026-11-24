@@ -772,7 +772,9 @@ impl Interpreter {
     /// generator-backed activation, or `Value::none()` when it is exhausted.
     /// The frame's `f_lineno` is the source line the generator is suspended on
     /// (the line of the `yield` it last paused at); `f_code` is the shared
-    /// code object of the originating function (issues #2185, #2980).
+    /// code object of the originating function carrying its immutable
+    /// compile-time `co_name` / `co_qualname` / `co_firstlineno` / `co_consts`
+    /// (issues #2185, #2980, #2981).
     pub(crate) fn build_generator_frame_object(&self, frame: &GeneratorFrame) -> Value {
         if frame.done {
             return Value::none();

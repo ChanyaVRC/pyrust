@@ -422,6 +422,29 @@ impl Interpreter {
             return self.call_generator_method(receiver, method, std::mem::take(pos));
         }
 
+        // Generators, coroutines, and async generators inherit object.__reduce__
+        // and object.__reduce_ex__ with CPython's exact arity, keyword, protocol,
+        // and unpicklable-noun checks (#2981). Route them before the generic
+        // object-protocol shortcut below.
+        let frame_reduce_noun = match receiver.kind() {
+            ValueKind::Generator(cell) if matches!(method, "__reduce__" | "__reduce_ex__") => {
+                cell.kind().frame_type_name()
+            }
+            _ => None,
+        };
+        if let Some(noun) = frame_reduce_noun {
+            if has_kw {
+                let owner = match origin {
+                    pyrust_builtins::dict_views::DictViewBoundMethodOrigin::Direct => "object",
+                    pyrust_builtins::dict_views::DictViewBoundMethodOrigin::Captured => noun,
+                };
+                return Err(pyrust_core::type_err!(
+                    "{owner}.{method}() takes no keyword arguments"
+                ));
+            }
+            return self.call_generator_method(receiver, method, std::mem::take(pos));
+        }
+
         // #2151: object-protocol method-wrappers (`__sizeof__`, `__dir__`,
         // `__reduce__`, `__reduce_ex__`, and `None.__bool__`) bound on a
         // built-in data value.  Intercept here — the receiver is already bound,

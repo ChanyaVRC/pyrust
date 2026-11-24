@@ -176,6 +176,17 @@ impl Interpreter {
                     .map(|hint| hint.unwrap_or_else(Value::not_implemented))
             }
             "__reduce__" => {
+                if let ValueKind::Generator(cell) = receiver.kind()
+                    && let Some(noun) = cell.kind().frame_type_name()
+                {
+                    if !args.is_empty() {
+                        return Err(pyrust_core::type_err!(
+                            "object.__reduce__() takes no arguments ({} given)",
+                            args.len()
+                        ));
+                    }
+                    return Err(pyrust_core::type_err!("cannot pickle '{noun}' object"));
+                }
                 if !args.is_empty() {
                     return Err(pyrust_core::type_err!(
                         "{}.__reduce__() takes no arguments ({} given)",
@@ -202,6 +213,22 @@ impl Interpreter {
                 native_iterator_reduce(&receiver, kind)
             }
             "__reduce_ex__" => {
+                if let ValueKind::Generator(cell) = receiver.kind()
+                    && let Some(noun) = cell.kind().frame_type_name()
+                {
+                    if args.len() != 1 {
+                        return Err(pyrust_core::type_err!(
+                            "object.__reduce_ex__() takes exactly one argument ({} given)",
+                            args.len()
+                        ));
+                    }
+                    let protocol =
+                        self.value_to_isize(&args[0], "Python int too large to convert to C int")?;
+                    i32::try_from(protocol).map_err(|_| {
+                        pyrust_core::overflow_err!("Python int too large to convert to C int")
+                    })?;
+                    return Err(pyrust_core::type_err!("cannot pickle '{noun}' object"));
+                }
                 if args.len() != 1 {
                     return Err(pyrust_core::type_err!(
                         "{}.__reduce_ex__() takes exactly one argument ({} given)",
@@ -483,18 +510,6 @@ impl Interpreter {
                     return Err(pyrust_core::value_err!("generator already executing"));
                 }
             };
-            // NativeIterFrame (returned by `iter()` on a built-in): close is a
-            // no-op — there's nothing user-visible to clean up.
-            if borrow.downcast_mut::<NativeIterFrame>().is_some() {
-                return Ok(Value::none());
-            }
-            // GetItemIter (legacy `__getitem__` protocol, #394): same
-            // story — there is no user frame to clean up; mark
-            // exhausted so subsequent next() raises StopIteration.
-            if let Some(it) = borrow.downcast_mut::<GetItemIter>() {
-                it.exhausted = true;
-                return Ok(Value::none());
-            }
             // `__anext__`/`asend` objects are coroutine-style one-shot
             // awaitables. Closing one only exhausts that wrapper; it does not
             // close the underlying async generator.
@@ -505,6 +520,20 @@ impl Interpreter {
             if borrow.downcast_ref::<AnextAwaitable>().is_some() {
                 drop(borrow);
                 return self.step_anext_awaitable_close(&state_rc);
+            }
+            // Built-in / native iterators (`map`, `filter`, `zip`, `enumerate`,
+            // `list_iterator`, `GetItemIter`, …) do not expose `close()`
+            // (issue #2981).
+            if state_rc.kind() == GeneratorKind::Iterator {
+                drop(borrow);
+                return Err(PyError::attribute_error(
+                    format!(
+                        "'{}' object has no attribute 'close'",
+                        full_type_name_str(&receiver)
+                    ),
+                    Some("close".to_string()),
+                    Some(receiver.clone()),
+                ));
             }
         }
 
@@ -650,17 +679,6 @@ impl Interpreter {
                     return Err(pyrust_core::value_err!("generator already executing"));
                 }
             };
-            // NativeIterFrame: throw at a built-in iterator simply propagates
-            // the exception (matching CPython, where the iterator has no
-            // Python frame to inject into).
-            if borrow.downcast_mut::<NativeIterFrame>().is_some() {
-                return Err(PyError::Raised(exc_val));
-            }
-            // GetItemIter (#394): same — no Python frame to inject
-            // into.  Propagate the thrown exception.
-            if borrow.downcast_mut::<GetItemIter>().is_some() {
-                return Err(PyError::Raised(exc_val));
-            }
             // Throw through the one-shot wrapper into the async generator's
             // current suspension point. The step driver handles either a
             // caught exception or propagation and completes the wrapper.
@@ -668,6 +686,18 @@ impl Interpreter {
                 asend.throw_exc = Some(PyError::Raised(exc_val));
                 drop(borrow);
                 return self.step_async_gen_asend(&state_rc, Value::none(), false);
+            }
+            // Built-in / native iterators do not expose `throw()` (issue #2981).
+            if state_rc.kind() == GeneratorKind::Iterator {
+                drop(borrow);
+                return Err(PyError::attribute_error(
+                    format!(
+                        "'{}' object has no attribute 'throw'",
+                        full_type_name_str(&receiver)
+                    ),
+                    Some("throw".to_string()),
+                    Some(receiver.clone()),
+                ));
             }
         }
 
@@ -750,14 +780,16 @@ impl Interpreter {
             return self.step_anext_awaitable_send(&state_rc, sent_value);
         }
 
-        // NativeIterFrame and GetItemIter do not support send().
-        if borrow.downcast_mut::<NativeIterFrame>().is_some()
-            || borrow.downcast_mut::<GetItemIter>().is_some()
-        {
+        // Built-in / native iterators do not support send() (issue #2981).
+        if state_rc.kind() == GeneratorKind::Iterator {
+            drop(borrow);
             return Err(PyError::attribute_error(
-                "'generator' object has no attribute 'send'",
+                format!(
+                    "'{}' object has no attribute 'send'",
+                    full_type_name_str(&receiver)
+                ),
                 Some("send".to_string()),
-                None,
+                Some(receiver.clone()),
             ));
         }
 

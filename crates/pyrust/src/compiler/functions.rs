@@ -190,6 +190,7 @@ impl Compiler {
         } else {
             format!("{}.{}", self.qualname_prefix, name)
         };
+        sub.qualname = std::sync::Arc::from(fn_qualname.as_str());
         sub.qualname_prefix = format!("{fn_qualname}.<locals>");
         let has_kwonly_params = params.iter().any(|p| p.is_keyword_only);
         if is_memo_pure && !has_kwonly_params {

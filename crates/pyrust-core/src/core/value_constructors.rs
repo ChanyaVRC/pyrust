@@ -717,7 +717,7 @@ impl Value {
         Value::opaque(Opaque::Generator(Rc::new(GeneratorCell {
             kind: GeneratorKind::Iterator,
             iterable_coroutine: false,
-            names: RefCell::new(None),
+            names: None,
             function: None,
             frame_ptr: None,
             state: RefCell::new(state),
@@ -734,8 +734,7 @@ impl Value {
     pub fn generator_frame(
         state: Box<dyn std::any::Any>,
         kind: GeneratorKind,
-        name: std::sync::Arc<str>,
-        qualname: std::sync::Arc<str>,
+        names: Rc<RefCell<GeneratorNames>>,
         iterable_coroutine: bool,
         function: Rc<UserFunction>,
     ) -> Self {
@@ -744,7 +743,7 @@ impl Value {
         Value::opaque(Opaque::Generator(Rc::new(GeneratorCell {
             kind,
             iterable_coroutine,
-            names: RefCell::new(Some(GeneratorNames { name, qualname })),
+            names: Some(names),
             function: Some(function),
             frame_ptr,
             state: RefCell::new(state),

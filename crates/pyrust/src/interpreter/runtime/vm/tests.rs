@@ -11,6 +11,7 @@ mod vm_tests {
         FnCode {
             insns,
             filename: std::sync::Arc::from("<unknown>"),
+            qualname: std::sync::Arc::from("<module>"),
             lineno_table: vec![0u32; n],
             col_table: vec![(0, 0, 0, 0); n],
             first_lineno: 0,

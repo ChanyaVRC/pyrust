@@ -23,6 +23,7 @@ impl Compiler {
             current_col_span: (0, 0, 0, 0),
             first_lineno: 0,
             filename: std::sync::Arc::from("<unknown>"),
+            qualname: std::sync::Arc::from("<module>"),
             consts: Vec::new(),
             const_index: HashMap::new(),
             names: Vec::new(),
@@ -595,6 +596,7 @@ impl Compiler {
         Ok(FnCode {
             insns,
             filename: self.filename,
+            qualname: self.qualname,
             lineno_table: self.lineno_table,
             col_table: self.col_table,
             first_lineno: self.first_lineno,

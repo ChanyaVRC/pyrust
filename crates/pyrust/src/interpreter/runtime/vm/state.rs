@@ -82,6 +82,10 @@ pub(crate) struct GeneratorFrame {
     /// Originating `UserFunction` for `gi_code` / `f_code` introspection on
     /// both suspended and running generator frames (#2980).
     pub(crate) function: Rc<pyrust_core::UserFunction>,
+    /// Shared writable `__name__` / `__qualname__` cell also held by the owning
+    /// `GeneratorCell`.  Read on `Drop` so CPython's never-awaited coroutine
+    /// warning reports the coroutine's current `__qualname__` (issue #2981).
+    pub(crate) display_names: Rc<std::cell::RefCell<pyrust_core::GeneratorNames>>,
     /// Source line of the `yield` the generator is currently suspended at
     /// (`0` before the first yield).  Restored into the dispatch loop's
     /// `cur_line` on resume so that an exception caught inside the body after a
@@ -140,11 +144,12 @@ impl Drop for GeneratorFrame {
     fn drop(&mut self) {
         if self.is_coroutine && !self.code.is_generator && self.pc == 0 && !self.done {
             use std::io::Write;
+            let qualname = self.display_names.borrow().qualname.clone();
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(
                 stderr,
                 "sys:1: RuntimeWarning: coroutine '{}' was never awaited",
-                self.fn_name
+                qualname
             );
         }
     }
