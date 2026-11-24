@@ -164,7 +164,10 @@ pub(super) fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> R
         {
             return Ok(rendered);
         }
-        if !is_object_repr || builtin_data_backing(value).is_none() {
+        if !is_object_repr
+            || (builtin_data_backing(value).is_none()
+                && !pyrust_core::is_exception_instance(&inst_rc))
+        {
             let result = invoke_class_method(
                 interp,
                 method_val,

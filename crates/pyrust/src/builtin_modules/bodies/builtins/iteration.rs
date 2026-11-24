@@ -326,15 +326,64 @@ pyrust_module! {
     /// exact CPython `TypeError` wording for non-integer `start`.  Keeping the
     /// default as an integer `PyValue` distinguishes an omitted start from an
     /// explicitly supplied `None`.
-    fn enumerate(
-        #[positional_only] iterable: PyValue,
-        #[default(PyValue(Value::int(0)))]
-        start: PyValue,
-    ) -> Result<Value> {
+    fn enumerate(args) -> Result<Value> {
+        if args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("enumerate() takes at most 2 arguments ({} given)", args.len()),
+            ));
+        }
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "enumerate() missing required argument 'iterable'".to_string(),
+            ));
+        }
+        let mut iterable: Option<Value> = None;
+        let mut start: Option<Value> = None;
+        let mut n_pos = 0usize;
+        for a in args {
+            match a.name.as_deref() {
+                None => {
+                    if n_pos == 0 {
+                        iterable = Some(a.value.clone());
+                    } else {
+                        start = Some(a.value.clone());
+                    }
+                    n_pos += 1;
+                }
+                Some("iterable") if n_pos == 0 && iterable.is_none() => {
+                    iterable = Some(a.value.clone());
+                }
+                Some("start") if n_pos <= 1 && start.is_none() => {
+                    start = Some(a.value.clone());
+                }
+                Some(bad) => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("'{bad}' is an invalid keyword argument for enumerate()"),
+                    ));
+                }
+            }
+        }
+        let Some(iterable_val) = iterable else {
+            // CPython 3.12 rejects `enumerate(start=5)` as an invalid keyword
+            // argument rather than missing 'iterable' when no positional or
+            // `iterable=` kwarg was supplied.
+            let bad = args
+                .iter()
+                .find_map(|a| a.name.as_deref())
+                .unwrap_or("start");
+            return Err(PyError::named(
+                "TypeError",
+                format!("'{bad}' is an invalid keyword argument for enumerate()"),
+            ));
+        };
+        let start_arg = start.unwrap_or_else(|| Value::int(0));
         // Resolve through the shared index protocol before storing the counter,
         // preserving the invariant that next_enumerate_counter only sees the
         // int family.  Normalize bool to an exact int as CPython does.
-        let start_val = _interp.value_to_index(&start.0, |value| {
+        let start_val = _interp.value_to_index(&start_arg, |value| {
             PyError::named(
                 "TypeError",
                 format!(
@@ -356,7 +405,7 @@ pyrust_module! {
         // instead of wrapping (#2125).
         // Convert the iterable to a lazy iterator without consuming any elements.
         // Elements are pulled lazily by step_enumerate_iter via call_next.
-        let source = make_iterator(_interp, &iterable.0)?;
+        let source = make_iterator(_interp, &iterable_val)?;
         Ok(Value::generator(Box::new(EnumerateIter {
             source,
             counter: start_val,
@@ -409,6 +458,7 @@ pyrust_module! {
     /// For non-PyInstance values only sequences (list, tuple, str, bytes) and
     /// range are reversible; all other types (Generator, BuiltinObject
     /// iterators, …) raise TypeError.
+    #[arity_style(expected_got)]
     fn reversed(#[positional_only] seq: PyValue) -> Result<Value> {
         let uses_special_method = reversed_uses_special_method(&seq.0);
         if let ValueKind::PyInstance(inst) = seq.0.kind() {

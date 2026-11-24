@@ -360,6 +360,17 @@ impl Interpreter {
         }
 
         if let Some((name, receiver)) = pyrust_builtins::bound_method::as_bound_method(function) {
+            if let Some(desc) = pyrust_builtins::bound_method::target_descriptor(function) {
+                let mut call_args = Vec::with_capacity(args.len() + 1);
+                call_args.push(ExpandedCallArg {
+                    name: None,
+                    value: receiver,
+                });
+                call_args.extend(args.iter().cloned());
+                return self
+                    .call_function_expanded(Value::builtin_function(desc), &call_args)
+                    .map(Some);
+            }
             return self
                 .call_captured_bound_method_dispatch(name, receiver, args)
                 .map(Some);

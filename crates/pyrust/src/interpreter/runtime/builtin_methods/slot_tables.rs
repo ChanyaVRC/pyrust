@@ -144,6 +144,21 @@ fn primitive_owned_dunder_sentinel(kind: PrimitiveClassKind, dunder: &str) -> Op
     })
 }
 
+/// Return the primitive-owned object-level dunder sentinel if `class` itself
+/// (not merely an ancestor) is a primitive class that owns `dunder`
+/// (`__repr__`, `__str__`, `__hash__`, `__format__`). Used by `super()` MRO
+/// walks so `super().__repr__()` inside `class MyInt(int)` resolves
+/// `int.__repr__` before falling through to `object.__repr__` (issue #2964).
+pub(crate) fn primitive_class_direct_object_dunder(
+    class: &Rc<RefCell<PyClass>>,
+    dunder: &str,
+) -> Option<&'static str> {
+    if !matches!(dunder, "__hash__" | "__repr__" | "__str__" | "__format__") {
+        return None;
+    }
+    primitive_class_kind(class).and_then(|kind| primitive_owned_dunder_sentinel(kind, dunder))
+}
+
 /// Resolve the primitive-owned descriptor sentinel for `class`.
 ///
 /// C3 order preserves normal builtin subclass inheritance (`class L(list)`),
@@ -512,7 +527,7 @@ pub(super) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
             ("__divmod__", P),
             ("__neg__", P),
             ("__pos__", P),
-            ("__abs__", P),
+            ("__abs__", PA),
             ("__invert__", P),
             // Issue #2297: `int.__round__`/`__index__`/`__trunc__`/`__floor__`/
             // `__ceil__` are int-owned descriptors (`__index__` a slot wrapper,
@@ -559,7 +574,7 @@ pub(super) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
             ("__divmod__", P),
             ("__neg__", P),
             ("__pos__", P),
-            ("__abs__", P),
+            ("__abs__", PA),
             ("__radd__", P),
             ("__rsub__", P),
             ("__rmul__", P),

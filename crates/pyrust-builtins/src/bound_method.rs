@@ -36,6 +36,12 @@ pub struct BoundMethodState {
     /// bound methods to None, permits arbitrary assignment, and resets the
     /// slot to None on deletion.
     pub module: Value,
+    /// Optional explicit unbound builtin descriptor target (e.g.
+    /// `object.__repr__` or `list.__len__` bound via `descr.__get__(obj)`).
+    /// When `Some`, calling this bound method invokes that exact descriptor
+    /// with `receiver` as `args[0]` rather than re-dispatching on `receiver`'s
+    /// own type.
+    pub target_descriptor: Option<&'static str>,
 }
 
 pub struct BoundMethodOps;
@@ -60,9 +66,12 @@ impl BuiltinTypeOps for BoundMethodOps {
         let recv_type = pyrust_core::builtin_type_name(&s.receiver);
         // Issue #2397: a bound slot dunder (`[1].__len__`) presents as a CPython
         // `method-wrapper`, including its receiver's identity address.
-        if pyrust_core::builtin_callable_presentation(&format!("{recv_type}.{}", s.name))
-            .is_wrapper_descriptor()
-        {
+        let is_wrapper = match s.target_descriptor {
+            Some(desc) => pyrust_core::builtin_callable_presentation(desc).is_wrapper_descriptor(),
+            None => pyrust_core::builtin_callable_presentation(&format!("{recv_type}.{}", s.name))
+                .is_wrapper_descriptor(),
+        };
+        if is_wrapper {
             format!(
                 "<method-wrapper '{}' of {} object at 0x{:x}>",
                 s.name,
@@ -108,6 +117,7 @@ impl BuiltinTypeOps for BoundMethodOps {
             return false;
         };
         method.name == other_method.name
+            && method.target_descriptor == other_method.target_descriptor
             && same_receiver_identity(&method.receiver, &other_method.receiver)
     }
 
@@ -190,8 +200,41 @@ pub fn bound_method(name: impl Into<String>, receiver: Value) -> Value {
         name: Rc::new(name.into()),
         receiver,
         module: Value::none(),
+        target_descriptor: None,
     });
     Value::builtin_object(BOUND_METHOD_OPS, state)
+}
+
+/// Construct a bound-method Value produced by binding a specific unbound
+/// builtin descriptor (`descr.__get__(receiver)`), preserving the exact
+/// descriptor target on call and presentation (issue #2964).
+pub fn bound_method_for_descriptor(
+    name: impl Into<String>,
+    receiver: Value,
+    target_descriptor: &'static str,
+) -> Value {
+    let state: Box<dyn Any> = Box::new(BoundMethodState {
+        name: Rc::new(name.into()),
+        receiver,
+        module: Value::none(),
+        target_descriptor: Some(target_descriptor),
+    });
+    Value::builtin_object(BOUND_METHOD_OPS, state)
+}
+
+/// Return the explicit descriptor target bound into a `BoundMethodState`, if
+/// this bound method came from `descriptor.__get__(receiver)`.
+pub fn target_descriptor(value: &Value) -> Option<&'static str> {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return None;
+    };
+    if !has_bound_method_ops(ops) {
+        return None;
+    }
+    let borrow = state.borrow();
+    borrow
+        .downcast_ref::<BoundMethodState>()
+        .and_then(|s| s.target_descriptor)
 }
 
 /// Extract `(name, receiver)` from a bound-method Value, or None if it's
@@ -251,6 +294,9 @@ pub fn is_bound_method(value: &Value) -> bool {
 /// (`[1].__len__`), which CPython presents as a `method-wrapper` rather than
 /// the generic `builtin_function_or_method`.  Drives `type(...).__name__`.
 pub fn is_method_wrapper(value: &Value) -> bool {
+    if let Some(desc) = target_descriptor(value) {
+        return pyrust_core::builtin_callable_presentation(desc).is_wrapper_descriptor();
+    }
     let Some((name, receiver)) = as_bound_method(value) else {
         return false;
     };

@@ -96,24 +96,13 @@ pyrust_module! {
         Ok(Value::string(s))
     }
 
-    /// Issue #1256: `object.__repr__(self)` — the default __repr__ on `object`.
+    /// Issue #1256 / #2964: `object.__repr__(self)` — the default `__repr__` on
+    /// `object`.
     ///
-    /// Returns the canonical `<ClassName object at 0xADDR>` format for plain
-    /// instances.  For `PyInstance` values that carry a primitive backing store
-    /// (e.g. a `MyList(list)` subclass instance), delegates to the backing data
-    /// so that `list.__repr__(MyList([1,2,3]))` returns `[1, 2, 3]` rather than
-    /// the generic `<__main__.MyList object at 0x...>` form.
-    ///
-    /// Issue #1600: regression from PR #1595 (primitive types got
-    /// `base: Some(OBJECT_CLASS)`), which caused `list.__repr__` to resolve via
-    /// MRO to this sentinel and fall through to `self_val.repr_raw()`.
-    ///
-    /// Note: we call `render_value_repr(interp, &backing)` (on the raw backing
-    /// value, NOT on the instance) so that nested `PyInstance` elements inside a
-    /// list/dict/tuple get their own `__repr__` dispatched correctly, but we do
-    /// NOT re-run the MRO lookup on the outer instance — this matches CPython's
-    /// behaviour where `list.__repr__(MyList_with_custom_repr)` still renders the
-    /// list contents, not the custom `__repr__`.
+    /// Always bypasses type-specific `__repr__` overrides (including built-in
+    /// primitives like `int`, `list`, `str`) and formats the CPython default
+    /// `<type object at 0xADDR>` (or `<module.qualname object at 0xADDR>` for
+    /// non-`builtins` classes).
     ///
     /// CPython signature: `object.__repr__(self, /)`
     #[py_name = "object.__repr__"]
@@ -121,66 +110,51 @@ pyrust_module! {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__repr__", "object")
         })?;
-        if native_iterator_class(&self_val).is_some() {
-            return Ok(Value::string(render_value_repr(_interp, &self_val)?));
+        if args.iter().skip(1).any(|a| a.name.is_some()) {
+            return Err(pyrust_core::type_err!(
+                "wrapper __repr__() takes no keyword arguments"
+            ));
         }
-        // Issue #1600: for a PyInstance with backing primitive data, render the
-        // backing value directly (bypassing MRO lookup) so that
-        // `list.__repr__(MyList([1,2,3]))` returns `[1, 2, 3]`.
-        if let ValueKind::PyInstance(inst_rc) = self_val.kind() {
-            let inst_rc = Rc::clone(inst_rc);
-            if let Some(backing) = instance_builtin_data(&inst_rc) {
-                let class = Rc::clone(&inst_rc.borrow().class);
-                // Do not dispatch while matching a mutable container's
-                // `ValueKind`: List/Dict/Set carry a live RefCell read guard.
-                // An element __repr__ is allowed to mutate the same backing
-                // container, so classify those containers with short-lived
-                // helpers before entering interpreter-aware rendering.
-                let s = if backing.is_list() || backing.is_dict() || backing.is_tuple() {
-                    render_value_repr(_interp, &backing)?
-                } else if let Some(is_empty) = backing.set_len().map(|len| len == 0) {
-                    let class_name = class.borrow().name.clone();
-                    if is_empty {
-                        format!("{class_name}()")
-                    } else {
-                        let inner = render_value_repr(_interp, &backing)?;
-                        format!("{class_name}({inner})")
-                    }
-                } else {
-                    match backing.kind() {
-                        ValueKind::Str(_)
-                        | ValueKind::Int(_)
-                        | ValueKind::BigInt(_)
-                        | ValueKind::Bool(_)
-                        | ValueKind::Float(_)
-                        | ValueKind::Complex(_, _)
-                        | ValueKind::Bytes(_) => backing.repr_raw(),
-                        ValueKind::BuiltinObject { ops, .. }
-                            if ops.canonical_class_tag()
-                                == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
-                        {
-                            let class_name = class.borrow().name.clone();
-                            let items = pyrust_builtins::frozenset::as_items(&backing);
-                            let is_empty = items.as_ref().is_none_or(|rc| rc.is_empty());
-                            if is_empty {
-                                format!("{class_name}()")
-                            } else {
-                                let snapshot: Vec<_> =
-                                    items.unwrap().iter().cloned().collect();
-                                let mut parts = Vec::with_capacity(snapshot.len());
-                                for k in &snapshot {
-                                    parts.push(render_key_repr(_interp, k)?);
-                                }
-                                format!("{class_name}({{{}}})", parts.join(", "))
-                            }
-                        }
-                        _ => self_val.repr_raw(),
-                    }
-                };
-                return Ok(Value::string(s));
+        if args.len() > 1 {
+            return Err(pyrust_core::type_err!(
+                "expected 0 arguments, got {}",
+                args.len() - 1
+            ));
+        }
+        let addr = match self_val.object_id().kind() {
+            ValueKind::Int(id) => id as usize,
+            _ => 0,
+        };
+        let display_type = match self_val.kind() {
+            ValueKind::PyInstance(inst_rc) => {
+                let mut out = String::new();
+                inst_rc.borrow().class.borrow().push_repr_display_name(&mut out);
+                out
             }
-        }
-        Ok(Value::string(self_val.repr_raw()))
+            ValueKind::PyClass(class_rc) => {
+                if let Some(meta) = class_rc.borrow().metatype.clone() {
+                    let mut out = String::new();
+                    meta.borrow().push_repr_display_name(&mut out);
+                    out
+                } else {
+                    "type".to_string()
+                }
+            }
+            ValueKind::BuiltinFunction(func_name) => {
+                if matches!(
+                    func_name,
+                    "generator" | "str" | "property" | "wrapper_descriptor"
+                ) {
+                    "type".to_string()
+                } else {
+                    full_type_name_str(&self_val).into_owned()
+                }
+            }
+            _ => full_type_name_str(&self_val).into_owned(),
+        };
+        Ok(Value::string(format!(
+            "<{display_type} object at 0x{addr:x}>"
+        )))
     }
 
     /// Issue #1256: `object.__eq__(self, other)` — default identity equality.

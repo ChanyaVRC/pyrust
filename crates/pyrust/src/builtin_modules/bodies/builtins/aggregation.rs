@@ -20,13 +20,44 @@ pyrust_module! {
     ///     the moment a `float` is involved, for bit-exact float sums;
     ///   * falls back to the general `__add__` loop for a non-numeric
     ///     start or the first non-numeric element.
-    fn sum(
-        #[positional_only] iterable: PyValue,
-        #[positional_only]
-        #[default(None)]
-        start: Option<PyValue>,
-    ) -> Result<Value> {
-        let start = start.map(|v| v.0);
+    fn sum(args) -> Result<Value> {
+        let mut positional: Vec<Value> = Vec::with_capacity(args.len());
+        let mut start_kw: Option<Value> = None;
+        for a in args {
+            match a.name.as_deref() {
+                None => positional.push(a.value.clone()),
+                Some("start") if start_kw.is_none() => start_kw = Some(a.value.clone()),
+                Some(_) => {}
+            }
+        }
+        // CPython 3.12 `builtin_sum` (`sum(iterable, /, start=0)`):
+        //   1. Too many total arguments (`> 2`) -> `sum() takes at most 2 arguments (N given)`
+        //   2. Missing positional `iterable` -> `sum() takes at least 1 positional argument (0 given)`
+        //   3. Any keyword other than `start` -> `'k' is an invalid keyword argument for sum()`
+        if args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("sum() takes at most 2 arguments ({} given)", args.len()),
+            ));
+        }
+        if positional.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "sum() takes at least 1 positional argument (0 given)".to_string(),
+            ));
+        }
+        for a in args {
+            if let Some(k) = a.name.as_deref()
+                && k != "start"
+            {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{k}' is an invalid keyword argument for sum()"),
+                ));
+            }
+        }
+        let iterable = PyValue(positional[0].clone());
+        let start = positional.get(1).cloned().or(start_kw);
         // CPython rejects str/bytes/bytearray as the *start* (accumulator)
         // before entering the loop; element-level rejection falls out of the
         // normal `int + str` TypeError in the generic path.
