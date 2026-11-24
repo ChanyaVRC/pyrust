@@ -111,9 +111,7 @@ fn generation_member(generation: &Value, name: &str) -> Result<Value> {
     if let Some(module) = module {
         return module
             .borrow()
-            .attrs
-            .get(name)
-            .cloned()
+            .get_attr_value(name)
             .ok_or_else(|| internal(name));
     }
     let borrow = state.borrow();
@@ -180,7 +178,7 @@ fn with_lru_classes<R>(
     let member = |name: &str| {
         module
             .as_ref()
-            .and_then(|module| module.borrow().attrs.get(name).cloned())
+            .and_then(|module| module.borrow().get_attr_value(name))
             .or_else(|| fallback.get(name).cloned())
             .ok_or_else(|| internal(name))
     };
@@ -188,7 +186,7 @@ fn with_lru_classes<R>(
     let factory = class_value(member("_lru_cache_factory")?, "_lru_cache_factory")?;
     let cache_info = if let Some(class) = module
         .as_ref()
-        .and_then(|module| module.borrow().attrs.get("_CacheInfo").cloned())
+        .and_then(|module| module.borrow().get_attr_value("_CacheInfo"))
     {
         class
     } else if let Some(class) = retained_cache_info {
