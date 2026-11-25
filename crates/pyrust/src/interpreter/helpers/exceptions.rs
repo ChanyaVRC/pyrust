@@ -615,16 +615,33 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     let connection_refused_error = mk("ConnectionRefusedError", Some(Rc::clone(&connection_error)));
     let connection_reset_error = mk("ConnectionResetError", Some(Rc::clone(&connection_error)));
     // CPython: io.UnsupportedOperation inherits from both OSError and ValueError
-    // (multiple inheritance).  pyrust uses single-inheritance; we pick OSError
-    // as the primary base since that is the first in CPython's MRO and what most
-    // user code catches (`except OSError`).  The class is registered under both
-    // "io.UnsupportedOperation" (the dotted name used by raise sites) and
-    // "UnsupportedOperation" (the bare name printed in tracebacks).
-    let unsupported_operation = mk("UnsupportedOperation", Some(Rc::clone(&os_error)));
-    unsupported_operation
+    // (multiple inheritance: `(OSError, ValueError)`).  Primary base is OSError
+    // and extra base is ValueError, matching CPython's `__bases__` and MRO.
+    // The class is registered under both "io.UnsupportedOperation" (the dotted
+    // name used by raise sites) and "UnsupportedOperation" (the bare name
+    // printed in tracebacks).
+    let mut unsupported_attrs = IndexMap::new();
+    unsupported_attrs.insert("__module__".to_string(), Value::string("io"));
+    let unsupported_operation = Rc::new(RefCell::new(PyClass {
+        extra_bases: vec![Rc::clone(&value_error)],
+        builtin_exception_name: Some("UnsupportedOperation"),
+        ..PyClass::new(
+            "UnsupportedOperation",
+            "UnsupportedOperation",
+            Some(Rc::clone(&os_error)),
+            unsupported_attrs,
+        )
+    }));
+    os_error
+        .borrow()
+        .subclasses
         .borrow_mut()
-        .attrs
-        .insert("__module__".to_string(), Value::string("io"));
+        .push(Rc::downgrade(&unsupported_operation));
+    value_error
+        .borrow()
+        .subclasses
+        .borrow_mut()
+        .push(Rc::downgrade(&unsupported_operation));
     // Python 3.3+: IOError and EnvironmentError are aliases for OSError.
     let io_error = Rc::clone(&os_error);
     let environment_error = Rc::clone(&os_error);

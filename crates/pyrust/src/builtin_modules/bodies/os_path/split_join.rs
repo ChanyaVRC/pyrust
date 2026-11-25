@@ -4,9 +4,72 @@ use crate::error::{PyError, Result};
 use crate::interpreter::{ExpandedCallArg, Interpreter, reject_keyword_args_expanded};
 use crate::value::{Value, ValueKind};
 
-/// Common preamble for single-`str`-arg `os.path` functions. Rejects kwargs,
-/// requires exactly one positional argument, and extracts the string contents.
-pub(super) fn single_path(fn_name: &str, args: &[ExpandedCallArg]) -> Result<String> {
+/// Resolve a `str` or `os.PathLike` (returning `str`) via `__fspath__`.
+pub(super) fn fspath_to_str(
+    interp: &mut Interpreter,
+    fn_name: &str,
+    value: &Value,
+) -> Result<String> {
+    if let ValueKind::Str(s) = value.kind() {
+        return Ok(s.to_string());
+    }
+    if let Ok(method) = interp.get_attr(value, "__fspath__") {
+        let res = interp.call_function_expanded(method, &[])?;
+        return match res.kind() {
+            ValueKind::Str(s) => Ok(s.to_string()),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{fn_name}(): expected __fspath__() to return str, not {}",
+                    crate::interpreter::value_type_name_str(&res),
+                ),
+            )),
+        };
+    }
+    Err(PyError::named(
+        "TypeError",
+        format!(
+            "expected str, bytes or os.PathLike object, not {}",
+            crate::interpreter::value_type_name_str(value),
+        ),
+    ))
+}
+
+/// Resolve a `str`, `bytes`, or `os.PathLike` object via `__fspath__`.
+pub(super) fn fspath_value(interp: &mut Interpreter, value: &Value) -> Result<Value> {
+    if matches!(value.kind(), ValueKind::Str(_) | ValueKind::Bytes(_)) {
+        return Ok(value.clone());
+    }
+    if let Ok(method) = interp.get_attr(value, "__fspath__") {
+        let res = interp.call_function_expanded(method, &[])?;
+        if matches!(res.kind(), ValueKind::Str(_) | ValueKind::Bytes(_)) {
+            return Ok(res);
+        }
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "expected {}.__fspath__() to return str or bytes, not {}",
+                crate::interpreter::value_type_name_str(value),
+                crate::interpreter::value_type_name_str(&res),
+            ),
+        ));
+    }
+    Err(PyError::named(
+        "TypeError",
+        format!(
+            "expected str, bytes or os.PathLike object, not {}",
+            crate::interpreter::value_type_name_str(value),
+        ),
+    ))
+}
+
+/// Common preamble for single-path-arg `os.path` functions. Rejects kwargs,
+/// requires exactly one positional argument, and extracts the string via `os.fspath`.
+pub(super) fn single_path(
+    interp: &mut Interpreter,
+    fn_name: &str,
+    args: &[ExpandedCallArg],
+) -> Result<String> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.len() != 1 {
         // CPython raises `TypeError` for wrong-arity calls.
@@ -15,16 +78,14 @@ pub(super) fn single_path(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Str
             format!("{fn_name}() takes exactly one argument"),
         ));
     }
-    match args[0].value.kind() {
-        ValueKind::Str(s) => Ok(s.to_string()),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}() argument must be str"),
-        )),
-    }
+    fspath_to_str(interp, fn_name, &args[0].value)
 }
 
-pub(super) fn join_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value> {
+pub(super) fn join_impl(
+    interp: &mut Interpreter,
+    fn_name: &str,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.is_empty() {
         return Err(PyError::named(
@@ -33,18 +94,133 @@ pub(super) fn join_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value
         ));
     }
     let mut parts: Vec<String> = Vec::with_capacity(args.len());
-    for (i, a) in args.iter().enumerate() {
-        match a.value.kind() {
-            ValueKind::Str(s) => parts.push(s.to_string()),
-            _ => {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{fn_name}() argument {} must be str", i + 1),
-                ));
-            }
-        }
+    for a in args {
+        parts.push(fspath_to_str(interp, fn_name, &a.value)?);
     }
     Ok(Value::string(host_join(&parts)))
+}
+
+pub(super) fn commonpath_impl(
+    interp: &mut Interpreter,
+    fn_name: &str,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
+    reject_keyword_args_expanded(fn_name, args)?;
+    if args.len() != 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "{fn_name}() takes exactly one argument ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let items = interp.collect_iterable(&args[0].value)?;
+    if items.is_empty() {
+        return Err(PyError::named(
+            "ValueError",
+            "commonpath() arg is an empty sequence".to_string(),
+        ));
+    }
+    let mut paths: Vec<String> = Vec::with_capacity(items.len());
+    for it in &items {
+        paths.push(fspath_to_str(interp, fn_name, it)?);
+    }
+    Ok(Value::string(host_commonpath(&paths)?))
+}
+
+pub(super) fn host_commonpath(paths: &[String]) -> Result<String> {
+    if cfg!(windows) {
+        nt_commonpath(paths)
+    } else {
+        posix_commonpath(paths)
+    }
+}
+
+pub(super) fn posix_commonpath(paths: &[String]) -> Result<String> {
+    if paths.is_empty() {
+        return Err(PyError::named(
+            "ValueError",
+            "commonpath() arg is an empty sequence".to_string(),
+        ));
+    }
+    let first_abs = paths[0].starts_with('/');
+    if paths.iter().any(|p| p.starts_with('/') != first_abs) {
+        return Err(PyError::named(
+            "ValueError",
+            "Can't mix absolute and relative paths".to_string(),
+        ));
+    }
+    let split_paths: Vec<Vec<&str>> = paths
+        .iter()
+        .map(|p| {
+            p.split('/')
+                .filter(|c| !c.is_empty() && *c != ".")
+                .collect()
+        })
+        .collect();
+    let s1 = split_paths.iter().min().unwrap();
+    let s2 = split_paths.iter().max().unwrap();
+    let common_len = s1.iter().zip(s2.iter()).take_while(|(a, b)| a == b).count();
+    let prefix = if first_abs { "/" } else { "" };
+    Ok(format!("{prefix}{}", s1[..common_len].join("/")))
+}
+
+pub(super) fn nt_commonpath(paths: &[String]) -> Result<String> {
+    if paths.is_empty() {
+        return Err(PyError::named(
+            "ValueError",
+            "commonpath() arg is an empty sequence".to_string(),
+        ));
+    }
+    let normalized: Vec<String> = paths.iter().map(|p| p.replace('/', "\\")).collect();
+    let split: Vec<(String, String, String)> = normalized.iter().map(|p| nt_splitroot(p)).collect();
+
+    let first_drive_lower = split[0].0.to_lowercase();
+    if split
+        .iter()
+        .any(|(d, _, _)| d.to_lowercase() != first_drive_lower)
+    {
+        return Err(PyError::named(
+            "ValueError",
+            "Paths don't have the same drive".to_string(),
+        ));
+    }
+    let first_has_root = !split[0].1.is_empty();
+    if split
+        .iter()
+        .any(|(_, r, _)| !r.is_empty() != first_has_root)
+    {
+        return Err(PyError::named(
+            "ValueError",
+            "Can't mix absolute and relative paths".to_string(),
+        ));
+    }
+
+    let first_parts: Vec<&str> = split[0]
+        .2
+        .split('\\')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    let mut common_len = first_parts.len();
+    for (_, _, rest) in &split[1..] {
+        let parts: Vec<&str> = rest
+            .split('\\')
+            .filter(|c| !c.is_empty() && *c != ".")
+            .collect();
+        let matched = first_parts
+            .iter()
+            .zip(parts.iter())
+            .take_while(|(a, b)| a.to_lowercase() == b.to_lowercase())
+            .count();
+        common_len = common_len.min(matched);
+    }
+
+    let (ref drive, ref root, _) = split[0];
+    Ok(format!(
+        "{drive}{root}{}",
+        first_parts[..common_len].join("\\")
+    ))
 }
 
 pub(super) fn commonprefix_impl(
@@ -62,30 +238,48 @@ pub(super) fn commonprefix_impl(
             ),
         ));
     }
-    // CPython coerces each element via os.fspath / str; we accept the common
-    // case of a list/tuple of str (what the parity tests and real callers use).
     let items = interp.collect_iterable(&args[0].value)?;
     if items.is_empty() {
         return Ok(Value::string(String::new()));
     }
+    // Accept str / PathLike or bytes (matching CPython's os.fspath coercion).
+    let first = fspath_value(interp, &items[0])?;
+    if matches!(first.kind(), ValueKind::Bytes(_)) {
+        let mut all_bytes: Vec<Vec<u8>> = Vec::with_capacity(items.len());
+        for it in &items {
+            let v = fspath_value(interp, it)?;
+            match v.kind() {
+                ValueKind::Bytes(b) => all_bytes.push(b.to_vec()),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "Can't mix strings and bytes in path components".to_string(),
+                    ));
+                }
+            }
+        }
+        let min = all_bytes.iter().min().unwrap();
+        let max = all_bytes.iter().max().unwrap();
+        let prefix_len = min
+            .iter()
+            .zip(max.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        return Ok(Value::bytes(min[..prefix_len].to_vec()));
+    }
     let mut strs: Vec<String> = Vec::with_capacity(items.len());
     for it in &items {
-        match it.kind() {
+        let v = fspath_value(interp, it)?;
+        match v.kind() {
             ValueKind::Str(s) => strs.push(s.to_string()),
             _ => {
                 return Err(PyError::named(
                     "TypeError",
-                    format!(
-                        "{fn_name}() argument must be a sequence of str, not {}",
-                        crate::interpreter::value_type_name_str(it),
-                    ),
+                    "Can't mix strings and bytes in path components".to_string(),
                 ));
             }
         }
     }
-    // Longest common prefix over Unicode scalar values. CPython compares the
-    // strings directly (min vs max suffices because string ordering bounds the
-    // shared prefix).
     let min = strs.iter().min().unwrap();
     let max = strs.iter().max().unwrap();
     let prefix_len = min

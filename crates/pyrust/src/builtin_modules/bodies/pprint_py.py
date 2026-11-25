@@ -113,32 +113,9 @@ class _safe_key:
                     (str(type(other.obj)), id(other.obj)))
 
 
-class _safe_tuple(tuple):
-    """Helper for comparing 2-tuples of dict (key, value) pairs.
-
-    CPython's `_safe_tuple` is a plain function returning a 2-tuple of
-    `_safe_key`; tuple ordering then delegates element-by-element to
-    `_safe_key.__lt__`.  pyrust's built-in tuple `<` does not yet route
-    element comparison through a user-defined `__lt__` (so
-    `(_safe_key(a),) < (_safe_key(b),)` raises `TypeError`).  Until that is
-    fixed at the core level, this subclass spells out the lexicographic
-    `__lt__` itself, calling `_safe_key.__lt__` directly (which works), so
-    `sorted(items, key=_safe_tuple)` matches CPython output.
-    """
-
-    __slots__ = ()
-
-    def __new__(cls, t):
-        return super().__new__(cls, (_safe_key(t[0]), _safe_key(t[1])))
-
-    def __lt__(self, other):
-        a0, a1 = self
-        b0, b1 = other
-        if a0 < b0:
-            return True
-        if b0 < a0:
-            return False
-        return a1 < b1
+def _safe_tuple(t):
+    "Helper function for comparing 2-tuples"
+    return _safe_key(t[0]), _safe_key(t[1])
 
 
 class PrettyPrinter:

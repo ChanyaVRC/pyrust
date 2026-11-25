@@ -319,17 +319,12 @@ pyrust_module! {
     /// CPython: open(file, mode='r', buffering=-1, encoding=None, errors=None,
     /// newline=None, closefd=True, opener=None).
     /// <https://docs.python.org/3/library/functions.html#open>
-    ///
-    /// First builtin migrated to the typed-signature dialect (#395) — the
-    /// macro-emitted prelude rejects unknown kwargs, validates the positional
-    /// count, and binds typed Rust locals.  The `encoding`, `buffering`,
-    /// `errors`, `newline`, and `closefd` parameters added here to fix #1360.
     fn open(
-        path: PyStr,
+        file: PyValue,
         #[default("r".into())]
         mode: PyStr,
-        #[default(None)]
-        buffering: Option<PyValue>,
+        #[default(PyValue(Value::int(-1)))]
+        buffering: PyValue,
         #[default(None)]
         encoding: Option<PyStr>,
         #[default(None)]
@@ -338,20 +333,98 @@ pyrust_module! {
         newline: Option<PyStr>,
         #[default(PyValue(Value::bool_(true)))]
         closefd: PyValue,
+        #[default(None)]
+        opener: Option<PyValue>,
     ) -> Result<Value> {
-        let _ = buffering; // accepted, not yet implemented (buffering is complex)
-        let _ = errors;    // accepted, not yet implemented
-        let _ = newline;   // accepted, not yet implemented
+        let _ = opener;
+        let buffering_i64 = match buffering.0.kind() {
+            ValueKind::Int(n) => n,
+            ValueKind::Bool(b) => i64::from(b),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "'{}' object cannot be interpreted as an integer",
+                        pyrust_core::py_value_display_name(&buffering.0),
+                    ),
+                ));
+            }
+        };
         // The default is True, but an explicitly supplied None is an ordinary
         // false value.  Keeping the bound value as PyValue (rather than
         // Option<PyValue>) preserves that omitted-vs-None distinction.
         let closefd_bool = _interp.truthy_value(&closefd.0)?;
-        pyrust_builtins::file::open(
-            &path,
-            &mode,
-            encoding.as_deref(),
-            closefd_bool,
-        )
+        let opts = pyrust_builtins::file::FileOpenOptions {
+            mode: &mode,
+            buffering: buffering_i64,
+            encoding: encoding.as_deref(),
+            errors: errors.as_deref(),
+            newline: newline.as_deref(),
+            closefd: closefd_bool,
+        };
+        match file.0.kind() {
+            ValueKind::Int(fd) => {
+                if fd < 0 {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "negative file descriptor".to_string(),
+                    ));
+                }
+                let os_file = crate::builtin_modules::os::clone_fd(fd)
+                    .map_err(|e| PyError::from_io_error(&e, None))?;
+                pyrust_builtins::file::open_fd(
+                    fd,
+                    os_file,
+                    crate::builtin_modules::os::close_fd_raw,
+                    opts,
+                )
+            }
+            ValueKind::Bool(b) => {
+                let fd = i64::from(b);
+                let os_file = crate::builtin_modules::os::clone_fd(fd)
+                    .map_err(|e| PyError::from_io_error(&e, None))?;
+                pyrust_builtins::file::open_fd(
+                    fd,
+                    os_file,
+                    crate::builtin_modules::os::close_fd_raw,
+                    opts,
+                )
+            }
+            ValueKind::Str(path) => pyrust_builtins::file::open_with_options(path, opts),
+            ValueKind::Bytes(bytes) => {
+                let path = String::from_utf8_lossy(bytes);
+                pyrust_builtins::file::open_with_options(&path, opts)
+            }
+            _ => {
+                // Support os.PathLike objects (e.g. pathlib.Path) via __fspath__().
+                let resolved = if let Ok(method) = _interp.get_attr(&file.0, "__fspath__") {
+                    let result = _interp.call_function_expanded(method, &[])?;
+                    match result.kind() {
+                        ValueKind::Str(s) => s.to_string(),
+                        ValueKind::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "expected {}.__fspath__() to return str or bytes, not {}",
+                                    pyrust_core::py_value_display_name(&file.0),
+                                    pyrust_core::py_value_display_name(&result),
+                                ),
+                            ));
+                        }
+                    }
+                } else {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "expected str, bytes or os.PathLike object, not {}",
+                            pyrust_core::py_value_display_name(&file.0),
+                        ),
+                    ));
+                };
+                pyrust_builtins::file::open_with_options(&resolved, opts)
+            }
+        }
     }
 
     /// CPython: format(value[, format_spec]).

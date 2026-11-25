@@ -4,8 +4,10 @@
 //! posix arm, so these exercise the `nt_*` helpers directly. Expected values
 //! are taken verbatim from CPython 3.12's `ntpath`.
 
-use super::normalize::{nt_isabs, nt_normpath, nt_relpath};
-use super::split_join::{nt_join, nt_split, nt_splitdrive, nt_splitext, nt_splitroot};
+use super::normalize::{nt_expandvars, nt_isabs, nt_normpath, nt_relpath, posix_expandvars};
+use super::split_join::{
+    nt_commonpath, nt_join, nt_split, nt_splitdrive, nt_splitext, nt_splitroot, posix_commonpath,
+};
 
 fn sd(p: &str) -> (String, String) {
     nt_splitdrive(p)
@@ -133,4 +135,53 @@ fn splitroot_matches_cpython() {
         r("Windows/notepad"),
         ("".into(), "".into(), "Windows/notepad".into())
     );
+}
+
+#[test]
+fn commonpath_matches_cpython() {
+    let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        posix_commonpath(&s(&["/usr/lib", "/usr/local/lib"])).unwrap(),
+        "/usr"
+    );
+    assert_eq!(posix_commonpath(&s(&["/a/b", "/c/d"])).unwrap(), "/");
+    assert_eq!(posix_commonpath(&s(&["a/b/c", "a/b/d"])).unwrap(), "a/b");
+    assert_eq!(posix_commonpath(&s(&["a/b", "c/d"])).unwrap(), "");
+    assert!(
+        posix_commonpath(&s(&["/a", "a"]))
+            .unwrap_err()
+            .class_name_is("ValueError")
+    );
+    assert!(
+        posix_commonpath(&s(&[]))
+            .unwrap_err()
+            .class_name_is("ValueError")
+    );
+
+    assert_eq!(nt_commonpath(&s(&[r"C:\a\b", "c:/a/c"])).unwrap(), r"C:\a");
+    assert_eq!(nt_commonpath(&s(&[r"C:\a", r"C:\b"])).unwrap(), r"C:\");
+    assert_eq!(nt_commonpath(&s(&["a/b/c", r"a\b\d"])).unwrap(), r"a\b");
+    assert!(
+        nt_commonpath(&s(&[r"C:\a", r"D:\a"]))
+            .unwrap_err()
+            .class_name_is("ValueError")
+    );
+    assert!(
+        nt_commonpath(&s(&[r"C:\a", "a"]))
+            .unwrap_err()
+            .class_name_is("ValueError")
+    );
+}
+
+#[test]
+fn expandvars_preserves_unknown_vars() {
+    assert_eq!(
+        posix_expandvars("$PYRUST_NO_SUCH_ENV_3206/${PYRUST_NO_SUCH_ENV_3206}"),
+        "$PYRUST_NO_SUCH_ENV_3206/${PYRUST_NO_SUCH_ENV_3206}"
+    );
+    assert_eq!(
+        nt_expandvars("%PYRUST_NO_SUCH_ENV_3206%/$PYRUST_NO_SUCH_ENV_3206/%%"),
+        "%PYRUST_NO_SUCH_ENV_3206%/$PYRUST_NO_SUCH_ENV_3206/%"
+    );
+    assert_eq!(nt_expandvars("'%PATH%'"), "'%PATH%'");
 }

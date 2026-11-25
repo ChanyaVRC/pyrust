@@ -36,8 +36,25 @@ impl Interpreter {
         // custom-mapping lookup routes through `__getitem__` so `__missing__`
         // is honoured.
         let is_mapping = has_named_key && is_percent_format_mapping(&args);
+        let tuple_backing: Option<Value> = if is_mapping {
+            None
+        } else {
+            match args.kind() {
+                ValueKind::PyInstance(inst)
+                    if find_immutable_primitive_base(&inst.borrow().class) == Some("tuple") =>
+                {
+                    builtin_data_backing(&args)
+                }
+                _ => None,
+            }
+        };
         let positional: Option<&[Value]> = if is_mapping {
             None
+        } else if let Some(backing) = tuple_backing.as_ref() {
+            match backing.kind() {
+                ValueKind::Tuple(items) => Some(items),
+                _ => Some(std::slice::from_ref(&args)),
+            }
         } else {
             match args.kind() {
                 ValueKind::Tuple(items) => Some(items),

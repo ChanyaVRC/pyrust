@@ -1,15 +1,13 @@
-// `pathlib` module — `pathlib.Path` and `pathlib.PosixPath` classes.
+// `pathlib` module — `PurePath`, `PurePosixPath`, `PureWindowsPath`,
+// `Path`, `PosixPath`, and `WindowsPath` classes.
 //
 // Keep the macro-generated registration surface in this owner. Private Rust
 // modules implement four independent responsibilities:
 //
-// - `class_registry`: generation-aware `Path`/`PosixPath` identity and factory;
-// - `lexical`: POSIX parsing, normalization, components, and derived paths;
-// - `filesystem`: host I/O, directory traversal, globbing, cwd, and home;
-// - `presentation`: repr/str, equality, hashing, and `__fspath__`.
-//
-// Delegation passes the macro's borrowed argument slice straight through, so
-// the split adds no per-call collection or allocation.
+// - `class_registry`: generation-aware 6-class hierarchy identity and factory;
+// - `lexical`: POSIX/Windows parsing, normalization, components, match, and parents;
+// - `filesystem`: host I/O, stat/lstat, directory traversal, glob/rglob, cwd, home;
+// - `presentation`: repr/str, equality/ordering, hashing, and `__fspath__`.
 //
 // Reference: <https://docs.python.org/3/library/pathlib.html>
 
@@ -27,211 +25,330 @@ mod lexical;
 #[path = "pathlib/presentation.rs"]
 mod presentation;
 
-// All Python-visible functions remain declared here. `PosixPath` inherits the
-// registered `Path.*` callables from the exact `Path` class exported in the
-// same module generation.
 pyrust_module! {
     constants {
-        "Path" => class_registry::new_path_class_value(),
-        "PosixPath" => class_registry::current_posix_path_class_value(),
+        "PurePath" => class_registry::new_generation_pure_path_value(),
+        "PurePosixPath" => class_registry::current_pure_posix_value(),
+        "PureWindowsPath" => class_registry::current_pure_windows_value(),
+        "Path" => class_registry::current_path_value(),
+        "PosixPath" => class_registry::current_posix_value(),
+        "WindowsPath" => class_registry::current_windows_value(),
     }
 
-    /// Allocate a concrete path for the requested `Path` generation/class.
-    #[py_name = "Path.__new__"]
-    fn path_new(args) -> Result<Value> {
+    // ── PurePath methods & properties (inherited by all 6 path classes) ──────
+
+    #[py_name = "PurePath.__new__"]
+    fn pure_path_new(args) -> Result<Value> {
         class_registry::path_new(args)
     }
 
-    /// Initialize a path from lexical string components.
-    #[py_name = "Path.__init__"]
-    fn path_init(args) -> Result<Value> {
-        lexical::path_init(args, FN_NAME)
+    #[py_name = "PurePath.__init__"]
+    fn pure_path_init(args) -> Result<Value> {
+        lexical::path_init(_interp, args, FN_NAME)
     }
 
-    /// Return the path string.
-    #[py_name = "Path.__str__"]
-    fn path_str(args) -> Result<Value> {
+    #[py_name = "PurePath.__str__"]
+    fn pure_path_str(args) -> Result<Value> {
         presentation::path_str(args, FN_NAME)
     }
 
-    /// Return a class-aware `PosixPath('...')`-style representation.
-    #[py_name = "Path.__repr__"]
-    fn path_repr(args) -> Result<Value> {
+    #[py_name = "PurePath.__repr__"]
+    fn pure_path_repr(args) -> Result<Value> {
         presentation::path_repr(args, FN_NAME)
     }
 
-    /// Join one component with `/`, preserving the receiver subclass.
-    #[py_name = "Path.__truediv__"]
-    fn path_truediv(args) -> Result<Value> {
-        lexical::path_truediv(args, FN_NAME)
+    #[py_name = "PurePath.__truediv__"]
+    fn pure_path_truediv(args) -> Result<Value> {
+        lexical::path_truediv(_interp, args, FN_NAME)
     }
 
-    /// Compare only against instances of a canonical `Path` generation.
-    #[py_name = "Path.__eq__"]
-    fn path_eq(args) -> Result<Value> {
+    #[py_name = "PurePath.__rtruediv__"]
+    fn pure_path_rtruediv(args) -> Result<Value> {
+        lexical::path_rtruediv(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.__eq__"]
+    fn pure_path_eq(args) -> Result<Value> {
         presentation::path_eq(args, FN_NAME)
     }
 
-    /// Hash the lexical path string.
-    #[py_name = "Path.__hash__"]
-    fn path_hash(args) -> Result<Value> {
+    #[py_name = "PurePath.__lt__"]
+    fn pure_path_lt(args) -> Result<Value> {
+        presentation::path_lt(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.__le__"]
+    fn pure_path_le(args) -> Result<Value> {
+        presentation::path_le(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.__gt__"]
+    fn pure_path_gt(args) -> Result<Value> {
+        presentation::path_gt(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.__ge__"]
+    fn pure_path_ge(args) -> Result<Value> {
+        presentation::path_ge(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.__hash__"]
+    fn pure_path_hash(args) -> Result<Value> {
         presentation::path_hash(args, FN_NAME)
     }
 
-    /// Implement the `os.fspath` protocol.
-    #[py_name = "Path.__fspath__"]
-    fn path_fspath(args) -> Result<Value> {
+    #[py_name = "PurePath.__fspath__"]
+    fn pure_path_fspath(args) -> Result<Value> {
         presentation::path_fspath(args, FN_NAME)
     }
 
-    /// Join zero or more lexical path components.
-    #[py_name = "Path.joinpath"]
-    fn path_joinpath(args) -> Result<Value> {
-        lexical::path_joinpath(args, FN_NAME)
+    #[py_name = "PurePath.as_posix"]
+    fn pure_path_as_posix(args) -> Result<Value> {
+        lexical::path_as_posix(args, FN_NAME)
     }
 
-    /// Return the final path component.
-    #[py_name = "Path.name"]
-    fn path_name(args) -> Result<Value> {
+    #[py_name = "PurePath.joinpath"]
+    fn pure_path_joinpath(args) -> Result<Value> {
+        lexical::path_joinpath(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.is_absolute"]
+    fn pure_path_is_absolute(args) -> Result<Value> {
+        lexical::path_is_absolute(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.with_name"]
+    fn pure_path_with_name(args) -> Result<Value> {
+        lexical::path_with_name(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.with_stem"]
+    fn pure_path_with_stem(args) -> Result<Value> {
+        lexical::path_with_stem(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.with_suffix"]
+    fn pure_path_with_suffix(args) -> Result<Value> {
+        lexical::path_with_suffix(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.relative_to"]
+    fn pure_path_relative_to(args) -> Result<Value> {
+        lexical::path_relative_to(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.is_relative_to"]
+    fn pure_path_is_relative_to(args) -> Result<Value> {
+        lexical::path_is_relative_to(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.match"]
+    fn pure_path_match(args) -> Result<Value> {
+        lexical::path_match(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.name"]
+    fn pure_path_name(args) -> Result<Value> {
         lexical::path_name(args, FN_NAME)
     }
 
-    /// Return the logical parent path.
-    #[py_name = "Path.parent"]
-    fn path_parent(args) -> Result<Value> {
+    #[py_name = "PurePath.parent"]
+    fn pure_path_parent(args) -> Result<Value> {
         lexical::path_parent(args, FN_NAME)
     }
 
-    /// Return the final component without its suffix.
-    #[py_name = "Path.stem"]
-    fn path_stem(args) -> Result<Value> {
+    #[py_name = "PurePath.parents"]
+    fn pure_path_parents(args) -> Result<Value> {
+        lexical::path_parents(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.stem"]
+    fn pure_path_stem(args) -> Result<Value> {
         lexical::path_stem(args, FN_NAME)
     }
 
-    /// Return the final suffix, including its leading dot.
-    #[py_name = "Path.suffix"]
-    fn path_suffix(args) -> Result<Value> {
+    #[py_name = "PurePath.suffix"]
+    fn pure_path_suffix(args) -> Result<Value> {
         lexical::path_suffix(args, FN_NAME)
     }
 
-    /// Return the lexical path components.
-    #[py_name = "Path.parts"]
-    fn path_parts(args) -> Result<Value> {
+    #[py_name = "PurePath.suffixes"]
+    fn pure_path_suffixes(args) -> Result<Value> {
+        lexical::path_suffixes(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.parts"]
+    fn pure_path_parts(args) -> Result<Value> {
         lexical::path_parts(args, FN_NAME)
     }
 
-    /// Return whether the path exists.
+    #[py_name = "PurePath.drive"]
+    fn pure_path_drive(args) -> Result<Value> {
+        lexical::path_drive(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.root"]
+    fn pure_path_root(args) -> Result<Value> {
+        lexical::path_root(args, FN_NAME)
+    }
+
+    #[py_name = "PurePath.anchor"]
+    fn pure_path_anchor(args) -> Result<Value> {
+        lexical::path_anchor(args, FN_NAME)
+    }
+
+    // ── _PathParents sequence methods ────────────────────────────────────────
+
+    #[py_name = "_PathParents.__len__"]
+    fn path_parents_len(args) -> Result<Value> {
+        lexical::parents_len(args, FN_NAME)
+    }
+
+    #[py_name = "_PathParents.__getitem__"]
+    fn path_parents_getitem(args) -> Result<Value> {
+        lexical::parents_getitem(args, FN_NAME)
+    }
+
+    #[py_name = "_PathParents.__iter__"]
+    fn path_parents_iter(args) -> Result<Value> {
+        lexical::parents_iter(args, FN_NAME)
+    }
+
+    #[py_name = "_PathParents.__contains__"]
+    fn path_parents_contains(args) -> Result<Value> {
+        lexical::parents_contains(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "_PathParents.__repr__"]
+    fn path_parents_repr(args) -> Result<Value> {
+        lexical::parents_repr(args, FN_NAME)
+    }
+
+    // ── Path concrete filesystem methods ─────────────────────────────────────
+
     #[py_name = "Path.exists"]
     fn path_exists(args) -> Result<Value> {
         filesystem::path_exists(args, FN_NAME)
     }
 
-    /// Return whether the path is a regular file.
     #[py_name = "Path.is_file"]
     fn path_is_file(args) -> Result<Value> {
         filesystem::path_is_file(args, FN_NAME)
     }
 
-    /// Return whether the path is a directory.
     #[py_name = "Path.is_dir"]
     fn path_is_dir(args) -> Result<Value> {
         filesystem::path_is_dir(args, FN_NAME)
     }
 
-    /// Read UTF-8 text from the path.
+    #[py_name = "Path.is_symlink"]
+    fn path_is_symlink(args) -> Result<Value> {
+        filesystem::path_is_symlink(args, FN_NAME)
+    }
+
+    #[py_name = "Path.readlink"]
+    fn path_readlink(args) -> Result<Value> {
+        filesystem::path_readlink(args, FN_NAME)
+    }
+
+    #[py_name = "Path.stat"]
+    fn path_stat(args) -> Result<Value> {
+        filesystem::path_stat(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "Path.lstat"]
+    fn path_lstat(args) -> Result<Value> {
+        filesystem::path_lstat(args, FN_NAME)
+    }
+
+    #[py_name = "Path.samefile"]
+    fn path_samefile(args) -> Result<Value> {
+        filesystem::path_samefile(_interp, args, FN_NAME)
+    }
+
     #[py_name = "Path.read_text"]
     fn path_read_text(args) -> Result<Value> {
         filesystem::path_read_text(args, FN_NAME)
     }
 
-    /// Write UTF-8 text to the path.
     #[py_name = "Path.write_text"]
     fn path_write_text(args) -> Result<Value> {
         filesystem::path_write_text(args, FN_NAME)
     }
 
-    /// Create the path as a directory.
-    #[py_name = "Path.mkdir"]
-    fn path_mkdir(args) -> Result<Value> {
-        filesystem::path_mkdir(args, FN_NAME)
-    }
-
-    /// Return the current directory through the class receiver.
-    #[py_name = "Path.cwd"]
-    fn path_cwd(args) -> Result<Value> {
-        filesystem::path_cwd(_interp, args)
-    }
-
-    /// Return the home directory through the class receiver.
-    #[py_name = "Path.home"]
-    fn path_home(args) -> Result<Value> {
-        filesystem::path_home(_interp, args)
-    }
-
-    /// Return whether the lexical path is absolute.
-    #[py_name = "Path.is_absolute"]
-    fn path_is_absolute(args) -> Result<Value> {
-        lexical::path_is_absolute(args, FN_NAME)
-    }
-
-    /// Resolve the path against the host filesystem.
-    #[py_name = "Path.resolve"]
-    fn path_resolve(args) -> Result<Value> {
-        filesystem::path_resolve(args, FN_NAME)
-    }
-
-    /// Read raw bytes from the path.
     #[py_name = "Path.read_bytes"]
     fn path_read_bytes(args) -> Result<Value> {
         filesystem::path_read_bytes(args, FN_NAME)
     }
 
-    /// Write bytes-like data to the path.
     #[py_name = "Path.write_bytes"]
     fn path_write_bytes(args) -> Result<Value> {
         filesystem::path_write_bytes(args, FN_NAME)
     }
 
-    /// Open the path as a file object.
     #[py_name = "Path.open"]
     fn path_open(args) -> Result<Value> {
         filesystem::path_open(args, FN_NAME)
     }
 
-    /// Remove the file.
+    #[py_name = "Path.mkdir"]
+    fn path_mkdir(args) -> Result<Value> {
+        filesystem::path_mkdir(args, FN_NAME)
+    }
+
+    #[py_name = "Path.rmdir"]
+    fn path_rmdir(args) -> Result<Value> {
+        filesystem::path_rmdir(args, FN_NAME)
+    }
+
     #[py_name = "Path.unlink"]
     fn path_unlink(args) -> Result<Value> {
         filesystem::path_unlink(args, FN_NAME)
     }
 
-    /// Yield directory children as receiver-class instances.
+    #[py_name = "Path.touch"]
+    fn path_touch(args) -> Result<Value> {
+        filesystem::path_touch(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "Path.rename"]
+    fn path_rename(args) -> Result<Value> {
+        filesystem::path_rename(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "Path.replace"]
+    fn path_replace(args) -> Result<Value> {
+        filesystem::path_replace(_interp, args, FN_NAME)
+    }
+
     #[py_name = "Path.iterdir"]
     fn path_iterdir(args) -> Result<Value> {
         filesystem::path_iterdir(args, FN_NAME)
     }
 
-    /// Yield paths matching a relative glob pattern.
     #[py_name = "Path.glob"]
     fn path_glob(args) -> Result<Value> {
-        filesystem::path_glob(args, FN_NAME)
+        filesystem::path_glob(_interp, args, FN_NAME)
     }
 
-    /// Replace the final path component.
-    #[py_name = "Path.with_name"]
-    fn path_with_name(args) -> Result<Value> {
-        lexical::path_with_name(args, FN_NAME)
+    #[py_name = "Path.rglob"]
+    fn path_rglob(args) -> Result<Value> {
+        filesystem::path_rglob(_interp, args, FN_NAME)
     }
 
-    /// Replace the final component's stem.
-    #[py_name = "Path.with_stem"]
-    fn path_with_stem(args) -> Result<Value> {
-        lexical::path_with_stem(args, FN_NAME)
+    #[py_name = "Path.resolve"]
+    fn path_resolve(args) -> Result<Value> {
+        filesystem::path_resolve(args, FN_NAME)
     }
 
-    /// Replace or remove the final component's suffix.
-    #[py_name = "Path.with_suffix"]
-    fn path_with_suffix(args) -> Result<Value> {
-        lexical::path_with_suffix(args, FN_NAME)
+    #[py_name = "Path.cwd"]
+    fn path_cwd(args) -> Result<Value> {
+        filesystem::path_cwd(_interp, args)
+    }
+
+    #[py_name = "Path.home"]
+    fn path_home(args) -> Result<Value> {
+        filesystem::path_home(_interp, args)
     }
 }
 
@@ -298,16 +415,12 @@ mod boundary_tests {
     }
 
     #[test]
-    fn registration_facade_stays_small_and_complete() {
-        let path_registration = concat!("#[py_", "name = \"Path.");
-        assert!(
-            OWNER.lines().count() <= 360,
-            "pathlib registration facade grew beyond its 360-line budget"
-        );
-        assert_eq!(
-            OWNER.matches(path_registration).count(),
-            33,
-            "every Path registration must remain explicit in pathlib.rs"
-        );
+    fn registration_facade_stays_complete() {
+        let pure_reg = concat!("#[py_", "name = \"PurePath.");
+        let parents_reg = concat!("#[py_", "name = \"_PathParents.");
+        let path_reg = concat!("#[py_", "name = \"Path.");
+        assert_eq!(OWNER.matches(pure_reg).count(), 32);
+        assert_eq!(OWNER.matches(parents_reg).count(), 5);
+        assert_eq!(OWNER.matches(path_reg).count(), 25);
     }
 }

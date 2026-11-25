@@ -35,11 +35,30 @@ impl Interpreter {
         // through `__getitem__` so `__missing__` and a custom `KeyError` are
         // honoured.
         let is_mapping = has_named_key && is_percent_format_mapping(&args);
+        // Unpack `tuple` subclasses (e.g. `collections.namedtuple`) into their
+        // backing tuple elements, matching CPython's `PyTuple_Check(args)`.
+        let tuple_backing: Option<Value> = if is_mapping {
+            None
+        } else {
+            match args.kind() {
+                ValueKind::PyInstance(inst)
+                    if find_immutable_primitive_base(&inst.borrow().class) == Some("tuple") =>
+                {
+                    builtin_data_backing(&args)
+                }
+                _ => None,
+            }
+        };
         // Wrap a non-tuple, non-mapping rhs in a virtual single-element tuple.
         // Use &[Value] to avoid cloning the tuple's items upfront; borrow from
         // args directly for the single-value case to avoid an extra clone.
         let positional: Option<&[Value]> = if is_mapping {
             None
+        } else if let Some(backing) = tuple_backing.as_ref() {
+            match backing.kind() {
+                ValueKind::Tuple(items) => Some(items),
+                _ => Some(std::slice::from_ref(&args)),
+            }
         } else {
             match args.kind() {
                 ValueKind::Tuple(items) => Some(items),
