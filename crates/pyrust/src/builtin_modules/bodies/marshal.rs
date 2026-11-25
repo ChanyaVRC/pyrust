@@ -86,6 +86,10 @@ struct MarshalWriter {
     version: i64,
     depth: usize,
     refs: HashMap<RefKey, u32>,
+    /// Keep every ref-tracked value alive until marshaling completes so that
+    /// temporary allocations (e.g. inside `write_code_object`) cannot be freed
+    /// and have their heap address / `ObjId` recycled by a later allocation.
+    pinned: Vec<Value>,
 }
 
 impl MarshalWriter {
@@ -95,6 +99,7 @@ impl MarshalWriter {
             version,
             depth: 0,
             refs: HashMap::new(),
+            pinned: Vec::new(),
         }
     }
 
@@ -129,7 +134,7 @@ impl MarshalWriter {
     /// emits `TYPE_REF` and returns `Ok(true)`. Otherwise reserves a ref slot
     /// and returns `Ok(false)` along with the `FLAG_REF` bit to OR onto the
     /// type byte.
-    fn try_write_ref(&mut self, key: Option<RefKey>) -> (bool, u8) {
+    fn try_write_ref(&mut self, val: &Value, key: Option<RefKey>) -> (bool, u8) {
         if self.version < 3 {
             return (false, 0);
         }
@@ -142,6 +147,9 @@ impl MarshalWriter {
             return (true, 0);
         }
         let idx = self.refs.len() as u32;
+        if matches!(k, RefKey::ObjId(_)) {
+            self.pinned.push(val.clone());
+        }
         self.refs.insert(k, idx);
         (false, FLAG_REF)
     }
@@ -303,7 +311,7 @@ impl MarshalWriter {
             return Err(PyError::named("ValueError", "unmarshallable object"));
         }
 
-        let (already_ref, flag) = self.try_write_ref(Self::ref_key_for(val));
+        let (already_ref, flag) = self.try_write_ref(val, Self::ref_key_for(val));
         if already_ref {
             return Ok(());
         }

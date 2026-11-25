@@ -156,6 +156,7 @@ try:
 except ValueError:
     print("cb_multi: ValueError")
 
+mon.set_events(tid_tool, 0)
 mon.set_local_events(tid_tool, target_fn.__code__, 0)
 mon.restart_events()
 mon.free_tool_id(tid_tool)

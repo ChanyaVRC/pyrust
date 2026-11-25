@@ -326,7 +326,7 @@ fn make_background_target(interp: &mut Interpreter, resolved: &ResolvedFile) -> 
 
 #[cfg(unix)]
 fn validate_unix_signal(signum: i64) -> Result<i32> {
-    if signum < 1 || signum >= 65 {
+    if !(1..65).contains(&signum) {
         return Err(PyError::named("ValueError", "signal number out of range"));
     }
     let sig = signum as i32;

@@ -96,7 +96,7 @@ for bad_gen in (-1, 3, 99):
 # 7. is_tracked & is_finalized
 print("tracked_primitives:", gc.is_tracked(None), gc.is_tracked(42), gc.is_tracked("hi"), gc.is_tracked(b"hi"))
 print("tracked_empty_tuple:", gc.is_tracked(()))
-print("tracked_containers:", gc.is_tracked([]), gc.is_tracked([1]), gc.is_tracked({}), gc.is_tracked(set()))
+print("tracked_containers:", gc.is_tracked([]), gc.is_tracked([1]), gc.is_tracked({"a": []}), gc.is_tracked(set()))
 n = Node("a")
 print("tracked_instance:", gc.is_tracked(n))
 print("tracked_plain_object:", gc.is_tracked(object()))

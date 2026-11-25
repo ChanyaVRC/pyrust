@@ -55,8 +55,8 @@ fn is_tracked_value(value: &Value) -> bool {
         | ValueKind::Ellipsis
         | ValueKind::BuiltinFunction(_) => false,
         ValueKind::Tuple(items) => !items.is_empty(),
+        ValueKind::Dict(d) => !d.is_empty(),
         ValueKind::List(_)
-        | ValueKind::Dict(_)
         | ValueKind::Set(_)
         | ValueKind::UserFunction(_)
         | ValueKind::PyClass(_)

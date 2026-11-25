@@ -232,9 +232,6 @@ pub(super) fn free_tool_id(
     let tid = parse_tool_id(interp, &args[0].value, "free_tool_id")?;
     let mut st = interp.cold.monitoring_state.borrow_mut();
     st.tools[tid] = None;
-    st.global_events[tid] = 0;
-    st.local_events[tid].clear();
-    st.callbacks[tid].clear();
     Ok(Value::none())
 }
 
