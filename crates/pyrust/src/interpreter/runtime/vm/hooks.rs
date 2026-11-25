@@ -10,6 +10,7 @@
 pub(crate) const VM_HOOK_TRACE: u8 = 1 << 0;
 pub(crate) const VM_HOOK_PROFILE: u8 = 1 << 1;
 pub(crate) const VM_HOOK_WEAKREF: u8 = 1 << 2;
+pub(crate) const VM_HOOK_TRACEMALLOC: u8 = 1 << 3;
 
 /// Classification of how a single instruction interacts with a candidate
 /// temporary register `target_reg`.
@@ -540,6 +541,9 @@ impl Interpreter {
         if pyrust_core::has_live_weakrefs() || pyrust_core::has_pending_weakref_callbacks() {
             flags |= VM_HOOK_WEAKREF;
         }
+        if self.cold.tracemalloc_state.borrow().tracing {
+            flags |= VM_HOOK_TRACEMALLOC;
+        }
         self.vm_hooks_flags = flags;
     }
 
@@ -689,9 +693,214 @@ impl Interpreter {
                 self.vm_emit_line_trace(cur_line, pc)?;
             }
         }
+        if self.vm_hooks_flags & VM_HOOK_TRACEMALLOC != 0 {
+            self.vm_tracemalloc_step(code, pc, regs_ptr, regs_len);
+        }
         Ok(())
     }
 
+    /// Cold per-step allocation sampler for `_tracemalloc` / `tracemalloc`.
+    /// Runs only while `tracemalloc.is_tracing()` is true; inspects live
+    /// registers in the current frame for newly created heap objects and
+    /// records their approximate size and Python stack traceback.
+    #[cold]
+    #[inline(never)]
+    fn vm_tracemalloc_step(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        pc: usize,
+        regs_ptr: std::ptr::NonNull<Value>,
+        regs_len: usize,
+    ) {
+        let Ok(mut tm) = self.cold.tracemalloc_state.try_borrow_mut() else {
+            return;
+        };
+        if !tm.tracing {
+            return;
+        }
+        let limit = tm.traceback_limit.max(1);
+        // SAFETY: `regs_ptr`/`regs_len` come directly from the active
+        // `RegSlice` of the suspended VM loop frame.
+        let regs = unsafe { std::slice::from_raw_parts(regs_ptr.as_ptr(), regs_len) };
+
+        let mut cached_tb: Option<(Vec<(String, i64)>, usize)> = None;
+        let line_pc = pc.saturating_sub(1);
+        let cur_line = {
+            let l = code.line_at(line_pc);
+            if l != 0 {
+                l as i64
+            } else {
+                let l2 = code.line_at(pc);
+                if l2 != 0 {
+                    l2 as i64
+                } else {
+                    code.first_lineno as i64
+                }
+            }
+        };
+
+        for val in regs {
+            if val.is_unset() {
+                continue;
+            }
+            let Some(approx_size) = tracemalloc_heap_size(val) else {
+                continue;
+            };
+            let oid = val.object_id().as_int().unwrap_or(0);
+            if oid == 0 || tm.ignored_objects.contains(&oid) {
+                continue;
+            }
+            if let Some(existing) = tm.tracked_objects.get_mut(&oid) {
+                let old_size = existing.size;
+                if approx_size != old_size {
+                    existing.size = approx_size;
+                    if approx_size > old_size {
+                        tm.current_memory =
+                            tm.current_memory.saturating_add(approx_size - old_size);
+                    } else {
+                        tm.current_memory =
+                            tm.current_memory.saturating_sub(old_size - approx_size);
+                    }
+                    if tm.current_memory > tm.peak_memory {
+                        tm.peak_memory = tm.current_memory;
+                    }
+                }
+                continue;
+            }
+            let (frames, total_nframe) = cached_tb
+                .get_or_insert_with(|| self.capture_tracemalloc_frames(code, cur_line, limit));
+            tm.tracked_objects.insert(
+                oid,
+                crate::interpreter::TracemallocRecord {
+                    domain: 0,
+                    size: approx_size,
+                    frames: frames.clone(),
+                    total_nframe: *total_nframe,
+                },
+            );
+            tm.current_memory = tm.current_memory.saturating_add(approx_size);
+            if tm.current_memory > tm.peak_memory {
+                tm.peak_memory = tm.current_memory;
+            }
+        }
+    }
+
+    /// Capture `(frames, total_nframe)` for the current VM stack up to `limit`
+    /// frames, most recent frame first (matching CPython's `tracemalloc`).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn capture_tracemalloc_frames(
+        &self,
+        current_code: &crate::bytecode::FnCode,
+        cur_line: i64,
+        limit: usize,
+    ) -> (Vec<(String, i64)>, usize) {
+        let mut all_frames: Vec<(String, i64)> = Vec::new();
+        let top_file = if !current_code.filename.is_empty() {
+            current_code.filename.to_string()
+        } else {
+            self.cold
+                .script_filename
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string())
+        };
+        all_frames.push((top_file, cur_line.max(1)));
+
+        // Walk outer visible frames starting at depth 1 (depth 0 is `current_code`).
+        let mut depth = 1usize;
+        while let Some(view_idx) = self.visible_view_index_for_depth(depth) {
+            let view = &self.vm_frame_views[view_idx];
+            let (filename, lineno) = self.tracemalloc_view_location(view_idx, view);
+            all_frames.push((filename, lineno.max(1)));
+            depth += 1;
+        }
+        let total = all_frames.len();
+        all_frames.truncate(limit.max(1));
+        (all_frames, total)
+    }
+
+    fn tracemalloc_view_location(
+        &self,
+        view_idx: usize,
+        view: &crate::interpreter::VmFrameView,
+    ) -> (String, i64) {
+        let filename = if let Some(func) = view.function() {
+            func.precompiled_code
+                .as_ref()
+                .and_then(|rc| rc.downcast_ref::<crate::bytecode::FnCode>())
+                .map(|c| c.filename.to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    self.cold
+                        .script_filename
+                        .as_ref()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string())
+                })
+        } else if let Some(gen_ptr) = view.gen_frame() {
+            // SAFETY: active view on `vm_frame_views`.
+            let gf = unsafe { gen_ptr.as_ref() };
+            if !gf.code.filename.is_empty() {
+                gf.code.filename.to_string()
+            } else {
+                "<unknown>".to_string()
+            }
+        } else {
+            self.cold
+                .script_filename
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string())
+        };
+        let lineno = self.resolve_view_lineno(view_idx, false, 0);
+        (filename, lineno)
+    }
+}
+
+/// Approximate heap allocation size in bytes for `tracemalloc` tracking.
+/// Returns `None` for immediates (`None`, `bool`, small `int`, `float`).
+fn tracemalloc_heap_size(val: &Value) -> Option<usize> {
+    match val.kind() {
+        ValueKind::None
+        | ValueKind::Bool(_)
+        | ValueKind::Int(_)
+        | ValueKind::Float(_)
+        | ValueKind::NotImplemented
+        | ValueKind::Ellipsis
+        | ValueKind::BuiltinFunction(_) => None,
+        ValueKind::BigInt(bi) => Some(32 + bi.bits() as usize / 8),
+        ValueKind::Str(s) => {
+            if s.len() <= 5 {
+                None
+            } else {
+                Some(49 + s.len())
+            }
+        }
+        ValueKind::Bytes(b) => Some(33 + b.len()),
+        ValueKind::List(items) => Some(56 + items.len() * 8),
+        ValueKind::Tuple(items) => {
+            if items.is_empty() {
+                None
+            } else {
+                Some(40 + items.len() * 8)
+            }
+        }
+        ValueKind::Dict(d) => Some(232 + d.len() * 24),
+        ValueKind::Set(s) => Some(216 + s.len() * 16),
+        ValueKind::Complex(_, _) => Some(32),
+        ValueKind::PyInstance(inst) => Some(64 + inst.borrow().attrs.len() * 24),
+        ValueKind::BuiltinObject { ops, state } => {
+            let base = 56usize;
+            let extra = ops.len(state).unwrap_or(0);
+            Some(base + extra)
+        }
+        ValueKind::UserFunction(_) | ValueKind::PyClass(_) | ValueKind::Generator(_) => Some(128),
+        _ => None,
+    }
+}
+
+impl Interpreter {
     /// Emit a `'line'` trace event for the innermost active frame if it has a
     /// non-`None` `f_trace` and `f_trace_lines == true` and the line changed
     /// (or jumped backward in a loop).

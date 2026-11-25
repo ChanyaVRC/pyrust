@@ -185,8 +185,102 @@ pub(super) fn make_implementation() -> Value {
 
 /// Build `sys.builtin_module_names`.
 pub(super) fn make_builtin_module_names() -> Value {
-    let names = ["builtins", "sys", "_thread", "errno", "time", "gc"];
+    let names = [
+        "_thread",
+        "_tracemalloc",
+        "builtins",
+        "errno",
+        "faulthandler",
+        "gc",
+        "marshal",
+        "sys",
+        "time",
+    ];
     Value::tuple(names.iter().map(|n| Value::string(*n)).collect())
+}
+
+#[cfg(windows)]
+crate::pyrust_struct_seq! {
+    pub(super) getwindowsversion in "sys" {
+        fields: [major, minor, build, platform, service_pack],
+        extra_fields: [
+            service_pack_major,
+            service_pack_minor,
+            suite_mask,
+            product_type,
+            platform_version,
+        ],
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn make_windows_version() -> Value {
+    use windows_sys::Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOEXW};
+
+    // Default fallback if OS query fails.
+    let mut major = 10i64;
+    let mut minor = 0i64;
+    let mut build = 19041i64;
+    let mut platform = 2i64;
+    let mut service_pack = String::new();
+    let mut sp_major = 0i64;
+    let mut sp_minor = 0i64;
+    let mut suite_mask = 0i64;
+    let mut product_type = 1i64;
+
+    // SAFETY: `OSVERSIONINFOEXW` is zero-initialized and `dwOSVersionInfoSize`
+    // is set to `size_of::<OSVERSIONINFOEXW>()`, as required by `GetVersionExW`.
+    unsafe {
+        let mut info: OSVERSIONINFOEXW = std::mem::zeroed();
+        info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOEXW>() as u32;
+        if GetVersionExW(&mut info as *mut OSVERSIONINFOEXW as *mut _) != 0 {
+            major = info.dwMajorVersion as i64;
+            minor = info.dwMinorVersion as i64;
+            build = info.dwBuildNumber as i64;
+            platform = info.dwPlatformId as i64;
+            let end = info
+                .szCSDVersion
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(info.szCSDVersion.len());
+            service_pack = String::from_utf16_lossy(&info.szCSDVersion[..end]);
+            sp_major = info.wServicePackMajor as i64;
+            sp_minor = info.wServicePackMinor as i64;
+            suite_mask = info.wSuiteMask as i64;
+            product_type = info.wProductType as i64;
+        }
+    }
+
+    let platform_version = Value::tuple(vec![
+        Value::int(major),
+        Value::int(minor),
+        Value::int(build),
+    ]);
+
+    getwindowsversion::make_with_extra(
+        vec![
+            Value::int(major),
+            Value::int(minor),
+            Value::int(build),
+            Value::int(platform),
+            Value::string(service_pack),
+        ],
+        vec![
+            Value::int(sp_major),
+            Value::int(sp_minor),
+            Value::int(suite_mask),
+            Value::int(product_type),
+            platform_version,
+        ],
+    )
+}
+
+#[cfg(windows)]
+pub(super) fn sys_dllhandle() -> i64 {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    // SAFETY: Passing NULL retrieves the HMODULE of the current executable.
+    let handle = unsafe { GetModuleHandleW(std::ptr::null()) };
+    handle as isize as i64
 }
 
 /// Build `sys.thread_info` — struct-sequence describing the thread

@@ -195,6 +195,91 @@ pub(super) fn clear_type_cache(args: &[ExpandedCallArg], fn_name: &str) -> Resul
     Ok(Value::none())
 }
 
+/// Return a stable positive integer thread identifier matching
+/// `threading.get_ident()`.
+fn current_thread_ident() -> i64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    let raw = (hasher.finish() & 0x7fff_ffff_ffff_ffff) as i64;
+    if raw == 0 { 1 } else { raw }
+}
+
+pub(super) fn getrefcount(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let val = require_exact_one_arg(args, fn_name, "getrefcount")?;
+    Ok(Value::int(val.refcount() as i64))
+}
+
+pub(super) fn getframemodulename(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    if args.len() > 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "_getframemodulename() takes at most 1 argument ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let depth_arg = if let Some(first) = args.first() {
+        if let Some(ref kw) = first.name
+            && kw != "depth"
+        {
+            return Err(PyError::named(
+                "TypeError",
+                format!("'{kw}' is an invalid keyword argument for _getframemodulename()"),
+            ));
+        }
+        let n = interp.value_to_isize(&first.value, "Python int too large to convert to C int")?;
+        if n < 0 { 0usize } else { n as usize }
+    } else {
+        0usize
+    };
+    let frame = interp.build_frame_object(depth_arg, pyrust_core::get_current_vm_line() as i64);
+    if frame.is_none() {
+        return Ok(Value::none());
+    }
+    let globals = interp.get_attr(&frame, "f_globals")?;
+    if let Some(dict) = globals.as_dict()
+        && let Some(name_val) = dict.get(&crate::value::PyKey::str_from("__name__"))
+        && name_val.is_str()
+    {
+        return Ok(name_val.clone());
+    }
+    let _ = fn_name;
+    Ok(Value::none())
+}
+
+pub(super) fn current_frames(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    require_no_args(args, fn_name, "_current_frames")?;
+    let mut d = crate::value::PyDict::default();
+    let frame = interp.build_frame_object(0, pyrust_core::get_current_vm_line() as i64);
+    if !frame.is_none() {
+        d.insert(crate::value::PyKey::Int(current_thread_ident()), frame);
+    }
+    Ok(Value::dict(d))
+}
+
+pub(super) fn current_exceptions(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    require_no_args(args, fn_name, "_current_exceptions")?;
+    let mut d = crate::value::PyDict::default();
+    let exc = interp.active_exception.clone().unwrap_or_else(Value::none);
+    d.insert(crate::value::PyKey::Int(current_thread_ident()), exc);
+    Ok(Value::dict(d))
+}
+
 /// Rough in-memory size estimate for `sys.getsizeof`.  CPython sizes are
 /// implementation-specific; this returns a plausible positive number so
 /// callers don't hit AttributeError, but the value must not be compared

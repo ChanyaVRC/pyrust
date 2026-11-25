@@ -23,6 +23,8 @@ use pyrust_derive::pyrust_module;
 mod hooks;
 #[path = "sys/introspection.rs"]
 mod introspection;
+#[path = "sys/monitoring.rs"]
+mod monitoring;
 #[path = "sys/platform_info.rs"]
 mod platform_info;
 #[path = "sys/runtime_limits.rs"]
@@ -87,6 +89,11 @@ pyrust_module! {
         "__excepthook__"       => Value::none(),
         "__unraisablehook__"   => Value::none(),
         "__breakpointhook__"   => Value::none(),
+        "monitoring"           => monitoring::make_monitoring_module(),
+        #[cfg(windows)]
+        "winver"               => Value::string("3.12"),
+        #[cfg(windows)]
+        "dllhandle"            => Value::int(platform_info::sys_dllhandle()),
     }
 
     fn exit(args) -> Result<Value> {
@@ -219,6 +226,85 @@ pyrust_module! {
 
     fn _clear_type_cache(args) -> Result<Value> {
         introspection::clear_type_cache(args, FN_NAME)
+    }
+
+    fn getrefcount(args) -> Result<Value> {
+        introspection::getrefcount(args, FN_NAME)
+    }
+
+    fn _getframemodulename(args) -> Result<Value> {
+        introspection::getframemodulename(_interp, args, FN_NAME)
+    }
+
+    fn _current_frames(args) -> Result<Value> {
+        introspection::current_frames(_interp, args, FN_NAME)
+    }
+
+    fn _current_exceptions(args) -> Result<Value> {
+        introspection::current_exceptions(_interp, args, FN_NAME)
+    }
+
+    #[cfg(windows)]
+    fn getwindowsversion(args) -> Result<Value> {
+        runtime_limits::require_no_args(args, FN_NAME, "getwindowsversion")?;
+        Ok(platform_info::make_windows_version())
+    }
+
+    // ── sys.monitoring (PEP 669) callables ───────────────────────────────────
+
+    #[py_name = "monitoring.use_tool_id"]
+    fn monitoring_use_tool_id(args) -> Result<Value> {
+        monitoring::use_tool_id(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "monitoring.free_tool_id"]
+    fn monitoring_free_tool_id(args) -> Result<Value> {
+        monitoring::free_tool_id(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "monitoring.clear_tool_id"]
+    fn monitoring_clear_tool_id(args) -> Result<Value> {
+        monitoring::clear_tool_id(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "monitoring.get_tool"]
+    fn monitoring_get_tool(args) -> Result<Value> {
+        monitoring::get_tool(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "monitoring.get_events"]
+    fn monitoring_get_events(args) -> Result<Value> {
+        monitoring::get_events(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "monitoring.set_events"]
+    fn monitoring_set_events(args) -> Result<Value> {
+        monitoring::set_events(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "monitoring.get_local_events"]
+    fn monitoring_get_local_events(args) -> Result<Value> {
+        monitoring::get_local_events(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "monitoring.set_local_events"]
+    fn monitoring_set_local_events(args) -> Result<Value> {
+        monitoring::set_local_events(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "monitoring.register_callback"]
+    fn monitoring_register_callback(args) -> Result<Value> {
+        monitoring::register_callback(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "monitoring.restart_events"]
+    fn monitoring_restart_events(args) -> Result<Value> {
+        monitoring::restart_events(args, FN_NAME)
+    }
+
+    #[py_name = "monitoring._all_events"]
+    fn monitoring_all_events(args) -> Result<Value> {
+        monitoring::all_events(args, FN_NAME)
     }
 
     // ── version_info rich-comparison and sequence methods ────────────────────
