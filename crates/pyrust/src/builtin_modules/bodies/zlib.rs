@@ -34,6 +34,30 @@ use self::checksum::{adler32, crc32};
 use self::deflate::Deflater;
 use self::inflate::Inflater;
 
+/// Compute IEEE 802.3 CRC-32 checksum over `data`.
+pub(crate) fn crc32_bytes(data: &[u8], init: u32) -> u32 {
+    crc32(data, init)
+}
+
+/// Compress `data` with raw DEFLATE (RFC 1951, `wbits = -15`) for ZIP entries.
+pub(crate) fn raw_deflate(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let mut def = Deflater::new(-1, 8, -15, 8, 0, Vec::new())?;
+    let mut out = def.compress(data)?;
+    let tail = def.flush(4)?;
+    out.extend_from_slice(&tail);
+    Ok(out)
+}
+
+/// Decompress raw DEFLATE (RFC 1951, `wbits = -15`) data from ZIP entries.
+pub(crate) fn raw_inflate(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let mut inf = Inflater::new(-15, Vec::new())?;
+    let out = inf.decompress(data, 0)?;
+    if !inf.eof {
+        return Err("incomplete or truncated deflate stream".to_string());
+    }
+    Ok(out)
+}
+
 /// Python-source definitions for the public `zlib` surface.
 const ZLIB_PY_SOURCE: &str = include_str!("zlib_py.py");
 

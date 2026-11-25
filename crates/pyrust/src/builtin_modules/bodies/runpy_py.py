@@ -264,8 +264,13 @@ class _ImporterMetaPathBridge:
         self._importer = importer
 
     def find_spec(self, fullname, path=None, target=None):
+        if path is not None:
+            return None
         if hasattr(self._importer, "find_spec"):
-            return self._importer.find_spec(fullname, path, target)
+            try:
+                return self._importer.find_spec(fullname, target)
+            except TypeError:
+                return self._importer.find_spec(fullname, path, target)
         return None
 
 

@@ -181,10 +181,17 @@ pub(crate) struct StatefulLexer {
     last_line_byte_len: u32,
     /// Track indentation style for TabError detection: (spaces_count, tabs_count) per level.
     indent_styles: Vec<(usize, usize)>,
+    /// Whether to raise `TabError` on mixed tabs/spaces (enabled for `ast.parse`,
+    /// disabled for `tokenize.generate_tokens` and `tabnanny` matching CPython 3.12).
+    check_tabs: bool,
 }
 
 impl StatefulLexer {
     pub(crate) fn new() -> Self {
+        Self::with_tab_check(false)
+    }
+
+    pub(crate) fn with_tab_check(check_tabs: bool) -> Self {
         Self {
             lnum: 0,
             indents: vec![0],
@@ -203,6 +210,7 @@ impl StatefulLexer {
             last_line_char_len: 0,
             last_line_byte_len: 0,
             indent_styles: vec![(0, 0)],
+            check_tabs,
         }
     }
 
@@ -360,7 +368,8 @@ impl StatefulLexer {
             let current_indent = *self.indents.last().unwrap();
             if visual_col > current_indent {
                 // Check for inconsistent tab/space mixing with previous level.
-                if let Some(&(prev_s, prev_t)) = self.indent_styles.last()
+                if self.check_tabs
+                    && let Some(&(prev_s, prev_t)) = self.indent_styles.last()
                     && ((prev_s > 0 && tabs > 0 && spaces < prev_s)
                         || (prev_t > 0 && spaces > 0 && tabs < prev_t))
                 {
@@ -412,7 +421,8 @@ impl StatefulLexer {
                     });
                 }
                 // Check same indent column with mixed tabs/spaces.
-                if let Some(&(prev_s, prev_t)) = self.indent_styles.last()
+                if self.check_tabs
+                    && let Some(&(prev_s, prev_t)) = self.indent_styles.last()
                     && (spaces, tabs) != (prev_s, prev_t)
                     && (tabs > 0 || prev_t > 0)
                 {
@@ -1609,7 +1619,15 @@ impl StatefulLexer {
 /// Tokenize an entire source string into a `Vec<LexToken>`, splitting on
 /// `\r\n`, `\n`, and `\r` exactly like Python's universal newlines.
 pub(crate) fn tokenize_source(src: &str) -> Result<Vec<LexToken>, LexError> {
-    let mut lexer = StatefulLexer::new();
+    tokenize_source_impl(src, true)
+}
+
+pub(crate) fn tokenize_source_relaxed(src: &str) -> Result<Vec<LexToken>, LexError> {
+    tokenize_source_impl(src, false)
+}
+
+fn tokenize_source_impl(src: &str, check_tabs: bool) -> Result<Vec<LexToken>, LexError> {
+    let mut lexer = StatefulLexer::with_tab_check(check_tabs);
     let mut all = Vec::new();
 
     if !src.is_empty() {

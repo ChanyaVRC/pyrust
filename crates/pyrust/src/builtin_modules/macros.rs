@@ -746,6 +746,16 @@ fn build_enum_subclass(
     interp.call_function_expanded(base_cls, &call_args)
 }
 
+/// Build a genuine Python `enum.Enum` subclass with `__module__ = module_name`.
+pub(crate) fn build_enum(
+    interp: &mut Interpreter,
+    module_name: &str,
+    class_name: &str,
+    members: &[(&str, i64)],
+) -> Result<Value> {
+    build_enum_subclass(interp, "Enum", module_name, class_name, members)
+}
+
 /// Build a genuine Python `enum.IntEnum` subclass with `__module__ = module_name`.
 pub(crate) fn build_int_enum(
     interp: &mut Interpreter,
