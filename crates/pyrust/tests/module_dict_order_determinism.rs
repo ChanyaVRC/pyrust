@@ -58,9 +58,9 @@ names = ["abc", "argparse", "ast", "asyncio", "atexit", "base64", "binascii", "b
          "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "dis", "doctest", "email", "enum", "errno",
          "fnmatch", "fractions", "functools", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json",
-         "locale", "logging", "lzma", "math", "mimetypes", "numbers", "opcode", "operator", "os", "pathlib", "pickle",
-         "platform", "pprint", "queue", "random", "re", "rlcompleter", "secrets", "selectors", "shlex", "shutil",
-         "signal", "socket", "socketserver", "sqlite3", "stat", "statistics", "string", "subprocess", "sys", "tarfile",
+         "linecache", "locale", "logging", "lzma", "math", "mimetypes", "numbers", "opcode", "operator", "os", "pathlib", "pickle",
+         "pkgutil", "platform", "pprint", "queue", "random", "re", "rlcompleter", "runpy", "secrets", "selectors", "shlex", "shutil",
+         "signal", "socket", "socketserver", "sqlite3", "stat", "statistics", "string", "subprocess", "sys", "sysconfig", "tarfile",
          "tempfile", "textwrap", "threading", "time", "timeit", "token", "tokenize", "tomllib", "traceback",
          "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref",
          "xml", "zipfile", "zlib", "zoneinfo"]

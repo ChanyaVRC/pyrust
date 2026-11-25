@@ -3,7 +3,7 @@
 import collections
 import collections.abc
 import itertools
-import os
+import linecache
 import sys
 import textwrap
 
@@ -29,61 +29,15 @@ __all__ = [
     'walk_tb',
 ]
 
-# Lightweight source-line cache (pyrust does not ship a standalone `linecache`
-# module yet).  Entries map filename -> (size, mtime, lines).
-_line_cache = {}
-
 
 def _checkcache(filename=None):
-    if filename is None:
-        filenames = list(_line_cache.keys())
-    elif filename in _line_cache:
-        filenames = [filename]
-    else:
-        return
-    for name in filenames:
-        entry = _line_cache.get(name)
-        if entry is None:
-            continue
-        size, mtime, _ = entry
-        if mtime is None:
-            continue
-        try:
-            st = os.stat(name)
-        except OSError:
-            _line_cache.pop(name, None)
-            continue
-        if size != st.st_size or mtime != st.st_mtime:
-            _line_cache.pop(name, None)
-
-
-def _getlines(filename):
-    if not filename:
-        return []
-    entry = _line_cache.get(filename)
-    if entry is not None:
-        return entry[2]
-    if filename.startswith('<') and filename.endswith('>'):
-        return []
-    try:
-        st = os.stat(filename)
-        with open(filename, 'r', encoding='utf-8', errors='replace') as fp:
-            lines = fp.readlines()
-    except OSError:
-        return []
-    if lines and not lines[-1].endswith('\n'):
-        lines[-1] += '\n'
-    _line_cache[filename] = (st.st_size, st.st_mtime, lines)
-    return lines
+    linecache.checkcache(filename)
 
 
 def _getline(filename, lineno):
     if lineno is None or lineno < 1:
         return ''
-    lines = _getlines(filename)
-    if 1 <= lineno <= len(lines):
-        return lines[lineno - 1]
-    return ''
+    return linecache.getline(filename, lineno)
 
 
 #
@@ -485,6 +439,7 @@ class StackSummary(list):
             name = co.co_name
 
             fnames.add(filename)
+            linecache.lazycache(filename, f.f_globals)
             if capture_locals:
                 f_locals = f.f_locals
             else:

@@ -646,6 +646,13 @@ pyrust_builtin_modules! {
     zoneinfo @inject,
     locale @inject,
     gettext @inject,
+    // `linecache`, `pkgutil`, `runpy`, and `sysconfig` (issue #3229): Python
+    // 3.12 source-line cache, package discovery/resolution utilities, module/
+    // script runner, and build/install-scheme configuration interface.
+    linecache @inject,
+    pkgutil @inject,
+    runpy @inject,
+    sysconfig @inject,
 }
 
 include!("finalization.rs");
