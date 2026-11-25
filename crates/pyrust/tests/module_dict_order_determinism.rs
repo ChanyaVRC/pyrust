@@ -73,7 +73,14 @@ import importlib.resources.simple
 import importlib.simple
 import importlib.util
 import pydoc_data.topics
+import json.decoder
+import json.encoder
+import json.scanner
+import json.tool
+import logging.config
+import logging.handlers
 import sqlite3.dbapi2
+import sqlite3.dump
 import unittest.mock
 import urllib.error
 import urllib.parse
@@ -146,7 +153,14 @@ for name, module in [("os.path", os.path),
                      ("importlib.simple", importlib.simple),
                      ("importlib.util", importlib.util),
                      ("pydoc_data.topics", pydoc_data.topics),
+                     ("json.decoder", json.decoder),
+                     ("json.encoder", json.encoder),
+                     ("json.scanner", json.scanner),
+                     ("json.tool", json.tool),
+                     ("logging.config", logging.config),
+                     ("logging.handlers", logging.handlers),
                      ("sqlite3.dbapi2", sqlite3.dbapi2),
+                     ("sqlite3.dump", sqlite3.dump),
                      ("unittest.mock", unittest.mock),
                      ("urllib.error", urllib.error),
                      ("urllib.parse", urllib.parse),

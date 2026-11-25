@@ -304,6 +304,11 @@ macro_rules! pyrust_builtin_modules {
                 "encodings.punycode" => return encodings_punycode::post_load_init(interp, module),
                 "encodings.idna" => return encodings_idna::post_load_init(interp, module),
                 "_compression" => return _compression::post_load_init(interp, module),
+                "logging.handlers" => return logging_handlers::post_load_init(interp, module),
+                "logging.config" => return logging_config::post_load_init(interp, module),
+                "json.scanner" => return json_scanner::post_load_init(interp, module),
+                "json.decoder" => return json_decoder::post_load_init(interp, module),
+                "json.encoder" => return json_encoder::post_load_init(interp, module),
                 _ => {}
             }
             if encodings_codecs::post_load_init(name, interp, module)? {
@@ -806,6 +811,16 @@ pyrust_builtin_modules! {
     "pydoc_data.topics" as pydoc_data_topics,
     pydoc_data,
     pydoc,
+    // `logging.handlers`, `logging.config`, `json.{scanner,decoder,encoder,tool}`,
+    // and `sqlite3.dump` (issue #3251): 100% native-Rust Python 3.12 stdlib
+    // submodules built with PyRust's expanded macro toolkit (no `@inject`).
+    "logging.handlers" as logging_handlers,
+    "logging.config" as logging_config,
+    "json.scanner" as json_scanner,
+    "json.decoder" as json_decoder,
+    "json.encoder" as json_encoder,
+    "json.tool" as json_tool,
+    "sqlite3.dump" as sqlite3_dump,
 }
 
 include!("finalization.rs");
