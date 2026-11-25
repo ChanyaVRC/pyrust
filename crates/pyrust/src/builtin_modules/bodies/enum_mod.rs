@@ -33,8 +33,37 @@ use pyrust_derive::pyrust_module;
 const ENUM_PY_SOURCE: &str = include_str!("enum_py.py");
 
 /// Public names from `ENUM_PY_SOURCE` exported onto the `enum` module.
-const ENUM_PY_EXPORTS: [&str; 8] = [
-    "EnumMeta", "EnumType", "Enum", "IntEnum", "auto", "Flag", "IntFlag", "StrEnum",
+const ENUM_PY_EXPORTS: &[&str] = &[
+    "__all__",
+    "EnumMeta",
+    "EnumType",
+    "Enum",
+    "ReprEnum",
+    "IntEnum",
+    "StrEnum",
+    "Flag",
+    "IntFlag",
+    "FlagBoundary",
+    "STRICT",
+    "CONFORM",
+    "EJECT",
+    "KEEP",
+    "EnumCheck",
+    "CONTINUOUS",
+    "NAMED_FLAGS",
+    "UNIQUE",
+    "auto",
+    "property",
+    "DynamicClassAttribute",
+    "member",
+    "nonmember",
+    "unique",
+    "verify",
+    "global_enum",
+    "global_enum_repr",
+    "global_flag_repr",
+    "global_str",
+    "show_flag_values",
 ];
 
 /// Execute `ENUM_PY_SOURCE` once and copy its public names onto the `enum`

@@ -227,15 +227,15 @@ pub(super) fn vector_norm(vec: &mut [f64]) -> f64 {
 /// ordered `i64` key, advance by `steps`, and map back.  This is O(1) and
 /// matches CPython for arbitrarily large `steps`.
 pub(super) fn nextafter_f64(x: f64, y: f64, steps: i64) -> f64 {
+    if steps == 0 {
+        return x;
+    }
     if x.is_nan() || y.is_nan() {
         return f64::NAN;
     }
     if x == y {
         // CPython returns y here (preserves -0.0 vs 0.0 of the target).
         return y;
-    }
-    if steps == 0 {
-        return x;
     }
     // Map each f64 to a monotonic i64 key so that incrementing the key by 1
     // advances to the next representable double.  Positive floats keep their
@@ -263,6 +263,11 @@ pub(super) fn nextafter_f64(x: f64, y: f64, steps: i64) -> f64 {
     let dist = (ky - kx).unsigned_abs();
     let advance = (steps as u128).min(dist) as i128;
     let kr = kx + dir * advance;
+    if kr == 0 && kx < 0 {
+        // Stepping upward from a negative subnormal onto zero yields -0.0,
+        // matching CPython 3.12 / IEEE 754 `nextafter(-5e-324, 1.0)`.
+        return -0.0;
+    }
     f64::from_bits(from_ordered(kr as i64))
 }
 

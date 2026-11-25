@@ -2,83 +2,122 @@
 # `enum` module by `enum_mod.rs::inject_python_members` (mirrors the
 # `operator` / `string` modules).
 #
-# A close port of the core of CPython 3.12's `Lib/enum.py`, restricted to the
-# minimum viable surface: `Enum`, `IntEnum`, `Flag`, `IntFlag`, `StrEnum`,
-# `EnumMeta` (aka `EnumType`), and `auto`.  `_generate_next_value_` overrides,
-# functional construction, pickling support, and `_missing_` are intentionally
-# omitted.
-#
-# Known limitation: a *named* flag composite that references other members
-# inside the class body via ``auto()`` (``WHITE = RED | GREEN`` where the
-# operands are ``auto()`` members) is not supported, because the interpreter
-# flushes ``_EnumDict.__setitem__`` after the class body runs rather than
-# interleaving it (so the operands are still unresolved sentinels when the
-# expression evaluates).  Spell such composites with explicit integer values
-# (``WHITE = 7``) instead; bitwise composition of *finished* members
-# (``Color.RED | Color.GREEN``) works as expected.
+# A faithful port of CPython 3.12's `Lib/enum.py` covering `Enum`, `ReprEnum`,
+# `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, `EnumType` (`EnumMeta`), `auto`,
+# `FlagBoundary` (`STRICT`/`CONFORM`/`EJECT`/`KEEP`), `EnumCheck`
+# (`CONTINUOUS`/`NAMED_FLAGS`/`UNIQUE`), `verify`, `unique`, `global_enum`
+# (+ `global_enum_repr`, `global_flag_repr`, `global_str`), `property`
+# (`DynamicClassAttribute`), `member`, `nonmember`, and `show_flag_values`.
 #
 # Reference: <https://docs.python.org/3/library/enum.html>
 
+import sys as _sys
+from types import DynamicClassAttribute
+
+__all__ = [
+    "EnumType",
+    "EnumMeta",
+    "Enum",
+    "IntEnum",
+    "StrEnum",
+    "Flag",
+    "IntFlag",
+    "ReprEnum",
+    "auto",
+    "unique",
+    "property",
+    "verify",
+    "member",
+    "nonmember",
+    "FlagBoundary",
+    "STRICT",
+    "CONFORM",
+    "EJECT",
+    "KEEP",
+    "global_flag_repr",
+    "global_enum_repr",
+    "global_str",
+    "global_enum",
+    "EnumCheck",
+    "CONTINUOUS",
+    "NAMED_FLAGS",
+    "UNIQUE",
+    "show_flag_values",
+]
+
+
+class nonmember:
+    """Protects item from becoming an Enum member during class creation."""
+
+    def __init__(self, value):
+        self.value = value
+
+
+class member:
+    """Forces item to become an Enum member during class creation."""
+
+    def __init__(self, value):
+        self.value = value
+
 
 class auto:
-    """Placeholder for a value auto-assigned by ``EnumMeta`` (1, 2, 3, ...).
-
-    For a plain ``Enum`` the metaclass fills in 1, 2, 3, ...; for a ``Flag`` /
-    ``IntFlag`` subclass it fills in successive powers of two (1, 2, 4, ...).
-    """
+    """Placeholder for a value auto-assigned by ``EnumType``."""
 
     def __init__(self):
         self.value = None
 
 
-class _EnumDict(dict):
-    """Class-body namespace returned by ``EnumMeta.__prepare__``.
+class property(DynamicClassAttribute):
+    """Enum-aware property descriptor (Python 3.11+).
 
-    Records member assignments in definition order and resolves ``auto()``
-    sentinels to the next integer as they are stored, mirroring CPython's
-    ``_EnumDict``.
+    Access on an enum member calls ``fget(member)``; access on the enum class
+    returns the member with the same name if one exists, otherwise raises
+    ``AttributeError`` (matching CPython's ``enum.property``).
     """
 
-    def __init__(self, is_flag=False, is_str=False):
-        super().__init__()
-        self._member_names = []
-        self._last_value = 0
-        # `Flag` / `IntFlag` subclasses generate powers of two (1, 2, 4, ...)
-        # for ``auto()`` instead of the sequential 1, 2, 3, ... of a plain
-        # ``Enum``; the OR of every value seen so far drives the next bit.
-        self._is_flag = is_flag
-        # ``StrEnum`` resolves ``auto()`` to the lowercased member name
-        # (CPython's ``StrEnum._generate_next_value_`` returns ``name.lower()``).
-        self._is_str = is_str
+    def __init__(self, fget=None, fset=None, fdel=None, doc=None):
+        self.fget = fget
+        self.fset = fset
+        self.fdel = fdel
+        self.__doc__ = doc if doc is not None else (fget.__doc__ if fget is not None else None)
+        self.overwrite_doc = doc is None
+        self.__isabstractmethod__ = bool(getattr(fget, "__isabstractmethod__", False))
+        self.name = None
 
-    def __setitem__(self, key, value):
-        if not _is_sunder(key) and not _is_dunder(key) and not _is_descriptor(value):
-            # A genuine enum member.
-            if isinstance(value, auto):
-                value = self._generate_next_value(key)
-            if self._is_str:
-                # String members carry no numeric accumulator.
-                pass
-            elif self._is_flag:
-                # Track the OR of every flag value so the next ``auto()``
-                # picks the next free bit (mirrors CPython's accumulator).
-                self._last_value |= value
-            else:
-                self._last_value = value
-            self._member_names.append(key)
-        super().__setitem__(key, value)
+    def __set_name__(self, ownerclass, name):
+        self.name = name
 
-    def _generate_next_value(self, name):
-        if self._is_str:
-            # CPython's ``StrEnum._generate_next_value_`` lowercases the name.
-            return name.lower()
-        if not self._is_flag:
-            return self._last_value + 1
-        # Next power of two strictly above the highest bit seen so far.
-        if self._last_value <= 0:
-            return 1
-        high_bit = self._last_value.bit_length() - 1
-        return 2 ** (high_bit + 1)
+    def __get__(self, instance, ownerclass=None):
+        if instance is None:
+            if ownerclass is not None and self.name is not None:
+                mmap = getattr(ownerclass, "_member_map_", None)
+                if mmap is not None and self.name in mmap:
+                    return mmap[self.name]
+            if self.__isabstractmethod__:
+                return self
+            cls_repr = repr(ownerclass) if ownerclass is not None else "Enum"
+            raise AttributeError("%s has no attribute %r" % (cls_repr, self.name))
+        if self.fget is None:
+            raise AttributeError("unreadable attribute")
+        return self.fget(instance)
+
+
+def _iter_bits_lsb(num):
+    """Yield powers of two set in ``num`` from least-significant bit up."""
+    original = num
+    if isinstance(num, Enum):
+        num = num.value
+    if num < 0:
+        raise ValueError("%r is not a positive integer" % (original,))
+    while num:
+        b = num & (~num + 1)
+        yield b
+        num ^= b
+
+
+def show_flag_values(value):
+    """Return a list of all power-of-two integers contained in ``value``."""
+    return list(_iter_bits_lsb(value))
 
 
 def _is_dunder(name):
@@ -109,14 +148,109 @@ def _is_descriptor(obj):
     )
 
 
+def _find_data_type(bases):
+    """Return the first non-Enum concrete mixin base type, or ``object``."""
+    enum_base = globals().get("Enum")
+    for base in bases:
+        if enum_base is not None and issubclass(base, enum_base):
+            dt = getattr(base, "_member_type_", object)
+            if dt is not object:
+                return dt
+        elif base is not object:
+            return base
+    return object
+
+
+def _find_generate_next_value(bases, classdict=None):
+    if classdict is not None and "_generate_next_value_" in classdict:
+        fn = classdict["_generate_next_value_"]
+        if isinstance(fn, staticmethod):
+            return fn.__func__
+        return fn
+    for base in bases:
+        for cls in base.__mro__:
+            if "_generate_next_value_" in cls.__dict__:
+                fn = cls.__dict__["_generate_next_value_"]
+                if isinstance(fn, staticmethod):
+                    return fn.__func__
+                return fn
+    return None
+
+
+class _EnumDict(dict):
+    """Class-body namespace returned by ``EnumType.__prepare__``."""
+
+    def __init__(self, is_flag=False, is_str=False, gen_next=None):
+        super().__init__()
+        self._member_names = []
+        self._last_values = []
+        self._last_value = 0
+        self._is_flag = is_flag
+        self._is_str = is_str
+        self._generate_next_value = gen_next
+        self._explicit_members = set()
+
+    def __setitem__(self, key, value):
+        if key == "_generate_next_value_":
+            self._generate_next_value = (
+                value.__func__ if isinstance(value, staticmethod) else value
+            )
+            super().__setitem__(key, value)
+            return
+        if isinstance(value, nonmember):
+            super().__setitem__(key, value.value)
+            return
+        if isinstance(value, member):
+            value = value.value
+            if isinstance(value, auto):
+                value = self._resolve_auto(key)
+            self._record_value(value)
+            self._member_names.append(key)
+            self._explicit_members.add(key)
+            super().__setitem__(key, value)
+            return
+        if not _is_sunder(key) and not _is_dunder(key) and not _is_descriptor(value):
+            if isinstance(value, auto):
+                value = self._resolve_auto(key)
+            self._record_value(value)
+            self._member_names.append(key)
+        super().__setitem__(key, value)
+
+    def _record_value(self, value):
+        self._last_values.append(value)
+        if self._is_str:
+            pass
+        elif self._is_flag and isinstance(value, int):
+            self._last_value |= value
+        elif isinstance(value, int):
+            self._last_value = value
+
+    def _resolve_auto(self, name):
+        if self._generate_next_value is not None:
+            return self._generate_next_value(
+                name, 1, len(self._member_names), list(self._last_values)
+            )
+        if self._is_str:
+            return name.lower()
+        if not self._is_flag:
+            return self._last_value + 1
+        if self._last_value <= 0:
+            return 1
+        high_bit = self._last_value.bit_length() - 1
+        return 2 ** (high_bit + 1)
+
+
+def _flag_bit_count(v):
+    if not isinstance(v, int) or v <= 0:
+        return 0
+    return bin(v).count("1")
+
+
 class EnumType(type):
     """Metaclass that turns plain class-body assignments into enum members."""
 
     @classmethod
-    def __prepare__(mcls, cls, bases, **kwds):
-        # ``Flag`` is defined later in this module; during its own creation it
-        # is not yet bound, so fall back to ``False`` (a bare ``Flag`` has no
-        # members anyway).
+    def __prepare__(mcls, cls, bases, boundary=None, **kwds):
         flag_base = globals().get("Flag")
         is_flag = flag_base is not None and any(
             isinstance(base, type) and issubclass(base, flag_base) for base in bases
@@ -125,68 +259,183 @@ class EnumType(type):
         is_str = str_base is not None and any(
             isinstance(base, type) and issubclass(base, str_base) for base in bases
         )
-        return _EnumDict(is_flag=is_flag, is_str=is_str)
+        gen_next = _find_generate_next_value(bases)
+        return _EnumDict(is_flag=is_flag, is_str=is_str, gen_next=gen_next)
 
-    def __new__(mcls, cls, bases, classdict, **kwds):
+    def __new__(mcls, cls, bases, classdict, boundary=None, **kwds):
+        if not isinstance(classdict, _EnumDict):
+            # Fallback if constructed directly with a plain dict.
+            flag_base = globals().get("Flag")
+            is_flag = flag_base is not None and any(
+                isinstance(base, type) and issubclass(base, flag_base) for base in bases
+            )
+            str_base = globals().get("StrEnum")
+            is_str = str_base is not None and any(
+                isinstance(base, type) and issubclass(base, str_base) for base in bases
+            )
+            gen_next = _find_generate_next_value(bases, classdict)
+            ed = _EnumDict(is_flag=is_flag, is_str=is_str, gen_next=gen_next)
+            for k, v in classdict.items():
+                ed[k] = v
+            classdict = ed
+
         member_names = classdict._member_names
-        # Strip the members out of the namespace handed to ``type.__new__``;
-        # they are re-attached below as fully-formed member instances.
         ns = {}
         for key, value in classdict.items():
             if key not in member_names:
                 ns[key] = value
 
+        # Re-check _generate_next_value_ defined inside class body in case any
+        # auto() values were processed before the method was registered.
+        gen_fn = _find_generate_next_value(bases, classdict)
+
         enum_class = super().__new__(mcls, cls, bases, ns)
         enum_class._member_names_ = []
         enum_class._member_map_ = {}
         enum_class._value2member_map_ = {}
+        enum_class._member_type_ = _find_data_type(bases)
 
         flag_base = globals().get("Flag")
         is_flag = flag_base is not None and issubclass(enum_class, flag_base)
 
+        if is_flag:
+            if boundary is not None:
+                enum_class._boundary_ = boundary
+            elif not hasattr(enum_class, "_boundary_"):
+                intflag_base = globals().get("IntFlag")
+                if intflag_base is not None and issubclass(enum_class, intflag_base):
+                    enum_class._boundary_ = globals().get("KEEP")
+                else:
+                    enum_class._boundary_ = globals().get("STRICT")
+
+        # First pass: collect values and resolve any remaining auto() sentinels.
+        resolved_items = []
+        last_vals = []
         for name in member_names:
             value = classdict[name]
-            # First-seen value wins as the canonical member; a later member with
-            # an existing value is an *alias*: it reuses the canonical member,
-            # is accessible by name (`Shape.DIAMOND`) and via `_member_map_`,
-            # but is not iterated and does not appear in `_member_names_` (it is
-            # `Shape.SQUARE`).  Matches CPython's alias semantics.
-            #
-            # For `Flag`, a value that is not a single set bit -- a named
-            # composite (`WHITE = RED | GREEN | BLUE`) or the all-zero flag
-            # (`NONE = 0`) -- is accessible by name but is not a canonical
-            # member: it is not iterated and does not occupy `_member_names_`,
-            # matching CPython's flag aliasing.
+            if isinstance(value, auto):
+                if gen_fn is not None:
+                    value = gen_fn(name, 1, len(resolved_items), list(last_vals))
+                else:
+                    value = classdict._resolve_auto(name)
+            last_vals.append(value)
+            resolved_items.append((name, value))
+
+        flag_mask = 0
+        for name, value in resolved_items:
             is_non_canonical_flag = (
-                is_flag and isinstance(value, int) and (value == 0 or (value & (value - 1)) != 0)
+                is_flag
+                and isinstance(value, int)
+                and (value <= 0 or (value & (value - 1)) != 0)
             )
+            if not is_non_canonical_flag and is_flag and isinstance(value, int):
+                flag_mask |= value
             if value in enum_class._value2member_map_:
-                member = enum_class._value2member_map_[value]
+                member_obj = enum_class._value2member_map_[value]
             elif is_non_canonical_flag:
-                member = enum_class._new_member_(name, value)
-                enum_class._value2member_map_[value] = member
+                member_obj = enum_class._new_member_(name, value)
+                enum_class._value2member_map_[value] = member_obj
             else:
-                member = enum_class._new_member_(name, value)
+                member_obj = enum_class._new_member_(name, value)
                 enum_class._member_names_.append(name)
-                enum_class._value2member_map_[value] = member
-            enum_class._member_map_[name] = member
-            setattr(enum_class, name, member)
+                enum_class._value2member_map_[value] = member_obj
+            enum_class._member_map_[name] = member_obj
+            # Do not shadow an `enum.property` / `DynamicClassAttribute` on a
+            # base class (such as `Enum.name` or `Enum.value`): accessing
+            # `MyEnum.value` routes through the descriptor's `__get__(None, cls)`
+            # which resolves `cls._member_map_['value']`, while instance access
+            # `MyEnum.X.value` still calls the property's `fget`.
+            shadows_enum_prop = False
+            for base in enum_class.__mro__[1:]:
+                if isinstance(base.__dict__.get(name), DynamicClassAttribute):
+                    shadows_enum_prop = True
+                    break
+            if not shadows_enum_prop:
+                setattr(enum_class, name, member_obj)
+
+        if is_flag:
+            enum_class._flag_mask_ = flag_mask
+            enum_class._all_bits_ = (1 << flag_mask.bit_length()) - 1 if flag_mask else 0
 
         return enum_class
 
-    def __call__(cls, value):
-        # ``Color(value)`` performs a value lookup, returning the existing
-        # member.  Calling the bare ``Enum`` base (no members) is not supported.
+    def __call__(
+        cls,
+        value,
+        names=None,
+        *,
+        module=None,
+        qualname=None,
+        type=None,
+        start=1,
+        boundary=None,
+    ):
+        if names is not None:
+            return cls._create_(
+                value,
+                names,
+                module=module,
+                qualname=qualname,
+                type=type,
+                start=start,
+                boundary=boundary,
+            )
         try:
             return cls._value2member_map_[value]
-        except KeyError:
+        except (KeyError, TypeError):
             pass
-        # ``Flag`` accepts composite integer values (the OR of one or more
-        # members), synthesising a pseudo-member on demand.
+        result = cls._missing_(value)
+        if isinstance(result, cls):
+            return result
         flag_base = globals().get("Flag")
-        if flag_base is not None and issubclass(cls, flag_base):
-            return cls._missing_(value)
+        if (
+            flag_base is not None
+            and issubclass(cls, flag_base)
+            and getattr(cls, "_boundary_", None) == globals().get("EJECT")
+            and isinstance(result, int)
+        ):
+            return result
+        if result is not None:
+            raise TypeError(
+                "error in %s._missing_: returned %r instead of None or a valid member"
+                % (cls.__name__, result)
+            )
         raise ValueError("%r is not a valid %s" % (value, cls.__name__))
+
+    def _create_(
+        cls,
+        class_name,
+        names,
+        *,
+        module=None,
+        qualname=None,
+        type=None,
+        start=1,
+        boundary=None,
+    ):
+        bases = (cls,) if type is None else (type, cls)
+        classdict = EnumType.__prepare__(class_name, bases, boundary=boundary)
+        if isinstance(names, str):
+            names = names.replace(",", " ").split()
+        if isinstance(names, dict):
+            for k, v in names.items():
+                classdict[k] = v
+        else:
+            items = list(names)
+            if items and isinstance(items[0], str):
+                idx = start
+                is_flag = issubclass(cls, Flag)
+                for n in items:
+                    classdict[n] = idx
+                    idx = (idx << 1) if is_flag else (idx + 1)
+            else:
+                for k, v in items:
+                    classdict[k] = v
+        if module is not None:
+            classdict["__module__"] = module
+        if qualname is not None:
+            classdict["__qualname__"] = qualname
+        return EnumType(class_name, bases, classdict, boundary=boundary)
 
     def __getitem__(cls, name):
         return cls._member_map_[name]
@@ -194,15 +443,24 @@ class EnumType(type):
     def __iter__(cls):
         return (cls._member_map_[name] for name in cls._member_names_)
 
+    def __reversed__(cls):
+        return (cls._member_map_[name] for name in reversed(cls._member_names_))
+
     def __len__(cls):
         return len(cls._member_names_)
 
     def __contains__(cls, member):
         if isinstance(member, cls):
             return True
-        return member in cls._value2member_map_
+        try:
+            return member in cls._value2member_map_
+        except TypeError:
+            return False
 
     def __repr__(cls):
+        flag_base = globals().get("Flag")
+        if flag_base is not None and issubclass(cls, flag_base):
+            return "<flag %r>" % cls.__name__
         return "<enum %r>" % cls.__name__
 
 
@@ -211,15 +469,32 @@ class EnumType(type):
 EnumMeta = EnumType
 
 
-class Enum(metaclass=EnumMeta):
+class Enum(metaclass=EnumType):
     """Base class for creating enumerated constants."""
+
+    @staticmethod
+    def _generate_next_value_(name, start, count, last_values):
+        for last_value in reversed(last_values):
+            try:
+                return last_value + 1
+            except TypeError:
+                pass
+        return start
 
     @classmethod
     def _new_member_(cls, name, value):
-        member = object.__new__(cls)
-        member._name_ = name
-        member._value_ = value
-        return member
+        member_type = getattr(cls, "_member_type_", object)
+        if member_type is object:
+            member_obj = object.__new__(cls)
+        else:
+            member_obj = member_type.__new__(cls, value)
+        member_obj._name_ = name
+        member_obj._value_ = value
+        return member_obj
+
+    @classmethod
+    def _missing_(cls, value):
+        return None
 
     @property
     def name(self):
@@ -239,126 +514,220 @@ class Enum(metaclass=EnumMeta):
         return hash(self._name_)
 
 
-class IntEnum(int, Enum):
-    """Enum where members are also (and comparable to) ints.
+class ReprEnum(Enum):
+    """Only changes the repr(), leaving str() and format() to the mixed-in type."""
 
-    Like CPython's ``ReprEnum``-based ``IntEnum``, the ``str`` / ``format`` of a
-    member is the underlying ``int``'s (``str(Status.OK) == '200'``), while
-    ``repr`` keeps the ``<Status.OK: 200>`` form from ``Enum``.
-    """
+    def __str__(self):
+        member_type = getattr(self.__class__, "_member_type_", object)
+        if member_type is object:
+            return Enum.__str__(self)
+        return str(self._value_)
+
+    def __format__(self, format_spec):
+        member_type = getattr(self.__class__, "_member_type_", object)
+        if member_type is object:
+            return Enum.__format__(self, format_spec)
+        return format(self._value_, format_spec)
+
+
+class IntEnum(int, ReprEnum):
+    """Enum where members are also (and comparable to) ints."""
 
     @classmethod
     def _new_member_(cls, name, value):
-        member = int.__new__(cls, value)
-        member._name_ = name
-        member._value_ = value
-        return member
+        member_obj = int.__new__(cls, value)
+        member_obj._name_ = name
+        member_obj._value_ = value
+        return member_obj
 
     def __str__(self):
-        # `int.__str__` defers to `__repr__`, which `Enum` overrides; format the
-        # underlying integer directly so `str(Status.OK) == '200'`.
         return "%d" % int(self)
 
     def __format__(self, format_spec):
         return format(int(self), format_spec)
 
 
-class StrEnum(str, Enum):
-    """Enum where members are also (and comparable to) ``str``.
+class StrEnum(str, ReprEnum):
+    """Enum where members are also (and comparable to) ``str``."""
 
-    Like ``IntEnum`` but for strings: ``str(Direction.NORTH) == 'north'`` and
-    ``Direction.NORTH == 'north'``.
-    """
+    @staticmethod
+    def _generate_next_value_(name, start, count, last_values):
+        return name.lower()
 
     @classmethod
     def _new_member_(cls, name, value):
         if not isinstance(value, str):
             raise TypeError("%r is not a string" % (value,))
-        member = str.__new__(cls, value)
-        member._name_ = name
-        member._value_ = value
-        return member
+        member_obj = str.__new__(cls, value)
+        member_obj._name_ = name
+        member_obj._value_ = value
+        return member_obj
 
     def __str__(self):
-        # The member *is* its string value; format that directly (`Enum`
-        # overrides `__repr__`, so deferring to it would print the repr form).
         return self._value_
 
     def __format__(self, format_spec):
         return format(self._value_, format_spec)
 
 
-class Flag(Enum):
-    """Base class for creating enumerated bit-flag constants.
+class FlagBoundary(StrEnum):
+    """Control how out of range values are handled in Flag."""
 
-    Members are powers of two and compose through the bitwise operators
-    (``|``, ``&``, ``^``, ``~``); an empty flag (value ``0``) is falsy.
-    """
+    STRICT = "strict"
+    CONFORM = "conform"
+    EJECT = "eject"
+    KEEP = "keep"
+
+
+STRICT, CONFORM, EJECT, KEEP = FlagBoundary
+
+
+class EnumCheck(StrEnum):
+    """Various conditions to check an enumeration for."""
+
+    CONTINUOUS = "no skipped integer values"
+    NAMED_FLAGS = "multi-flag aliases may not contain unnamed flags"
+    UNIQUE = "one name per value"
+
+
+CONTINUOUS, NAMED_FLAGS, UNIQUE = EnumCheck
+
+
+def _format_binary(val, bit_len):
+    if val < 0:
+        sign = "1"
+        bits = bin(val & ((1 << max(bit_len, 1)) - 1))[2:].zfill(max(bit_len, 1))
+    else:
+        sign = "0"
+        bits = bin(val)[2:].zfill(max(bit_len, 1))
+    return "0b%s %s" % (sign, bits)
+
+
+class Flag(Enum):
+    """Base class for creating enumerated bit-flag constants."""
+
+    _boundary_ = STRICT
+    _flag_mask_ = 0
+    _all_bits_ = 0
+
+    @staticmethod
+    def _generate_next_value_(name, start, count, last_values):
+        mask = 0
+        for v in last_values:
+            if isinstance(v, int):
+                mask |= v
+        if mask <= 0:
+            return 1
+        return 1 << mask.bit_length()
 
     @classmethod
     def _new_member_(cls, name, value):
-        member = object.__new__(cls)
-        member._name_ = name
-        member._value_ = value
-        return member
+        member_obj = object.__new__(cls)
+        member_obj._name_ = name
+        member_obj._value_ = value
+        return member_obj
 
     @classmethod
-    def _missing_(cls, value):
-        # Resolve / synthesise the member for an arbitrary composite value.
-        if not isinstance(value, int):
-            raise ValueError("%r is not a valid %s" % (value, cls.__name__))
-        member = cls._value2member_map_.get(value)
-        if member is not None:
-            return member
-        all_bits = 0
-        for m in cls._member_map_.values():
-            all_bits |= m._value_
-        # CPython 3.12 accepts negatives in [-(all_bits+1), -1] and masks them
-        # (two's complement): Color(-1) with all_bits=7 yields Color(7).
-        if value < 0 and value >= -(all_bits + 1):
-            value = value & all_bits
-            cached = cls._value2member_map_.get(value)
-            if cached is not None:
-                return cached
-        elif (value & ~all_bits) != 0 or value < 0:
-            raise ValueError("%r is not a valid %s" % (value, cls.__name__))
-        # Build an unnamed composite pseudo-member and cache it.
-        pseudo = object.__new__(cls)
+    def _make_pseudo_member(cls, value):
+        cached = cls._value2member_map_.get(value)
+        if cached is not None:
+            return cached
+        member_type = getattr(cls, "_member_type_", object)
+        if member_type is object:
+            pseudo = object.__new__(cls)
+        else:
+            pseudo = member_type.__new__(cls, value)
         pseudo._name_ = None
         pseudo._value_ = value
         cls._value2member_map_[value] = pseudo
         return pseudo
 
+    @classmethod
+    def _missing_(cls, value):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError("%r is not a valid %s" % (value, cls.__name__))
+        member_obj = cls._value2member_map_.get(value)
+        if member_obj is not None:
+            return member_obj
+        flag_mask = cls._flag_mask_
+        boundary = cls._boundary_
+        if value < 0:
+            # Negative values are two's-complement bitmasks.
+            if boundary is STRICT:
+                if (~value & ~flag_mask) != 0:
+                    bit_len = max(flag_mask.bit_length(), (~value).bit_length())
+                    raise ValueError(
+                        "%r invalid value %r\n    given %s\n  allowed %s"
+                        % (
+                            cls,
+                            value,
+                            _format_binary(value, bit_len),
+                            _format_binary(flag_mask, bit_len),
+                        )
+                    )
+                value = value & flag_mask
+            elif boundary is CONFORM:
+                value = value & flag_mask
+            elif boundary is EJECT:
+                if (~value & ~flag_mask) != 0:
+                    return int(value)
+                value = value & flag_mask
+            elif boundary is KEEP:
+                value = value & flag_mask
+            return cls._make_pseudo_member(value)
+
+        unknown = value & ~flag_mask
+        if unknown != 0:
+            if boundary is STRICT:
+                bit_len = max(flag_mask.bit_length(), value.bit_length())
+                raise ValueError(
+                    "%r invalid value %r\n    given %s\n  allowed %s"
+                    % (
+                        cls,
+                        value,
+                        _format_binary(value, bit_len),
+                        _format_binary(flag_mask, bit_len),
+                    )
+                )
+            elif boundary is CONFORM:
+                value = value & flag_mask
+            elif boundary is EJECT:
+                return int(value)
+            elif boundary is KEEP:
+                pass
+        return cls._make_pseudo_member(value)
+
     @property
     def name(self):
-        # A canonical member carries its own name; an unnamed composite reports
-        # the joined names of its set bits (`Color.RED|GREEN`.name == 'RED|GREEN'),
-        # matching CPython 3.12.  The empty flag (no set bits) stays nameless.
         if self._name_ is not None:
             return self._name_
-        names = self._decompose_()
+        names = self._decompose_names_()
         if names:
             return "|".join(names)
         return None
 
-    def _decompose_(self):
-        # Names of the canonical single-bit members contained in ``self``, in
-        # definition order.  Used by ``__str__`` / ``__repr__``.
+    def _decompose_members_(self):
         members = []
         for name in self.__class__._member_names_:
-            member = self.__class__._member_map_[name]
-            v = member._value_
-            # Single-bit members whose bit is set.
+            member_obj = self.__class__._member_map_[name]
+            v = member_obj._value_
             if v and (v & (v - 1)) == 0 and (self._value_ & v) == v:
-                members.append(name)
+                members.append(member_obj)
         return members
 
+    def _decompose_names_(self):
+        names = [m._name_ for m in self._decompose_members_()]
+        unknown = self._value_ & ~self.__class__._flag_mask_
+        if unknown and names:
+            names.append(str(unknown))
+        return names
+
     def __iter__(self):
-        for name in self._decompose_():
-            yield self.__class__._member_map_[name]
+        for m in self._decompose_members_():
+            yield m
 
     def __len__(self):
-        return len(self._decompose_())
+        return len(self._decompose_members_())
 
     def __bool__(self):
         return bool(self._value_)
@@ -379,10 +748,7 @@ class Flag(Enum):
         return self.__class__(self._value_ ^ other._value_)
 
     def __invert__(self):
-        all_bits = 0
-        for member in self.__class__._member_map_.values():
-            all_bits |= member._value_
-        return self.__class__(all_bits & ~self._value_)
+        return self.__class__(self.__class__._flag_mask_ & ~self._value_)
 
     def __contains__(self, other):
         if not isinstance(other, self.__class__):
@@ -390,8 +756,6 @@ class Flag(Enum):
                 "unsupported operand type(s) for 'in': %r and %r"
                 % (type(other).__name__, self.__class__.__name__)
             )
-        if other._value_ == 0:
-            return self._value_ == 0
         return (self._value_ & other._value_) == other._value_
 
     def __hash__(self):
@@ -406,7 +770,7 @@ class Flag(Enum):
         cls_name = self.__class__.__name__
         if self._name_ is not None:
             return "<%s.%s: %r>" % (cls_name, self._name_, self._value_)
-        names = self._decompose_()
+        names = self._decompose_names_()
         if names:
             return "<%s.%s: %r>" % (cls_name, "|".join(names), self._value_)
         return "<%s: %r>" % (cls_name, self._value_)
@@ -415,73 +779,56 @@ class Flag(Enum):
         cls_name = self.__class__.__name__
         if self._name_ is not None:
             return "%s.%s" % (cls_name, self._name_)
-        names = self._decompose_()
+        names = self._decompose_names_()
         if names:
             return "%s.%s" % (cls_name, "|".join(names))
         return "%s(%r)" % (cls_name, self._value_)
 
 
-class IntFlag(int, Flag):
-    """``Flag`` whose members are also (and comparable to) ints.
+class IntFlag(int, ReprEnum, Flag):
+    """``Flag`` whose members are also (and comparable to) ints."""
 
-    Bitwise operations with plain ``int`` operands are supported and the
-    ``str`` / ``format`` of a member is its underlying integer value.
-    """
+    _boundary_ = KEEP
 
     @classmethod
     def _new_member_(cls, name, value):
-        member = int.__new__(cls, value)
-        member._name_ = name
-        member._value_ = value
-        return member
-
-    @classmethod
-    def _missing_(cls, value):
-        if not isinstance(value, int):
-            raise ValueError("%r is not a valid %s" % (value, cls.__name__))
-        member = cls._value2member_map_.get(value)
-        if member is not None:
-            return member
-        # CPython 3.12 ``IntFlag`` is lenient on positive out-of-range values
-        # (extra bits are kept), but masks negatives into the named-bit range
-        # via two's complement: ``P(-1)`` with all_bits=7 yields ``P(7)``.
-        if value < 0:
-            all_bits = 0
-            for m in cls._member_map_.values():
-                all_bits |= m._value_
-            value = value & all_bits
-            cached = cls._value2member_map_.get(value)
-            if cached is not None:
-                return cached
-        pseudo = int.__new__(cls, value)
-        pseudo._name_ = None
-        pseudo._value_ = value
-        cls._value2member_map_[value] = pseudo
-        return pseudo
+        member_obj = int.__new__(cls, value)
+        member_obj._name_ = name
+        member_obj._value_ = value
+        return member_obj
 
     def __or__(self, other):
-        return self.__class__(int(self) | int(other))
+        if isinstance(other, (self.__class__, int)):
+            return self.__class__(int(self) | int(other))
+        return NotImplemented
 
     def __and__(self, other):
-        return self.__class__(int(self) & int(other))
+        if isinstance(other, (self.__class__, int)):
+            return self.__class__(int(self) & int(other))
+        return NotImplemented
 
     def __xor__(self, other):
-        return self.__class__(int(self) ^ int(other))
+        if isinstance(other, (self.__class__, int)):
+            return self.__class__(int(self) ^ int(other))
+        return NotImplemented
 
     def __ror__(self, other):
-        return self.__class__(int(self) | int(other))
+        if isinstance(other, (self.__class__, int)):
+            return self.__class__(int(self) | int(other))
+        return NotImplemented
 
     def __rand__(self, other):
-        return self.__class__(int(self) & int(other))
+        if isinstance(other, (self.__class__, int)):
+            return self.__class__(int(self) & int(other))
+        return NotImplemented
 
     def __rxor__(self, other):
-        return self.__class__(int(self) ^ int(other))
+        if isinstance(other, (self.__class__, int)):
+            return self.__class__(int(self) ^ int(other))
+        return NotImplemented
 
     def __invert__(self):
-        all_bits = 0
-        for member in self.__class__._member_map_.values():
-            all_bits |= member._value_
-        return self.__class__(all_bits & ~int(self))
+        return self.__class__(self.__class__._flag_mask_ & ~int(self))
 
     def __hash__(self):
         return hash(self._value_)
@@ -491,3 +838,121 @@ class IntFlag(int, Flag):
 
     def __format__(self, format_spec):
         return format(int(self), format_spec)
+
+
+def unique(enumeration):
+    """Class decorator for enumerations ensuring unique member values."""
+    duplicates = []
+    for name, member_obj in enumeration._member_map_.items():
+        if name != member_obj.name:
+            duplicates.append((name, member_obj.name))
+    if duplicates:
+        alias_details = ", ".join(
+            ["%s -> %s" % (alias, name) for (alias, name) in duplicates]
+        )
+        raise ValueError(
+            "duplicate values found in %r: %s" % (enumeration, alias_details)
+        )
+    return enumeration
+
+
+def verify(*checks):
+    """Class decorator to verify enum constraints (UNIQUE, CONTINUOUS, NAMED_FLAGS)."""
+
+    def _verify(enumeration):
+        for check in checks:
+            if check is UNIQUE:
+                duplicates = []
+                for name, member_obj in enumeration._member_map_.items():
+                    if name != member_obj.name:
+                        duplicates.append((name, member_obj.name))
+                if duplicates:
+                    alias_details = ", ".join(
+                        ["%s -> %s" % (alias, name) for (alias, name) in duplicates]
+                    )
+                    raise ValueError(
+                        "aliases found in %r: %s" % (enumeration, alias_details)
+                    )
+            elif check is CONTINUOUS:
+                values = [
+                    m.value for m in enumeration if isinstance(m.value, int)
+                ]
+                if values:
+                    low = min(values)
+                    high = max(values)
+                    val_set = set(values)
+                    missing = [v for v in range(low, high + 1) if v not in val_set]
+                    if missing:
+                        raise ValueError(
+                            "invalid enum %r: missing values %s"
+                            % (enumeration.__name__, ", ".join(str(m) for m in missing))
+                        )
+            elif check is NAMED_FLAGS:
+                flag_mask = getattr(enumeration, "_flag_mask_", 0)
+                missed = []
+                for name, member_obj in enumeration._member_map_.items():
+                    val = member_obj.value
+                    if isinstance(val, int) and val > 0:
+                        missing_bits = val & ~flag_mask
+                        if missing_bits:
+                            missed.append((name, hex(missing_bits)))
+                if missed:
+                    details = ", ".join(
+                        "alias %s is missing value %s" % (n, v) for n, v in missed
+                    )
+                    raise ValueError(
+                        "invalid Flag %r: %s [use enum.show_flag_values(value) for details]"
+                        % (enumeration.__name__, details)
+                    )
+        return enumeration
+
+    return _verify
+
+
+def global_enum_repr(self):
+    """Use module.name as repr for global enums."""
+    return "%s.%s" % (self.__class__.__module__, self._name_)
+
+
+def global_flag_repr(self):
+    """Use module.name (or module.A|module.B) as repr for global flags."""
+    module = self.__class__.__module__
+    cls_name = self.__class__.__name__
+    if self._name_ is not None:
+        return "%s.%s" % (module, self._name_)
+    names = self._decompose_names_()
+    if names:
+        parts = []
+        for p in names:
+            if p and (p[0].isdigit() or p[0] == "-"):
+                parts.append(p)
+            else:
+                parts.append("%s.%s" % (module, p))
+        return "|".join(parts)
+    return "%s.%s(%r)" % (module, cls_name, self._value_)
+
+
+def global_str(self):
+    """Use the enum member name as str for global enums."""
+    if self._name_ is not None:
+        return self._name_
+    names = self._decompose_names_()
+    if names:
+        return "|".join(names)
+    return "%s(%r)" % (self.__class__.__name__, self._value_)
+
+
+def global_enum(cls, update_str=False):
+    """Decorator that updates an Enum's repr/str and exports its members to module globals."""
+    if issubclass(cls, Flag):
+        cls.__repr__ = global_flag_repr
+    else:
+        cls.__repr__ = global_enum_repr
+    if not issubclass(cls, ReprEnum) or update_str:
+        cls.__str__ = global_str
+    mod = _sys.modules.get(cls.__module__)
+    if mod is not None:
+        mod_dict = getattr(mod, "__dict__", None)
+        if mod_dict is not None:
+            mod_dict.update(cls._member_map_)
+    return cls

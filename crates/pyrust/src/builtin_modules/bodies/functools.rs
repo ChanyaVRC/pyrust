@@ -51,6 +51,36 @@ use pyrust_core::BuiltinTypeOps;
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
+    constants {
+        "WRAPPER_ASSIGNMENTS" => Value::tuple(vec![
+            Value::string("__module__"),
+            Value::string("__name__"),
+            Value::string("__qualname__"),
+            Value::string("__doc__"),
+            Value::string("__annotations__"),
+            Value::string("__type_params__"),
+        ]),
+        "WRAPPER_UPDATES" => Value::tuple(vec![
+            Value::string("__dict__"),
+        ]),
+        "__all__" => Value::list(vec![
+            Value::string("update_wrapper"),
+            Value::string("wraps"),
+            Value::string("WRAPPER_ASSIGNMENTS"),
+            Value::string("WRAPPER_UPDATES"),
+            Value::string("total_ordering"),
+            Value::string("cache"),
+            Value::string("cmp_to_key"),
+            Value::string("lru_cache"),
+            Value::string("reduce"),
+            Value::string("partial"),
+            Value::string("partialmethod"),
+            Value::string("singledispatch"),
+            Value::string("singledispatchmethod"),
+            Value::string("cached_property"),
+        ]),
+    }
+
     /// CPython: functools.reduce(function, iterable[, initializer]).
     /// Apply `function` of two arguments cumulatively to the items of
     /// `iterable` — left-to-right — so as to reduce the iterable to a
@@ -423,6 +453,32 @@ pyrust_module! {
             };
             make_cache_info(_interp, class, hits, misses, maxsize, currsize)
         }
+
+        /// `wrapper.cache_parameters()` — return `{'maxsize': ..., 'typed': ...}`
+        /// matching CPython 3.9+ (`functools.lru_cache` / `functools.cache`).
+        fn cache_parameters(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            reject_extra_args(args, FN_NAME)?;
+            let (maxsize, typed) = {
+                let borrow = inst.borrow();
+                let maxsize = borrow
+                    .attrs
+                    .get("_maxsize")
+                    .cloned()
+                    .unwrap_or_else(Value::none);
+                let typed = borrow
+                    .attrs
+                    .get("_typed")
+                    .cloned()
+                    .unwrap_or_else(|| Value::bool_(false));
+                (maxsize, typed)
+            };
+            let _ = _interp;
+            let mut dict = PyDict::default();
+            dict.insert(PyKey::str_from("maxsize"), maxsize);
+            dict.insert(PyKey::str_from("typed"), typed);
+            Ok(Value::dict(dict))
+        }
     }
 
     /// Decorator factory produced by `lru_cache(maxsize=N)` /
@@ -484,38 +540,21 @@ pyrust_module! {
     /// `wrapper.__wrapped__ = wrapped`, and returns `wrapper`.
     /// <https://docs.python.org/3/library/functools.html#functools.update_wrapper>
     fn update_wrapper(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        // CPython's `assigned` / `updated` parameters are rarely overridden;
-        // we accept the common 2-argument form and use the standard
-        // WRAPPER_ASSIGNMENTS / WRAPPER_UPDATES.
-        if args.len() != 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes 2 arguments ({} given)", args.len()),
-            ));
-        }
-        let wrapper = args[0].value.clone();
-        let wrapped = args[1].value.clone();
-        do_update_wrapper(_interp, &wrapper, &wrapped)?;
+        let (wrapper, wrapped, assigned, updated) = parse_update_wrapper_args(FN_NAME, args)?;
+        do_update_wrapper_with(_interp, &wrapper, &wrapped, assigned.as_ref(), updated.as_ref())?;
         Ok(wrapper)
     }
 
-    /// CPython: functools.wraps(wrapped).
+    /// CPython: functools.wraps(wrapped, assigned=WRAPPER_ASSIGNMENTS, updated=WRAPPER_UPDATES).
     /// Returns a decorator that, applied to `wrapper`, runs
-    /// `update_wrapper(wrapper, wrapped)` and returns the (mutated)
-    /// wrapper.  Equivalent to `partial(update_wrapper, wrapped=wrapped)`.
+    /// `update_wrapper(wrapper, wrapped, assigned, updated)` and returns the
+    /// (mutated) wrapper.
     /// <https://docs.python.org/3/library/functools.html#functools.wraps>
     fn wraps(args) -> Result<Value> {
         let (generation, args) = split_generation_arg(args, FN_NAME)?;
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes exactly 1 argument"),
-            ));
-        }
+        let (wrapped, assigned, updated) = parse_wraps_args(FN_NAME, args)?;
         let _ = _interp;
-        make_wraps_partial(generation, args[0].value.clone())
+        make_wraps_partial(generation, wrapped, assigned, updated)
     }
 
     /// `wraps(wrapped)` returns one of these.  Calling it with the
@@ -541,14 +580,19 @@ pyrust_module! {
                     format!("{FN_NAME} expected exactly 1 argument"),
                 ));
             }
-            let wrapped = inst
-                .borrow()
-                .attrs
-                .get("__wraps_func")
-                .cloned()
-                .ok_or_else(|| internal(FN_NAME))?;
+            let (wrapped, assigned, updated) = {
+                let borrow = inst.borrow();
+                let wrapped = borrow
+                    .attrs
+                    .get("__wraps_func")
+                    .cloned()
+                    .ok_or_else(|| internal(FN_NAME))?;
+                let assigned = borrow.attrs.get("__wraps_assigned").cloned();
+                let updated = borrow.attrs.get("__wraps_updated").cloned();
+                (wrapped, assigned, updated)
+            };
             let wrapper = user[0].value.clone();
-            do_update_wrapper(_interp, &wrapper, &wrapped)?;
+            do_update_wrapper_with(_interp, &wrapper, &wrapped, assigned.as_ref(), updated.as_ref())?;
             Ok(wrapper)
         }
     }
@@ -730,12 +774,6 @@ pyrust_module! {
             ));
         }
         let func = args[0].value.clone();
-        if !is_callable(&func) {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} requires a callable argument"),
-            ));
-        }
         let factory = singledispatch_factory(_interp, generation)?;
         _interp.call_function_expanded(
             factory,

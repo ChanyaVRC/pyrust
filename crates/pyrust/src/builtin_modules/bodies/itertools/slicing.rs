@@ -394,30 +394,65 @@ pub(super) fn batched_init(
 ) -> Result<Value> {
     let inst = expect_self(args, fn_name)?;
     let user = &args[1..];
-    reject_keyword_args_expanded("batched", user)?;
-    if user.len() < 2 {
+    let mut positional: Vec<Value> = Vec::new();
+    let mut iterable_kw: Option<Value> = None;
+    let mut n_kw: Option<Value> = None;
+    for a in user {
+        match a.name.as_deref() {
+            Some("iterable") => iterable_kw = Some(a.value.clone()),
+            Some("n") => n_kw = Some(a.value.clone()),
+            Some(other) => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{other}' is an invalid keyword argument for batched()"),
+                ));
+            }
+            None => positional.push(a.value.clone()),
+        }
+    }
+    if positional.len() > 2 {
         return Err(PyError::named(
+            "TypeError",
+            format!(
+                "batched() takes at most 2 arguments ({} given)",
+                positional.len()
+            ),
+        ));
+    }
+    if !positional.is_empty() && iterable_kw.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "argument for batched() given by name ('iterable') and position (1)".to_string(),
+        ));
+    }
+    if positional.len() >= 2 && n_kw.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "argument for batched() given by name ('n') and position (2)".to_string(),
+        ));
+    }
+    let iterable_val = iterable_kw
+        .or_else(|| positional.first().cloned())
+        .ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "batched() missing required argument 'iterable' (pos 1)".to_string(),
+            )
+        })?;
+    let n_val = n_kw.or_else(|| positional.get(1).cloned()).ok_or_else(|| {
+        PyError::named(
             "TypeError",
             "batched() missing required argument 'n' (pos 2)".to_string(),
-        ));
-    }
-    if user.len() > 2 {
-        return Err(PyError::named(
-            "TypeError",
-            format!("batched() takes at most 2 arguments ({} given)", user.len()),
-        ));
-    }
-    let n = interp.value_to_isize(
-        &user[1].value,
-        "Python int too large to convert to C ssize_t",
-    )?;
+        )
+    })?;
+    let n = interp.value_to_isize(&n_val, "Python int too large to convert to C ssize_t")?;
     if n < 1 {
         return Err(PyError::named(
             "ValueError",
             "n must be at least one".to_string(),
         ));
     }
-    let iter = make_iter(interp, &user[0].value)?;
+    let iter = make_iter(interp, &iterable_val)?;
     let mut a = inst.borrow_mut();
     a.attrs.insert("_iter", iter);
     a.attrs.insert("_n", Value::int(n));

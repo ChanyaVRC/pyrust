@@ -260,8 +260,6 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<PyModule>>,
 ) -> Result<Option<Value>> {
-    let _ = interp;
-
     let mut fallback = IndexMap::new();
     {
         let module = module.borrow();
@@ -313,9 +311,37 @@ pub(crate) fn inject_python_members(
             })
             .collect::<Result<Vec<_>>>()?
     };
-    let mut module = module.borrow_mut();
-    for (name, callable) in replacements {
-        module.insert_attr(name, callable);
+    {
+        let mut module = module.borrow_mut();
+        for (name, callable) in replacements {
+            module.insert_attr(name, callable);
+        }
     }
+
+    let (partial_val, singledispatch_val, update_wrapper_val) = {
+        let module = module.borrow();
+        (
+            module
+                .attrs
+                .get("partial")
+                .cloned()
+                .ok_or_else(|| internal("partial"))?,
+            module
+                .attrs
+                .get("singledispatch")
+                .cloned()
+                .ok_or_else(|| internal("singledispatch"))?,
+            module
+                .attrs
+                .get("update_wrapper")
+                .cloned()
+                .ok_or_else(|| internal("update_wrapper"))?,
+        )
+    };
+    let (sdm, pm) =
+        build_descriptor_helpers(interp, partial_val, singledispatch_val, update_wrapper_val)?;
+    let mut module = module.borrow_mut();
+    module.insert_attr("singledispatchmethod".to_string(), sdm);
+    module.insert_attr("partialmethod".to_string(), pm);
     Ok(None)
 }
