@@ -85,6 +85,7 @@ include!("builtin_args/common.rs");
 include!("builtin_args/scalars.rs");
 include!("builtin_args/containers.rs");
 include!("builtin_args/iterables.rs");
+include!("builtin_args/protocols.rs");
 include!("builtin_args/optional.rs");
 include!("builtin_args/binding.rs");
 include!("builtin_args/arity.rs");

@@ -2,66 +2,55 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Ident, LitStr};
+use syn::{Attribute, Ident, LitStr};
 
-use crate::builtin_fn::{emit_builtin_reg, emit_name_static};
+use crate::builtin_fn::{
+    NativeStateCtx, emit_builtin_reg, emit_name_static, emit_native_state_helpers,
+};
 use crate::clinic::{KW_ONLY_POS_SENTINEL, emit_msg_name_binding, emit_validation_phase};
 use crate::signature::{ModuleFn, ModuleFnArgs, TypedParam, params_all_positional_only};
 
 /// Emit a multi-fn overload group's artefacts: one shared name static,
 /// N typed-arg body fns, one dispatcher (plus optional vectorcall fast
-/// dispatcher), and one `BuiltinReg` entry.
-///
-/// Generated shape (for `abs(PyInt)` + `abs(PyFloat)` + `abs(PyValue)`):
-///
-/// ```ignore
-/// static __pyfn_abs_NAME: LazyLock<&'static str> = …;
-///
-/// fn __pyfn_abs_overload_0(_interp, x: PyInt<'_>) -> Result<Value> { /* int body */ }
-/// fn __pyfn_abs_overload_1(_interp, x: PyFloat)   -> Result<Value> { /* float body */ }
-/// fn __pyfn_abs_overload_2(_interp, x: PyValue)   -> Result<Value> { /* catch-all */ }
-///
-/// fn __pyfn_abs(_interp, __pyrust_args: &[ExpandedCallArg]) -> Result<Value> {
-///     let FN_NAME = *__pyfn_abs_NAME;
-///     // Phase 1 — shared kwarg + arity validation.
-///     let __positional = validate_kwargs_and_collect_positional(__pyrust_args, FN_NAME, &["x"])?;
-///     check_positional_count(FN_NAME, __positional.len(), 1, 1)?;
-///     let __arg_x = locate_arg(__pyrust_args, &__positional, FN_NAME, "x", 0, true)?
-///         .ok_or_else(|| missing_arg::<()>(FN_NAME, "x").unwrap_err())?;
-///     // Phase 2 — try each overload's predicate in declaration order.
-///     if <PyInt as FromValue>::matches(__arg_x) {
-///         let x = <PyInt as FromValue>::try_from_value(__arg_x, FN_NAME, "x")?;
-///         return __pyfn_abs_overload_0(_interp, x);
-///     }
-///     // … same for PyFloat, then PyValue (always matches) …
-///     no_overload_matched(FN_NAME, &[…actual types…])
-/// }
-/// ```
+/// dispatcher), and one `regs.push(BuiltinReg { … });` statement.
 pub(crate) fn emit_overload_set_artefacts(
     group: &[&ModuleFn],
-    py_short: &str,
-    rust_short: &str,
+    name_suffix: &str,
+    rust_suffix: &str,
+    is_class_method: bool,
+    extra_cfg_attrs: &[Attribute],
+    native_state_ctx: Option<NativeStateCtx<'_>>,
 ) -> (Vec<TokenStream>, TokenStream, Ident) {
     let head = group[0];
     let head_span = head.short_name.span();
-    let suffix_lit = LitStr::new(py_short, head_span);
-    let name_static_ident = format_ident!("__pyfn_{}_NAME", rust_short, span = head_span);
-    let dispatcher_ident = format_ident!("__pyfn_{}", rust_short, span = head_span);
+    let suffix_lit = LitStr::new(name_suffix, head_span);
+    let bare_lit = LitStr::new(&head.py_and_rust_short_name().0, head_span);
+    let name_static_ident = format_ident!("__pyfn_{}_NAME", rust_suffix, span = head_span);
+    let dispatcher_ident = format_ident!("__pyfn_{}", rust_suffix, span = head_span);
+
+    let mut all_cfg_attrs: Vec<Attribute> =
+        Vec::with_capacity(extra_cfg_attrs.len() + head.cfg_attrs.len());
+    all_cfg_attrs.extend(extra_cfg_attrs.iter().cloned());
+    all_cfg_attrs.extend(head.cfg_attrs.iter().cloned());
 
     let ModuleFnArgs::Typed { params: ref_params } = &head.args else {
         unreachable!("validate_overload_set already rejected legacy overloads");
     };
 
-    // Overload sets disallow defaults, so min_pos == max_pos.
+    // Overload sets disallow defaults and varargs, so min_pos == max_pos.
     let pos_count = ref_params.iter().filter(|p| !p.keyword_only).count();
     let all_positional_only = params_all_positional_only(ref_params);
 
     let per_arg_locate = emit_per_arg_locate(ref_params, all_positional_only);
-    let (body_fns, dispatch_branches) =
-        emit_overload_bodies_and_branches(group, rust_short, &name_static_ident);
+    let (body_fns, dispatch_branches) = emit_overload_bodies_and_branches(
+        group,
+        rust_suffix,
+        &name_static_ident,
+        &all_cfg_attrs,
+        native_state_ctx,
+    );
 
     let no_match_tail = emit_no_match_tail(ref_params);
-    let bare_lit = LitStr::new(py_short, head_span);
     let msg_name_binding = emit_msg_name_binding(head.bare_name, &bare_lit);
     let phase1 = emit_validation_phase(
         ref_params,
@@ -72,6 +61,7 @@ pub(crate) fn emit_overload_set_artefacts(
     );
 
     let dispatcher = quote! {
+        #(#all_cfg_attrs)*
         #[allow(non_snake_case)]
         fn #dispatcher_ident(
             _interp: &mut crate::Interpreter,
@@ -109,6 +99,7 @@ pub(crate) fn emit_overload_set_artefacts(
                 })
                 .collect();
             let item = quote! {
+                #(#all_cfg_attrs)*
                 #[allow(non_snake_case)]
                 fn #fast_ident(
                     _interp: &mut crate::Interpreter,
@@ -132,7 +123,11 @@ pub(crate) fn emit_overload_set_artefacts(
         };
 
     let mut items = Vec::with_capacity(body_fns.len() + 3);
-    items.push(emit_name_static(&name_static_ident, &suffix_lit));
+    items.push(emit_name_static(
+        &name_static_ident,
+        &suffix_lit,
+        &all_cfg_attrs,
+    ));
     items.extend(body_fns);
     items.push(dispatcher);
     items.push(fast_fn_item);
@@ -140,10 +135,11 @@ pub(crate) fn emit_overload_set_artefacts(
     let reg_entry = emit_builtin_reg(
         &name_static_ident,
         &dispatcher_ident,
-        py_short,
+        name_suffix,
         &suffix_lit,
-        head.method_descriptor,
+        is_class_method || head.method_descriptor,
         fast_reg_fields,
+        &all_cfg_attrs,
     );
 
     (items, reg_entry, name_static_ident)
@@ -192,11 +188,14 @@ fn emit_per_arg_locate(ref_params: &[TypedParam], all_positional_only: bool) -> 
 
 fn emit_overload_bodies_and_branches(
     group: &[&ModuleFn],
-    rust_short: &str,
+    rust_suffix: &str,
     name_static_ident: &Ident,
+    all_cfg_attrs: &[Attribute],
+    native_state_ctx: Option<NativeStateCtx<'_>>,
 ) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let mut body_fns = Vec::with_capacity(group.len());
     let mut dispatch_branches = Vec::with_capacity(group.len());
+    let state_helpers = emit_native_state_helpers(native_state_ctx);
 
     for (idx, f) in group.iter().enumerate() {
         let ModuleFnArgs::Typed { params } = &f.args else {
@@ -204,7 +203,7 @@ fn emit_overload_bodies_and_branches(
         };
         let body_ident = format_ident!(
             "__pyfn_{}_overload_{}",
-            rust_short,
+            rust_suffix,
             idx,
             span = f.short_name.span()
         );
@@ -220,6 +219,7 @@ fn emit_overload_bodies_and_branches(
         let attrs = &f.attrs;
         let body_stmts = &f.body.stmts;
         body_fns.push(quote! {
+            #(#all_cfg_attrs)*
             #[allow(non_snake_case)]
             #(#attrs)*
             fn #body_ident(
@@ -229,6 +229,7 @@ fn emit_overload_bodies_and_branches(
                 #[allow(non_snake_case)]
                 let FN_NAME: &'static str = *#name_static_ident;
                 let _ = FN_NAME;
+                #state_helpers
                 #(#body_stmts)*
             }
         });
@@ -249,8 +250,8 @@ fn emit_overload_bodies_and_branches(
                 let name_lit = p.name_lit();
                 let arg_ident = overload_arg_ident(p);
                 quote! {
-                    let #n: #ty = <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value(
-                        #arg_ident, __pyrust_msg_name, #name_lit,
+                    let #n: #ty = <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value_with_interp(
+                        _interp, #arg_ident, __pyrust_msg_name, #name_lit,
                     )?;
                 }
             })

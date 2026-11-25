@@ -2,18 +2,21 @@
 
 use std::collections::{HashMap, HashSet};
 
+use proc_macro2::Span;
 use quote::ToTokens;
 use syn::parse::ParseStream;
 use syn::{Attribute, Block, Expr, Ident, LitStr, Token, Type};
 
 use crate::attrs::{
-    ArityStyle, FnAttrs, is_snake_case, parse_fn_attrs, parse_param_attrs, unraw_ident,
+    ArityStyle, FnAttrs, MethodKind, cfg_key, parse_fn_attrs, parse_param_attrs, unraw_ident,
 };
 
 /// A single `fn` declaration inside `pyrust_module!` (top-level or class method).
 pub(crate) struct ModuleFn {
-    /// Outer attributes that remain on the generated fn (`#[doc = …]`, etc.).
+    /// Outer attributes that remain on the generated fn (`#[doc = …]`, `#[allow(…)]`).
     pub(crate) attrs: Vec<Attribute>,
+    /// `#[cfg(…)]` attributes gating this function across all emitted artefacts.
+    pub(crate) cfg_attrs: Vec<Attribute>,
     pub(crate) short_name: Ident,
     /// Optional Python-level name override set via `#[py_name = "..."]`.
     pub(crate) py_name_override: Option<LitStr>,
@@ -27,6 +30,10 @@ pub(crate) struct ModuleFn {
     /// `true` when `#[method_descriptor]` is present — explicitly marks an
     /// undotted top-level `fn` as `BuiltinCallableKind::MethodDescriptor`.
     pub(crate) method_descriptor: bool,
+    /// Binding kind for methods inside `class { … }`.
+    pub(crate) method_kind: MethodKind,
+    /// Span of any `#[getter]`/`#[setter]`/`#[classmethod]`/`#[staticmethod]` attr.
+    pub(crate) method_kind_span: Option<Span>,
     pub(crate) body: Block,
 }
 
@@ -42,6 +49,17 @@ impl ModuleFn {
         };
         (py_short, rust_short)
     }
+
+    /// Property name for a `#[getter]` / `#[setter]` method.
+    pub(crate) fn property_name(&self) -> Option<String> {
+        match &self.method_kind {
+            MethodKind::Getter(Some(name)) | MethodKind::Setter(Some(name)) => Some(name.clone()),
+            MethodKind::Getter(None) | MethodKind::Setter(None) => {
+                Some(self.py_and_rust_short_name().0)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Argument-list dialect — legacy `(args: &[ExpandedCallArg])` or typed.
@@ -54,7 +72,7 @@ pub(crate) enum ModuleFnArgs {
 pub(crate) struct TypedParam {
     /// Parameter name (the local bound in the generated body).
     pub(crate) name: Ident,
-    /// Wrapper type — e.g. `PyInt`, `PyFloat`, `Option<PyStr>`.
+    /// Wrapper type — e.g. `PyInt`, `PyFloat`, `Option<PyStr>`, `&[Value]`.
     pub(crate) ty: Type,
     /// Lazy `#[default(expr)]` evaluated only when the slot is missing.
     pub(crate) default: Option<Expr>,
@@ -62,12 +80,28 @@ pub(crate) struct TypedParam {
     pub(crate) positional_only: bool,
     /// `#[keyword_only]` — passing positionally is rejected.
     pub(crate) keyword_only: bool,
+    /// `#[varargs]` — collects extra positional arguments.
+    pub(crate) varargs: bool,
+    /// `#[varkwargs]` — collects extra keyword arguments.
+    pub(crate) varkwargs: bool,
+    /// `#[state]` — borrows `&T` from `#[native_state(T)]` on positional `self`.
+    pub(crate) state: bool,
+    /// `#[state_mut]` — mutably borrows `&mut T` from `#[native_state(T)]` on positional `self`.
+    pub(crate) state_mut: bool,
 }
 
 impl TypedParam {
     /// Python-level parameter name literal (with any `r#` raw prefix stripped).
     pub(crate) fn name_lit(&self) -> LitStr {
         LitStr::new(&unraw_ident(&self.name), self.name.span())
+    }
+
+    pub(crate) fn is_state_param(&self) -> bool {
+        self.state || self.state_mut
+    }
+
+    pub(crate) fn is_regular_param(&self) -> bool {
+        !self.varargs && !self.varkwargs && !self.is_state_param()
     }
 }
 
@@ -79,25 +113,18 @@ pub(crate) fn parse_module_fn(
 ) -> syn::Result<ModuleFn> {
     let FnAttrs {
         retained: attrs,
+        cfg_attrs,
         py_name_override,
         arity_style,
         arity_style_set,
         bare_name,
         method_descriptor,
+        method_kind,
+        method_kind_span,
     } = parse_fn_attrs(raw_attrs)?;
 
     let _fn_kw: Token![fn] = input.parse()?;
     let short_name: Ident = input.parse()?;
-    let short_str = unraw_ident(&short_name);
-    if !is_snake_case(&short_str) {
-        return Err(syn::Error::new(
-            short_name.span(),
-            format!(
-                "`pyrust_module!` function names must be snake_case (got `{short_str}`); \
-                 CamelCase would risk const-ident collisions with other functions",
-            ),
-        ));
-    }
 
     let arg_content;
     syn::parenthesized!(arg_content in input);
@@ -114,14 +141,38 @@ pub(crate) fn parse_module_fn(
 
     Ok(ModuleFn {
         attrs,
+        cfg_attrs,
         short_name,
         py_name_override,
         args,
         arity_style,
         bare_name,
         method_descriptor,
+        method_kind,
+        method_kind_span,
         body,
     })
+}
+
+/// Validate constraints that apply only to top-level module functions (not class methods).
+pub(crate) fn validate_top_level_fn(f: &ModuleFn) -> syn::Result<()> {
+    if !matches!(f.method_kind, MethodKind::Regular) {
+        return Err(syn::Error::new(
+            f.method_kind_span.unwrap_or_else(|| f.short_name.span()),
+            "`#[getter]`, `#[setter]`, `#[classmethod]`, and `#[staticmethod]` may only appear \
+             on methods inside a `class { … }` block",
+        ));
+    }
+    if let ModuleFnArgs::Typed { params } = &f.args
+        && let Some(sp) = params.iter().find(|p| p.is_state_param())
+    {
+        return Err(syn::Error::new(
+            sp.name.span(),
+            "`#[state]` and `#[state_mut]` may only be used on methods inside a \
+             `#[native_state(T)] class { … }` block",
+        ));
+    }
+    Ok(())
 }
 
 /// Cross-validate function-level dialect attributes against the parsed
@@ -151,8 +202,24 @@ fn validate_fn_attr_compatibility(
             }
         }
         ModuleFnArgs::Typed { params } => {
+            let has_variadic = has_varargs(params) || has_varkwargs(params);
+            if has_variadic
+                && matches!(
+                    arity_style,
+                    ArityStyle::TakesExactlyOne | ArityStyle::TakesNoArgs | ArityStyle::Clinic
+                )
+            {
+                return Err(syn::Error::new(
+                    short_name.span(),
+                    "`#[varargs]` and `#[varkwargs]` are not compatible with \
+                     `#[arity_style(takes_exactly_one)]`, `takes_no_args`, or `clinic`",
+                ));
+            }
             if arity_style == ArityStyle::TakesExactlyOne {
-                let pos = params.iter().filter(|p| !p.keyword_only).count();
+                let pos = params
+                    .iter()
+                    .filter(|p| !p.keyword_only && !p.varargs && !p.varkwargs)
+                    .count();
                 if pos != 1 || params.iter().any(|p| p.default.is_some()) {
                     return Err(syn::Error::new(
                         short_name.span(),
@@ -189,7 +256,13 @@ fn parse_fn_args(input: ParseStream) -> syn::Result<ModuleFnArgs> {
     // explicit type (or the legacy slice type) -> legacy slice binding.
     if params.len() == 1 {
         let p = &params[0];
-        let attrs_empty = p.default.is_none() && !p.positional_only && !p.keyword_only;
+        let attrs_empty = p.default.is_none()
+            && !p.positional_only
+            && !p.keyword_only
+            && !p.varargs
+            && !p.varkwargs
+            && !p.state
+            && !p.state_mut;
         let ty_str = ty_to_canonical_string(&p.ty);
         let is_legacy_type = ty_str.is_empty()
             || ty_str == "&[ExpandedCallArg]"
@@ -204,8 +277,12 @@ fn parse_fn_args(input: ParseStream) -> syn::Result<ModuleFnArgs> {
     // Typed dialect structural invariants:
     // 1. Every parameter has an explicit type annotation.
     // 2. Parameter names are unique.
+    // 3. `#[varargs]`, `#[varkwargs]`, `#[state]`, `#[state_mut]` ordering.
     let mut seen: HashSet<String> = HashSet::with_capacity(params.len());
-    for p in &params {
+    let mut seen_varargs = false;
+    let mut seen_varkwargs = false;
+
+    for (idx, p) in params.iter_mut().enumerate() {
         if ty_to_canonical_string(&p.ty).is_empty() {
             return Err(syn::Error::new(
                 p.name.span(),
@@ -224,6 +301,38 @@ fn parse_fn_args(input: ParseStream) -> syn::Result<ModuleFnArgs> {
                     p.name,
                 ),
             ));
+        }
+        if seen_varkwargs {
+            return Err(syn::Error::new(
+                p.name.span(),
+                "`#[varkwargs]` must be the last parameter in the signature",
+            ));
+        }
+        if p.is_state_param() && idx != 0 {
+            return Err(syn::Error::new(
+                p.name.span(),
+                "`#[state]` / `#[state_mut]` must be the first parameter (bound to `self`)",
+            ));
+        }
+        if p.varargs {
+            if seen_varargs {
+                return Err(syn::Error::new(
+                    p.name.span(),
+                    "`#[varargs]` may appear at most once per function",
+                ));
+            }
+            seen_varargs = true;
+        } else if p.varkwargs {
+            seen_varkwargs = true;
+        } else if seen_varargs {
+            if p.positional_only {
+                return Err(syn::Error::new(
+                    p.name.span(),
+                    "a `#[positional_only]` parameter cannot appear after `#[varargs]`",
+                ));
+            }
+            // Match Python syntax: parameters after `*args` are implicitly keyword-only.
+            p.keyword_only = true;
         }
     }
     Ok(ModuleFnArgs::Typed { params })
@@ -249,30 +358,57 @@ fn parse_one_param(input: ParseStream) -> syn::Result<TypedParam> {
         default: param_attrs.default,
         positional_only: param_attrs.positional_only,
         keyword_only: param_attrs.keyword_only,
+        varargs: param_attrs.varargs,
+        varkwargs: param_attrs.varkwargs,
+        state: param_attrs.state,
+        state_mut: param_attrs.state_mut,
     })
 }
 
-/// Returns true when every parameter in a non-empty list is `#[positional_only]`.
-pub(crate) fn params_all_positional_only(params: &[TypedParam]) -> bool {
-    !params.is_empty() && params.iter().all(|p| p.positional_only && !p.keyword_only)
+pub(crate) fn has_varargs(params: &[TypedParam]) -> bool {
+    params.iter().any(|p| p.varargs)
 }
 
-/// Names of every parameter that may be passed by keyword.
+pub(crate) fn has_varkwargs(params: &[TypedParam]) -> bool {
+    params.iter().any(|p| p.varkwargs)
+}
+
+pub(crate) fn has_state_param(params: &[TypedParam]) -> bool {
+    params.iter().any(TypedParam::is_state_param)
+}
+
+/// Returns true when every parameter in a non-empty list is `#[positional_only]`
+/// (or `#[state]`/`#[state_mut]`), with no `#[varargs]`/`#[varkwargs]`.
+pub(crate) fn params_all_positional_only(params: &[TypedParam]) -> bool {
+    !params.is_empty()
+        && !has_varargs(params)
+        && !has_varkwargs(params)
+        && params
+            .iter()
+            .all(|p| (p.positional_only || p.is_state_param()) && !p.keyword_only)
+}
+
+/// Names of every regular parameter that may be passed by keyword.
 pub(crate) fn allowed_kwarg_lits(params: &[TypedParam]) -> Vec<LitStr> {
     params
         .iter()
-        .filter(|p| !p.positional_only)
+        .filter(|p| p.is_regular_param() && !p.positional_only)
         .map(TypedParam::name_lit)
         .collect()
 }
 
-/// Compute `(min_positional, max_positional)` counts for a typed parameter list.
+/// Compute `(min_positional, max_positional)` counts for fixed positional parameters
+/// (excluding `#[keyword_only]`, `#[varargs]`, and `#[varkwargs]`, and counting
+/// `#[state]`/`#[state_mut]` as 1 required positional parameter).
 pub(crate) fn positional_arity_bounds(params: &[TypedParam]) -> (usize, usize) {
     let min_pos = params
         .iter()
-        .filter(|p| !p.keyword_only && p.default.is_none())
+        .filter(|p| !p.keyword_only && !p.varargs && !p.varkwargs && p.default.is_none())
         .count();
-    let max_pos = params.iter().filter(|p| !p.keyword_only).count();
+    let max_pos = params
+        .iter()
+        .filter(|p| !p.keyword_only && !p.varargs && !p.varkwargs)
+        .count();
     (min_pos, max_pos)
 }
 
@@ -291,17 +427,22 @@ pub(crate) fn ty_to_canonical_string(ty: &Type) -> String {
         .collect()
 }
 
-/// Group module-level `fn` declarations by Python-level short name in
-/// deterministic source order and validate any multi-fn overload sets.
+/// Group `fn` declarations by `(Python short name, cfg key)` in deterministic
+/// source order and validate any multi-fn overload sets.
+///
+/// Functions with the same Python name but different `#[cfg(...)]` gates (e.g.
+/// `#[cfg(unix)] fn f` and `#[cfg(windows)] fn f`) are placed in separate
+/// single-fn groups rather than combined into an overload set.
 pub(crate) fn group_funcs_by_name(funcs: &[ModuleFn]) -> syn::Result<Vec<Vec<&ModuleFn>>> {
     let mut groups: Vec<Vec<&ModuleFn>> = Vec::new();
-    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+    let mut key_to_idx: HashMap<(String, String), usize> = HashMap::new();
     for f in funcs {
         let (py_short, _) = f.py_and_rust_short_name();
-        match name_to_idx.get(&py_short).copied() {
+        let key = (py_short, cfg_key(&f.cfg_attrs));
+        match key_to_idx.get(&key).copied() {
             Some(idx) => groups[idx].push(f),
             None => {
-                name_to_idx.insert(py_short, groups.len());
+                key_to_idx.insert(key, groups.len());
                 groups.push(vec![f]);
             }
         }
@@ -318,9 +459,10 @@ pub(crate) fn group_funcs_by_name(funcs: &[ModuleFn]) -> syn::Result<Vec<Vec<&Mo
 /// name:
 /// 1. All overloads use the typed dialect.
 /// 2. Same arity, parameter names, and `#[positional_only]`/`#[keyword_only]` flags.
-/// 3. No `#[default(...)]` on any parameter.
+/// 3. No `#[default(...)]`, `#[varargs]`, `#[varkwargs]`, `#[state]`, or `#[state_mut]`.
 /// 4. Any unconditional `PyValue` / `Option<PyValue>` catch-all overload is last.
-/// 5. All overloads agree on `#[arity_style]`, `#[bare_name]`, and `#[method_descriptor]`.
+/// 5. All overloads agree on `#[arity_style]`, `#[bare_name]`, `#[method_descriptor]`,
+///    and method kind (`#[classmethod]` / `#[staticmethod]` / regular).
 fn validate_overload_set(group: &[&ModuleFn]) -> syn::Result<()> {
     let reference = group[0];
     let ref_params = require_typed_overload_params(reference)?;
@@ -332,6 +474,16 @@ fn validate_overload_set(group: &[&ModuleFn]) -> syn::Result<()> {
                     "parameter `{}` has a `#[default(...)]`, which is not \
                      allowed in overload sets — declare a single signature \
                      instead, or move the default into the dispatched body",
+                    p.name,
+                ),
+            ));
+        }
+        if p.varargs || p.varkwargs || p.is_state_param() {
+            return Err(syn::Error::new(
+                p.name.span(),
+                format!(
+                    "parameter `{}` uses `#[varargs]`/`#[varkwargs]`/`#[state]`, \
+                     which is not allowed in overload sets",
                     p.name,
                 ),
             ));
@@ -393,6 +545,16 @@ fn validate_overload_set(group: &[&ModuleFn]) -> syn::Result<()> {
                     ),
                 ));
             }
+            if b.varargs || b.varkwargs || b.is_state_param() {
+                return Err(syn::Error::new(
+                    b.name.span(),
+                    format!(
+                        "parameter `{}` uses `#[varargs]`/`#[varkwargs]`/`#[state]`, \
+                         which is not allowed in overload sets",
+                        b.name,
+                    ),
+                ));
+            }
         }
     }
 
@@ -416,7 +578,7 @@ fn validate_overload_set(group: &[&ModuleFn]) -> syn::Result<()> {
     }
 
     // All overloads share one dispatcher and one registry entry, so they must
-    // agree on arity wording, message name, and callable kind (#2331).
+    // agree on arity wording, message name, callable kind, and method kind (#2331).
     for (idx, f) in group.iter().enumerate().skip(1) {
         if f.arity_style != reference.arity_style {
             return Err(syn::Error::new(
@@ -445,6 +607,15 @@ fn validate_overload_set(group: &[&ModuleFn]) -> syn::Result<()> {
                     "overload #{idx} disagrees on `#[method_descriptor]` with the \
                      first overload — all overloads share one registry entry and \
                      must agree on callable kind",
+                ),
+            ));
+        }
+        if f.method_kind != reference.method_kind {
+            return Err(syn::Error::new(
+                f.short_name.span(),
+                format!(
+                    "overload #{idx} disagrees on method binding (`#[classmethod]` / \
+                     `#[staticmethod]`) with the first overload",
                 ),
             ));
         }

@@ -711,4 +711,173 @@ mod tests {
             err_msg(&err)
         );
     }
+
+    // ── Protocol-driven FromValue wrappers (#3268) ───────────────────────────
+
+    #[test]
+    fn pybytes_like_zero_copy_bytes_and_mutable_buffers() {
+        let b = Value::bytes(b"hello".to_vec());
+        assert!(PyBytesLike::matches(&b));
+        let extracted = PyBytesLike::try_from_value(&b, "f", "buf").unwrap();
+        assert_eq!(extracted.as_bytes(), b"hello");
+        assert!(matches!(extracted.0, Cow::Borrowed(_)));
+
+        let ba = pyrust_builtins::bytearray::bytearray(b"world".to_vec());
+        assert!(PyBytesLike::matches(&ba));
+        let extracted_ba = PyBytesLike::try_from_value(&ba, "f", "buf").unwrap();
+        assert_eq!(extracted_ba.as_bytes(), b"world");
+
+        let mv = pyrust_builtins::memoryview::from_bytes(Rc::new(b"slice".to_vec()), b.clone());
+        assert!(PyBytesLike::matches(&mv));
+        let extracted_mv = PyBytesLike::try_from_value(&mv, "f", "buf").unwrap();
+        assert_eq!(extracted_mv.as_bytes(), b"slice");
+
+        let s = Value::string("nope");
+        assert!(!PyBytesLike::matches(&s));
+        let err = PyBytesLike::try_from_value(&s, "f", "buf").unwrap_err();
+        assert_eq!(err_class(&err), "TypeError");
+    }
+
+    #[test]
+    fn pypath_str_bytes_and_rejection() {
+        let s = Value::string("/tmp/demo.txt");
+        assert!(PyPath::matches(&s));
+        let p = PyPath::try_from_value(&s, "open", "path").unwrap();
+        assert_eq!(p.as_path(), Path::new("/tmp/demo.txt"));
+        assert!(!p.is_bytes());
+
+        let b = Value::bytes(b"/tmp/demo.bin".to_vec());
+        assert!(PyPath::matches(&b));
+        let pb = PyPath::try_from_value(&b, "open", "path").unwrap();
+        assert_eq!(pb.as_path(), Path::new("/tmp/demo.bin"));
+        assert!(pb.is_bytes());
+
+        let i = Value::int(7);
+        assert!(!PyPath::matches(&i));
+        let err = PyPath::try_from_value(&i, "open", "path").unwrap_err();
+        assert_eq!(err_class(&err), "TypeError");
+    }
+
+    #[test]
+    fn pyindex_int_bool_bigint_and_rejection() {
+        let i = Value::int(-12);
+        assert!(PyIndex::matches(&i));
+        assert_eq!(
+            PyIndex::try_from_value(&i, "f", "n").unwrap().as_i64(),
+            Some(-12)
+        );
+
+        let b = Value::bool_(true);
+        assert!(PyIndex::matches(&b));
+        assert_eq!(
+            PyIndex::try_from_value(&b, "f", "n").unwrap().as_i64(),
+            Some(1)
+        );
+
+        let huge = PyBigInt::from(1u128 << 100);
+        let bv = Value::bigint(huge.clone());
+        assert!(PyIndex::matches(&bv));
+        let bi = PyIndex::try_from_value(&bv, "f", "n").unwrap();
+        assert_eq!(bi.to_bigint(), huge);
+        assert_eq!(
+            err_class(&bi.expect_i64("f", "n").unwrap_err()),
+            "OverflowError"
+        );
+
+        let f = Value::float(1.0);
+        assert!(!PyIndex::matches(&f));
+        let err = PyIndex::try_from_value(&f, "f", "n").unwrap_err();
+        assert_eq!(err_class(&err), "TypeError");
+        assert!(err_msg(&err).contains("cannot be interpreted as an integer"));
+    }
+
+    #[test]
+    fn pynumber_float_int_bool_bigint_and_rejection() {
+        let f = Value::float(3.25);
+        assert!(PyNumber::matches(&f));
+        assert_eq!(
+            PyNumber::try_from_value(&f, "f", "x").unwrap().as_f64(),
+            3.25
+        );
+
+        let i = Value::int(7);
+        assert!(PyNumber::matches(&i));
+        assert_eq!(
+            PyNumber::try_from_value(&i, "f", "x").unwrap().as_f64(),
+            7.0
+        );
+
+        let b = Value::bool_(true);
+        assert!(PyNumber::matches(&b));
+        assert_eq!(
+            PyNumber::try_from_value(&b, "f", "x").unwrap().as_f64(),
+            1.0
+        );
+
+        // BigInt larger than f64::MAX raises OverflowError.
+        let huge = PyBigInt::from(1u32) << 2000usize;
+        let bv = Value::bigint(huge);
+        let err = PyNumber::try_from_value(&bv, "f", "x").unwrap_err();
+        assert_eq!(err_class(&err), "OverflowError");
+
+        let s = Value::string("3.25");
+        assert!(!PyNumber::matches(&s));
+        let err = PyNumber::try_from_value(&s, "f", "x").unwrap_err();
+        assert_eq!(err_class(&err), "TypeError");
+    }
+
+    #[test]
+    fn pycallable_builtin_and_rejection() {
+        let f = Value::builtin_function("len");
+        assert!(PyCallable::matches(&f));
+        let cb = PyCallable::try_from_value(&f, "map", "func").unwrap();
+        assert_eq!(cb.as_value(), &f);
+
+        let n = Value::int(42);
+        assert!(!PyCallable::matches(&n));
+        let err = PyCallable::try_from_value(&n, "map", "func").unwrap_err();
+        assert_eq!(err_class(&err), "TypeError");
+        assert!(err_msg(&err).contains("must be callable"));
+    }
+
+    #[test]
+    fn variadic_collect_helpers() {
+        let args = vec![
+            ExpandedCallArg {
+                name: None,
+                value: Value::int(1),
+            },
+            ExpandedCallArg {
+                name: None,
+                value: Value::int(2),
+            },
+            ExpandedCallArg {
+                name: None,
+                value: Value::int(3),
+            },
+            ExpandedCallArg {
+                name: Some("known".to_string()),
+                value: Value::int(10),
+            },
+            ExpandedCallArg {
+                name: Some("extra_a".to_string()),
+                value: Value::string("a"),
+            },
+            ExpandedCallArg {
+                name: Some("extra_b".to_string()),
+                value: Value::string("b"),
+            },
+        ];
+        let pos = collect_positional_args(&args);
+        assert_eq!(pos.len(), 3);
+        let rest = collect_varargs(&pos, 1);
+        assert_eq!(rest.len(), 2);
+        assert_eq!(rest[0].as_int(), Some(2));
+        assert_eq!(rest[1].as_int(), Some(3));
+
+        let kw: indexmap::IndexMap<String, Value> = collect_varkwargs(&args, &["known"]);
+        assert_eq!(kw.len(), 2);
+        assert_eq!(kw.get("extra_a").and_then(Value::as_str), Some("a"));
+        assert_eq!(kw.get("extra_b").and_then(Value::as_str), Some("b"));
+    }
 }

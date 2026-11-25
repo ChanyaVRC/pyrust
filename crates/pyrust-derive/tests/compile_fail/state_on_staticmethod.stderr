@@ -1,0 +1,5 @@
+error: `#[state]` / `#[state_mut]` cannot be used on `#[classmethod]` or `#[staticmethod]`
+  --> tests/compile_fail/state_on_staticmethod.rs:12:26
+   |
+12 |         fn read(#[state] st: &u32) -> Result<Value> {
+   |                          ^^

@@ -1,0 +1,5 @@
+error: `#[state]` / `#[state_mut]` requires `#[native_state(MyState)]` on `class Bad`
+  --> tests/compile_fail/state_without_native_state.rs:10:26
+   |
+10 |         fn read(#[state] st: &u32) -> Result<Value> {
+   |                          ^^

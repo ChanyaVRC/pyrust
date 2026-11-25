@@ -33,6 +33,25 @@ impl<'a, T: FromValue<'a>> FromValue<'a> for Option<T> {
         )))
     }
 
+    fn try_from_value_with_interp(
+        interp: &mut crate::interpreter::Interpreter,
+        value: &'a Value,
+        fn_name: &str,
+        arg_name: &str,
+    ) -> Result<Self> {
+        if value.is_none() {
+            return Ok(None);
+        }
+        if T::matches(value) {
+            return T::try_from_value_with_interp(interp, value, fn_name, arg_name).map(Some);
+        }
+        Err(type_error(format!(
+            "{fn_name}() argument '{arg_name}' must be {} or None, not {}",
+            T::PY_TYPE_NAME,
+            pyrust_core::builtin_type_name(value),
+        )))
+    }
+
     fn matches(value: &'a Value) -> bool {
         value.is_none() || T::matches(value)
     }
@@ -69,6 +88,16 @@ impl<'a, T: FromValue<'a>> FromValue<'a> for OptionalArg<T> {
     #[inline(always)]
     fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         T::try_from_value(value, fn_name, arg_name).map(OptionalArg::Provided)
+    }
+
+    #[inline(always)]
+    fn try_from_value_with_interp(
+        interp: &mut crate::interpreter::Interpreter,
+        value: &'a Value,
+        fn_name: &str,
+        arg_name: &str,
+    ) -> Result<Self> {
+        T::try_from_value_with_interp(interp, value, fn_name, arg_name).map(OptionalArg::Provided)
     }
 
     #[inline(always)]

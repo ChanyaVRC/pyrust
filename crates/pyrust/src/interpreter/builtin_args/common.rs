@@ -19,6 +19,23 @@ pub(crate) trait FromValue<'a>: Sized {
     /// parameter name (e.g. `"x"`) used in error messages.
     fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self>;
 
+    /// Interpreter-aware conversion used by `pyrust_module!` typed preludes.
+    ///
+    /// Defaults to [`Self::try_from_value`]. Protocol-driven wrappers
+    /// (`PyBytesLike`, `PyPath`, `PyIndex`, `PyNumber`) override this so they
+    /// can invoke Python dunders (`__buffer__`, `__fspath__`, `__index__`,
+    /// `__float__`) via `interp`.
+    #[inline]
+    fn try_from_value_with_interp(
+        interp: &mut crate::interpreter::Interpreter,
+        value: &'a Value,
+        fn_name: &str,
+        arg_name: &str,
+    ) -> Result<Self> {
+        let _ = interp;
+        Self::try_from_value(value, fn_name, arg_name)
+    }
+
     /// Allocation-free type-match predicate used by overload dispatch.
     /// Returns `true` iff `try_from_value` would succeed for this value.
     /// Takes `&'a Value` so the default can delegate to `try_from_value`
