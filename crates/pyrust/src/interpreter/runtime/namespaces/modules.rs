@@ -1573,6 +1573,7 @@ impl Interpreter {
                 "dis" => Some("import dis\ndis.main()\n"),
                 "site" => Some("import site\nsite._script()\n"),
                 "pydoc" => Some("import pydoc\npydoc.cli()\n"),
+                "json.tool" => Some("import json.tool\njson.tool.main()\n"),
                 _ => None,
             } {
                 return Ok(MainModuleTarget::Builtin {

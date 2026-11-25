@@ -13,11 +13,15 @@ use std::io::IsTerminal;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
+use crate::interpreter::builtin_args::{OptValueRef, OptionalArg, PyPath, PyStr, PyValue};
 use crate::interpreter::{
     ExpandedCallArg, Interpreter, reject_keyword_args_expanded, value_type_name_str,
 };
 use crate::value::{PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
+
+#[path = "shutil/archives_disk.rs"]
+mod archives_disk;
 
 /// Python-source definitions for the `shutil` module.
 const SHUTIL_PY_SOURCE: &str = include_str!("shutil_py.py");
@@ -93,6 +97,29 @@ pub(crate) fn inject_python_members(
                 .borrow_mut()
                 .attrs
                 .insert(name.to_string(), val.clone());
+        }
+    }
+    archives_disk::init_format_registries(module);
+    // Append native archive/disk API exports to `__all__` in the exec namespace
+    // so `publish_exec_dunder_all` publishes the complete CPython 3.12 `__all__`.
+    if let Some(all_val) = dict.get(&PyKey::str_from("__all__")) {
+        #[allow(unused_mut)]
+        let mut extra = vec![
+            "RegistryError",
+            "make_archive",
+            "get_archive_formats",
+            "register_archive_format",
+            "unregister_archive_format",
+            "get_unpack_formats",
+            "register_unpack_format",
+            "unregister_unpack_format",
+            "unpack_archive",
+            "disk_usage",
+        ];
+        #[cfg(unix)]
+        extra.push("chown");
+        for sym in extra {
+            let _ = archives_disk::call_method(interp, all_val, "append", &[Value::string(sym)]);
         }
     }
     Ok(Some(ns.clone()))
@@ -278,6 +305,13 @@ fn query_terminal_size_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<V
 }
 
 pyrust_module! {
+    constants {
+        "usage" => archives_disk::usage::class(),
+    }
+
+    /// Raised when a registry operation fails (e.g. duplicate unpack extension).
+    exception RegistryError;
+
     fn _copyfile_native(args) -> Result<Value> {
         copyfile_native_impl(FN_NAME, args)
     }
@@ -292,5 +326,212 @@ pyrust_module! {
 
     fn _query_terminal_size(args) -> Result<Value> {
         query_terminal_size_impl(FN_NAME, args)
+    }
+
+    fn disk_usage(path: PyPath) -> Result<Value> {
+        archives_disk::disk_usage_impl(path.as_path())
+    }
+
+    #[cfg(unix)]
+    fn chown(
+        path: PyPath,
+        #[default(OptionalArg::Omitted)] user: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] group: OptValueRef<'_>,
+    ) -> Result<Value> {
+        archives_disk::chown_impl(path.as_path(), user.as_value(), group.as_value())
+    }
+
+    fn get_archive_formats() -> Result<Value> {
+        archives_disk::get_archive_formats_impl(_interp)
+    }
+
+    fn register_archive_format(
+        name: PyStr<'_>,
+        function: PyValue,
+        #[default(OptionalArg::Omitted)] extra_args: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] description: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let desc = match description.as_value() {
+            None => String::new(),
+            Some(v) => v
+                .as_str()
+                .ok_or_else(|| {
+                    PyError::named(
+                        "TypeError",
+                        format!(
+                            "description must be str, not {}",
+                            value_type_name_str(v)
+                        ),
+                    )
+                })?
+                .to_string(),
+        };
+        archives_disk::register_archive_format_impl(
+            _interp,
+            name.0.as_ref(),
+            function.0,
+            extra_args.as_value(),
+            &desc,
+        )
+    }
+
+    fn unregister_archive_format(name: PyStr<'_>) -> Result<Value> {
+        archives_disk::unregister_archive_format_impl(_interp, name.0.as_ref())
+    }
+
+    fn get_unpack_formats() -> Result<Value> {
+        archives_disk::get_unpack_formats_impl(_interp)
+    }
+
+    fn register_unpack_format(
+        name: PyStr<'_>,
+        extensions: PyValue,
+        function: PyValue,
+        #[default(OptionalArg::Omitted)] extra_args: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] description: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let desc = match description.as_value() {
+            None => String::new(),
+            Some(v) => v
+                .as_str()
+                .ok_or_else(|| {
+                    PyError::named(
+                        "TypeError",
+                        format!(
+                            "description must be str, not {}",
+                            value_type_name_str(v)
+                        ),
+                    )
+                })?
+                .to_string(),
+        };
+        archives_disk::register_unpack_format_impl(
+            _interp,
+            name.0.as_ref(),
+            extensions.0,
+            function.0,
+            extra_args.as_value(),
+            &desc,
+        )
+    }
+
+    fn unregister_unpack_format(name: PyStr<'_>) -> Result<Value> {
+        archives_disk::unregister_unpack_format_impl(_interp, name.0.as_ref())
+    }
+
+    fn _make_tarball(
+        base_name: PyPath,
+        base_dir: PyPath,
+        #[default(OptionalArg::Omitted)] compress: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] _verbose: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] dry_run: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] owner: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] group: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] logger: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let comp = match compress.as_value() {
+            None => Some("gzip"),
+            Some(v) if v.is_none() => None,
+            Some(v) => Some(v.as_str().ok_or_else(|| {
+                PyError::named(
+                    "TypeError",
+                    format!("compress must be str or None, not {}", value_type_name_str(v)),
+                )
+            })?),
+        };
+        let is_dry = match dry_run.as_value() {
+            None => false,
+            Some(v) => _interp.truthy_value(v)?,
+        };
+        let bn = base_name.as_path().to_string_lossy().into_owned();
+        let bd = base_dir.as_path().to_string_lossy().into_owned();
+        archives_disk::make_tarball_impl(
+            _interp,
+            &bn,
+            &bd,
+            comp,
+            is_dry,
+            owner.as_value(),
+            group.as_value(),
+            logger.as_value(),
+        )
+    }
+
+    fn _make_zipfile(
+        base_name: PyPath,
+        base_dir: PyPath,
+        #[default(OptionalArg::Omitted)] _verbose: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] dry_run: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] logger: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] _owner: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] _group: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] _root_dir: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let is_dry = match dry_run.as_value() {
+            None => false,
+            Some(v) => _interp.truthy_value(v)?,
+        };
+        let bn = base_name.as_path().to_string_lossy().into_owned();
+        let bd = base_dir.as_path().to_string_lossy().into_owned();
+        archives_disk::make_zipfile_impl(_interp, &bn, &bd, is_dry, logger.as_value())
+    }
+
+    fn _unpack_tarfile(
+        filename: PyPath,
+        extract_dir: PyPath,
+        #[keyword_only] #[default(OptionalArg::Omitted)] filter: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let fn_s = filename.as_path().to_string_lossy().into_owned();
+        let ed_s = extract_dir.as_path().to_string_lossy().into_owned();
+        archives_disk::unpack_tarfile_impl(_interp, &fn_s, &ed_s, filter.as_value())
+    }
+
+    fn _unpack_zipfile(filename: PyPath, extract_dir: PyPath) -> Result<Value> {
+        let fn_s = filename.as_path().to_string_lossy().into_owned();
+        let ed_s = extract_dir.as_path().to_string_lossy().into_owned();
+        archives_disk::unpack_zipfile_impl(_interp, &fn_s, &ed_s)
+    }
+
+    fn make_archive(
+        base_name: PyPath,
+        format: PyStr<'_>,
+        #[default(None)] root_dir: Option<PyPath>,
+        #[default(None)] base_dir: Option<PyPath>,
+        #[default(OptionalArg::Omitted)] _verbose: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] dry_run: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] owner: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] group: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] logger: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let is_dry = match dry_run.as_value() {
+            None => false,
+            Some(v) => _interp.truthy_value(v)?,
+        };
+        archives_disk::make_archive_impl(
+            _interp,
+            base_name.as_path(),
+            format.0.as_ref(),
+            root_dir.as_ref().map(PyPath::as_path),
+            base_dir.as_ref().map(PyPath::as_path),
+            is_dry,
+            owner.as_value(),
+            group.as_value(),
+            logger.as_value(),
+        )
+    }
+
+    fn unpack_archive(
+        filename: PyPath,
+        #[default(None)] extract_dir: Option<PyPath>,
+        #[default(None)] format: Option<PyStr<'_>>,
+        #[keyword_only] #[default(OptionalArg::Omitted)] filter: OptValueRef<'_>,
+    ) -> Result<Value> {
+        archives_disk::unpack_archive_impl(
+            _interp,
+            filename.as_path(),
+            extract_dir.as_ref().map(PyPath::as_path),
+            format.as_ref().map(|s| s.0.as_ref()),
+            filter.as_value(),
+        )
     }
 }

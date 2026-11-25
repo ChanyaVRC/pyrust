@@ -59,6 +59,16 @@ pub(crate) fn inject_python_members(
                 .insert(name.to_string(), val.clone());
         }
     }
+    // Bind `json.scanner`, `json.decoder`, and `json.encoder` onto `json`
+    // (matching CPython 3.12 where `import json` imports these submodules).
+    for (attr, mod_name) in [
+        ("scanner", "json.scanner"),
+        ("decoder", "json.decoder"),
+        ("encoder", "json.encoder"),
+    ] {
+        let sub = interp.load_module(mod_name)?;
+        module.borrow_mut().attrs.insert(attr.to_string(), sub);
+    }
     Ok(Some(ns.clone()))
 }
 
