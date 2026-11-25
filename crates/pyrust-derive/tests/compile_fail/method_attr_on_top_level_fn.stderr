@@ -1,0 +1,5 @@
+error: `#[getter]`, `#[setter]`, `#[classmethod]`, and `#[staticmethod]` may only appear on methods inside a `class { … }` block
+  --> tests/compile_fail/method_attr_on_top_level_fn.rs:10:7
+   |
+10 |     #[classmethod]
+   |       ^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: method `size` in class `Bad` collides with a `#[getter]`/`#[setter]` property of the same name
+  --> tests/compile_fail/getter_collides_with_method.rs:15:12
+   |
+15 |         fn size(args) -> Result<Value> {
+   |            ^^^^

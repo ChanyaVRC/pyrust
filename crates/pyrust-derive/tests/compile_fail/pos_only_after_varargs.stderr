@@ -1,0 +1,5 @@
+error: a `#[positional_only]` parameter cannot appear after `#[varargs]`
+ --> tests/compile_fail/pos_only_after_varargs.rs:9:58
+  |
+9 |     fn bad(#[varargs] rest: &[Value], #[positional_only] x: PyInt) -> Result<Value> {
+  |                                                          ^

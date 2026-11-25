@@ -1,0 +1,5 @@
+error: `#[varargs]`, `#[varkwargs]`, `#[state]`, and `#[state_mut]` cannot be combined with `#[default(...)]`, `#[positional_only]`, or `#[keyword_only]`
+ --> tests/compile_fail/varargs_with_default.rs:9:12
+  |
+9 |     fn bad(#[varargs] #[default(&[])] args: &[Value]) -> Result<Value> {
+  |            ^^^^^^^^^^

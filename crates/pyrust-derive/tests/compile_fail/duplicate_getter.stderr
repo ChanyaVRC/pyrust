@@ -1,0 +1,5 @@
+error: duplicate `#[getter]` for property `value` in class `Bad`
+  --> tests/compile_fail/duplicate_getter.rs:16:12
+   |
+16 |         fn get_value(args) -> Result<Value> {
+   |            ^^^^^^^^^

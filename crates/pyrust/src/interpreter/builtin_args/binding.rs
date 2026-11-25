@@ -117,6 +117,72 @@ pub(crate) fn check_positional_count(
     Ok(())
 }
 
+/// Build the list of positional args (in source order) without rejecting
+/// unknown keyword arguments — used when a typed signature declares
+/// `#[varkwargs]`.
+#[allow(dead_code)]
+pub(crate) fn collect_positional_args<'a>(args: &'a [ExpandedCallArg]) -> PositionalArgs<'a> {
+    let mut positional: PositionalArgs<'a> = SmallVec::new();
+    for arg in args {
+        if arg.name.is_none() {
+            positional.push(arg);
+        }
+    }
+    positional
+}
+
+/// Collect excess positional arguments starting at `start_index` for a
+/// `#[varargs]` parameter.
+#[allow(dead_code)]
+pub(crate) fn collect_varargs(positional: &[&ExpandedCallArg], start_index: usize) -> Vec<Value> {
+    if start_index >= positional.len() {
+        return Vec::new();
+    }
+    positional[start_index..]
+        .iter()
+        .map(|arg| arg.value.clone())
+        .collect()
+}
+
+/// Collect excess keyword arguments (those not bound to any declared
+/// non-positional-only parameter) into any `FromIterator<(String, Value)>`
+/// container (`IndexMap`, `HashMap`, `BTreeMap`, `Vec`, …) for a
+/// `#[varkwargs]` parameter.
+#[allow(dead_code)]
+pub(crate) fn collect_varkwargs<C: FromIterator<(String, Value)>>(
+    args: &[ExpandedCallArg],
+    known_kwargs: &[&str],
+) -> C {
+    args.iter()
+        .filter_map(|arg| {
+            let name = arg.name.as_deref()?;
+            if known_kwargs.contains(&name) {
+                None
+            } else {
+                Some((name.to_string(), arg.value.clone()))
+            }
+        })
+        .collect()
+}
+
+/// Minimum positional count guard for `#[varargs]` functions using
+/// `ExpectedGot` / `ExpectedGotParens` arity styles.
+#[allow(dead_code)]
+pub(crate) fn check_min_arity_expected_got(
+    fn_name: &str,
+    suffix: &str,
+    positional_len: usize,
+    min: usize,
+) -> Result<()> {
+    if positional_len < min {
+        let plural = if min == 1 { "argument" } else { "arguments" };
+        return Err(type_error(format!(
+            "{fn_name}{suffix} expected at least {min} {plural}, got {positional_len}"
+        )));
+    }
+    Ok(())
+}
+
 /// Construct the "missing required argument" error.  The macro emits a call
 /// to this from the per-arg extraction when no value is found and no default
 /// is supplied.

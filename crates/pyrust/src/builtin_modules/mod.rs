@@ -14,6 +14,9 @@
 //! - is wired into the function registry (via `all_regs`) and the
 //!   `import` path (via `load_builtin_module`).
 
+#[macro_use]
+pub(crate) mod macros;
+
 use crate::builtin_registry::BuiltinReg;
 use crate::value::Value;
 
@@ -86,7 +89,8 @@ fn publish_exec_dunder_all(
 /// [`pyrust_builtin_modules!`]. Expanding each entry independently keeps
 /// macro recursion depth O(1) regardless of how many built-in modules exist.
 macro_rules! pyrust_builtin_mod_def {
-    (@flat $ident:ident $(@inject)?) => {
+    ($(#[cfg($($cfg:tt)*)])* @flat $ident:ident $(@inject)?) => {
+        $(#[cfg($($cfg)*)])*
         pub mod $ident {
             /// Python-level name of this built-in module.  Used for
             /// `PyModule.name` and as the key for `import`.
@@ -99,7 +103,8 @@ macro_rules! pyrust_builtin_mod_def {
             include!(concat!("bodies/", stringify!($ident), ".rs"));
         }
     };
-    ($py_name:literal as $ident:ident $(@inject)?) => {
+    ($(#[cfg($($cfg:tt)*)])* $py_name:literal as $ident:ident $(@inject)?) => {
+        $(#[cfg($($cfg)*)])*
         pub mod $ident {
             /// Python-level name of this built-in module.  Used for
             /// `PyModule.name` and as the key for `import`.
@@ -112,7 +117,8 @@ macro_rules! pyrust_builtin_mod_def {
             include!(concat!("bodies/", stringify!($ident), ".rs"));
         }
     };
-    ($ident:ident $(@inject)?) => {
+    ($(#[cfg($($cfg:tt)*)])* $ident:ident $(@inject)?) => {
+        $(#[cfg($($cfg)*)])*
         pub mod $ident {
             /// Python-level name of this built-in module.  Used for
             /// `PyModule.name` and as the key for `import`.
@@ -154,19 +160,26 @@ macro_rules! pyrust_builtin_mod_inject {
 macro_rules! pyrust_builtin_modules {
     (
         $(
+            $(#[cfg($($cfg:tt)*)])*
             $(@ $flat:ident)? $($py_name:literal as)? $ident:ident $(@ $inj:ident)?
         ),* $(,)?
     ) => {
         $(
-            pyrust_builtin_mod_def!($(@$flat)? $($py_name as)? $ident $(@$inj)?);
+            pyrust_builtin_mod_def!($(#[cfg($($cfg)*)])* $(@$flat)? $($py_name as)? $ident $(@$inj)?);
         )*
 
         /// Concatenate every per-module `regs()` slice — consumed by
         /// `crate::builtin_registry::REGISTRY` on first use.
         pub(crate) fn all_regs() -> Vec<BuiltinReg> {
             let mut all: Vec<BuiltinReg> = Vec::new();
+            all.extend_from_slice(macros::structseq_regs());
+            #[cfg(test)]
+            all.extend_from_slice(macro_tests::fixture_regs());
             $(
-                all.extend_from_slice($ident::regs());
+                $(#[cfg($($cfg)*)])*
+                {
+                    all.extend_from_slice($ident::regs());
+                }
             )*
             all
         }
@@ -176,8 +189,11 @@ macro_rules! pyrust_builtin_modules {
         /// previously sitting inside `env.rs::load_module`.
         pub fn load_builtin_module(name: &str) -> Option<Value> {
             $(
-                if name == pyrust_builtin_mod_name!($($py_name as)? $ident) {
-                    return Some($ident::module());
+                $(#[cfg($($cfg)*)])*
+                {
+                    if name == pyrust_builtin_mod_name!($($py_name as)? $ident) {
+                        return Some($ident::module());
+                    }
                 }
             )*
             None
@@ -187,8 +203,11 @@ macro_rules! pyrust_builtin_modules {
         /// `pyrust_builtin_modules!` without allocating a module object.
         pub fn is_builtin_module(name: &str) -> bool {
             $(
-                if name == pyrust_builtin_mod_name!($($py_name as)? $ident) {
-                    return true;
+                $(#[cfg($($cfg)*)])*
+                {
+                    if name == pyrust_builtin_mod_name!($($py_name as)? $ident) {
+                        return true;
+                    }
                 }
             )*
             false
@@ -222,10 +241,13 @@ macro_rules! pyrust_builtin_modules {
                 return true;
             }
             $(
-                if let Some(rest) = pyrust_builtin_mod_name!($($py_name as)? $ident).strip_prefix(name)
-                    && rest.starts_with('.')
+                $(#[cfg($($cfg)*)])*
                 {
-                    return true;
+                    if let Some(rest) = pyrust_builtin_mod_name!($($py_name as)? $ident).strip_prefix(name)
+                        && rest.starts_with('.')
+                    {
+                        return true;
+                    }
                 }
             )*
             false
@@ -243,13 +265,16 @@ macro_rules! pyrust_builtin_modules {
             module: &std::rc::Rc<std::cell::RefCell<crate::value::PyModule>>,
         ) -> crate::error::Result<()> {
             $(
-                pyrust_builtin_mod_inject!(
-                    name,
-                    interp,
-                    module,
-                    pyrust_builtin_mod_name!($($py_name as)? $ident),
-                    $ident $(@$inj)?
-                );
+                $(#[cfg($($cfg)*)])*
+                {
+                    pyrust_builtin_mod_inject!(
+                        name,
+                        interp,
+                        module,
+                        pyrust_builtin_mod_name!($($py_name as)? $ident),
+                        $ident $(@$inj)?
+                    );
+                }
             )*
             Ok(())
         }
@@ -664,3 +689,6 @@ pyrust_builtin_modules! {
 }
 
 include!("finalization.rs");
+
+#[cfg(test)]
+mod macro_tests;

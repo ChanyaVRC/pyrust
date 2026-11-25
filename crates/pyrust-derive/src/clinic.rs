@@ -1,4 +1,4 @@
-//! Typed-signature argument unpacking, arity checks, and Argument Clinic codegen.
+//! Typed-signature argument unpacking, arity checks, variadics, and Argument Clinic codegen.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -6,7 +6,8 @@ use syn::LitStr;
 
 use crate::attrs::ArityStyle;
 use crate::signature::{
-    TypedParam, allowed_kwarg_lits, params_all_positional_only, positional_arity_bounds,
+    TypedParam, allowed_kwarg_lits, has_varargs, has_varkwargs, params_all_positional_only,
+    positional_arity_bounds, ty_to_canonical_string,
 };
 
 /// Sentinel positional index for `#[keyword_only]` parameters so `locate_arg`
@@ -80,6 +81,9 @@ pub(crate) fn emit_validation_phase(
     min_pos: usize,
     max_pos: usize,
 ) -> TokenStream {
+    let variadic_pos = has_varargs(params);
+    let variadic_kw = has_varkwargs(params);
+
     if all_positional_only {
         let arity_check =
             emit_arity_check(arity_style, quote!(__pyrust_args.len()), min_pos, max_pos);
@@ -88,24 +92,57 @@ pub(crate) fn emit_validation_phase(
             #arity_check
         }
     } else {
-        let allowed_kwargs = allowed_kwarg_lits(params);
-        let arity_check =
-            emit_arity_check(arity_style, quote!(__positional.len()), min_pos, max_pos);
+        let positional_init = if variadic_kw {
+            quote! {
+                let __positional: crate::interpreter::builtin_args::PositionalArgs<'_> =
+                    crate::interpreter::builtin_args::collect_positional_args(__pyrust_args);
+            }
+        } else {
+            let allowed_kwargs = allowed_kwarg_lits(params);
+            quote! {
+                let __positional: crate::interpreter::builtin_args::PositionalArgs<'_> =
+                    crate::interpreter::builtin_args::validate_kwargs_and_collect_positional(
+                        __pyrust_args,
+                        __pyrust_msg_name,
+                        &[#(#allowed_kwargs),*],
+                    )?;
+            }
+        };
+
+        let arity_check = if variadic_pos {
+            match arity_style {
+                ArityStyle::ExpectedGot => quote! {
+                    crate::interpreter::builtin_args::check_min_arity_expected_got(
+                        __pyrust_msg_name,
+                        "",
+                        __positional.len(),
+                        #min_pos,
+                    )?;
+                },
+                ArityStyle::ExpectedGotParens => quote! {
+                    crate::interpreter::builtin_args::check_min_arity_expected_got(
+                        __pyrust_msg_name,
+                        "()",
+                        __positional.len(),
+                        #min_pos,
+                    )?;
+                },
+                _ => quote!(),
+            }
+        } else {
+            emit_arity_check(arity_style, quote!(__positional.len()), min_pos, max_pos)
+        };
+
         quote! {
-            let __positional: crate::interpreter::builtin_args::PositionalArgs<'_> =
-                crate::interpreter::builtin_args::validate_kwargs_and_collect_positional(
-                    __pyrust_args,
-                    __pyrust_msg_name,
-                    &[#(#allowed_kwargs),*],
-                )?;
+            #positional_init
             #arity_check
         }
     }
 }
 
 /// Emit one typed local binding `let <name>: <ty> = { ... };`, deduplicating
-/// the `FromValue::try_from_value` + lazy default / `missing_arg` boilerplate
-/// across Clinic, general, positional-only, and vectorcall fast preludes.
+/// the `FromValue::try_from_value_with_interp` + lazy default / `missing_arg`
+/// boilerplate across Clinic, general, positional-only, and vectorcall fast preludes.
 fn emit_param_binding(
     param: &TypedParam,
     lookup_stmt: Option<TokenStream>,
@@ -124,10 +161,33 @@ fn emit_param_binding(
         let #name_ident: #ty = {
             #lookup_stmt
             match #value_expr {
-                Some(__v) => <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value(
-                    __v, __pyrust_msg_name, #name_lit,
+                Some(__v) => <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value_with_interp(
+                    _interp, __v, __pyrust_msg_name, #name_lit,
                 )?,
                 None => (#default_branch)?,
+            }
+        };
+    }
+}
+
+/// Emit the binding for a `#[state]` / `#[state_mut]` slot 0 (`self`) receiver.
+fn emit_state_self_binding(
+    param: &TypedParam,
+    lookup_stmt: Option<TokenStream>,
+    value_expr: TokenStream,
+) -> TokenStream {
+    let name_lit = param.name_lit();
+    quote! {
+        let __pyrust_self_val: &crate::value::Value = {
+            #lookup_stmt
+            match #value_expr {
+                Some(__v) => __v,
+                None => {
+                    return crate::interpreter::builtin_args::missing_arg::<crate::value::Value>(
+                        __pyrust_msg_name,
+                        #name_lit,
+                    );
+                }
             }
         };
     }
@@ -143,7 +203,7 @@ fn emit_typed_prelude_clinic(
         .iter()
         .map(|p| {
             let name_lit = p.name_lit();
-            let positional_only = p.positional_only;
+            let positional_only = p.positional_only || p.is_state_param();
             let keyword_only = p.keyword_only;
             let required = p.default.is_none();
             quote! {
@@ -160,7 +220,13 @@ fn emit_typed_prelude_clinic(
     let per_param: Vec<TokenStream> = params
         .iter()
         .enumerate()
-        .map(|(idx, p)| emit_param_binding(p, None, quote!(__clinic_slots[#idx])))
+        .map(|(idx, p)| {
+            if p.is_state_param() {
+                emit_state_self_binding(p, None, quote!(__clinic_slots[#idx]))
+            } else {
+                emit_param_binding(p, None, quote!(__clinic_slots[#idx]))
+            }
+        })
         .collect();
 
     let msg_name_binding = emit_msg_name_binding(bare_name, bare_lit);
@@ -183,23 +249,6 @@ fn emit_typed_prelude_clinic(
 /// Emit the prelude that validates + binds typed parameters before the
 /// user-written body runs.  See the typed-dialect docs on
 /// `crate::interpreter::builtin_args` for the full contract.
-///
-/// Generated shape (for `(path: PyStr, mode: PyStr = "r")`):
-///
-/// ```ignore
-/// use crate::interpreter::builtin_args::{FromValue, PyStr, ...};
-/// // 1. Reject unknown kwargs + collect positionals.
-/// let __positional = crate::interpreter::builtin_args::validate_kwargs_and_collect_positional(
-///     __pyrust_args, FN_NAME, &["path", "mode"],
-/// )?;
-/// // 2. Bound on positional count.
-/// crate::interpreter::builtin_args::check_positional_count(
-///     FN_NAME, __positional.len(), /* required */ 1, /* total */ 2,
-/// )?;
-/// // 3. Per-param extraction.
-/// let path: PyStr = { ... resolve positional/kw, default or missing-arg, FromValue ... };
-/// let mode: PyStr = { ... };
-/// ```
 pub(crate) fn emit_typed_prelude(
     params: &[TypedParam],
     arity_style: ArityStyle,
@@ -219,33 +268,86 @@ pub(crate) fn emit_typed_prelude(
             .iter()
             .enumerate()
             .map(|(idx, p)| {
-                emit_param_binding(
-                    p,
-                    None,
-                    quote!(__pyrust_args.get(#idx).map(|__a| &__a.value)),
-                )
+                let expr = quote!(__pyrust_args.get(#idx).map(|__a| &__a.value));
+                if p.is_state_param() {
+                    emit_state_self_binding(p, None, expr)
+                } else {
+                    emit_param_binding(p, None, expr)
+                }
             })
             .collect()
     } else {
         let mut pos_index: usize = 0;
+        let allowed_kwargs = allowed_kwarg_lits(params);
         params
             .iter()
             .map(|p| {
-                let name_lit = p.name_lit();
-                let kw_allowed = !p.positional_only;
-                let this_pos = if p.keyword_only {
-                    KW_ONLY_POS_SENTINEL
+                if p.varargs {
+                    let name_ident = &p.name;
+                    let ty = &p.ty;
+                    let start_idx = pos_index;
+                    let ty_str = ty_to_canonical_string(ty);
+                    if ty_str.starts_with("&[") {
+                        quote! {
+                            let __pyrust_varargs_buf: Vec<crate::value::Value> =
+                                crate::interpreter::builtin_args::collect_varargs(
+                                    &__positional,
+                                    #start_idx,
+                                );
+                            let #name_ident: #ty = &__pyrust_varargs_buf;
+                        }
+                    } else {
+                        quote! {
+                            let #name_ident: #ty =
+                                crate::interpreter::builtin_args::collect_varargs(
+                                    &__positional,
+                                    #start_idx,
+                                );
+                        }
+                    }
+                } else if p.varkwargs {
+                    let name_ident = &p.name;
+                    let ty = &p.ty;
+                    let ty_str = ty_to_canonical_string(ty);
+                    if ty_str.starts_with("&[") {
+                        quote! {
+                            let __pyrust_varkwargs_buf: Vec<(String, crate::value::Value)> =
+                                crate::interpreter::builtin_args::collect_varkwargs(
+                                    __pyrust_args,
+                                    &[#(#allowed_kwargs),*],
+                                );
+                            let #name_ident: #ty = &__pyrust_varkwargs_buf;
+                        }
+                    } else {
+                        quote! {
+                            let #name_ident: #ty =
+                                crate::interpreter::builtin_args::collect_varkwargs(
+                                    __pyrust_args,
+                                    &[#(#allowed_kwargs),*],
+                                );
+                        }
+                    }
                 } else {
-                    let i = pos_index;
-                    pos_index += 1;
-                    i
-                };
-                let lookup = quote! {
-                    let __found = crate::interpreter::builtin_args::locate_arg(
-                        __pyrust_args, &__positional, __pyrust_msg_name, #name_lit, #this_pos, #kw_allowed,
-                    )?;
-                };
-                emit_param_binding(p, Some(lookup), quote!(__found))
+                    let name_lit = p.name_lit();
+                    let kw_allowed = !p.positional_only && !p.is_state_param();
+                    let this_pos = if p.keyword_only {
+                        KW_ONLY_POS_SENTINEL
+                    } else {
+                        let i = pos_index;
+                        pos_index += 1;
+                        i
+                    };
+                    let lookup = quote! {
+                        let __found = crate::interpreter::builtin_args::locate_arg(
+                            __pyrust_args, &__positional, __pyrust_msg_name, #name_lit, #this_pos, #kw_allowed,
+                        )?;
+                    };
+                    if p.is_state_param() {
+                        emit_state_self_binding(p, Some(lookup), quote!(__found))
+                    } else {
+                        emit_param_binding(p, Some(lookup), quote!(__found))
+                    }
+                }
             })
             .collect()
     };

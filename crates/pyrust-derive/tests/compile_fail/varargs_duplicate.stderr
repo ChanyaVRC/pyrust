@@ -1,0 +1,5 @@
+error: `#[varargs]` may appear at most once per function
+ --> tests/compile_fail/varargs_duplicate.rs:9:47
+  |
+9 |     fn bad(#[varargs] a: &[Value], #[varargs] b: &[Value]) -> Result<Value> {
+  |                                               ^

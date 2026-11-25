@@ -1,0 +1,5 @@
+error: `#[varkwargs]` must be the last parameter in the signature
+ --> tests/compile_fail/varkwargs_not_last.rs:9:54
+  |
+9 |     fn bad(#[varkwargs] kw: IndexMap<String, Value>, extra: PyInt) -> Result<Value> {
+  |                                                      ^^^^^
