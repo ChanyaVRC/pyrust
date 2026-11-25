@@ -15,12 +15,11 @@ import http.client
 import io
 import itertools
 import os
-import selectors
 import shutil
 import socket
+import socketserver
 import sys
 import time
-import traceback
 import urllib.parse
 
 from http import HTTPStatus
@@ -165,158 +164,26 @@ def _posix_splitext(path):
     return path, ''
 
 
-class HTTPServer:
+class HTTPServer(socketserver.TCPServer):
     """TCP-backed HTTP server compatible with CPython's http.server.HTTPServer."""
 
-    address_family = socket.AF_INET
-    socket_type = socket.SOCK_STREAM
-    request_queue_size = 5
-    allow_reuse_address = True
-    allow_reuse_port = False
-    timeout = None
-
-    def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
-        self.server_address = server_address
-        self.RequestHandlerClass = RequestHandlerClass
-        self.__is_shut_down = False
-        self.__shutdown_request = False
-        self.socket = socket.socket(self.address_family, self.socket_type)
-        if bind_and_activate:
-            try:
-                self.server_bind()
-                self.server_activate()
-            except BaseException:
-                self.server_close()
-                raise
+    allow_reuse_address = 1
 
     def server_bind(self):
-        if self.allow_reuse_address and hasattr(socket, "SO_REUSEADDR"):
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.bind(self.server_address)
-        self.server_address = self.socket.getsockname()
+        """Override server_bind to store the server name."""
+        socketserver.TCPServer.server_bind(self)
         host, port = self.server_address[:2]
         self.server_name = socket.getfqdn(host)
         self.server_port = port
 
-    def server_activate(self):
-        self.socket.listen(self.request_queue_size)
 
-    def server_close(self):
-        self.socket.close()
-
-    def fileno(self):
-        return self.socket.fileno()
-
-    def get_request(self):
-        return self.socket.accept()
-
-    def verify_request(self, request, client_address):
-        return True
-
-    def process_request(self, request, client_address):
-        self.finish_request(request, client_address)
-        self.shutdown_request(request)
-
-    def finish_request(self, request, client_address):
-        self.RequestHandlerClass(request, client_address, self)
-
-    def shutdown_request(self, request):
-        try:
-            request.shutdown(socket.SHUT_WR)
-        except OSError:
-            pass
-        self.close_request(request)
-
-    def close_request(self, request):
-        request.close()
-
-    def handle_timeout(self):
-        pass
-
-    def handle_error(self, request, client_address):
-        print('-' * 40, file=sys.stderr)
-        print(
-            'Exception occurred during processing of request from',
-            client_address,
-            file=sys.stderr,
-        )
-        traceback.print_exc()
-        print('-' * 40, file=sys.stderr)
-
-    def service_actions(self):
-        pass
-
-    def _handle_request_noblock(self):
-        try:
-            request, client_address = self.get_request()
-        except OSError:
-            return
-        if self.verify_request(request, client_address):
-            try:
-                self.process_request(request, client_address)
-            except Exception:
-                self.handle_error(request, client_address)
-                self.shutdown_request(request)
-            except BaseException:
-                self.shutdown_request(request)
-                raise
-        else:
-            self.shutdown_request(request)
-
-    def handle_request(self):
-        timeout = self.socket.gettimeout()
-        if timeout is None:
-            timeout = self.timeout
-        elif self.timeout is not None:
-            timeout = min(timeout, self.timeout)
-        if timeout is not None:
-            deadline = time.monotonic() + timeout
-
-        with selectors.DefaultSelector() as selector:
-            selector.register(self, selectors.EVENT_READ)
-            while True:
-                ready = selector.select(timeout)
-                if ready:
-                    return self._handle_request_noblock()
-                else:
-                    if timeout is not None:
-                        timeout = deadline - time.monotonic()
-                        if timeout < 0:
-                            return self.handle_timeout()
-
-    def serve_forever(self, poll_interval=0.5):
-        self.__is_shut_down = False
-        try:
-            with selectors.DefaultSelector() as selector:
-                selector.register(self, selectors.EVENT_READ)
-                while not self.__shutdown_request:
-                    ready = selector.select(poll_interval)
-                    if self.__shutdown_request:
-                        break
-                    if ready:
-                        self._handle_request_noblock()
-                    self.service_actions()
-        finally:
-            self.__shutdown_request = False
-            self.__is_shut_down = True
-
-    def shutdown(self):
-        self.__shutdown_request = True
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.server_close()
-
-
-class ThreadingHTTPServer(HTTPServer):
-    """Single-threaded compatibility subclass of HTTPServer."""
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    """Threading HTTP server subclass."""
 
     daemon_threads = True
 
 
-class BaseHTTPRequestHandler:
+class BaseHTTPRequestHandler(socketserver.StreamRequestHandler):
     """HTTP request handler base class."""
 
     sys_version = "Python/" + sys.version.split()[0]
@@ -326,11 +193,6 @@ class BaseHTTPRequestHandler:
     default_request_version = "HTTP/0.9"
     protocol_version = "HTTP/1.0"
     MessageClass = http.client.HTTPMessage
-
-    rbufsize = -1
-    wbufsize = 0
-    timeout = None
-    disable_nagle_algorithm = False
 
     weekdayname = list(_WEEKDAYNAME)
     monthname = list(_MONTHNAME)
@@ -344,39 +206,6 @@ class BaseHTTPRequestHandler:
         {c: fr'\x{c:02x}' for c in itertools.chain(range(0x20), range(0x7f, 0xa0))}
     )
     _control_char_table[ord('\\')] = r'\\'
-
-    def __init__(self, request, client_address, server):
-        self.request = request
-        self.client_address = client_address
-        self.server = server
-        self.setup()
-        try:
-            self.handle()
-        finally:
-            self.finish()
-
-    def setup(self):
-        self.connection = self.request
-        if self.timeout is not None:
-            self.connection.settimeout(self.timeout)
-        if self.disable_nagle_algorithm:
-            self.connection.setsockopt(
-                socket.IPPROTO_TCP, socket.TCP_NODELAY, True
-            )
-        self.rfile = self.connection.makefile('rb', self.rbufsize)
-        if self.wbufsize == 0:
-            self.wfile = self.connection.makefile('wb', 0)
-        else:
-            self.wfile = self.connection.makefile('wb', self.wbufsize)
-
-    def finish(self):
-        if not self.wfile.closed:
-            try:
-                self.wfile.flush()
-            except OSError:
-                pass
-        self.wfile.close()
-        self.rfile.close()
 
     def parse_request(self):
         self.command = None

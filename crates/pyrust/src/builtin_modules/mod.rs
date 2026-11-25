@@ -461,11 +461,14 @@ pyrust_builtin_modules! {
     // `FileType`, help formatters, groups, subparsers, …) injected from
     // `argparse_py.py`.
     argparse @inject,
-    // `urllib.parse` and `urllib` (issue #3149): pure-Python RFC 3986 URL
-    // parsing, joining, quoting, and query-string encoding/decoding injected
-    // from `urllib_parse_py.py`, exposed as `urllib.parse` on the `urllib`
-    // parent package.
+    // `urllib` (`urllib.parse`, `urllib.response`, `urllib.error`,
+    // `urllib.request`) (issues #3149, #3223): RFC 3986 URL parsing/quoting,
+    // response wrappers, exception hierarchy, and extensible URL opener
+    // exposed as submodules on the `urllib` parent package.
     "urllib.parse" as urllib_parse @inject,
+    "urllib.response" as urllib_response @inject,
+    "urllib.error" as urllib_error @inject,
+    "urllib.request" as urllib_request @inject,
     urllib,
     // `html.entities`, `html.parser`, and `html` (issue #3149): static HTML4 /
     // HTML5 character reference tables in `html_entities.rs`, `escape` /
@@ -560,6 +563,10 @@ pyrust_builtin_modules! {
     ipaddress @inject,
     socket @inject,
     selectors @inject,
+    // `socketserver` (issue #3223): Python 3.12 generic TCP/UDP socket server
+    // framework (`BaseServer`, `TCPServer`, `UDPServer`, `ThreadingMixIn`,
+    // `BaseRequestHandler`, `StreamRequestHandler`, `DatagramRequestHandler`).
+    socketserver @inject,
     // `copyreg`, `graphlib`, `threading`, and `queue` (issue #3208): Python
     // 3.12 pickle/copy extension registry, topological graph sorter,
     // single-interpreter synchronization primitives, and synchronized queues.
