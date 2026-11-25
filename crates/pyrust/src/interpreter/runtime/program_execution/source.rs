@@ -146,12 +146,16 @@ impl Interpreter {
                 // so errors inside the exec'd source report correct internal
                 // line numbers.
                 let code = {
-                    let c = crate::compiler::compile_script_with_linenos(
+                    let c = crate::compiler::compile_script_with_options(
                         &program,
                         Rc::clone(&local_index),
                         false,
                         &linenos,
                         filename,
+                        crate::compiler::CompileOptions {
+                            optimize: self.compile_optimize_level(),
+                            allow_top_level_await: false,
+                        },
                     )?;
                     Rc::new(crate::optimizer::optimize(c))
                 };
@@ -204,11 +208,15 @@ impl Interpreter {
         let (program, linenos) = self.parse_source_to_stmts_with_warnings(trimmed, "<string>")?;
         let local_index: Rc<HashMap<String, crate::bytecode::Reg>> = Rc::new(HashMap::new());
         let code = {
-            let c = crate::compiler::compile_eval_expr_with_linenos(
+            let c = crate::compiler::compile_eval_expr_with_options(
                 &program,
                 Rc::clone(&local_index),
                 &linenos,
                 "<string>",
+                crate::compiler::CompileOptions {
+                    optimize: self.compile_optimize_level(),
+                    allow_top_level_await: false,
+                },
             )?;
             Rc::new(crate::optimizer::optimize(c))
         };

@@ -147,6 +147,94 @@ impl Interpreter {
         interp
     }
 
+    /// Attach parsed CLI & `PYTHON*` environment configuration to this
+    /// interpreter before startup initialization runs.
+    pub fn set_runtime_config(&mut self, config: crate::interpreter::RuntimeConfig) {
+        if config.int_max_str_digits >= 0 {
+            self.int_max_str_digits = config.int_max_str_digits as usize;
+        }
+        self.cold.runtime_config = Rc::new(config);
+    }
+
+    /// Effective compiler optimization level (`0`, `1`, or `2`) derived from
+    /// `-O`/`-OO`/`PYTHONOPTIMIZE`.
+    #[inline]
+    pub(crate) fn compile_optimize_level(&self) -> u8 {
+        self.cold.runtime_config.optimize.clamp(0, 2) as u8
+    }
+
+    /// Perform CPython 3.12-order CLI startup initialization:
+    /// 1. Configure `builtins.__debug__` (`False` when `-O`/`-OO` active).
+    /// 2. Load `sys` (populating `sys.flags`, `sys.warnoptions`, `sys._xoptions`,
+    ///    `sys.dont_write_bytecode`, `sys.pycache_prefix`, `sys.orig_argv`,
+    ///    `sys.argv`, and `PYTHONPATH`).
+    /// 3. Apply startup `-W` / `PYTHONWARNINGS` / `-X dev` / `-b` filters.
+    /// 4. Import `site` unless `-S` was supplied.
+    /// 5. Prepend the script directory / `""` / cwd to `sys.path[0]` unless
+    ///    `-P` or `-I` (`safe_path`) was supplied.
+    pub fn initialize_cli_startup(&mut self) -> Result<()> {
+        if self.cold.cli_startup_initialized {
+            return Ok(());
+        }
+        self.cold.cli_startup_initialized = true;
+        self.cold.cli_startup_managed = true;
+
+        let limit = self.cold.runtime_config.int_max_str_digits;
+        if limit >= 0 {
+            self.int_max_str_digits = limit as usize;
+        }
+
+        let builtins_val = cached_builtins_module();
+        if let ValueKind::PyModule(bm) = builtins_val.kind() {
+            bm.borrow_mut().insert_attr(
+                "__debug__".to_string(),
+                Value::bool_(self.cold.runtime_config.optimize == 0),
+            );
+        }
+        // Register the canonical builtins module in both caches before `site`
+        // (or any startup hook) imports `builtins`, so `site.setquit()` /
+        // `setcopyright()` / `sethelper()` mutate the exact `builtins` object
+        // bound to `__builtins__` and `sys.modules["builtins"]`.
+        self.cold
+            .module_cache
+            .borrow_mut()
+            .entry("builtins".to_string())
+            .or_insert_with(|| builtins_val.clone());
+        let _ = self.insert_import_registry("builtins", builtins_val);
+
+        let _ = self.load_module("sys")?;
+        self.initialize_script_argv()?;
+
+        if !self.cold.runtime_config.warnoptions.is_empty()
+            || self.cold.runtime_config.bytes_warning > 0
+        {
+            let _ = self.load_module("warnings")?;
+        }
+
+        if self.cold.runtime_config.no_site == 0 {
+            let _ = self.load_module("site")?;
+        }
+
+        if !self.cold.runtime_config.safe_path {
+            let entry = self
+                .cold
+                .script_dir
+                .as_ref()
+                .map(|dir| Value::string(dir.to_string_lossy()))
+                .unwrap_or_else(|| Value::string(""));
+            let sys = self.load_module("sys")?;
+            if let ValueKind::PyModule(sys_mod) = sys.kind()
+                && let Some(path_val) = sys_mod.borrow().get_attr_value("path")
+            {
+                path_val.list_with_mut(|items| {
+                    items.insert(0, entry);
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     /// Run all registered `atexit` callbacks in LIFO order, catching and
     /// reporting any exceptions to `sys.stderr` without aborting subsequent
     /// callbacks, and clearing the callback table afterward (matching CPython
@@ -742,14 +830,19 @@ impl Interpreter {
         // imported module's function is called from a different script (#2438).
         let script_path = self.cold.script_filename.as_deref().unwrap_or("<unknown>");
         let is_imported_module = matches!(namespace_storage, ModuleNamespaceStorage::SharedGlobals);
+        let compile_opts = crate::compiler::CompileOptions {
+            optimize: self.compile_optimize_level(),
+            allow_top_level_await: false,
+        };
         let (local_index, compiled) = match namespace_storage {
             ModuleNamespaceStorage::FastLocals(local_index) => {
-                let compiled = crate::compiler::compile_script_with_linenos(
+                let compiled = crate::compiler::compile_script_with_options(
                     program,
                     Rc::clone(&local_index),
                     repl_mode,
                     linenos,
                     script_path,
+                    compile_opts,
                 );
                 (local_index, compiled)
             }
@@ -759,6 +852,7 @@ impl Interpreter {
                     program,
                     linenos,
                     script_path,
+                    compile_opts,
                 ),
             ),
         };

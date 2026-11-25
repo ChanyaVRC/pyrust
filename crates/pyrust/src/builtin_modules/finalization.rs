@@ -8,7 +8,10 @@ use crate::value::ValueKind;
 /// the generic importer only invokes this hook.
 pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, module: &Value) {
     match name {
-        "sys" => interpreter.initialize_system_module(module),
+        "sys" => {
+            interpreter.initialize_system_module(module);
+            prepare_sys_module(interpreter, module);
+        }
         "builtins" => prepare_builtins_module(module),
         "collections" => prepare_collections_module(module),
         "contextlib" => prepare_contextlib_module(module),
@@ -23,6 +26,14 @@ pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, 
         "antigravity" => antigravity::prepare_module(interpreter),
         _ => {}
     }
+}
+
+fn prepare_sys_module(interpreter: &Interpreter, module: &Value) {
+    let ValueKind::PyModule(sys_mod) = module.kind() else {
+        return;
+    };
+    let flags = sys::make_flags_from_config(&interpreter.cold.runtime_config);
+    sys_mod.borrow_mut().insert_attr("flags".to_string(), flags);
 }
 
 /// Replace constructor registry tokens with the canonical Python type objects

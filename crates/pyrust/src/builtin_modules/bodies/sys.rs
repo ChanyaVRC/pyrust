@@ -30,6 +30,10 @@ mod runtime_limits;
 #[path = "sys/version_info.rs"]
 mod version_info;
 
+pub(crate) use version_info::make_flags_from_config;
+
+const PYRUST_COPYRIGHT: &str = "Copyright (c) 2001-2023 Python Software Foundation.\nAll Rights Reserved.\n\nPyRust 0.2 (Python 3.12 compatible runtime).";
+
 pyrust_module! {
     constants {
         "version"              => Value::string("PyRust 0.2"),
@@ -46,13 +50,15 @@ pyrust_module! {
         "modules"              => Value::dict(crate::value::PyDict::default()),
         "executable"           => Value::string(platform_info::sys_executable()),
         "byteorder"            => Value::string(platform_info::sys_byteorder()),
-        "prefix"               => Value::string(""),
-        "exec_prefix"          => Value::string(""),
-        "base_prefix"          => Value::string(""),
-        "base_exec_prefix"     => Value::string(""),
+        "prefix"               => Value::string(platform_info::default_sys_prefix()),
+        "exec_prefix"          => Value::string(platform_info::default_sys_prefix()),
+        "base_prefix"          => Value::string(platform_info::default_sys_prefix()),
+        "base_exec_prefix"     => Value::string(platform_info::default_sys_prefix()),
         // 3.12.0 final → 0x030c00f0
         "hexversion"           => Value::int(0x030c_00f0),
-        "copyright"            => Value::string(""),
+        "copyright"            => Value::string(PYRUST_COPYRIGHT),
+        #[cfg(windows)]
+        "winver"               => Value::string("3.12"),
         "flags"                => version_info::make_flags(),
         "maxunicode"           => Value::int(1_114_111),
         "abiflags"             => Value::string(""),

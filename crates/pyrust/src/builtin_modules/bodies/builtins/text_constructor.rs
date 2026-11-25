@@ -35,6 +35,18 @@ pyrust_module! {
             if let ValueKind::Int(n) = object.kind() {
                 return Ok(Value::int_string(n));
             }
+            if _interp.cold.runtime_config.bytes_warning > 0 {
+                let bytes_warn_msg = match object.kind() {
+                    ValueKind::Bytes(_) => Some("str() on a bytes instance"),
+                    ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "bytearray" => {
+                        Some("str() on a bytearray instance")
+                    }
+                    _ => None,
+                };
+                if let Some(msg) = bytes_warn_msg {
+                    crate::builtin_modules::warnings::emit_bytes_warning(_interp, msg)?;
+                }
+            }
             return Ok(Value::string(render_instance_str(_interp, object)?));
         }
 

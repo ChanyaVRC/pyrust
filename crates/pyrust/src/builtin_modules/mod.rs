@@ -264,6 +264,13 @@ macro_rules! pyrust_builtin_modules {
             interp: &mut crate::interpreter::Interpreter,
             module: &std::rc::Rc<std::cell::RefCell<crate::value::PyModule>>,
         ) -> crate::error::Result<()> {
+            if name == "site" {
+                let module_val = Value::py_module(std::rc::Rc::clone(module));
+                return site::post_load_init(interp, &module_val);
+            }
+            if name == "warnings" {
+                return warnings::post_load_init(interp);
+            }
             $(
                 $(#[cfg($($cfg)*)])*
                 {
@@ -702,6 +709,10 @@ pyrust_builtin_modules! {
     mmap,
     getpass,
     webbrowser,
+    // `_sitebuiltins` and `site` (issue #3243): 100% native-Rust CPython 3.12
+    // site configuration, `.pth` processing, and interactive builtins.
+    _sitebuiltins,
+    site,
 }
 
 include!("finalization.rs");

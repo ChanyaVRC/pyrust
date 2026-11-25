@@ -283,6 +283,88 @@ pub(crate) struct InterpreterColdState {
     /// Cloned by `Rc` into filesystem-import child interpreters so callbacks
     /// registered in imported modules execute on top-level interpreter shutdown.
     pub(crate) atexit_state: Rc<RefCell<Vec<Option<AtexitCallback>>>>,
+    /// Startup CLI flags and `PYTHON*` environment configuration (issue #3243).
+    /// Shared via `Rc` with child filesystem-import interpreters.
+    pub(crate) runtime_config: Rc<RuntimeConfig>,
+    /// True when `initialize_cli_startup` manages `sys.path` ordering
+    /// (`PYTHONPATH` -> `import site` -> prepend script/cwd unless `-P`/`-I`).
+    pub(crate) cli_startup_managed: bool,
+    /// True once `initialize_cli_startup` has run for this interpreter.
+    pub(crate) cli_startup_initialized: bool,
+}
+
+/// Startup configuration populated from CPython 3.12 CLI flags and `PYTHON*`
+/// environment variables (issue #3243).
+///
+/// Stored behind `Rc` inside [`InterpreterColdState`] so hot VM state and
+/// `size_of::<Interpreter>()` are completely unaffected.
+#[derive(Debug, Clone)]
+pub struct RuntimeConfig {
+    pub debug: i64,
+    pub inspect: i64,
+    pub interactive: i64,
+    pub optimize: i64,
+    pub dont_write_bytecode: i64,
+    pub no_user_site: i64,
+    pub no_site: i64,
+    pub ignore_environment: i64,
+    pub verbose: i64,
+    pub bytes_warning: i64,
+    pub quiet: i64,
+    pub hash_randomization: i64,
+    pub isolated: i64,
+    pub dev_mode: bool,
+    pub utf8_mode: i64,
+    pub warn_default_encoding: i64,
+    pub safe_path: bool,
+    pub int_max_str_digits: i64,
+    pub unbuffered: bool,
+    pub skip_first_line: bool,
+    pub check_hash_based_pycs: String,
+    pub warnoptions: Vec<String>,
+    pub xoptions: Vec<(String, Option<String>)>,
+    pub pycache_prefix: Option<String>,
+    pub platlibdir: Option<String>,
+    pub python_path: Vec<String>,
+    pub prefix_override: Option<String>,
+    pub exec_prefix_override: Option<String>,
+    pub orig_argv: Vec<String>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            debug: 0,
+            inspect: 0,
+            interactive: 0,
+            optimize: 0,
+            dont_write_bytecode: 0,
+            no_user_site: 0,
+            no_site: 0,
+            ignore_environment: 0,
+            verbose: 0,
+            bytes_warning: 0,
+            quiet: 0,
+            hash_randomization: 1,
+            isolated: 0,
+            dev_mode: false,
+            utf8_mode: 0,
+            warn_default_encoding: 0,
+            safe_path: false,
+            int_max_str_digits: pyrust_core::INT_MAX_STR_DIGITS_DEFAULT as i64,
+            unbuffered: false,
+            skip_first_line: false,
+            check_hash_based_pycs: "default".to_string(),
+            warnoptions: Vec::new(),
+            xoptions: Vec::new(),
+            pycache_prefix: None,
+            platlibdir: None,
+            python_path: Vec::new(),
+            prefix_override: None,
+            exec_prefix_override: None,
+            orig_argv: Vec::new(),
+        }
+    }
 }
 
 impl Default for InterpreterColdState {
@@ -316,6 +398,9 @@ impl Default for InterpreterColdState {
             inlined_comp_escaped_span: None,
             call_site_lines: Vec::new(),
             atexit_state: Rc::new(RefCell::new(Vec::new())),
+            runtime_config: Rc::new(RuntimeConfig::default()),
+            cli_startup_managed: false,
+            cli_startup_initialized: false,
         }
     }
 }

@@ -29,12 +29,16 @@ impl Interpreter {
         // Thread the lexer line table into the bytecode (issue #2245) so errors
         // inside the exec'd source report correct internal line numbers.
         let code = {
-            let c = crate::compiler::compile_script_with_linenos(
+            let c = crate::compiler::compile_script_with_options(
                 program,
                 Rc::clone(&local_index),
                 false,
                 linenos,
                 filename,
+                crate::compiler::CompileOptions {
+                    optimize: self.compile_optimize_level(),
+                    allow_top_level_await: false,
+                },
             )?;
             Rc::new(crate::optimizer::optimize(c))
         };

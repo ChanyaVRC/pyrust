@@ -515,3 +515,431 @@ fn missing_option_arguments_and_unknown_flags_exit_with_code_2() {
         );
     }
 }
+
+// ── W5-02 (#3243): CPython 3.12 CLI flags, PYTHON* env vars, sys.flags & site ─
+
+fn run_cli_with_env(cwd: Option<&Path>, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(pyrust_bin());
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    // Clear PYTHON* vars that might leak from the host environment.
+    for key in [
+        "PYTHONDEBUG",
+        "PYTHONDEVMODE",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONHASHSEED",
+        "PYTHONHOME",
+        "PYTHONINSPECT",
+        "PYTHONINTMAXSTRDIGITS",
+        "PYTHONNOUSERSITE",
+        "PYTHONOPTIMIZE",
+        "PYTHONPATH",
+        "PYTHONPLATLIBDIR",
+        "PYTHONPYCACHEPREFIX",
+        "PYTHONSAFEPATH",
+        "PYTHONUNBUFFERED",
+        "PYTHONUTF8",
+        "PYTHONVERBOSE",
+        "PYTHONWARNDEFAULTENCODING",
+        "PYTHONWARNINGS",
+    ] {
+        cmd.env_remove(key);
+    }
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.args(args).output().expect("run pyrust")
+}
+
+#[test]
+fn optimize_flags_o_oo_and_pythonoptimize() {
+    let script = r#"
+"""module docstring"""
+import builtins, sys
+
+def fn():
+    """fn docstring"""
+    assert False, "should be stripped"
+    return 1
+
+class C:
+    """class docstring"""
+
+c_code = compile("assert False\nx = __debug__\n", "<dyn>", "exec")
+ns = {}
+exec(c_code, ns)
+
+print(sys.flags.optimize, __debug__, builtins.__debug__, fn(), __doc__, fn.__doc__, C.__doc__, ns["x"])
+"#;
+
+    // -O: optimize=1, __debug__=False, assert omitted, docstrings KEPT.
+    let o1 = run_cli_with_env(None, &["-O", "-c", script], &[]);
+    assert!(o1.status.success(), "-O failed:\n{}", stderr_str(&o1));
+    assert_eq!(
+        stdout_str(&o1),
+        "1 False False 1 module docstring fn docstring class docstring False\n"
+    );
+
+    // -OO: optimize=2, __debug__=False, assert omitted, docstrings STRIPPED.
+    let o2 = run_cli_with_env(None, &["-OO", "-c", script], &[]);
+    assert!(o2.status.success(), "-OO failed:\n{}", stderr_str(&o2));
+    assert_eq!(stdout_str(&o2), "2 False False 1 None None None False\n");
+
+    // PYTHONOPTIMIZE=2 matches -OO.
+    let env_o2 = run_cli_with_env(None, &["-c", script], &[("PYTHONOPTIMIZE", "2")]);
+    assert!(
+        env_o2.status.success(),
+        "PYTHONOPTIMIZE=2 failed:\n{}",
+        stderr_str(&env_o2)
+    );
+    assert_eq!(
+        stdout_str(&env_o2),
+        "2 False False 1 None None None False\n"
+    );
+}
+
+#[test]
+fn flags_b_e_i_p_s_site_u_d_and_env_isolation() {
+    let dir = TempDir::new("flags_isolation");
+    dir.write("sibling_mod.py", "VAL = 99\n");
+    let script = dir.write(
+        "check.py",
+        "import builtins, sys\n\
+         print(\n\
+             sys.flags.dont_write_bytecode,\n\
+             sys.dont_write_bytecode,\n\
+             sys.flags.ignore_environment,\n\
+             sys.flags.isolated,\n\
+             sys.flags.no_user_site,\n\
+             sys.flags.no_site,\n\
+             sys.flags.safe_path,\n\
+             sys.flags.debug,\n\
+             'site' in sys.modules,\n\
+             hasattr(builtins, 'quit'),\n\
+         )\n",
+    );
+
+    // Default run: site loaded, interactive builtins installed, sibling importable.
+    let normal = run_cli_with_env(Some(dir.path()), &[script.to_str().unwrap()], &[]);
+    assert!(normal.status.success(), "{}", stderr_str(&normal));
+    assert_eq!(stdout_str(&normal), "0 False 0 0 0 0 False 0 True True\n");
+
+    // -B -s -S -d -u (clustered as -BsSdu)
+    let clustered = run_cli_with_env(Some(dir.path()), &["-BsSdu", script.to_str().unwrap()], &[]);
+    assert!(clustered.status.success(), "{}", stderr_str(&clustered));
+    assert_eq!(
+        stdout_str(&clustered),
+        "1 True 0 0 1 1 False 1 False False\n"
+    );
+
+    // -E ignores PYTHON* env vars.
+    let ignore_env = run_cli_with_env(
+        None,
+        &[
+            "-E",
+            "-c",
+            "import sys; print(sys.flags.ignore_environment, sys.flags.optimize, sys.flags.safe_path, sys.dont_write_bytecode, sys.warnoptions)",
+        ],
+        &[
+            ("PYTHONOPTIMIZE", "2"),
+            ("PYTHONSAFEPATH", "1"),
+            ("PYTHONDONTWRITEBYTECODE", "1"),
+            ("PYTHONWARNINGS", "error"),
+        ],
+    );
+    assert!(ignore_env.status.success(), "{}", stderr_str(&ignore_env));
+    assert_eq!(stdout_str(&ignore_env), "1 0 False False []\n");
+
+    // -P and PYTHONSAFEPATH prevent prepending script dir / cwd to sys.path.
+    let safe_p = run_cli_with_env(
+        Some(dir.path()),
+        &["-P", "-c", "import sys, sibling_mod"],
+        &[],
+    );
+    assert_eq!(safe_p.status.code(), Some(1));
+    assert!(stderr_str(&safe_p).contains("ModuleNotFoundError"));
+
+    let safe_env = run_cli_with_env(
+        Some(dir.path()),
+        &[
+            "-c",
+            "import sys; print(sys.flags.safe_path, '' in sys.path)",
+        ],
+        &[("PYTHONSAFEPATH", "1")],
+    );
+    assert!(safe_env.status.success(), "{}", stderr_str(&safe_env));
+    assert_eq!(stdout_str(&safe_env), "True False\n");
+
+    // -I implies -E, -s, and -P.
+    let isolated = run_cli_with_env(
+        Some(dir.path()),
+        &[
+            "-I",
+            "-c",
+            "import site, sys; print(sys.flags.isolated, sys.flags.ignore_environment, sys.flags.no_user_site, sys.flags.safe_path, sys.flags.optimize, site.ENABLE_USER_SITE, '' in sys.path)",
+        ],
+        &[("PYTHONOPTIMIZE", "2")],
+    );
+    assert!(isolated.status.success(), "{}", stderr_str(&isolated));
+    assert_eq!(stdout_str(&isolated), "1 1 1 True 0 False False\n");
+
+    // PYTHONPATH allows importing from external directory (ignored with -E).
+    let py_path_ok = run_cli_with_env(
+        None,
+        &["-c", "import sibling_mod; print(sibling_mod.VAL)"],
+        &[("PYTHONPATH", dir.path().to_str().unwrap())],
+    );
+    assert!(py_path_ok.status.success(), "{}", stderr_str(&py_path_ok));
+    assert_eq!(stdout_str(&py_path_ok), "99\n");
+
+    let py_path_ignored = run_cli_with_env(
+        None,
+        &["-E", "-c", "import sibling_mod"],
+        &[("PYTHONPATH", dir.path().to_str().unwrap())],
+    );
+    assert_eq!(py_path_ignored.status.code(), Some(1));
+    assert!(stderr_str(&py_path_ignored).contains("ModuleNotFoundError"));
+}
+
+#[test]
+fn warnings_flags_w_and_pythonwarnings() {
+    // -W error turns warnings.warn into an exception.
+    let w_err = run_cli_with_env(
+        None,
+        &[
+            "-W",
+            "error",
+            "-c",
+            "import sys, warnings; print(sys.warnoptions); warnings.warn('boom')",
+        ],
+        &[],
+    );
+    assert_eq!(w_err.status.code(), Some(1));
+    assert_eq!(stdout_str(&w_err), "['error']\n");
+    assert!(
+        stderr_str(&w_err).contains("UserWarning: boom"),
+        "expected UserWarning raised:\n{}",
+        stderr_str(&w_err)
+    );
+
+    // Attached -Wignore suppresses warnings.
+    let w_ign = run_cli_with_env(
+        None,
+        &[
+            "-Wignore",
+            "-c",
+            "import warnings; warnings.warn('silenced'); print('ok')",
+        ],
+        &[],
+    );
+    assert!(w_ign.status.success(), "{}", stderr_str(&w_ign));
+    assert_eq!(stdout_str(&w_ign), "ok\n");
+    assert!(stderr_str(&w_ign).is_empty());
+
+    // PYTHONWARNINGS comma-separated list.
+    let env_w = run_cli_with_env(
+        None,
+        &[
+            "-c",
+            concat!(
+                "import sys, warnings\n",
+                "print(sys.warnoptions)\n",
+                "warnings.warn('dep', DeprecationWarning)\n",
+                "try:\n",
+                "    warnings.warn('usr', UserWarning)\n",
+                "except UserWarning as e:\n",
+                "    print('caught', e)\n",
+            ),
+        ],
+        &[("PYTHONWARNINGS", "error,ignore::DeprecationWarning")],
+    );
+    assert!(env_w.status.success(), "{}", stderr_str(&env_w));
+    assert_eq!(
+        stdout_str(&env_w),
+        "['error', 'ignore::DeprecationWarning']\ncaught usr\n"
+    );
+}
+
+#[test]
+fn xoptions_dev_int_max_str_digits_pycache_utf8() {
+    let out = run_cli_with_env(
+        None,
+        &[
+            "-X",
+            "dev",
+            "-X",
+            "foo=bar",
+            "-X",
+            "flag",
+            "-X",
+            "int_max_str_digits=5000",
+            "-X",
+            "pycache_prefix=/tmp/my_pyc",
+            "-X",
+            "utf8=1",
+            "-X",
+            "warn_default_encoding",
+            "-c",
+            concat!(
+                "import sys\n",
+                "print(sys.flags.dev_mode, sys.flags.utf8_mode, sys.flags.warn_default_encoding)\n",
+                "print(sys.flags.int_max_str_digits, sys.get_int_max_str_digits())\n",
+                "print(sys.pycache_prefix)\n",
+                "print(sys._xoptions['dev'], sys._xoptions['foo'], sys._xoptions['flag'])\n",
+                "print(len(str(10 ** 4900)) > 4300)\n",
+                "try:\n",
+                "    int('1' * 5001)\n",
+                "    print('no_err')\n",
+                "except ValueError:\n",
+                "    print('limit_enforced')\n",
+            ),
+        ],
+        &[],
+    );
+    assert!(out.status.success(), "{}", stderr_str(&out));
+    assert_eq!(
+        stdout_str(&out),
+        "True 1 1\n\
+         5000 5000\n\
+         /tmp/my_pyc\n\
+         True bar True\n\
+         True\n\
+         limit_enforced\n"
+    );
+
+    // -X int_max_str_digits=0 disables the limit.
+    let unlimited = run_cli_with_env(
+        None,
+        &[
+            "-X",
+            "int_max_str_digits=0",
+            "-c",
+            "import sys; print(sys.flags.int_max_str_digits, sys.get_int_max_str_digits(), len(str(int('9' * 6000))))",
+        ],
+        &[],
+    );
+    assert!(unlimited.status.success(), "{}", stderr_str(&unlimited));
+    assert_eq!(stdout_str(&unlimited), "0 0 6000\n");
+
+    // Invalid int_max_str_digits fails startup cleanly.
+    let bad_limit = run_cli_with_env(None, &["-X", "int_max_str_digits=100", "-c", "pass"], &[]);
+    assert!(!bad_limit.status.success());
+    assert!(stderr_str(&bad_limit).contains("int_max_str_digits"));
+}
+
+#[test]
+fn flags_bytes_warning_verbose_skip_first_line_quiet_inspect_help_and_pyc() {
+    // -bb raises BytesWarning on str(b'abc').
+    let bb = run_cli_with_env(
+        None,
+        &[
+            "-bb",
+            "-c",
+            concat!(
+                "import sys\n",
+                "print(sys.flags.bytes_warning)\n",
+                "try:\n",
+                "    str(b'abc')\n",
+                "except BytesWarning:\n",
+                "    print('raised_bytes_warning')\n",
+            ),
+        ],
+        &[],
+    );
+    assert!(bb.status.success(), "{}", stderr_str(&bb));
+    assert_eq!(stdout_str(&bb), "2\nraised_bytes_warning\n");
+
+    // -v traces imports to stderr.
+    let verbose = run_cli_with_env(
+        None,
+        &[
+            "-v",
+            "-c",
+            "import math; print(sys.flags.verbose if 'sys' in globals() else 1)",
+        ],
+        &[],
+    );
+    assert!(verbose.status.success(), "{}", stderr_str(&verbose));
+    assert!(
+        stderr_str(&verbose).contains("import 'math'"),
+        "expected verbose import trace:\n{}",
+        stderr_str(&verbose)
+    );
+
+    // -x skips the first line of a script file while keeping line numbers.
+    let dir = TempDir::new("skip_first_line");
+    let script = dir.write(
+        "weird_header.py",
+        "NOT VALID PYTHON HEADER LINE @@@\nimport sys\nprint('line', sys._getframe().f_lineno)\n",
+    );
+    let skip_out = run_cli_with_env(None, &["-x", script.to_str().unwrap()], &[]);
+    assert!(skip_out.status.success(), "{}", stderr_str(&skip_out));
+    assert_eq!(stdout_str(&skip_out), "line 3\n");
+
+    // -q suppresses REPL banner.
+    let repl_quiet = run_cli_with_stdin(None, &["-q"], "print(1 + 2)\nexit\n");
+    assert!(repl_quiet.status.success(), "{}", stderr_str(&repl_quiet));
+    assert!(!stdout_str(&repl_quiet).contains("PyRust 0.2"));
+    assert!(stdout_str(&repl_quiet).contains("3"));
+
+    // -i drops into interactive REPL preserving script variables.
+    let inspect_out = run_cli_with_stdin(
+        None,
+        &["-i", "-c", "answer = 41"],
+        "print(answer + 1)\nexit\n",
+    );
+    assert!(inspect_out.status.success(), "{}", stderr_str(&inspect_out));
+    assert!(stdout_str(&inspect_out).contains("42"));
+
+    // --check-hash-based-pycs accepts default|always|never and rejects invalid.
+    for mode in ["default", "always", "never"] {
+        let ok = run_cli_with_env(
+            None,
+            &[
+                &format!("--check-hash-based-pycs={mode}"),
+                "-c",
+                "print('ok')",
+            ],
+            &[],
+        );
+        assert!(
+            ok.status.success(),
+            "mode {mode} failed: {}",
+            stderr_str(&ok)
+        );
+        assert_eq!(stdout_str(&ok), "ok\n");
+    }
+    let bad_pyc = run_cli_with_env(None, &["--check-hash-based-pycs=bogus"], &[]);
+    assert_eq!(bad_pyc.status.code(), Some(2));
+
+    // --help-env, --help-xoptions, --help-all exit 0 with expected sections.
+    let help_env = run_cli_with_env(None, &["--help-env"], &[]);
+    assert_eq!(help_env.status.code(), Some(0));
+    assert!(stdout_str(&help_env).contains("PYTHONOPTIMIZE"));
+    assert!(stdout_str(&help_env).contains("PYTHONWARNINGS"));
+
+    let help_x = run_cli_with_env(None, &["--help-xoptions"], &[]);
+    assert_eq!(help_x.status.code(), Some(0));
+    assert!(stdout_str(&help_x).contains("-X dev"));
+    assert!(stdout_str(&help_x).contains("-X int_max_str_digits=N"));
+
+    let help_all = run_cli_with_env(None, &["--help-all"], &[]);
+    assert_eq!(help_all.status.code(), Some(0));
+    let all_out = stdout_str(&help_all);
+    assert!(
+        all_out.contains("-c cmd")
+            && all_out.contains("PYTHONOPTIMIZE")
+            && all_out.contains("-X dev")
+    );
+
+    // Interactive builtins installed by default: quit(7) exits with code 7.
+    let quit_code = run_cli_with_env(None, &["-c", "quit(7)"], &[]);
+    assert_eq!(quit_code.status.code(), Some(7));
+
+    // -m site prints site info and exits 0.
+    let m_site = run_cli_with_env(None, &["-m", "site"], &[]);
+    assert!(m_site.status.success(), "{}", stderr_str(&m_site));
+    let m_site_out = stdout_str(&m_site);
+    assert!(m_site_out.contains("sys.path = [") && m_site_out.contains("USER_BASE:"));
+}

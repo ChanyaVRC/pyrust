@@ -206,26 +206,39 @@ pub(super) fn version_info_len(args: &[ExpandedCallArg]) -> Result<Value> {
     Ok(Value::int(5))
 }
 
+pyrust_struct_seq! {
+    pub(crate) flags in "sys" {
+        fields: [
+            debug,
+            inspect,
+            interactive,
+            optimize,
+            dont_write_bytecode,
+            no_user_site,
+            no_site,
+            ignore_environment,
+            verbose,
+            bytes_warning,
+            quiet,
+            hash_randomization,
+            isolated,
+            dev_mode,
+            utf8_mode,
+            warn_default_encoding,
+            safe_path,
+            int_max_str_digits,
+        ],
+    }
+}
+
 // Thread-local justification:
 // (a) Why `thread_local!`: `PyClass` and its attribute `Value`s are
-//     `!Send + !Sync`, so per-thread singletons for `sys.flags` and
-//     `sys.version_info` classes cannot live in a process-global `OnceLock`.
+//     `!Send + !Sync`, so per-thread singletons for `sys.version_info`
+//     cannot live in a process-global `OnceLock`.
 // (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
-//     thread share the `sys.flags` and `sys.version_info` class objects (each
-//     module gets fresh `PyInstance` objects); separate threads build
-//     independent class objects.
+//     thread share the `sys.version_info` class object (each module gets fresh
+//     `PyInstance` objects); separate threads build independent class objects.
 thread_local! {
-    static FLAGS_CLASS: Rc<RefCell<PyClass>> = {
-        let mut attrs = indexmap::IndexMap::new();
-        attrs.insert("__module__".to_string(), Value::string("sys"));
-        Rc::new(RefCell::new(PyClass::new(
-            "flags",
-            "flags",
-            None,
-            attrs,
-        )))
-    };
-
     static VERSION_INFO_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
         attrs.insert("__module__".to_string(), Value::string("sys"));
@@ -253,45 +266,34 @@ thread_local! {
     };
 }
 
-/// Build the `sys.flags` singleton value.
+/// Build the `sys.flags` structseq value populated from `cfg` (matching
+/// CPython 3.12's 18-field `sys.flags` tuple subtype).
+pub(crate) fn make_flags_from_config(cfg: &crate::interpreter::RuntimeConfig) -> Value {
+    flags::make([
+        Value::int(cfg.debug),
+        Value::int(cfg.inspect),
+        Value::int(cfg.interactive),
+        Value::int(cfg.optimize),
+        Value::int(cfg.dont_write_bytecode),
+        Value::int(cfg.no_user_site),
+        Value::int(cfg.no_site),
+        Value::int(cfg.ignore_environment),
+        Value::int(cfg.verbose),
+        Value::int(cfg.bytes_warning),
+        Value::int(cfg.quiet),
+        Value::int(cfg.hash_randomization),
+        Value::int(cfg.isolated),
+        Value::bool_(cfg.dev_mode),
+        Value::int(cfg.utf8_mode),
+        Value::int(cfg.warn_default_encoding),
+        Value::bool_(cfg.safe_path),
+        Value::int(cfg.int_max_str_digits),
+    ])
+}
+
+/// Build the default `sys.flags` singleton value (no CLI options).
 pub(super) fn make_flags() -> Value {
-    FLAGS_CLASS.with(|class| {
-        let mut attrs = InstanceAttrs::new();
-        // Fields and their defaults match CPython's sys.flags for a normal run
-        // with no command-line options (all optimization / debug flags are 0).
-        // <https://docs.python.org/3/library/sys.html#sys.flags>
-        for field in [
-            "debug",
-            "inspect",
-            "interactive",
-            "optimize",
-            "dont_write_bytecode",
-            "no_user_site",
-            "no_site",
-            "ignore_environment",
-            "verbose",
-            "bytes_warning",
-            "quiet",
-            "hash_randomization",
-            "isolated",
-            "utf8_mode",
-            "warn_default_encoding",
-        ] {
-            attrs.insert(field, Value::int(0));
-        }
-        attrs.insert("dev_mode", Value::bool_(false));
-        attrs.insert("safe_path", Value::bool_(false));
-        // This records the startup configuration and intentionally does not
-        // change after sys.set_int_max_str_digits(), matching CPython.
-        attrs.insert(
-            "int_max_str_digits",
-            Value::int(pyrust_core::INT_MAX_STR_DIGITS_DEFAULT as i64),
-        );
-        Value::py_instance(Rc::new(RefCell::new(PyInstance {
-            class: Rc::clone(class),
-            attrs,
-        })))
-    })
+    make_flags_from_config(&crate::interpreter::RuntimeConfig::default())
 }
 
 /// Build the `sys.version_info` singleton value.  Called once per
