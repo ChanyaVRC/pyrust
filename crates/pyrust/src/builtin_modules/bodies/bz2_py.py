@@ -480,6 +480,9 @@ class _TextBZ2Wrapper(_io.TextIOBase):
     def seekable(self):
         return self.buffer.seekable()
 
+    def fileno(self):
+        return self.buffer.fileno()
+
     def _translate_read(self, text):
         if self._newline is None:
             text = text.replace("\r\n", "\n").replace("\r", "\n")
