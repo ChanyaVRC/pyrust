@@ -40,12 +40,17 @@ impl Interpreter {
         let class = Rc::clone(&instance.borrow().class);
 
         // Built-in exception formatting applies only while `__str__` has not
-        // been replaced by a user callable.
+        // been replaced by a user or native-stdlib override.
         if is_exception_class(&class) {
-            let has_user_str = lookup_class_attr(&class, "__str__")
-                .map(|method| !matches!(method.kind(), ValueKind::BuiltinFunction(_)))
+            let has_custom_str = lookup_class_attr(&class, "__str__")
+                .map(|method| {
+                    !crate::interpreter::value_is_canonical_slot(
+                        &method,
+                        crate::interpreter::CanonicalSlot::ObjectStr,
+                    )
+                })
                 .unwrap_or(false);
-            if !has_user_str {
+            if !has_custom_str {
                 return exception_str_with_dispatch(self, value, &instance, &class);
             }
         }

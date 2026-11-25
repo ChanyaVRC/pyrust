@@ -686,6 +686,16 @@ pyrust_builtin_modules! {
     netrc @inject,
     quopri @inject,
     getopt @inject,
+    // `keyword`, `reprlib`, `sched`, `pickletools`, `optparse`, `this`, and
+    // `antigravity` (issue #3248): 100% native-Rust Python 3.12 compact stdlib
+    // modules built with PyRust's expanded macro toolkit (no `@inject`).
+    keyword,
+    reprlib,
+    sched,
+    pickletools,
+    optparse,
+    this,
+    antigravity,
 }
 
 include!("finalization.rs");

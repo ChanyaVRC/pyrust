@@ -24,8 +24,24 @@ impl Interpreter {
         // through to instantiate_exception.  This mirrors the non-exception
         // __new__ dispatch below (issue #1143).
         let user_new = if kinds.has_user_new {
-            lookup_class_attr(&class, "__new__")
-                .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
+            crate::interpreter::lookup_class_attr_owner(&class, "__new__").and_then(|owner| {
+                let borrowed = owner.borrow();
+                let v = borrowed.attrs.get("__new__")?.clone();
+                if borrowed.builtin_exception_name.is_none()
+                    && matches!(
+                        v.kind(),
+                        ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
+                    )
+                    && !crate::interpreter::value_is_canonical_slot(
+                        &v,
+                        crate::interpreter::CanonicalSlot::ObjectNew,
+                    )
+                {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
         } else {
             None
         };
@@ -67,8 +83,24 @@ impl Interpreter {
         // args), then call the user's __init__ so it can override .args via
         // super().__init__(...) and set its own instance attributes.
         let user_init = if kinds.has_user_init {
-            lookup_class_attr(&class, "__init__")
-                .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
+            crate::interpreter::lookup_class_attr_owner(&class, "__init__").and_then(|owner| {
+                let borrowed = owner.borrow();
+                let v = borrowed.attrs.get("__init__")?.clone();
+                if borrowed.builtin_exception_name.is_none()
+                    && matches!(
+                        v.kind(),
+                        ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
+                    )
+                    && !crate::interpreter::value_is_canonical_slot(
+                        &v,
+                        crate::interpreter::CanonicalSlot::ObjectInit,
+                    )
+                {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
         } else {
             None
         };
