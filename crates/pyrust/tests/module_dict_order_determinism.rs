@@ -56,14 +56,14 @@ import __future__
 names = ["abc", "argparse", "ast", "asyncio", "atexit", "base64", "binascii", "bisect", "builtins",
          "bz2", "calendar", "cmath", "cmd", "code", "codecs", "codeop", "collections", "configparser", "contextlib", "contextvars",
          "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "dis", "doctest", "email", "enum", "errno",
-         "fnmatch", "fractions", "functools", "glob", "graphlib", "gzip", "hashlib", "heapq",
+         "fnmatch", "fractions", "functools", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json",
-         "logging", "lzma", "math", "mimetypes", "numbers", "opcode", "operator", "os", "pathlib", "pickle",
+         "locale", "logging", "lzma", "math", "mimetypes", "numbers", "opcode", "operator", "os", "pathlib", "pickle",
          "platform", "pprint", "queue", "random", "re", "rlcompleter", "secrets", "selectors", "shlex", "shutil",
          "signal", "socket", "socketserver", "sqlite3", "stat", "statistics", "string", "subprocess", "sys", "tarfile",
          "tempfile", "textwrap", "threading", "time", "timeit", "token", "tokenize", "tomllib", "traceback",
          "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref",
-         "xml", "zipfile", "zlib"]
+         "xml", "zipfile", "zlib", "zoneinfo"]
 for name in names:
     print(name, list(vars(__import__(name))))
 for name, module in [("os.path", os.path),

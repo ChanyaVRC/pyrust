@@ -217,6 +217,7 @@ macro_rules! pyrust_builtin_modules {
                     | "unittest"
                     | "urllib"
                     | "zipfile"
+                    | "zoneinfo"
             ) {
                 return true;
             }
@@ -639,6 +640,12 @@ pyrust_builtin_modules! {
     code @inject,
     cmd @inject,
     rlcompleter @inject,
+    // `zoneinfo` (PEP 615), `locale`, and `gettext` (issue #3226): Python 3.12
+    // IANA time zone support (TZif v1/v2/v3 parser + POSIX TZ rules), locale
+    // conventions/formatting/normalization, and GNU gettext `.mo` catalogs.
+    zoneinfo @inject,
+    locale @inject,
+    gettext @inject,
 }
 
 include!("finalization.rs");
