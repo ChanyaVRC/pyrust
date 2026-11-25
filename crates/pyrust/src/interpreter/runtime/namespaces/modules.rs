@@ -25,6 +25,46 @@ pub(crate) enum MainModuleResolveError {
     ImportException(PyError, Vec<pyrust_core::FrameInfo>),
 }
 
+/// Result of looking up a single `sys.path` / `__path__` entry in
+/// `sys.path_importer_cache` and `sys.path_hooks`.
+enum PathEntryFinderLookup {
+    /// A finder returned by a `sys.path_hooks` callable or cached in
+    /// `sys.path_importer_cache`.
+    Finder(Value),
+    /// Entry explicitly mapped to `None` in `sys.path_importer_cache` (or
+    /// rejected by all `sys.path_hooks` and not a filesystem directory).
+    CachedNone,
+    /// No hook claimed this entry; fall back to default filesystem lookup.
+    DefaultFilesystem,
+}
+
+/// Locate a filesystem package (`<dir>/<leaf>/__init__.py`) or module
+/// (`<dir>/<leaf>.py`) within a single search directory.
+///
+/// Within a directory, a package takes precedence over a sibling `.py` module,
+/// matching CPython 3.12's `FileFinder`.
+fn find_filesystem_module_in_dir(
+    dir: &std::path::Path,
+    leaf_name: &str,
+) -> Option<FilesystemModuleTarget> {
+    let pkg_dir = dir.join(leaf_name);
+    let init_path = pkg_dir.join("__init__.py");
+    if init_path.is_file() {
+        return Some(FilesystemModuleTarget {
+            file_path: init_path,
+            package_dir: Some(pkg_dir),
+        });
+    }
+    let mod_path = dir.join(format!("{leaf_name}.py"));
+    if mod_path.is_file() {
+        return Some(FilesystemModuleTarget {
+            file_path: mod_path,
+            package_dir: None,
+        });
+    }
+    None
+}
+
 /// Locate a filesystem package (`<dir>/<leaf>/__init__.py`) or module
 /// (`<dir>/<leaf>.py`) across `search_dirs`.
 ///
@@ -36,20 +76,8 @@ fn find_filesystem_module(
     leaf_name: &str,
 ) -> Option<FilesystemModuleTarget> {
     for dir in search_dirs {
-        let pkg_dir = dir.join(leaf_name);
-        let init_path = pkg_dir.join("__init__.py");
-        if init_path.is_file() {
-            return Some(FilesystemModuleTarget {
-                file_path: init_path,
-                package_dir: Some(pkg_dir),
-            });
-        }
-        let mod_path = dir.join(format!("{leaf_name}.py"));
-        if mod_path.is_file() {
-            return Some(FilesystemModuleTarget {
-                file_path: mod_path,
-                package_dir: None,
-            });
+        if let Some(target) = find_filesystem_module_in_dir(dir, leaf_name) {
+            return Some(target);
         }
     }
     None
@@ -326,12 +354,10 @@ impl Interpreter {
         }
     }
 
-    /// Snapshot the import roots currently exposed through `sys.path`.
-    /// Before `sys` is imported, preserve the legacy script-directory lookup
-    /// so a script can still import a sibling module as its very first import.
-    fn user_module_search_dirs(&self) -> Vec<PathBuf> {
-        let sys_path = self
-            .cold
+    /// Return an attribute from the already-cached `sys` module, if `sys` has
+    /// been imported into this interpreter. Never triggers an import of `sys`.
+    fn cached_sys_attr(&self, attr: &str) -> Option<Value> {
+        self.cold
             .module_cache
             .borrow()
             .get("sys")
@@ -339,10 +365,15 @@ impl Interpreter {
                 let ValueKind::PyModule(sys) = module.kind() else {
                     return None;
                 };
-                sys.borrow().get_attr_value("path")
-            });
+                sys.borrow().get_attr_value(attr)
+            })
+    }
 
-        if let Some(path) = sys_path
+    /// Snapshot the import roots currently exposed through `sys.path`.
+    /// Before `sys` is imported, preserve the legacy script-directory lookup
+    /// so a script can still import a sibling module as its very first import.
+    fn user_module_search_dirs(&self) -> Vec<PathBuf> {
+        if let Some(path) = self.cached_sys_attr("path")
             && let ValueKind::List(entries) = path.kind()
         {
             return entries
@@ -352,6 +383,474 @@ impl Interpreter {
         }
 
         self.cold.script_dir.iter().cloned().collect()
+    }
+
+    /// Collect raw search entries from `sys.path` (or `script_dir` before `sys`
+    /// is loaded) so `sys.path_hooks` can see non-filesystem path tokens as
+    /// well as `os.PathLike` values.
+    fn user_module_search_entries(&mut self) -> Result<Vec<Value>> {
+        if let Some(path) = self.cached_sys_attr("path") {
+            return self.collect_iterable(&path);
+        }
+        Ok(self
+            .cold
+            .script_dir
+            .iter()
+            .map(|dir| Value::string(dir.to_string_lossy()))
+            .collect())
+    }
+
+    /// Convert a `sys.path` / `__path__` entry into a string path using `str`
+    /// or `os.PathLike.__fspath__`. Returns `Ok(None)` for non-path entries.
+    fn coerce_search_path_entry(&mut self, entry: &Value) -> Result<Option<String>> {
+        if let Some(s) = entry.as_str() {
+            return Ok(Some(s.to_string()));
+        }
+        if let Ok(fspath) = self.get_attr(entry, "__fspath__") {
+            let res = self.call_function_expanded(fspath, &[])?;
+            if let Some(s) = res.as_str() {
+                return Ok(Some(s.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Snapshot `sys.meta_path` finders when `sys` is loaded and the list is
+    /// non-empty. Returns an empty `Vec` on the fast path when no custom meta
+    /// path finders are installed.
+    fn snapshot_meta_path_finders(&mut self) -> Result<Vec<Value>> {
+        let Some(meta_path) = self.cached_sys_attr("meta_path") else {
+            return Ok(Vec::new());
+        };
+        if meta_path.is_none() {
+            return Ok(Vec::new());
+        }
+        if let ValueKind::List(items) = meta_path.kind() {
+            return Ok(items.clone());
+        }
+        self.collect_iterable(&meta_path)
+    }
+
+    /// Consult `sys.path_importer_cache` and `sys.path_hooks` for a single
+    /// search-path entry.
+    fn lookup_path_hook_finder(&mut self, entry_str: &str) -> Result<PathEntryFinderLookup> {
+        let Some(cache) = self.cached_sys_attr("path_importer_cache") else {
+            return Ok(PathEntryFinderLookup::DefaultFilesystem);
+        };
+        let hooks_val = self.cached_sys_attr("path_hooks");
+        let cache_key = if entry_str.is_empty() {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            entry_str.to_string()
+        };
+
+        // Probe `sys.path_importer_cache` first.
+        let cache_is_dict = matches!(cache.kind(), ValueKind::Dict(_));
+        let cached_entry: Option<Value> = if cache_is_dict {
+            cache
+                .dict_with(|d| d.get(&PyKey::str_from(&cache_key)).cloned())
+                .flatten()
+        } else {
+            match self.get_attr(&cache, "__getitem__") {
+                Ok(getitem) => match self.call_function_expanded(
+                    getitem,
+                    &[ExpandedCallArg {
+                        name: None,
+                        value: Value::string(&cache_key),
+                    }],
+                ) {
+                    Ok(v) => Some(v),
+                    Err(e) if e.class_name_is("KeyError") => None,
+                    Err(e) => return Err(e),
+                },
+                Err(_) => None,
+            }
+        };
+
+        if let Some(finder) = cached_entry {
+            if finder.is_none() {
+                return Ok(PathEntryFinderLookup::CachedNone);
+            }
+            return Ok(PathEntryFinderLookup::Finder(finder));
+        }
+
+        // Not cached yet — consult `sys.path_hooks` if any hooks are registered.
+        let hooks: Vec<Value> = match hooks_val {
+            Some(ref h) if !h.is_none() => match h.kind() {
+                ValueKind::List(items) => items.clone(),
+                _ => self.collect_iterable(h)?,
+            },
+            _ => return Ok(PathEntryFinderLookup::DefaultFilesystem),
+        };
+        if hooks.is_empty() {
+            return Ok(PathEntryFinderLookup::DefaultFilesystem);
+        }
+
+        let store_in_cache =
+            |interp: &mut Self, cache_obj: &Value, key: &str, val: Value| -> Result<()> {
+                let is_dict = matches!(cache_obj.kind(), ValueKind::Dict(_));
+                if is_dict {
+                    cache_obj.dict_insert(PyKey::str_from(key), val)?;
+                } else if let Ok(setitem) = interp.get_attr(cache_obj, "__setitem__") {
+                    interp.call_function_expanded(
+                        setitem,
+                        &[
+                            ExpandedCallArg {
+                                name: None,
+                                value: Value::string(key),
+                            },
+                            ExpandedCallArg {
+                                name: None,
+                                value: val,
+                            },
+                        ],
+                    )?;
+                }
+                Ok(())
+            };
+
+        for hook in hooks {
+            match self.call_function_expanded(
+                hook,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: Value::string(&cache_key),
+                }],
+            ) {
+                Ok(finder) => {
+                    store_in_cache(self, &cache, &cache_key, finder.clone())?;
+                    if finder.is_none() {
+                        return Ok(PathEntryFinderLookup::CachedNone);
+                    }
+                    return Ok(PathEntryFinderLookup::Finder(finder));
+                }
+                Err(e)
+                    if e.class_name_is("ImportError") || e.class_name_is("ModuleNotFoundError") =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // All hooks rejected this entry with `ImportError`. Cache `None` for
+        // non-directory entries (matching CPython 3.12's `PathFinder` cache
+        // behavior) while allowing real filesystem directories to fall through
+        // to PyRust's built-in filesystem loader.
+        let path_probe = if cache_key.is_empty() {
+            std::path::Path::new(".")
+        } else {
+            std::path::Path::new(&cache_key)
+        };
+        if !path_probe.is_dir() {
+            store_in_cache(self, &cache, &cache_key, Value::none())?;
+            return Ok(PathEntryFinderLookup::CachedNone);
+        }
+        Ok(PathEntryFinderLookup::DefaultFilesystem)
+    }
+
+    /// Create, register, and execute a module from a Python `ModuleSpec`
+    /// returned by a `sys.meta_path` or `sys.path_hooks` finder.
+    fn load_module_from_spec(
+        &mut self,
+        name: &str,
+        spec: Value,
+        parent_name: Option<&str>,
+        parent_module_value: Option<Value>,
+    ) -> Result<Value> {
+        let loader = match self.get_attr(&spec, "loader") {
+            Ok(v) => v,
+            Err(e) if e.class_name_is("AttributeError") => Value::none(),
+            Err(e) => return Err(e),
+        };
+
+        let mut created: Value = Value::none();
+        if !loader.is_none() {
+            match self.get_attr(&loader, "create_module") {
+                Ok(create_fn) => {
+                    created = self.call_function_expanded(
+                        create_fn,
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: spec.clone(),
+                        }],
+                    )?;
+                }
+                Err(e) if e.class_name_is("AttributeError") => {
+                    if self.get_attr(&loader, "exec_module").is_ok() {
+                        return Err(PyError::import_error(
+                            "ImportError",
+                            "loaders that define exec_module() must also define create_module()"
+                                .to_string(),
+                            Some(name.to_string()),
+                        ));
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let spec_name = match self.get_attr(&spec, "name") {
+            Ok(v) if v.as_str().is_some() => v.as_str().unwrap_or(name).to_string(),
+            _ => name.to_string(),
+        };
+
+        let module = if created.is_none() {
+            let module_rc = Rc::new(RefCell::new(PyModule::new(
+                spec_name.clone(),
+                crate::value::ModuleAttrs::default(),
+            )));
+            {
+                let mut m = module_rc.borrow_mut();
+                m.attach_live_namespace();
+                m.insert_attr("__name__".to_string(), Value::string(&spec_name));
+                m.insert_attr("__doc__".to_string(), Value::none());
+                m.insert_attr("__package__".to_string(), Value::none());
+                m.insert_attr("__loader__".to_string(), Value::none());
+                m.insert_attr("__spec__".to_string(), Value::none());
+            }
+            Value::py_module(module_rc)
+        } else {
+            created
+        };
+
+        // Initialize standard module attributes from `spec`, matching CPython's
+        // `_init_module_attrs(spec, module, override=False)`.
+        let attr_missing_or_none = |interp: &mut Self, obj: &Value, attr: &str| -> bool {
+            match interp.get_attr(obj, attr) {
+                Ok(v) => v.is_none() || v.is_unset(),
+                Err(_) => true,
+            }
+        };
+
+        if attr_missing_or_none(self, &module, "__name__") {
+            let _ = self.assign_attr(module.clone(), "__name__", Value::string(&spec_name));
+        }
+
+        let smsl = match self.get_attr(&spec, "submodule_search_locations") {
+            Ok(v) => v,
+            Err(_) => Value::none(),
+        };
+
+        let mut effective_loader = loader.clone();
+        if attr_missing_or_none(self, &module, "__loader__") {
+            if effective_loader.is_none()
+                && !smsl.is_none()
+                && let Ok(machinery) = self.load_module("importlib.machinery")
+                && let Ok(ns_loader_cls) = self.get_attr(&machinery, "NamespaceLoader")
+                && let Ok(ns_loader) = self.call_function_expanded(
+                    ns_loader_cls,
+                    &[
+                        ExpandedCallArg {
+                            name: None,
+                            value: Value::string(&spec_name),
+                        },
+                        ExpandedCallArg {
+                            name: None,
+                            value: smsl.clone(),
+                        },
+                        ExpandedCallArg {
+                            name: None,
+                            value: Value::none(),
+                        },
+                    ],
+                )
+            {
+                effective_loader = ns_loader.clone();
+                let _ = self.assign_attr(spec.clone(), "loader", ns_loader);
+                let _ = self.assign_attr(module.clone(), "__file__", Value::none());
+            }
+            let _ = self.assign_attr(module.clone(), "__loader__", effective_loader.clone());
+        }
+
+        if attr_missing_or_none(self, &module, "__package__") {
+            let pkg_val = match self.get_attr(&spec, "parent") {
+                Ok(v) if !v.is_none() => v,
+                _ => {
+                    if !smsl.is_none() {
+                        Value::string(&spec_name)
+                    } else {
+                        let parent_str = spec_name.rsplit_once('.').map(|(p, _)| p).unwrap_or("");
+                        Value::string(parent_str)
+                    }
+                }
+            };
+            let _ = self.assign_attr(module.clone(), "__package__", pkg_val);
+        }
+
+        let _ = self.assign_attr(module.clone(), "__spec__", spec.clone());
+
+        if !smsl.is_none() && attr_missing_or_none(self, &module, "__path__") {
+            let _ = self.assign_attr(module.clone(), "__path__", smsl);
+        }
+
+        let has_location = match self.get_attr(&spec, "has_location") {
+            Ok(v) => self.truthy_value(&v).unwrap_or(false),
+            Err(_) => false,
+        };
+        if has_location {
+            if attr_missing_or_none(self, &module, "__file__")
+                && let Ok(origin) = self.get_attr(&spec, "origin")
+            {
+                let _ = self.assign_attr(module.clone(), "__file__", origin);
+            }
+            if attr_missing_or_none(self, &module, "__cached__")
+                && let Ok(cached) = self.get_attr(&spec, "cached")
+            {
+                let _ = self.assign_attr(module.clone(), "__cached__", cached);
+            }
+        }
+
+        // Register in `sys.modules` BEFORE executing the module body so
+        // circular imports and `sys.modules[__name__]` lookups succeed.
+        self.cold
+            .module_cache
+            .borrow_mut()
+            .insert(name.to_string(), module.clone());
+        if let Err(error) = self.register_in_sys_modules(name, &module) {
+            self.unregister_failed_module(name);
+            return Err(error);
+        }
+
+        if !effective_loader.is_none()
+            && let Ok(exec_fn) = self.get_attr(&effective_loader, "exec_module")
+            && let Err(e) = self.call_function_expanded(
+                exec_fn,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: module.clone(),
+                }],
+            )
+        {
+            self.unregister_failed_module(name);
+            return Err(e);
+        }
+
+        let final_module = self
+            .lookup_internal_import_registry(name)
+            .or_else(|| self.lookup_sys_modules(name).ok().flatten())
+            .unwrap_or(module);
+
+        if let Some(parent) = parent_name {
+            let leaf_name = name.rsplit_once('.').map(|(_, l)| l).unwrap_or(name);
+            let current_parent = self
+                .lookup_internal_import_registry(parent)
+                .or_else(|| self.lookup_sys_modules(parent).ok().flatten())
+                .or(parent_module_value);
+            if let Some(parent_mod) = current_parent {
+                let _ = self.assign_attr(parent_mod, leaf_name, final_module.clone());
+            }
+        }
+
+        Ok(final_module)
+    }
+
+    /// Construct and register a PEP 420 implicit namespace package spanning
+    /// `namespace_dirs`.
+    fn create_namespace_package(
+        &mut self,
+        name: &str,
+        namespace_dirs: Vec<String>,
+        parent_name: Option<&str>,
+        parent_module_value: Option<Value>,
+    ) -> Result<Value> {
+        let path_list = Value::list(namespace_dirs.into_iter().map(Value::string).collect());
+
+        let (loader_val, spec_val) = if let Ok(machinery) = self.load_module("importlib.machinery")
+            && let Ok(ns_loader_cls) = self.get_attr(&machinery, "NamespaceLoader")
+            && let Ok(spec_cls) = self.get_attr(&machinery, "ModuleSpec")
+        {
+            let path_finder = self
+                .get_attr(&machinery, "PathFinder")
+                .unwrap_or_else(|_| Value::none());
+            let loader = self
+                .call_function_expanded(
+                    ns_loader_cls,
+                    &[
+                        ExpandedCallArg {
+                            name: None,
+                            value: Value::string(name),
+                        },
+                        ExpandedCallArg {
+                            name: None,
+                            value: path_list.clone(),
+                        },
+                        ExpandedCallArg {
+                            name: None,
+                            value: path_finder,
+                        },
+                    ],
+                )
+                .unwrap_or_else(|_| Value::none());
+            let spec = self
+                .call_function_expanded(
+                    spec_cls,
+                    &[
+                        ExpandedCallArg {
+                            name: None,
+                            value: Value::string(name),
+                        },
+                        ExpandedCallArg {
+                            name: None,
+                            value: loader.clone(),
+                        },
+                        ExpandedCallArg {
+                            name: Some("origin".to_string()),
+                            value: Value::none(),
+                        },
+                    ],
+                )
+                .unwrap_or_else(|_| Value::none());
+            if !spec.is_none() {
+                let _ = self.assign_attr(
+                    spec.clone(),
+                    "submodule_search_locations",
+                    path_list.clone(),
+                );
+            }
+            (loader, spec)
+        } else {
+            (Value::none(), Value::none())
+        };
+
+        let module_rc = Rc::new(RefCell::new(PyModule::new(
+            name.to_string(),
+            crate::value::ModuleAttrs::default(),
+        )));
+        {
+            let mut module = module_rc.borrow_mut();
+            module.attach_live_namespace();
+            module.insert_attr("__name__".to_string(), Value::string(name));
+            module.insert_attr("__doc__".to_string(), Value::none());
+            module.insert_attr("__package__".to_string(), Value::string(name));
+            module.insert_attr("__loader__".to_string(), loader_val);
+            module.insert_attr("__spec__".to_string(), spec_val);
+            module.insert_attr("__path__".to_string(), path_list);
+            module.insert_attr("__file__".to_string(), Value::none());
+        }
+        let module = Value::py_module(module_rc);
+        self.cold
+            .module_cache
+            .borrow_mut()
+            .insert(name.to_string(), module.clone());
+        if let Err(error) = self.register_in_sys_modules(name, &module) {
+            self.unregister_failed_module(name);
+            return Err(error);
+        }
+        if let Some(parent) = parent_name {
+            let leaf_name = name.rsplit_once('.').map(|(_, l)| l).unwrap_or(name);
+            let current_parent = self
+                .lookup_internal_import_registry(parent)
+                .or_else(|| self.lookup_sys_modules(parent).ok().flatten())
+                .or(parent_module_value);
+            if let Some(parent_mod) = current_parent {
+                let _ = self.assign_attr(parent_mod, leaf_name, module.clone());
+            }
+        }
+        Ok(module)
     }
 
     /// Notify all registered `sys.addaudithook` callbacks of an audit event.
@@ -513,6 +1012,25 @@ impl Interpreter {
         }
     }
 
+    /// Extract raw search entries from a parent package's `__path__` attribute.
+    /// Returns `Ok(None)` when the parent module has no `__path__`.
+    fn extract_package_search_entries(
+        &mut self,
+        parent_module: &Value,
+    ) -> Result<Option<Vec<Value>>> {
+        let path_val = match self.get_attr(parent_module, "__path__") {
+            Ok(val) => val,
+            Err(err) if err.class_name_is("AttributeError") => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let entries = match path_val.kind() {
+            ValueKind::List(entries) => entries.clone(),
+            ValueKind::Tuple(entries) => entries.to_vec(),
+            _ => self.collect_iterable(&path_val)?,
+        };
+        Ok(Some(entries))
+    }
+
     /// Extract filesystem search directories from a parent package's
     /// `__path__` attribute. Returns `Ok(None)` when the parent module has no
     /// `__path__` (i.e. is not a package).
@@ -520,26 +1038,13 @@ impl Interpreter {
         &mut self,
         parent_module: &Value,
     ) -> Result<Option<Vec<PathBuf>>> {
-        let path_val = match self.get_attr(parent_module, "__path__") {
-            Ok(val) => val,
-            Err(err) if err.class_name_is("AttributeError") => return Ok(None),
-            Err(err) => return Err(err),
+        let Some(entries) = self.extract_package_search_entries(parent_module)? else {
+            return Ok(None);
         };
-        let dirs = match path_val.kind() {
-            ValueKind::List(entries) => entries
-                .iter()
-                .filter_map(|entry| entry.as_str().map(PathBuf::from))
-                .collect(),
-            ValueKind::Tuple(entries) => entries
-                .iter()
-                .filter_map(|entry| entry.as_str().map(PathBuf::from))
-                .collect(),
-            _ => self
-                .collect_iterable(&path_val)?
-                .into_iter()
-                .filter_map(|entry| entry.as_str().map(PathBuf::from))
-                .collect(),
-        };
+        let dirs = entries
+            .iter()
+            .filter_map(|entry| entry.as_str().map(PathBuf::from))
+            .collect();
         Ok(Some(dirs))
     }
 
@@ -598,7 +1103,92 @@ impl Interpreter {
         if present_internally {
             self.cold.module_cache.borrow_mut().remove(name);
         }
-        // Built-in modules — declared in
+        // Split dotted module names into `(parent, leaf)` up front so custom
+        // `sys.meta_path` finders and path-based loaders share parent loading.
+        let (parent_name, leaf_name) = match name.rsplit_once('.') {
+            Some((parent, leaf)) if !parent.is_empty() && !leaf.is_empty() => (Some(parent), leaf),
+            _ => (None, name),
+        };
+
+        // 1. Consult user-installed `sys.meta_path` finders BEFORE falling back
+        // to built-in or default filesystem lookup (PEP 451 / CPython 3.12).
+        let meta_path_finders = self.snapshot_meta_path_finders()?;
+        if !meta_path_finders.is_empty() {
+            let (meta_parent_mod, meta_parent_path) = if let Some(parent) = parent_name {
+                let loaded_parent = if let Some(cached) = validate_import_cache_entry(
+                    parent,
+                    self.lookup_internal_import_registry(parent),
+                )? {
+                    cached
+                } else if let Some(cached) = self.lookup_sys_modules(parent)? {
+                    cached
+                } else {
+                    self.load_module(parent)?
+                };
+                // Importing the parent may have populated `name` in `sys.modules`.
+                if let Some(cached) =
+                    validate_import_cache_entry(name, self.lookup_internal_import_registry(name))?
+                {
+                    return Ok(cached);
+                }
+                if let Some(cached) = self.lookup_sys_modules(name)? {
+                    return Ok(cached);
+                }
+                let active_parent = validate_import_cache_entry(
+                    parent,
+                    self.lookup_internal_import_registry(parent),
+                )?
+                .or(self.lookup_sys_modules(parent)?)
+                .unwrap_or(loaded_parent);
+                match self.get_attr(&active_parent, "__path__") {
+                    Ok(p) => (Some(active_parent), p),
+                    Err(err) if err.class_name_is("AttributeError") => {
+                        if crate::builtin_modules::load_builtin_module(name).is_some() {
+                            (Some(active_parent), Value::none())
+                        } else {
+                            return Err(PyError::import_error(
+                                "ModuleNotFoundError",
+                                format!("No module named '{name}'; '{parent}' is not a package"),
+                                Some(name.to_string()),
+                            ));
+                        }
+                    }
+                    Err(err) => return Err(err),
+                }
+            } else {
+                (None, Value::none())
+            };
+
+            for finder in meta_path_finders {
+                let find_spec_fn = match self.get_attr(&finder, "find_spec") {
+                    Ok(f) => f,
+                    Err(e) if e.class_name_is("AttributeError") => continue,
+                    Err(e) => return Err(e),
+                };
+                let spec = self.call_function_expanded(
+                    find_spec_fn,
+                    &[
+                        ExpandedCallArg {
+                            name: None,
+                            value: Value::string(name),
+                        },
+                        ExpandedCallArg {
+                            name: None,
+                            value: meta_parent_path.clone(),
+                        },
+                        ExpandedCallArg {
+                            name: None,
+                            value: Value::none(),
+                        },
+                    ],
+                )?;
+                if !spec.is_none() {
+                    return self.load_module_from_spec(name, spec, parent_name, meta_parent_mod);
+                }
+            }
+        }
+
+        // 2. Built-in modules — declared in
         // `crates/pyrust/src/builtin_modules/mod.rs::pyrust_builtin_modules!`.
         // Adding a new module is a single-line edit there; this file
         // never has to change.
@@ -692,14 +1282,12 @@ impl Interpreter {
             return Ok(val);
         }
 
-        // User filesystem packages (`<pkg>/__init__.py`) and modules (`<mod>.py`).
+        // 3. Path-based lookup (`sys.path_hooks`, `sys.path_importer_cache`,
+        // filesystem packages `<pkg>/__init__.py`, modules `<mod>.py`, and
+        // PEP 420 implicit namespace packages).
         // Dotted names load parent packages first and search each child inside
         // its parent package's `__path__` (never falling back to `sys.path`).
-        let (parent_name, leaf_name) = match name.rsplit_once('.') {
-            Some((parent, leaf)) if !parent.is_empty() && !leaf.is_empty() => (Some(parent), leaf),
-            _ => (None, name),
-        };
-        let (parent_module_value, search_dirs) = if let Some(parent) = parent_name {
+        let (parent_module_value, search_entries) = if let Some(parent) = parent_name {
             let loaded_parent = if let Some(cached) =
                 validate_import_cache_entry(parent, self.lookup_internal_import_registry(parent))?
             {
@@ -725,19 +1313,89 @@ impl Interpreter {
                 validate_import_cache_entry(parent, self.lookup_internal_import_registry(parent))?
                     .or(self.lookup_sys_modules(parent)?)
                     .unwrap_or(loaded_parent);
-            let Some(dirs) = self.extract_package_search_dirs(&active_parent)? else {
+            let Some(entries) = self.extract_package_search_entries(&active_parent)? else {
                 return Err(PyError::import_error(
                     "ModuleNotFoundError",
                     format!("No module named '{name}'; '{parent}' is not a package"),
                     Some(name.to_string()),
                 ));
             };
-            (Some(active_parent), dirs)
+            (Some(active_parent), entries)
         } else {
-            (None, self.user_module_search_dirs())
+            (None, self.user_module_search_entries()?)
         };
 
-        if let Some(target) = find_filesystem_module(&search_dirs, leaf_name) {
+        let mut filesystem_target: Option<FilesystemModuleTarget> = None;
+        let mut namespace_dirs: Vec<String> = Vec::new();
+
+        for entry_val in &search_entries {
+            let Some(entry_str) = self.coerce_search_path_entry(entry_val)? else {
+                continue;
+            };
+            match self.lookup_path_hook_finder(&entry_str)? {
+                PathEntryFinderLookup::CachedNone => continue,
+                PathEntryFinderLookup::Finder(finder) => {
+                    let find_spec_fn = match self.get_attr(&finder, "find_spec") {
+                        Ok(f) => f,
+                        Err(e) if e.class_name_is("AttributeError") => continue,
+                        Err(e) => return Err(e),
+                    };
+                    let spec = self.call_function_expanded(
+                        find_spec_fn,
+                        &[
+                            ExpandedCallArg {
+                                name: None,
+                                value: Value::string(name),
+                            },
+                            ExpandedCallArg {
+                                name: None,
+                                value: Value::none(),
+                            },
+                        ],
+                    )?;
+                    if !spec.is_none() {
+                        let loader = self
+                            .get_attr(&spec, "loader")
+                            .unwrap_or_else(|_| Value::none());
+                        if !loader.is_none() {
+                            return self.load_module_from_spec(
+                                name,
+                                spec,
+                                parent_name,
+                                parent_module_value,
+                            );
+                        }
+                        if let Ok(smsl) = self.get_attr(&spec, "submodule_search_locations")
+                            && !smsl.is_none()
+                            && let Ok(locs) = self.collect_iterable(&smsl)
+                        {
+                            for loc in locs {
+                                if let Some(loc_str) = self.coerce_search_path_entry(&loc)? {
+                                    namespace_dirs.push(loc_str);
+                                }
+                            }
+                        }
+                    }
+                }
+                PathEntryFinderLookup::DefaultFilesystem => {
+                    let dir = PathBuf::from(&entry_str);
+                    if let Some(target) = find_filesystem_module_in_dir(&dir, leaf_name) {
+                        filesystem_target = Some(target);
+                        break;
+                    }
+                    let ns_dir = dir.join(leaf_name);
+                    if ns_dir.is_dir() {
+                        let abs_ns = std::path::absolute(&ns_dir)
+                            .unwrap_or(ns_dir)
+                            .to_string_lossy()
+                            .into_owned();
+                        namespace_dirs.push(abs_ns);
+                    }
+                }
+            }
+        }
+
+        if let Some(target) = filesystem_target {
             let full_path = target.file_path;
             let src = std::fs::read_to_string(&full_path).map_err(|e| {
                 PyError::runtime(format!("failed to read '{}': {e}", full_path.display()))
@@ -874,6 +1532,15 @@ impl Interpreter {
                 }
             }
             return Ok(final_module);
+        }
+
+        if !namespace_dirs.is_empty() {
+            return self.create_namespace_package(
+                name,
+                namespace_dirs,
+                parent_name,
+                parent_module_value,
+            );
         }
 
         Err(PyError::import_error(

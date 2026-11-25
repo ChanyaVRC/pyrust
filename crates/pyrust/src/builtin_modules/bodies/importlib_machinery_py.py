@@ -454,6 +454,19 @@ class FileFinder:
         return None
 
 
+    @classmethod
+    def path_hook(cls, *loader_details):
+        """A class method which returns a closure to use on sys.path_hooks
+        which will return an instance using the specified loaders and the path
+        called on the closure."""
+        def path_hook_for_FileFinder(path):
+            if not os.path.isdir(path or '.'):
+                raise ImportError('only directories are supported', path=path)
+            return cls(path, *loader_details)
+
+        return path_hook_for_FileFinder
+
+
 class PathFinder:
     """Meta path finder for sys.path and package __path__ attributes."""
 
@@ -464,13 +477,59 @@ class PathFinder:
                 finder.invalidate_caches()
 
     @classmethod
+    def _path_hooks(cls, path):
+        hooks = sys.path_hooks
+        if hooks is not None:
+            for hook in hooks:
+                try:
+                    return hook(path)
+                except ImportError:
+                    continue
+        return None
+
+    @classmethod
+    def _path_importer_cache(cls, path):
+        if path == '':
+            try:
+                path = os.getcwd()
+            except FileNotFoundError:
+                return None
+        cache = sys.path_importer_cache
+        if path in cache:
+            return cache[path]
+        if sys.path_hooks:
+            finder = cls._path_hooks(path)
+            if finder is not None:
+                cache[path] = finder
+                return finder
+            if not os.path.isdir(path):
+                cache[path] = None
+                return None
+        return _UNSET_PATH_FINDER
+
+    @classmethod
     def find_spec(cls, fullname, path=None, target=None):
         search_dirs = sys.path if path is None else path
         tail_module = fullname.rpartition('.')[2]
+        namespace_path = []
         for entry in search_dirs:
             try:
                 entry_str = os.fspath(entry)
             except TypeError:
+                continue
+            finder = cls._path_importer_cache(entry_str)
+            if finder is None:
+                continue
+            if finder is not _UNSET_PATH_FINDER:
+                if hasattr(finder, 'find_spec'):
+                    spec = finder.find_spec(fullname, target)
+                    if spec is not None:
+                        if spec.loader is not None:
+                            return spec
+                        if spec.submodule_search_locations is not None:
+                            namespace_path.extend(
+                                spec.submodule_search_locations
+                            )
                 continue
             base_path = os.path.join(entry_str, tail_module)
             if os.path.isdir(base_path):
@@ -496,4 +555,14 @@ class PathFinder:
                     )
                     spec.has_location = True
                     return spec
+            if os.path.isdir(base_path):
+                namespace_path.append(os.path.abspath(base_path))
+        if namespace_path:
+            loader = NamespaceLoader(fullname, namespace_path, cls)
+            spec = ModuleSpec(fullname, loader, origin=None)
+            spec.submodule_search_locations = namespace_path
+            return spec
         return None
+
+
+_UNSET_PATH_FINDER = object()

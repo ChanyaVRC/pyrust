@@ -271,6 +271,29 @@ macro_rules! pyrust_builtin_modules {
             if name == "warnings" {
                 return warnings::post_load_init(interp);
             }
+            match name {
+                "importlib.abc" => return importlib_abc::post_load_init(interp, module),
+                "importlib.resources.abc" => {
+                    return importlib_resources_abc::post_load_init(interp, module);
+                }
+                "importlib.resources.readers" => {
+                    return importlib_resources_readers::post_load_init(interp, module);
+                }
+                "importlib.resources.simple" => {
+                    return importlib_resources_simple::post_load_init(interp, module);
+                }
+                "importlib.resources" => {
+                    return importlib_resources::post_load_init(interp, module);
+                }
+                "importlib.readers" => return importlib_readers::post_load_init(interp, module),
+                "importlib.simple" => return importlib_simple::post_load_init(interp, module),
+                "importlib.metadata" => return importlib_metadata::post_load_init(interp, module),
+                "_frozen_importlib" => return _frozen_importlib::post_load_init(interp, module),
+                "_frozen_importlib_external" => {
+                    return _frozen_importlib_external::post_load_init(interp, module);
+                }
+                _ => {}
+            }
             $(
                 $(#[cfg($($cfg)*)])*
                 {
@@ -571,14 +594,23 @@ pyrust_builtin_modules! {
     // (`Pickler`, `Unpickler`, `dump`/`dumps`, `load`/`loads`, `PickleBuffer`,
     // protocols 0-5) injected from `pickle_py.py`.
     pickle @inject,
-    // `importlib`, `importlib.machinery`, and `importlib.util` (issue #3189):
-    // Python 3.12 import machinery (`import_module`, `reload`,
-    // `invalidate_caches`, `ModuleSpec`, `SourceFileLoader`, `resolve_name`,
-    // `find_spec`, `spec_from_file_location`, `spec_from_loader`,
-    // `module_from_spec`, `MAGIC_NUMBER`, `cache_from_source`).
+    // `importlib`, `importlib.machinery`, `importlib.util`, `importlib.abc`,
+    // `importlib.resources` (`.abc`, `.readers`, `.simple`), `importlib.readers`,
+    // `importlib.simple`, `importlib.metadata`, and `_frozen_importlib*`
+    // (issues #3189, #3244). All new submodules are 100% native Rust (no `@inject`).
     "importlib.machinery" as importlib_machinery @inject,
     "importlib.util" as importlib_util @inject,
+    "importlib.resources.abc" as importlib_resources_abc,
+    "importlib.resources.readers" as importlib_resources_readers,
+    "importlib.resources.simple" as importlib_resources_simple,
+    "importlib.resources" as importlib_resources,
+    "importlib.readers" as importlib_readers,
+    "importlib.simple" as importlib_simple,
+    "importlib.abc" as importlib_abc,
+    "importlib.metadata" as importlib_metadata,
     importlib @inject,
+    _frozen_importlib,
+    _frozen_importlib_external,
     // `weakref` (issue #3190): weak references (`ref`/`ReferenceType`),
     // `proxy`/`ProxyType`/`CallableProxyType`/`ProxyTypes`, `getweakrefcount`,
     // `getweakrefs`, `WeakMethod`, `WeakKeyDictionary`, `WeakValueDictionary`,
