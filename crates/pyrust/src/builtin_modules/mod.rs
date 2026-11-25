@@ -592,6 +592,13 @@ pyrust_builtin_modules! {
     "email.parser" as email_parser @inject,
     email @inject,
     mimetypes @inject,
+    // `xml`, `xml.etree`, `xml.etree.ElementPath`, and `xml.etree.ElementTree`
+    // (issue #3210): Python 3.12 XML ElementTree API, streaming XML 1.0 parser
+    // and serializer, XPath subset evaluator, and C14N 2.0 canonicalizer.
+    "xml.etree.ElementPath" as xml_etree_elementpath @inject,
+    "xml.etree.ElementTree" as xml_etree_elementtree @inject,
+    "xml.etree" as xml_etree,
+    xml,
 }
 
 include!("finalization.rs");
