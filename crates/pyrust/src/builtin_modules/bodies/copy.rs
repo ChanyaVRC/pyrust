@@ -77,10 +77,18 @@ pub(crate) fn inject_python_members(
         "deepcopy",
         "copy",
     );
+    let copyreg_mod = interp.load_module("copyreg")?;
+    let dispatch_table = match copyreg_mod.kind() {
+        crate::value::ValueKind::PyModule(m) => m.borrow().get_attr_value("dispatch_table"),
+        _ => None,
+    };
     {
         let mut module_mut = module.borrow_mut();
         module_mut.insert_attr("copy".to_string(), copy);
         module_mut.insert_attr("deepcopy".to_string(), deepcopy);
+        if let Some(dt) = dispatch_table {
+            module_mut.insert_attr("dispatch_table".to_string(), dt);
+        }
     }
     Ok(Some(ns))
 }

@@ -563,6 +563,13 @@ pyrust_builtin_modules! {
     ipaddress @inject,
     socket @inject,
     selectors @inject,
+    // `copyreg`, `graphlib`, `threading`, and `queue` (issue #3208): Python
+    // 3.12 pickle/copy extension registry, topological graph sorter,
+    // single-interpreter synchronization primitives, and synchronized queues.
+    copyreg @inject,
+    graphlib @inject,
+    threading @inject,
+    queue @inject,
 }
 
 include!("finalization.rs");

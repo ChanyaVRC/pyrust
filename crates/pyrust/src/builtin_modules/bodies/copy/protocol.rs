@@ -100,14 +100,46 @@ fn class_overrides_reduce(class: &Rc<RefCell<PyClass>>) -> bool {
     })
 }
 
-/// Resolve and invoke the `__reduce_ex__(4)` / `__reduce__()` hook on `obj`
-/// following CPython 3.12's `Lib/copy.py` and `object_reduce_ex` precedence.
+/// Look up `class` in `copyreg.dispatch_table` (shared with `copy.dispatch_table`).
+fn lookup_copyreg_dispatch_table(
+    class: &Rc<RefCell<PyClass>>,
+    interp: &mut Interpreter,
+) -> Result<Option<Value>> {
+    let copyreg_mod = interp.load_module("copyreg")?;
+    let dispatch_table = match copyreg_mod.kind() {
+        ValueKind::PyModule(m) => m.borrow().get_attr_value("dispatch_table"),
+        _ => None,
+    };
+    let Some(dt) = dispatch_table else {
+        return Ok(None);
+    };
+    let cls_val = Value::py_class(Rc::clone(class));
+    let key = interp.value_to_pykey(&cls_val)?;
+    Ok(dt.dict_with(|d| d.get(&key).cloned()).flatten())
+}
+
+/// Resolve and invoke the `copyreg.dispatch_table` or `__reduce_ex__(4)` /
+/// `__reduce__()` hook on `obj` following CPython 3.12's `Lib/copy.py` and
+/// `object_reduce_ex` precedence.
 pub(super) fn resolve_instance_copy_reduction(
     obj: &Value,
     class: &Rc<RefCell<PyClass>>,
     is_deep: bool,
     interp: &mut Interpreter,
 ) -> Result<InstanceReduction> {
+    if let Some(reductor) = lookup_copyreg_dispatch_table(class, interp)?
+        && (!is_deep && !reductor.is_none() || is_deep && interp.truthy_value(&reductor)?)
+    {
+        let rv = interp.call_function_expanded(
+            reductor,
+            &[ExpandedCallArg {
+                name: None,
+                value: obj.clone(),
+            }],
+        )?;
+        return Ok(InstanceReduction::Reduced(rv));
+    }
+
     match interp.get_attr(obj, "__reduce_ex__") {
         Ok(reductor) if !reductor.is_none() => {
             if is_canonical_bound_reducer(&reductor, obj, class, "__reduce_ex__") {
