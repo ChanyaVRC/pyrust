@@ -35,11 +35,12 @@ mod formatting {
         ExpandedCallArg, HashMap, Interpreter, PyBigInt, PyClass, PyError, PyInstance, PyKey, Rc,
         RefCell, Result, Value, ValueKind, ascii_repr_interp, bigint_to_float_or_overflow,
         builtin_data_backing, effective_builtin_receiver, exception_str_with_dispatch,
-        extract_str_value, float_to_bigint, full_type_name_str, intern_string, invoke_class_method,
-        is_exception_class, is_percent_format_mapping, is_str_or_str_subclass, lookup_class_attr,
-        lookup_class_attr_owner, lookup_value_special_method, metaclass_dunder_for_call,
-        native_iterator_class, normalize_float_slot_result, object_class_singleton,
-        render_instance_repr, try_value_to_float, value_type_name_str,
+        extract_str_value, find_immutable_primitive_base, float_to_bigint, full_type_name_str,
+        intern_string, invoke_class_method, is_exception_class, is_percent_format_mapping,
+        is_str_or_str_subclass, lookup_class_attr, lookup_class_attr_owner,
+        lookup_value_special_method, metaclass_dunder_for_call, native_iterator_class,
+        normalize_float_slot_result, object_class_singleton, render_instance_repr,
+        try_value_to_float, value_type_name_str,
     };
     include!("runtime/formatting.rs");
 }

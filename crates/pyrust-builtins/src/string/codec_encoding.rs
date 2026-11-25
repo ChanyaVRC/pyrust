@@ -22,6 +22,7 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
         XmlCharRefReplace,
         NameReplace,
         SurrogatePass,
+        SurrogateEscape,
     }
 
     fn resolve_handler(errors: &str) -> Result<Handler> {
@@ -33,6 +34,7 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
             "xmlcharrefreplace" => Ok(Handler::XmlCharRefReplace),
             "namereplace" => Ok(Handler::NameReplace),
             "surrogatepass" => Ok(Handler::SurrogatePass),
+            "surrogateescape" => Ok(Handler::SurrogateEscape),
             other => Err(PyError::named(
                 "LookupError",
                 format!("unknown error handler name '{other}'"),
@@ -101,9 +103,14 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
                         out.extend_from_slice(&replacement);
                         idx += 1;
                     }
-                    // For single-byte codecs CPython treats surrogatepass like
-                    // strict (the surrogate still doesn't fit the byte range).
-                    Handler::Strict | Handler::SurrogatePass => {
+                    Handler::SurrogateEscape if (0xDC80..=0xDCFF).contains(&cp) => {
+                        out.push((cp - 0xDC00) as u8);
+                        idx += 1;
+                    }
+                    // For single-byte codecs CPython treats surrogatepass (and
+                    // surrogateescape for non-0xDC80..=0xDCFF codepoints) like
+                    // strict.
+                    Handler::Strict | Handler::SurrogatePass | Handler::SurrogateEscape => {
                         let run_start = idx;
                         let mut run_end = idx + 1;
                         while run_end < cps.len() && !fits(cps[run_end]) {
@@ -175,7 +182,11 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
                     out.extend_from_slice(&backslash_escape_bytes(cp));
                     idx += 1;
                 }
-                Handler::Strict => {
+                Handler::SurrogateEscape if (0xDC80..=0xDCFF).contains(&cp) => {
+                    out.push((cp - 0xDC00) as u8);
+                    idx += 1;
+                }
+                Handler::Strict | Handler::SurrogateEscape => {
                     let run_start = idx;
                     let mut run_end = idx + 1;
                     while run_end < cps.len() && is_surrogate(cps[run_end]) {

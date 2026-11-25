@@ -135,12 +135,7 @@ def namedtuple(typename, field_names, *, rename=False, defaults=None, module=Non
 
     def __repr__(self):
         'Return a nicely formatted representation string'
-        # NB: `repr_fmt % tuple(self)` rather than CPython's `% self`.
-        # pyrust's `str.__mod__` does not yet unpack a *tuple subclass*
-        # operand into positional arguments, so without the explicit
-        # `tuple(...)` it would treat `self` as a single argument and
-        # recurse back into this `__repr__` (issue #1884 self-review).
-        return self.__class__.__name__ + repr_fmt % tuple(self)
+        return self.__class__.__name__ + repr_fmt % self
 
     def _asdict(self):
         'Return a new dict which maps field names to their values.'

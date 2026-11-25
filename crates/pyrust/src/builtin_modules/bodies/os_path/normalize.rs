@@ -1,12 +1,16 @@
 //! Path normalization, resolution, and home-expansion helpers for `os.path`.
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{ExpandedCallArg, reject_keyword_args_expanded};
+use crate::interpreter::{ExpandedCallArg, Interpreter, reject_keyword_args_expanded};
 use crate::value::{Value, ValueKind};
 
-use super::split_join::{nt_join, nt_splitroot};
+use super::split_join::{fspath_to_str, fspath_value, nt_join, nt_splitroot};
 
-pub(super) fn normcase_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value> {
+pub(super) fn normcase_impl(
+    interp: &mut Interpreter,
+    fn_name: &str,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.len() != 1 {
         return Err(PyError::named(
@@ -14,7 +18,8 @@ pub(super) fn normcase_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<V
             format!("{fn_name}() takes exactly one argument"),
         ));
     }
-    match args[0].value.kind() {
+    let resolved = fspath_value(interp, &args[0].value)?;
+    match resolved.kind() {
         ValueKind::Str(s) => {
             if cfg!(windows) {
                 Ok(Value::string(s.replace('/', "\\").to_lowercase()))
@@ -36,17 +41,15 @@ pub(super) fn normcase_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<V
                 Ok(Value::bytes(b.as_ref().clone()))
             }
         }
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "expected str, bytes or os.PathLike object, not {}",
-                crate::interpreter::value_type_name_str(&args[0].value),
-            ),
-        )),
+        _ => unreachable!("fspath_value only returns str or bytes"),
     }
 }
 
-pub(super) fn relpath_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value> {
+pub(super) fn relpath_impl(
+    interp: &mut Interpreter,
+    fn_name: &str,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.is_empty() || args.len() > 2 {
         return Err(PyError::named(
@@ -54,15 +57,7 @@ pub(super) fn relpath_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Va
             format!("{fn_name}() takes 1 or 2 arguments ({} given)", args.len()),
         ));
     }
-    let path = match args[0].value.kind() {
-        ValueKind::Str(s) => s.to_string(),
-        _ => {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{fn_name}() argument must be str"),
-            ));
-        }
-    };
+    let path = fspath_to_str(interp, fn_name, &args[0].value)?;
     // CPython raises ValueError for an empty `path`.
     if path.is_empty() {
         return Err(PyError::named(
@@ -70,17 +65,205 @@ pub(super) fn relpath_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Va
             "no path specified".to_string(),
         ));
     }
-    let start = match args.get(1).map(|a| a.value.kind()) {
-        Some(ValueKind::Str(s)) => s.to_string(),
+    let start = match args.get(1) {
         None => ".".to_string(),
-        Some(_) => {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{fn_name}() argument must be str"),
-            ));
-        }
+        Some(a) if a.value.is_none() => ".".to_string(),
+        Some(a) => fspath_to_str(interp, fn_name, &a.value)?,
     };
     Ok(Value::string(host_relpath(&path, &start)?))
+}
+
+pub(super) fn expandvars_impl(
+    interp: &mut Interpreter,
+    fn_name: &str,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
+    reject_keyword_args_expanded(fn_name, args)?;
+    if args.len() != 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes exactly one argument"),
+        ));
+    }
+    let path = fspath_to_str(interp, fn_name, &args[0].value)?;
+    Ok(Value::string(host_expandvars(&path)))
+}
+
+pub(super) fn host_expandvars(path: &str) -> String {
+    if cfg!(windows) {
+        nt_expandvars(path)
+    } else {
+        posix_expandvars(path)
+    }
+}
+
+/// POSIX `os.path.expandvars`: expand `$VAR` and `${VAR}` using the live
+/// process environment; unknown variables are left unchanged.
+pub(super) fn posix_expandvars(path: &str) -> String {
+    if !path.contains('$') {
+        return path.to_string();
+    }
+    let chars: Vec<char> = path.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(path.len());
+    let mut i = 0;
+    while i < len {
+        if chars[i] != '$' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        if i + 1 >= len {
+            out.push('$');
+            break;
+        }
+        if chars[i + 1] == '{' {
+            let start = i + 2;
+            let mut end = start;
+            while end < len && chars[end] != '}' {
+                end += 1;
+            }
+            if end < len && chars[end] == '}' {
+                let name: String = chars[start..end].iter().collect();
+                if let Ok(val) = std::env::var(&name) {
+                    out.push_str(&val);
+                } else {
+                    out.push_str("${");
+                    out.push_str(&name);
+                    out.push('}');
+                }
+                i = end + 1;
+            } else {
+                out.push('$');
+                i += 1;
+            }
+        } else if chars[i + 1].is_ascii_alphanumeric() || chars[i + 1] == '_' {
+            let start = i + 1;
+            let mut end = start;
+            while end < len && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let name: String = chars[start..end].iter().collect();
+            if let Ok(val) = std::env::var(&name) {
+                out.push_str(&val);
+            } else {
+                out.push('$');
+                out.push_str(&name);
+            }
+            i = end;
+        } else {
+            out.push('$');
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Windows `ntpath.expandvars`: expand `$VAR`, `${VAR}`, and `%VAR%`
+/// (preserving `'...'` quoted spans and translating `$$` -> `$` and `%%` -> `%`).
+pub(super) fn nt_expandvars(path: &str) -> String {
+    if !path.contains('$') && !path.contains('%') {
+        return path.to_string();
+    }
+    let chars: Vec<char> = path.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(path.len());
+    let mut i = 0;
+    while i < len {
+        match chars[i] {
+            '\'' => {
+                // Single-quoted literal span: copy verbatim through closing quote.
+                out.push('\'');
+                i += 1;
+                while i < len {
+                    let c = chars[i];
+                    out.push(c);
+                    i += 1;
+                    if c == '\'' {
+                        break;
+                    }
+                }
+            }
+            '%' => {
+                if i + 1 < len && chars[i + 1] == '%' {
+                    out.push('%');
+                    i += 2;
+                    continue;
+                }
+                let start = i + 1;
+                let mut end = start;
+                while end < len && chars[end] != '%' {
+                    end += 1;
+                }
+                if end < len && chars[end] == '%' {
+                    let name: String = chars[start..end].iter().collect();
+                    if let Ok(val) = std::env::var(&name) {
+                        out.push_str(&val);
+                    } else {
+                        out.push('%');
+                        out.push_str(&name);
+                        out.push('%');
+                    }
+                    i = end + 1;
+                } else {
+                    out.push('%');
+                    i += 1;
+                }
+            }
+            '$' => {
+                if i + 1 < len && chars[i + 1] == '$' {
+                    out.push('$');
+                    i += 2;
+                    continue;
+                }
+                if i + 1 < len && chars[i + 1] == '{' {
+                    let start = i + 2;
+                    let mut end = start;
+                    while end < len && chars[end] != '}' {
+                        end += 1;
+                    }
+                    if end < len && chars[end] == '}' {
+                        let name: String = chars[start..end].iter().collect();
+                        if let Ok(val) = std::env::var(&name) {
+                            out.push_str(&val);
+                        } else {
+                            out.push_str("${");
+                            out.push_str(&name);
+                            out.push('}');
+                        }
+                        i = end + 1;
+                    } else {
+                        out.push('$');
+                        i += 1;
+                    }
+                } else if i + 1 < len
+                    && (chars[i + 1].is_ascii_alphanumeric() || chars[i + 1] == '_')
+                {
+                    let start = i + 1;
+                    let mut end = start;
+                    while end < len && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                        end += 1;
+                    }
+                    let name: String = chars[start..end].iter().collect();
+                    if let Ok(val) = std::env::var(&name) {
+                        out.push_str(&val);
+                    } else {
+                        out.push('$');
+                        out.push_str(&name);
+                    }
+                    i = end;
+                } else {
+                    out.push('$');
+                    i += 1;
+                }
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

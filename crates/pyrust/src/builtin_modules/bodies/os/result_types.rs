@@ -343,7 +343,7 @@ pub(super) fn make_terminal_size(columns: i64, lines: i64) -> Value {
     })
 }
 
-pub(super) fn make_stat_result(metadata: &std::fs::Metadata) -> Value {
+pub(crate) fn make_stat_result(metadata: &std::fs::Metadata) -> Value {
     fn seconds_since_epoch(result: std::io::Result<std::time::SystemTime>) -> f64 {
         result
             .ok()

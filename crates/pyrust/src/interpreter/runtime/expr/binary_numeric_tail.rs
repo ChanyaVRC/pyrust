@@ -54,6 +54,33 @@ impl Interpreter {
         op_name: &str,
         cmp: impl Fn(std::cmp::Ordering) -> bool,
     ) -> Result<Value> {
+        // If both operands are user instances (including primitive/container
+        // subclasses) and both overrode their respective comparison dunders
+        // (which already ran in `try_dunder_binary` and returned
+        // `NotImplemented`), do NOT fall back to unwrapping their builtin
+        // backings — CPython raises `TypeError` directly.
+        if matches!(
+            (left.kind(), right.kind()),
+            (ValueKind::PyInstance(_), ValueKind::PyInstance(_))
+        ) {
+            let (fwd, rev) = match op {
+                BinaryOp::Lt => ("__lt__", "__gt__"),
+                BinaryOp::Le => ("__le__", "__ge__"),
+                BinaryOp::Gt => ("__gt__", "__lt__"),
+                BinaryOp::Ge => ("__ge__", "__le__"),
+                _ => ("", ""),
+            };
+            if !fwd.is_empty()
+                && effective_builtin_receiver(&left, &[fwd]).is_none()
+                && effective_builtin_receiver(&right, &[rev]).is_none()
+            {
+                return Err(pyrust_core::type_err!(
+                    "'{op_name}' not supported between instances of '{}' and '{}'",
+                    crate::interpreter::error_type_name_str(&left),
+                    crate::interpreter::error_type_name_str(&right),
+                ));
+            }
+        }
         // Canonical 5-type numeric comparison via pyrust_core::NumericOps (#458):
         // handles exact Int/BigInt vs Float precision, NaN -> False (only for
         // numeric pairs; `nan < 'a'` raises TypeError), and Complex ordering

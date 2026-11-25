@@ -6,6 +6,7 @@
 //! `BuiltinObject` whose `BuiltinTypeOps` impl dispatches through this module.
 
 use std::any::Any;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 
 use indexmap::IndexMap;
@@ -21,38 +22,146 @@ pub use stdio::{
     make_stdin, make_stdout, stdio_has_method,
 };
 
+/// Options passed to [`open_with_options`] and [`open_fd`].
+#[derive(Debug, Clone, Copy)]
+pub struct FileOpenOptions<'a> {
+    pub mode: &'a str,
+    pub buffering: i64,
+    pub encoding: Option<&'a str>,
+    pub errors: Option<&'a str>,
+    pub newline: Option<&'a str>,
+    pub closefd: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum FileName {
+    Path(String),
+    Fd(i64),
+}
+
+impl FileName {
+    fn display_for_error(&self) -> Option<&str> {
+        match self {
+            FileName::Path(p) => Some(p.as_str()),
+            FileName::Fd(_) => None,
+        }
+    }
+
+    fn repr_fragment(&self) -> String {
+        match self {
+            FileName::Path(p) => format!("'{p}'"),
+            FileName::Fd(fd) => fd.to_string(),
+        }
+    }
+
+    fn as_value(&self) -> Value {
+        match self {
+            FileName::Path(p) => Value::string(p.clone()),
+            FileName::Fd(fd) => Value::int(*fd),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewlineMode {
+    /// `newline=None`: universal newlines on read (translating `\r\n` and `\r`
+    /// to `\n`); on write `\n` translates to `os.linesep`.
+    UniversalTranslate,
+    /// `newline=""`: universal newlines on read without translation; on write
+    /// no translation.
+    UniversalNoTranslate,
+    /// `newline="\n"`: split only on `\n`, no translation on read or write.
+    Lf,
+    /// `newline="\r"`: split only on `\r`, no translation on read; on write
+    /// `\n` translates to `\r`.
+    Cr,
+    /// `newline="\r\n"`: split only on `\r\n`, no translation on read; on write
+    /// `\n` translates to `\r\n`.
+    CrLf,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ObservedNewlines {
+    seen_cr: bool,
+    seen_lf: bool,
+    seen_crlf: bool,
+}
+
+impl ObservedNewlines {
+    fn as_value(&self) -> Value {
+        let mut items: Vec<&'static str> = Vec::new();
+        if self.seen_cr {
+            items.push("\r");
+        }
+        if self.seen_lf {
+            items.push("\n");
+        }
+        if self.seen_crlf {
+            items.push("\r\n");
+        }
+        match items.len() {
+            0 => Value::none(),
+            1 => Value::string(items[0]),
+            _ => Value::tuple(items.into_iter().map(Value::string).collect()),
+        }
+    }
+}
+
 pub struct FileState {
-    pub path: String,
+    pub name: FileName,
     pub mode: String,
     pub closed: bool,
-    /// For text read modes: the full file contents; we read eagerly at open time.
+    /// Underlying OS file handle (None once closed).
+    pub os_file: Option<std::fs::File>,
+    /// Optional integer fd & close callback for `open(fd, closefd=True/False)`.
+    pub fd_num: Option<i64>,
+    pub closefd: bool,
+    pub close_fd_fn: Option<fn(i64) -> std::io::Result<()>>,
+    /// Buffering policy (`-1` default, `0` unbuffered binary, `1` line-buffered
+    /// text, `>1` explicit buffer size).
+    pub buffering: i64,
+    /// For text read modes: lazily loaded decoded text buffer.
     pub content: String,
-    /// For binary read modes: the full file contents as raw bytes.
+    /// For binary buffered read modes: lazily loaded raw byte buffer.
     pub content_bytes: Vec<u8>,
-    /// Read cursor (in bytes for both text and binary mode).
+    /// Whether `content` / `content_bytes` has been loaded from `os_file`.
+    pub read_loaded: bool,
+    /// OS file byte offset corresponding to `pos == 0` in `content` / `content_bytes`.
+    pub read_base_offset: u64,
+    /// Byte offset inside `content` or `content_bytes`.
     pub pos: usize,
-    /// For text write modes: buffered text to flush on `close()`.
-    pub write_buf: String,
-    /// For binary write modes: buffered bytes to flush on `close()`.
+    /// Pending write bytes waiting for `flush()` / `close()`.
     pub write_buf_bytes: Vec<u8>,
-    pub is_write: bool,
+    /// Whether a BOM has already been emitted for encodings like `utf-8-sig`.
+    pub bom_written: bool,
+    pub is_readable_mode: bool,
+    pub is_writable_mode: bool,
     pub is_append: bool,
     /// Whether the file was opened in binary mode (`'b'` in mode string).
     pub is_binary: bool,
-    /// Encoding for text mode (e.g. "utf-8", "ascii", "latin-1").  Always
-    /// `None` for binary mode.  `None` in text mode means locale default
-    /// (pyrust uses UTF-8 as the locale default).
-    /// This is the normalised (lowercase, hyphens) form used for codec routing.
+    /// Normalised encoding name for codec routing (`None` for binary mode).
     pub encoding: Option<String>,
-    /// The original user-supplied encoding string (exact case as passed to `open()`).
-    /// Used for `repr()` and the `.encoding` attribute to match CPython behaviour
-    /// of preserving the user-supplied name verbatim.
+    /// Original user-supplied encoding string preserved verbatim for `.encoding` and `repr()`.
     pub encoding_display: Option<String>,
+    /// Error handler name for text mode (`"strict"` by default).
+    pub errors: String,
+    /// Newline translation mode for text mode.
+    pub newline: NewlineMode,
+    /// Observed line endings while reading in universal-newline mode.
+    observed_newlines: ObservedNewlines,
 }
 
 impl FileState {
     fn is_readable(&self) -> bool {
-        !self.is_write && !self.is_append
+        self.is_readable_mode
+    }
+
+    fn is_writable(&self) -> bool {
+        self.is_writable_mode
+    }
+
+    fn error_path(&self) -> Option<&str> {
+        self.name.display_for_error()
     }
 }
 
@@ -69,13 +178,26 @@ impl BuiltinTypeOps for FileOps {
     fn repr(&self, state: &BuiltinState) -> String {
         let borrow = state.borrow();
         if let Some(s) = borrow.downcast_ref::<FileState>() {
+            let name_frag = s.name.repr_fragment();
             if s.is_binary {
-                format!("<_io.BufferedReader name='{}'>", s.path)
+                if s.buffering == 0 {
+                    let closefd_str = if s.closefd { "True" } else { "False" };
+                    format!(
+                        "<_io.FileIO name={name_frag} mode='{}' closefd={closefd_str}>",
+                        s.mode
+                    )
+                } else if s.is_readable_mode && s.is_writable_mode {
+                    format!("<_io.BufferedRandom name={name_frag}>")
+                } else if s.is_writable_mode {
+                    format!("<_io.BufferedWriter name={name_frag}>")
+                } else {
+                    format!("<_io.BufferedReader name={name_frag}>")
+                }
             } else {
                 let enc = s.encoding_display.as_deref().unwrap_or("UTF-8");
                 format!(
-                    "<_io.TextIOWrapper name='{}' mode='{}' encoding='{}'>",
-                    s.path, s.mode, enc
+                    "<_io.TextIOWrapper name={name_frag} mode='{}' encoding='{enc}'>",
+                    s.mode
                 )
             }
         } else {
@@ -88,7 +210,7 @@ impl BuiltinTypeOps for FileOps {
     }
 
     fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
-        read_line_value(state)
+        read_line_value(state, None)
     }
 
     fn is_iterable(&self) -> bool {
@@ -103,15 +225,37 @@ impl BuiltinTypeOps for FileOps {
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<FileState>()?;
         match name {
-            "name" => Some(Value::string(s.path.clone())),
+            "name" => Some(s.name.as_value()),
             "mode" => Some(Value::string(s.mode.clone())),
             "closed" => Some(Value::bool_(s.closed)),
+            "closefd" => Some(Value::bool_(s.closefd)),
             "encoding" => {
                 if s.is_binary {
                     None
                 } else {
                     let enc = s.encoding_display.as_deref().unwrap_or("UTF-8");
                     Some(Value::string(enc))
+                }
+            }
+            "errors" => {
+                if s.is_binary {
+                    None
+                } else {
+                    Some(Value::string(s.errors.clone()))
+                }
+            }
+            "line_buffering" => {
+                if s.is_binary {
+                    None
+                } else {
+                    Some(Value::bool_(s.buffering == 1))
+                }
+            }
+            "newlines" => {
+                if s.is_binary {
+                    None
+                } else {
+                    Some(s.observed_newlines.as_value())
                 }
             }
             _ => None,
@@ -133,241 +277,547 @@ impl BuiltinTypeOps for FileOps {
     }
 }
 
-/// Normalise an encoding name to the canonical lowercase form used internally
-/// (e.g. `"UTF-8"` → `"utf-8"`, `"UTF_8"` → `"utf-8"`).
+/// Normalise an encoding name to the canonical lowercase form used internally.
 fn normalise_encoding(enc: &str) -> String {
     enc.to_ascii_lowercase().replace('_', "-")
 }
 
-/// Implements `open(path, mode='r', buffering=-1, encoding=None, errors=None,
-/// newline=None, closefd=True, opener=None)`.
-///
-/// Returns a `BuiltinObject` carrying the file state plus the static `FileOps`
-/// dispatch table.
-///
-/// `encoding` is `None` when not supplied (defaults to UTF-8 for text mode).
-/// `closefd` must be `true` when `path` is a filename string; `false` is only
-/// valid when passing an integer file descriptor (not yet supported by pyrust).
-pub fn open(path: &str, mode: &str, encoding: Option<&str>, closefd: bool) -> Result<Value> {
-    // CPython raises ValueError when closefd=False and a filename is given.
-    if !closefd {
-        return Err(PyError::named(
-            "ValueError",
-            "closefd=False with a file path is not supported".to_string(),
-        ));
-    }
+struct ParsedMode {
+    is_read: bool,
+    is_write: bool,
+    is_append: bool,
+    is_create: bool,
+    is_plus: bool,
+    is_binary: bool,
+}
+
+fn parse_mode(mode: &str) -> Result<ParsedMode> {
+    let mut is_read = false;
+    let mut is_write = false;
+    let mut is_append = false;
+    let mut is_create = false;
+    let mut is_plus = false;
+    let mut is_binary = false;
+    let mut is_text = false;
 
     for c in mode.chars() {
-        if !matches!(c, 'r' | 'w' | 'a' | 'b' | 't' | '+') {
+        let slot = match c {
+            'r' => &mut is_read,
+            'w' => &mut is_write,
+            'a' => &mut is_append,
+            'x' => &mut is_create,
+            '+' => &mut is_plus,
+            'b' => &mut is_binary,
+            't' => &mut is_text,
+            _ => {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!("invalid mode: '{mode}'"),
+                ));
+            }
+        };
+        if *slot {
             return Err(PyError::named(
                 "ValueError",
                 format!("invalid mode: '{mode}'"),
             ));
         }
+        *slot = true;
     }
-    let is_write = mode.contains('w');
-    let is_append = mode.contains('a');
-    let is_read = mode.contains('r') || (!is_write && !is_append);
-    let is_binary = mode.contains('b');
 
-    // Validate the encoding name early (before opening the file) so we get a
-    // clean LookupError rather than a confusing IO error.
-    // encoding_norm: lowercased+hyphens form used for codec routing.
-    // encoding_display: exact user-supplied string preserved for .encoding attr
-    //   and repr(), matching CPython which returns the verbatim user input.
-    let (encoding_norm, encoding_display): (Option<String>, Option<String>) = if is_binary {
-        // Binary mode must not have an encoding.
-        if encoding.is_some() {
+    if is_binary && is_text {
+        return Err(PyError::named(
+            "ValueError",
+            "can't have text and binary mode at once".to_string(),
+        ));
+    }
+
+    let primary_count = usize::from(is_read)
+        + usize::from(is_write)
+        + usize::from(is_append)
+        + usize::from(is_create);
+    if primary_count != 1 {
+        return Err(PyError::named(
+            "ValueError",
+            "must have exactly one of create/read/write/append mode".to_string(),
+        ));
+    }
+
+    Ok(ParsedMode {
+        is_read,
+        is_write,
+        is_append,
+        is_create,
+        is_plus,
+        is_binary,
+    })
+}
+
+fn parse_newline(newline: Option<&str>) -> Result<NewlineMode> {
+    match newline {
+        None => Ok(NewlineMode::UniversalTranslate),
+        Some("") => Ok(NewlineMode::UniversalNoTranslate),
+        Some("\n") => Ok(NewlineMode::Lf),
+        Some("\r") => Ok(NewlineMode::Cr),
+        Some("\r\n") => Ok(NewlineMode::CrLf),
+        Some(other) => Err(PyError::named(
+            "ValueError",
+            format!("illegal newline value: {other}"),
+        )),
+    }
+}
+
+struct ValidatedOpen {
+    parsed_mode: ParsedMode,
+    encoding_norm: Option<String>,
+    encoding_display: Option<String>,
+    errors: String,
+    newline: NewlineMode,
+}
+
+fn validate_open_options(opts: &FileOpenOptions<'_>) -> Result<ValidatedOpen> {
+    let parsed_mode = parse_mode(opts.mode)?;
+
+    if parsed_mode.is_binary {
+        if opts.encoding.is_some() {
             return Err(PyError::named(
                 "ValueError",
                 "binary mode doesn't take an encoding argument".to_string(),
             ));
         }
-        (None, None)
-    } else {
-        match encoding {
-            None => (None, None),
-            Some(enc) => {
-                let norm = normalise_encoding(enc);
-                // Validate the name by attempting a dummy decode of empty bytes.
-                // This surfaces LookupError for unknown encodings before IO.
-                match norm.as_str() {
-                    "utf-8" | "utf8" | "u8" | "utf" | "utf-8-sig" | "utf8sig" | "utf-8sig"
-                    | "ascii" | "us-ascii" | "646" | "latin-1" | "iso-8859-1" | "8859"
-                    | "cp819" | "latin1" | "l1" | "utf-16" | "utf16" => {}
-                    _ => {
-                        return Err(PyError::named(
-                            "LookupError",
-                            format!("unknown encoding: {enc}"),
-                        ));
-                    }
-                }
-                (Some(norm), Some(enc.to_string()))
-            }
+        if opts.errors.is_some() {
+            return Err(PyError::named(
+                "ValueError",
+                "binary mode doesn't take an errors argument".to_string(),
+            ));
+        }
+        if opts.newline.is_some() {
+            return Err(PyError::named(
+                "ValueError",
+                "binary mode doesn't take a newline argument".to_string(),
+            ));
+        }
+        return Ok(ValidatedOpen {
+            parsed_mode,
+            encoding_norm: None,
+            encoding_display: None,
+            errors: "strict".to_string(),
+            newline: NewlineMode::UniversalNoTranslate,
+        });
+    }
+
+    if opts.buffering == 0 {
+        return Err(PyError::named(
+            "ValueError",
+            "can't have unbuffered text I/O".to_string(),
+        ));
+    }
+
+    let newline = parse_newline(opts.newline)?;
+
+    let (encoding_norm, encoding_display) = match opts.encoding {
+        None => (None, None),
+        Some(enc) => {
+            // Validate codec name up front via decode_bytes so unknown encodings
+            // raise LookupError before touching the filesystem.
+            decode_bytes(b"", enc, "strict")?;
+            (Some(normalise_encoding(enc)), Some(enc.to_string()))
         }
     };
 
-    let mut content = String::new();
-    let mut content_bytes = Vec::new();
-    if is_read {
-        if is_binary {
-            content_bytes =
-                std::fs::read(path).map_err(|e| PyError::from_io_error(&e, Some(path)))?;
-        } else {
-            let raw_bytes =
-                std::fs::read(path).map_err(|e| PyError::from_io_error(&e, Some(path)))?;
-            let enc = encoding_norm.as_deref().unwrap_or("utf-8");
-            let decoded = decode_text_bytes(&raw_bytes, enc)?;
-            // On Windows, text mode strips \r from \r\n (universal newlines).
-            #[cfg(windows)]
-            {
-                content = decoded.replace("\r\n", "\n");
-            }
-            #[cfg(not(windows))]
-            {
-                content = decoded;
-            }
+    let errors = opts.errors.unwrap_or("strict").to_string();
+
+    Ok(ValidatedOpen {
+        parsed_mode,
+        encoding_norm,
+        encoding_display,
+        errors,
+        newline,
+    })
+}
+
+/// Backwards-compatible convenience entry point for `open(path, mode, encoding, closefd)`.
+pub fn open(path: &str, mode: &str, encoding: Option<&str>, closefd: bool) -> Result<Value> {
+    open_with_options(
+        path,
+        FileOpenOptions {
+            mode,
+            buffering: -1,
+            encoding,
+            errors: None,
+            newline: None,
+            closefd,
+        },
+    )
+}
+
+/// Implements `open(path, mode='r', buffering=-1, encoding=None, errors=None,
+/// newline=None, closefd=True)`.
+pub fn open_with_options(path: &str, opts: FileOpenOptions<'_>) -> Result<Value> {
+    if !opts.closefd {
+        return Err(PyError::named(
+            "ValueError",
+            "Cannot use closefd=False with file name".to_string(),
+        ));
+    }
+
+    let validated = validate_open_options(&opts)?;
+    let pm = &validated.parsed_mode;
+
+    let mut open_opts = std::fs::OpenOptions::new();
+    if pm.is_read {
+        open_opts.read(true);
+        if pm.is_plus {
+            open_opts.write(true);
+        }
+    } else if pm.is_write {
+        open_opts.write(true).create(true).truncate(true);
+        if pm.is_plus {
+            open_opts.read(true);
+        }
+    } else if pm.is_append {
+        open_opts.append(true).create(true);
+        if pm.is_plus {
+            open_opts.read(true);
+        }
+    } else if pm.is_create {
+        open_opts.write(true).create_new(true);
+        if pm.is_plus {
+            open_opts.read(true);
         }
     }
+
+    let os_file = open_opts
+        .open(path)
+        .map_err(|e| PyError::from_io_error(&e, Some(path)))?;
+
     let state = FileState {
-        path: path.to_string(),
-        mode: mode.to_string(),
+        name: FileName::Path(path.to_string()),
+        mode: opts.mode.to_string(),
         closed: false,
-        content,
-        content_bytes,
+        os_file: Some(os_file),
+        fd_num: None,
+        closefd: true,
+        close_fd_fn: None,
+        buffering: opts.buffering,
+        content: String::new(),
+        content_bytes: Vec::new(),
+        read_loaded: false,
+        read_base_offset: 0,
         pos: 0,
-        write_buf: String::new(),
         write_buf_bytes: Vec::new(),
-        is_write,
-        is_append,
-        is_binary,
-        encoding: encoding_norm,
-        encoding_display,
+        bom_written: false,
+        is_readable_mode: pm.is_read || pm.is_plus,
+        is_writable_mode: pm.is_write || pm.is_append || pm.is_create || pm.is_plus,
+        is_append: pm.is_append,
+        is_binary: pm.is_binary,
+        encoding: validated.encoding_norm,
+        encoding_display: validated.encoding_display,
+        errors: validated.errors,
+        newline: validated.newline,
+        observed_newlines: ObservedNewlines::default(),
     };
     let state: Box<dyn Any> = Box::new(state);
     Ok(Value::builtin_object(FILE_OPS, state))
 }
 
-/// Decode raw file bytes to a `String` using the given normalised encoding name.
-/// Only called for text-mode opens; binary opens skip this entirely.
-fn decode_text_bytes(raw: &[u8], enc: &str) -> Result<String> {
-    // utf-8-sig: strip leading BOM (U+FEFF encoded as EF BB BF) if present.
-    if matches!(enc, "utf-8-sig" | "utf8sig" | "utf-8sig") {
-        let stripped = if raw.starts_with(b"\xEF\xBB\xBF") {
-            &raw[3..]
-        } else {
-            raw
-        };
-        return match std::str::from_utf8(stripped) {
-            Ok(s) => Ok(s.to_string()),
-            Err(e) => {
-                let start = e.valid_up_to();
-                let end = start + e.error_len().unwrap_or(stripped.len() - start);
-                Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
-                    encoding: "utf-8-sig".to_string(),
-                    object: stripped.to_vec(),
-                    start,
-                    end,
-                    reason: "invalid start byte".to_string(),
-                }))
-            }
-        };
-    }
-    // utf-16: use Rust's std to parse both LE and BE variants via the BOM.
-    if matches!(enc, "utf-16" | "utf16") {
-        // Try to decode UTF-16 via the BOM; if no BOM, assume native endian.
-        // We pair bytes and decode; Rust doesn't have built-in UTF-16, so we
-        // do it manually.
-        let s = decode_utf16(raw)?;
-        return Ok(s);
-    }
-    // For all other encodings, delegate to the existing decode_bytes helper
-    // (which returns a `Value::Str`; we unwrap the inner string).
-    let val = decode_bytes(raw, enc, "strict")?;
+/// Implements `open(fd, mode='r', buffering=-1, encoding=None, errors=None,
+/// newline=None, closefd=True)` for an integer file descriptor.
+pub fn open_fd(
+    fd: i64,
+    file: std::fs::File,
+    close_fd_fn: fn(i64) -> std::io::Result<()>,
+    opts: FileOpenOptions<'_>,
+) -> Result<Value> {
+    let validated = validate_open_options(&opts)?;
+    let pm = &validated.parsed_mode;
+
+    let state = FileState {
+        name: FileName::Fd(fd),
+        mode: opts.mode.to_string(),
+        closed: false,
+        os_file: Some(file),
+        fd_num: Some(fd),
+        closefd: opts.closefd,
+        close_fd_fn: Some(close_fd_fn),
+        buffering: opts.buffering,
+        content: String::new(),
+        content_bytes: Vec::new(),
+        read_loaded: false,
+        read_base_offset: 0,
+        pos: 0,
+        write_buf_bytes: Vec::new(),
+        bom_written: false,
+        is_readable_mode: pm.is_read || pm.is_plus,
+        is_writable_mode: pm.is_write || pm.is_append || pm.is_create || pm.is_plus,
+        is_append: pm.is_append,
+        is_binary: pm.is_binary,
+        encoding: validated.encoding_norm,
+        encoding_display: validated.encoding_display,
+        errors: validated.errors,
+        newline: validated.newline,
+        observed_newlines: ObservedNewlines::default(),
+    };
+    let state: Box<dyn Any> = Box::new(state);
+    Ok(Value::builtin_object(FILE_OPS, state))
+}
+
+/// Decode raw file bytes to a `String` using the given encoding and error handler.
+fn decode_text_bytes(raw: &[u8], enc: &str, errors: &str) -> Result<String> {
+    let val = decode_bytes(raw, enc, errors)?;
     match val.kind() {
         pyrust_core::ValueKind::Str(s) => Ok(s.to_string()),
         _ => Ok(String::new()),
     }
 }
 
-/// Minimal UTF-16 decoder: handles BOM-prefixed streams (LE or BE).
-/// Falls back to native endian when no BOM is present.
-fn decode_utf16(raw: &[u8]) -> Result<String> {
-    if !raw.len().is_multiple_of(2) {
-        // Odd byte count → truncated sequence.
-        return Err(PyError::named(
-            "UnicodeDecodeError",
-            "'utf-16' codec can't decode bytes: truncated data".to_string(),
-        ));
-    }
-    // Detect BOM.
-    let (le, payload) = if raw.starts_with(b"\xFF\xFE") {
-        (true, &raw[2..])
-    } else if raw.starts_with(b"\xFE\xFF") {
-        (false, &raw[2..])
-    } else {
-        // No BOM: assume LE (matches CPython's default on little-endian hosts).
-        (true, raw)
-    };
-    let words: Vec<u16> = payload
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|c| {
-            if le {
-                u16::from_le_bytes([c[0], c[1]])
-            } else {
-                u16::from_be_bytes([c[0], c[1]])
-            }
-        })
-        .collect();
-    String::from_utf16(&words).map_err(|_| {
-        PyError::named(
-            "UnicodeDecodeError",
-            "'utf-16' codec can't decode bytes: invalid data".to_string(),
-        )
-    })
-}
-
-/// Encode a text string to bytes using the file's encoding for writing.
-/// Returns `Err` if the encoding is unsupported or the string can't be encoded.
-fn encode_text_to_bytes(s: &str, enc: &str) -> Result<Vec<u8>> {
-    // utf-8-sig: prepend BOM only when writing the first flush.
-    // Since we buffer the whole write_buf and flush at close time, we prepend
-    // the BOM to the entire output (matching CPython's behaviour for a freshly
-    // opened 'w' file with encoding='utf-8-sig').
-    if matches!(enc, "utf-8-sig" | "utf8sig" | "utf-8sig") {
-        let mut out = Vec::with_capacity(3 + s.len());
-        out.extend_from_slice(b"\xEF\xBB\xBF");
-        out.extend_from_slice(s.as_bytes());
-        return Ok(out);
-    }
-    if matches!(enc, "utf-16" | "utf16") {
-        // Write UTF-16 LE with BOM.
-        let mut out: Vec<u8> = Vec::with_capacity(2 + s.len() * 2);
-        out.extend_from_slice(b"\xFF\xFE"); // LE BOM
-        for c in s.encode_utf16() {
-            out.extend_from_slice(&c.to_le_bytes());
+/// Encode a text string to bytes using the file's encoding and error handler.
+/// When `include_bom` is false, BOM-emitting codecs (`utf-8-sig`, `utf-16`,
+/// `utf-32`) omit their leading BOM (for subsequent writes after the first).
+fn encode_text_to_bytes(s: &str, enc: &str, errors: &str, include_bom: bool) -> Result<Vec<u8>> {
+    let effective_enc = if !include_bom {
+        match enc {
+            "utf-8-sig" | "utf8sig" | "utf-8sig" => "utf-8",
+            "utf-16" | "utf16" => "utf-16-le",
+            "utf-32" | "utf32" => "utf-32-le",
+            other => other,
         }
-        return Ok(out);
-    }
-    // Delegate to encode_str_to_bytes for utf-8 / ascii / latin-1.
-    let val = encode_str_to_bytes(s, enc, "strict")?;
+    } else {
+        enc
+    };
+    let val = encode_str_to_bytes(s, effective_enc, errors)?;
     match val.kind() {
         pyrust_core::ValueKind::Bytes(rc) => Ok(rc.as_slice().to_vec()),
         _ => Ok(Vec::new()),
     }
 }
 
+/// Translate output `\n` according to `NewlineMode`.
+/// Operates on UTF-8 / CESU-8 bytes directly so lone surrogates from
+/// `surrogateescape` never touch `str::chars()`.
+fn translate_output_newlines(s: &str, mode: NewlineMode) -> String {
+    let replacement: Option<&[u8]> = match mode {
+        NewlineMode::UniversalTranslate => {
+            if cfg!(windows) {
+                Some(b"\r\n")
+            } else {
+                None
+            }
+        }
+        NewlineMode::UniversalNoTranslate | NewlineMode::Lf => None,
+        NewlineMode::Cr => Some(b"\r"),
+        NewlineMode::CrLf => Some(b"\r\n"),
+    };
+    let Some(repl) = replacement else {
+        return s.to_string();
+    };
+    let bytes = s.as_bytes();
+    if !bytes.contains(&b'\n') {
+        return s.to_string();
+    }
+    let mut out = Vec::with_capacity(bytes.len() + 16);
+    for &b in bytes {
+        if b == b'\n' {
+            out.extend_from_slice(repl);
+        } else {
+            out.push(b);
+        }
+    }
+    // SAFETY: `s` is valid UTF-8 / CESU-8, and replacing ASCII `0x0A` with
+    // ASCII `\r` or `\r\n` preserves byte validity identically.
+    unsafe { String::from_utf8_unchecked(out) }
+}
+
+/// Translate input `\r\n` and `\r` to `\n` for `newline=None` (universal
+/// newlines) and record observed line endings. Safe on CESU-8 strings.
+fn translate_universal_input_newlines(s: &str, observed: &mut ObservedNewlines) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                    observed.seen_crlf = true;
+                    out.push(b'\n');
+                    i += 2;
+                } else {
+                    observed.seen_cr = true;
+                    out.push(b'\n');
+                    i += 1;
+                }
+            }
+            b'\n' => {
+                observed.seen_lf = true;
+                out.push(b'\n');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    // SAFETY: `s` is valid UTF-8 / CESU-8 and only ASCII `\r`/`\n` are rewritten.
+    unsafe { String::from_utf8_unchecked(out) }
+}
+
+/// Record observed line endings without modifying the text (for `newline=""`).
+fn scan_observed_newlines(s: &str, observed: &mut ObservedNewlines) {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                    observed.seen_crlf = true;
+                    i += 2;
+                } else {
+                    observed.seen_cr = true;
+                    i += 1;
+                }
+            }
+            b'\n' => {
+                observed.seen_lf = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+/// Byte width of one UTF-8 / CESU-8 codepoint starting at `first_byte`.
+#[inline]
+fn cesu8_char_width(first_byte: u8) -> usize {
+    if first_byte < 0x80 {
+        1
+    } else if first_byte < 0xE0 {
+        2
+    } else if first_byte < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
+/// Count codepoints in a UTF-8 / CESU-8 byte slice without calling `str::chars()`.
+fn cesu8_codepoint_count(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut count = 0;
+    while i < bytes.len() {
+        i += cesu8_char_width(bytes[i]);
+        count += 1;
+    }
+    count
+}
+
+/// Advance `start` by up to `max_chars` codepoints within `bytes`, returning
+/// the new byte offset (clamped to `bytes.len()`).
+fn advance_cesu8_chars(bytes: &[u8], start: usize, max_chars: usize) -> usize {
+    let mut idx = start;
+    let mut chars = 0;
+    while idx < bytes.len() && chars < max_chars {
+        let w = cesu8_char_width(bytes[idx]);
+        if idx + w > bytes.len() {
+            return bytes.len();
+        }
+        idx += w;
+        chars += 1;
+    }
+    idx
+}
+
+fn flush_write_buf(s: &mut FileState) -> Result<()> {
+    if s.write_buf_bytes.is_empty() {
+        return Ok(());
+    }
+    let err_path = s.error_path().map(str::to_owned);
+    if let Some(ref mut f) = s.os_file {
+        f.write_all(&s.write_buf_bytes)
+            .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))?;
+        f.flush()
+            .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))?;
+    }
+    s.write_buf_bytes.clear();
+    // After writing, any cached read buffer is stale.
+    s.read_loaded = false;
+    s.content.clear();
+    s.content_bytes.clear();
+    s.pos = 0;
+    Ok(())
+}
+
+fn ensure_read_loaded(s: &mut FileState) -> Result<()> {
+    if s.read_loaded {
+        return Ok(());
+    }
+    flush_write_buf(s)?;
+    let err_path = s.error_path().map(str::to_owned);
+    let mut raw = Vec::new();
+    let base_offset = if let Some(ref mut f) = s.os_file {
+        let off = f.stream_position().unwrap_or(0);
+        f.read_to_end(&mut raw)
+            .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))?;
+        off
+    } else {
+        0
+    };
+    if s.is_binary {
+        s.content_bytes = raw;
+    } else {
+        let enc = s.encoding.as_deref().unwrap_or("utf-8");
+        let decoded = decode_text_bytes(&raw, enc, &s.errors)?;
+        s.content = match s.newline {
+            NewlineMode::UniversalTranslate => {
+                translate_universal_input_newlines(&decoded, &mut s.observed_newlines)
+            }
+            NewlineMode::UniversalNoTranslate => {
+                scan_observed_newlines(&decoded, &mut s.observed_newlines);
+                decoded
+            }
+            NewlineMode::Lf | NewlineMode::Cr | NewlineMode::CrLf => decoded,
+        };
+    }
+    s.read_base_offset = base_offset;
+    s.pos = 0;
+    s.read_loaded = true;
+    Ok(())
+}
+
+fn closed_file_error() -> PyError {
+    PyError::named("ValueError", "I/O operation on closed file.".to_string())
+}
+
 fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) -> Result<Value> {
     match method {
-        "__enter__" => Ok(Value::builtin_object_shared(FILE_OPS, Rc::clone(state))),
+        "__enter__" => {
+            let borrow = state.borrow();
+            let s = borrow
+                .downcast_ref::<FileState>()
+                .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
+            if s.closed {
+                return Err(closed_file_error());
+            }
+            drop(borrow);
+            Ok(Value::builtin_object_shared(FILE_OPS, Rc::clone(state)))
+        }
         "__exit__" => {
             close_file(state)?;
             Ok(Value::none())
         }
-        "__iter__" => Ok(Value::builtin_object_shared(FILE_OPS, Rc::clone(state))),
-        "__next__" => match read_line_value(state)? {
+        "__iter__" => {
+            let borrow = state.borrow();
+            let s = borrow
+                .downcast_ref::<FileState>()
+                .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
+            if s.closed {
+                return Err(closed_file_error());
+            }
+            drop(borrow);
+            Ok(Value::builtin_object_shared(FILE_OPS, Rc::clone(state)))
+        }
+        "__next__" => match read_line_value(state, None)? {
             Some(v) => Ok(v),
             None => Err(PyError::named("StopIteration", String::new())),
         },
@@ -376,44 +826,65 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             Ok(Value::none())
         }
         "flush" => {
-            let borrow = state.borrow();
+            let mut borrow = state.borrow_mut();
             let s = borrow
-                .downcast_ref::<FileState>()
+                .downcast_mut::<FileState>()
                 .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
             if s.closed {
-                return Err(PyError::named(
-                    "ValueError",
-                    "I/O operation on closed file.".to_string(),
-                ));
+                return Err(closed_file_error());
             }
+            flush_write_buf(s)?;
             Ok(Value::none())
         }
-        "tell" => {
+        "readable" => {
             let borrow = state.borrow();
             let s = borrow
                 .downcast_ref::<FileState>()
                 .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
             if s.closed {
-                return Err(PyError::named(
-                    "ValueError",
-                    "I/O operation on closed file.".to_string(),
-                ));
+                return Err(closed_file_error());
             }
-            let pos = if s.is_readable() {
-                s.pos
-            } else if s.is_binary {
-                s.write_buf_bytes.len()
-            } else {
-                s.write_buf.len()
-            };
-            Ok(Value::int(pos as i64))
+            Ok(Value::bool_(s.is_readable()))
         }
+        "writable" => {
+            let borrow = state.borrow();
+            let s = borrow
+                .downcast_ref::<FileState>()
+                .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
+            if s.closed {
+                return Err(closed_file_error());
+            }
+            Ok(Value::bool_(s.is_writable()))
+        }
+        "seekable" => {
+            let borrow = state.borrow();
+            let s = borrow
+                .downcast_ref::<FileState>()
+                .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
+            if s.closed {
+                return Err(closed_file_error());
+            }
+            Ok(Value::bool_(true))
+        }
+        "isatty" => {
+            let borrow = state.borrow();
+            let s = borrow
+                .downcast_ref::<FileState>()
+                .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
+            if s.closed {
+                return Err(closed_file_error());
+            }
+            Ok(Value::bool_(false))
+        }
+        "fileno" => file_fileno(state),
+        "tell" => file_tell(state),
         "seek" => file_seek(state, args),
+        "truncate" => file_truncate(state, args),
         "read" => file_read(state, args),
         "readline" => {
-            let v = read_line_value(state)?;
+            let limit = parse_optional_size_arg(args)?;
+            let v = read_line_value(state, limit)?;
             Ok(v.unwrap_or_else(|| {
-                // EOF: return empty bytes or empty str depending on mode
                 let borrow = state.borrow();
                 if let Some(s) = borrow.downcast_ref::<FileState>()
                     && s.is_binary
@@ -425,7 +896,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
         }
         "readlines" => {
             let mut out = Vec::new();
-            while let Some(v) = read_line_value(state)? {
+            while let Some(v) = read_line_value(state, None)? {
                 out.push(v);
             }
             Ok(Value::list(out))
@@ -439,11 +910,79 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
     }
 }
 
+fn parse_optional_size_arg(args: &[Value]) -> Result<Option<usize>> {
+    match args.first().map(|v| v.kind()) {
+        None | Some(ValueKind::None) => Ok(None),
+        Some(ValueKind::Int(n)) if n < 0 => Ok(None),
+        Some(ValueKind::Int(n)) => Ok(Some(n as usize)),
+        Some(ValueKind::Bool(b)) => Ok(Some(usize::from(b))),
+        _ => Err(PyError::named(
+            "TypeError",
+            "argument should be integer or None".to_string(),
+        )),
+    }
+}
+
+fn file_fileno(state: &BuiltinState) -> Result<Value> {
+    let borrow = state.borrow();
+    let s = borrow
+        .downcast_ref::<FileState>()
+        .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
+    if s.closed {
+        return Err(closed_file_error());
+    }
+    if let Some(fd) = s.fd_num {
+        return Ok(Value::int(fd));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        if let Some(ref f) = s.os_file {
+            return Ok(Value::int(f.as_raw_fd() as i64));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        if let Some(ref f) = s.os_file {
+            // Return a positive non-stdio integer descriptor handle proxy.
+            let raw = f.as_raw_handle() as usize;
+            return Ok(Value::int(((raw % 65000) + 3) as i64));
+        }
+    }
+    Err(PyError::named(
+        "io.UnsupportedOperation",
+        "fileno".to_string(),
+    ))
+}
+
+fn file_tell(state: &BuiltinState) -> Result<Value> {
+    let mut borrow = state.borrow_mut();
+    let s = borrow
+        .downcast_mut::<FileState>()
+        .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
+    if s.closed {
+        return Err(closed_file_error());
+    }
+    if s.read_loaded {
+        return Ok(Value::int(s.read_base_offset as i64 + s.pos as i64));
+    }
+    let err_path = s.error_path().map(str::to_owned);
+    let base_pos = if let Some(ref mut f) = s.os_file {
+        f.stream_position()
+            .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))? as i64
+    } else {
+        0
+    };
+    Ok(Value::int(base_pos + s.write_buf_bytes.len() as i64))
+}
+
 fn file_seek(state: &BuiltinState, args: &[Value]) -> Result<Value> {
     let offset = args
         .first()
         .and_then(|v| match v.kind() {
             ValueKind::Int(n) => Some(n),
+            ValueKind::Bool(b) => Some(i64::from(b)),
             _ => None,
         })
         .ok_or_else(|| PyError::named("TypeError", "seek() argument must be int".to_string()))?;
@@ -451,6 +990,7 @@ fn file_seek(state: &BuiltinState, args: &[Value]) -> Result<Value> {
         .get(1)
         .and_then(|v| match v.kind() {
             ValueKind::Int(n) => Some(n),
+            ValueKind::Bool(b) => Some(i64::from(b)),
             _ => None,
         })
         .unwrap_or(0);
@@ -459,105 +999,13 @@ fn file_seek(state: &BuiltinState, args: &[Value]) -> Result<Value> {
         .downcast_mut::<FileState>()
         .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if s.closed {
-        return Err(PyError::named(
-            "ValueError",
-            "I/O operation on closed file.".to_string(),
-        ));
+        return Err(closed_file_error());
     }
-    if s.is_readable() {
-        let content_len = if s.is_binary {
-            s.content_bytes.len()
-        } else {
-            s.content.len()
-        };
-        let new_pos = if s.is_binary {
-            // Binary mode allows all seek forms with nonzero offsets
-            match whence {
-                0 => {
-                    if offset < 0 {
-                        return Err(PyError::named(
-                            "ValueError",
-                            format!("negative seek position {offset}"),
-                        ));
-                    }
-                    (offset as usize).min(content_len)
-                }
-                1 => {
-                    let new = s.pos as i64 + offset;
-                    if new < 0 {
-                        return Err(PyError::named(
-                            "ValueError",
-                            format!("negative seek position {new}"),
-                        ));
-                    }
-                    (new as usize).min(content_len)
-                }
-                2 => {
-                    let new = content_len as i64 + offset;
-                    if new < 0 {
-                        return Err(PyError::named(
-                            "ValueError",
-                            format!("negative seek position {new}"),
-                        ));
-                    }
-                    (new as usize).min(content_len)
-                }
-                _ => {
-                    return Err(PyError::named(
-                        "ValueError",
-                        format!("invalid whence ({whence}, should be 0, 1 or 2)"),
-                    ));
-                }
-            }
-        } else {
-            match whence {
-                0 => {
-                    if offset < 0 {
-                        return Err(PyError::named(
-                            "ValueError",
-                            format!("negative seek position {offset}"),
-                        ));
-                    }
-                    (offset as usize).min(content_len)
-                }
-                1 => {
-                    // Text mode only allows seek(0, 1)
-                    if offset != 0 {
-                        return Err(PyError::named(
-                            "io.UnsupportedOperation",
-                            "can't do nonzero cur-relative seeks".to_string(),
-                        ));
-                    }
-                    s.pos
-                }
-                2 => {
-                    // Text mode only allows seek(0, 2)
-                    if offset != 0 {
-                        return Err(PyError::named(
-                            "io.UnsupportedOperation",
-                            "can't do nonzero end-relative seeks".to_string(),
-                        ));
-                    }
-                    content_len
-                }
-                _ => {
-                    return Err(PyError::named(
-                        "ValueError",
-                        format!("invalid whence ({whence}, should be 0, 1 or 2)"),
-                    ));
-                }
-            }
-        };
-        s.pos = new_pos;
-        Ok(Value::int(new_pos as i64))
-    } else {
-        // Write / append mode: track position in write_buf
-        let buf_len = if s.is_binary {
-            s.write_buf_bytes.len()
-        } else {
-            s.write_buf.len()
-        };
-        let new_pos = match whence {
+
+    flush_write_buf(s)?;
+
+    if !s.is_binary {
+        match whence {
             0 => {
                 if offset < 0 {
                     return Err(PyError::named(
@@ -565,7 +1013,6 @@ fn file_seek(state: &BuiltinState, args: &[Value]) -> Result<Value> {
                         format!("negative seek position {offset}"),
                     ));
                 }
-                (offset as usize).min(buf_len)
             }
             1 => {
                 if offset != 0 {
@@ -574,7 +1021,6 @@ fn file_seek(state: &BuiltinState, args: &[Value]) -> Result<Value> {
                         "can't do nonzero cur-relative seeks".to_string(),
                     ));
                 }
-                buf_len
             }
             2 => {
                 if offset != 0 {
@@ -583,7 +1029,6 @@ fn file_seek(state: &BuiltinState, args: &[Value]) -> Result<Value> {
                         "can't do nonzero end-relative seeks".to_string(),
                     ));
                 }
-                buf_len
             }
             _ => {
                 return Err(PyError::named(
@@ -591,31 +1036,124 @@ fn file_seek(state: &BuiltinState, args: &[Value]) -> Result<Value> {
                     format!("invalid whence ({whence}, should be 0, 1 or 2)"),
                 ));
             }
-        };
-        // Truncate write buffer to new_pos (seek in write mode discards future bytes)
-        if s.is_binary {
-            s.write_buf_bytes.truncate(new_pos);
-        } else {
-            s.write_buf.truncate(new_pos);
         }
-        Ok(Value::int(new_pos as i64))
     }
+
+    let err_path = s.error_path().map(str::to_owned);
+    // Compute the logical current position before invalidating any read buffer,
+    // because `ensure_read_loaded` drained `os_file` to EOF.
+    let seek_from = match whence {
+        0 => {
+            if offset < 0 {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!("negative seek position {offset}"),
+                ));
+            }
+            SeekFrom::Start(offset as u64)
+        }
+        1 => {
+            if s.read_loaded {
+                let logical_cur = s.read_base_offset as i64 + s.pos as i64;
+                let target = logical_cur + offset;
+                if target < 0 {
+                    return Err(PyError::named(
+                        "ValueError",
+                        format!("negative seek position {target}"),
+                    ));
+                }
+                SeekFrom::Start(target as u64)
+            } else {
+                SeekFrom::Current(offset)
+            }
+        }
+        2 => SeekFrom::End(offset),
+        _ => {
+            return Err(PyError::named(
+                "ValueError",
+                format!("invalid whence ({whence}, should be 0, 1 or 2)"),
+            ));
+        }
+    };
+    let new_pos = if let Some(ref mut f) = s.os_file {
+        f.seek(seek_from)
+            .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))? as i64
+    } else {
+        0
+    };
+    s.read_loaded = false;
+    s.read_base_offset = new_pos as u64;
+    s.content.clear();
+    s.content_bytes.clear();
+    s.pos = 0;
+    Ok(Value::int(new_pos))
 }
 
-fn file_read(state: &BuiltinState, args: &[Value]) -> Result<Value> {
-    let n = args.first().and_then(|v| match v.kind() {
-        ValueKind::Int(n) => Some(n),
-        _ => None,
-    });
+fn file_truncate(state: &BuiltinState, args: &[Value]) -> Result<Value> {
     let mut borrow = state.borrow_mut();
     let s = borrow
         .downcast_mut::<FileState>()
         .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if s.closed {
+        return Err(closed_file_error());
+    }
+    if !s.is_writable() {
         return Err(PyError::named(
-            "ValueError",
-            "I/O operation on closed file.".to_string(),
+            "io.UnsupportedOperation",
+            "File not open for writing".to_string(),
         ));
+    }
+    flush_write_buf(s)?;
+    let err_path = s.error_path().map(str::to_owned);
+    let target_len: u64 = match args.first().map(|v| v.kind()) {
+        None | Some(ValueKind::None) => {
+            if let Some(ref mut f) = s.os_file {
+                f.stream_position()
+                    .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))?
+            } else {
+                0
+            }
+        }
+        Some(ValueKind::Int(n)) if n >= 0 => n as u64,
+        Some(ValueKind::Int(n)) => {
+            return Err(PyError::named(
+                "ValueError",
+                format!("Negative size value {n}"),
+            ));
+        }
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "truncate() argument must be int or None".to_string(),
+            ));
+        }
+    };
+    if let Some(ref mut f) = s.os_file {
+        f.set_len(target_len)
+            .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))?;
+    }
+    s.read_loaded = false;
+    Ok(Value::int(target_len as i64))
+}
+
+fn file_read(state: &BuiltinState, args: &[Value]) -> Result<Value> {
+    let n = match args.first().map(|v| v.kind()) {
+        None | Some(ValueKind::None) => None,
+        Some(ValueKind::Int(n)) => Some(n),
+        Some(ValueKind::Bool(b)) => Some(i64::from(b)),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "argument should be integer or None".to_string(),
+            ));
+        }
+    };
+    let mut borrow = state.borrow_mut();
+    let s = borrow
+        .downcast_mut::<FileState>()
+        .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
+    if s.closed {
+        return Err(closed_file_error());
     }
     if !s.is_readable() {
         return Err(PyError::named(
@@ -623,6 +1161,34 @@ fn file_read(state: &BuiltinState, args: &[Value]) -> Result<Value> {
             "not readable".to_string(),
         ));
     }
+
+    // Unbuffered binary I/O (`buffering=0`): read directly from the OS handle
+    // without reading ahead into an internal buffer.
+    if s.is_binary && s.buffering == 0 {
+        flush_write_buf(s)?;
+        let err_path = s.error_path().map(str::to_owned);
+        let Some(ref mut f) = s.os_file else {
+            return Ok(Value::bytes(Vec::new()));
+        };
+        let mut buf = Vec::new();
+        match n {
+            Some(count) if count >= 0 => {
+                buf.resize(count as usize, 0);
+                let got = f
+                    .read(&mut buf)
+                    .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))?;
+                buf.truncate(got);
+            }
+            _ => {
+                f.read_to_end(&mut buf)
+                    .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))?;
+            }
+        }
+        return Ok(Value::bytes(buf));
+    }
+
+    ensure_read_loaded(s)?;
+
     if s.is_binary {
         let remaining = &s.content_bytes[s.pos..];
         let take = match n {
@@ -633,37 +1199,56 @@ fn file_read(state: &BuiltinState, args: &[Value]) -> Result<Value> {
         s.pos += take;
         return Ok(Value::bytes(out));
     }
+
     let bytes = s.content.as_bytes();
-    let remaining = &bytes[s.pos..];
-    let to_take = match n {
-        Some(n) if n >= 0 => remaining.len().min(n as usize),
-        _ => remaining.len(),
+    let end = match n {
+        Some(n) if n >= 0 => advance_cesu8_chars(bytes, s.pos, n as usize),
+        _ => bytes.len(),
     };
-    let mut take = 0usize;
-    let mut chars = 0usize;
-    let want_chars = match n {
-        Some(n) if n >= 0 => n as usize,
-        _ => usize::MAX,
-    };
-    for (i, _) in s.content[s.pos..].char_indices() {
-        if chars >= want_chars {
-            take = i;
-            break;
-        }
-        chars += 1;
-        take = i + s.content[s.pos + i..].chars().next().unwrap().len_utf8();
-        if chars >= want_chars {
-            break;
-        }
-    }
-    let take = if n.is_some_and(|n| n >= 0) {
-        take
-    } else {
-        to_take
-    };
-    let out = s.content[s.pos..s.pos + take].to_string();
-    s.pos += take;
+    let out = s.content[s.pos..end].to_string();
+    s.pos = end;
     Ok(Value::string(out))
+}
+
+fn extract_bytes_like(value: &Value) -> Option<Vec<u8>> {
+    match value.kind() {
+        ValueKind::Bytes(rc) => Some(rc.as_slice().to_vec()),
+        _ => crate::bytearray::as_bytearray_snapshot(value),
+    }
+}
+
+fn write_text_chunk(st: &mut FileState, s: &str) -> Result<i64> {
+    let char_len = cesu8_codepoint_count(s) as i64;
+    let translated = translate_output_newlines(s, st.newline);
+    let enc = st.encoding.as_deref().unwrap_or("utf-8");
+    let include_bom = !st.bom_written && !st.is_append;
+    let encoded = encode_text_to_bytes(&translated, enc, &st.errors, include_bom)?;
+    st.bom_written = true;
+    st.write_buf_bytes.extend_from_slice(&encoded);
+    let should_flush = (st.buffering == 1 && (s.contains('\n') || s.contains('\r')))
+        || (st.buffering > 1 && st.write_buf_bytes.len() >= st.buffering as usize);
+    if should_flush {
+        flush_write_buf(st)?;
+    }
+    Ok(char_len)
+}
+
+fn write_binary_chunk(st: &mut FileState, data: &[u8]) -> Result<i64> {
+    let len = data.len() as i64;
+    if st.buffering == 0 {
+        let err_path = st.error_path().map(str::to_owned);
+        if let Some(ref mut f) = st.os_file {
+            f.write_all(data)
+                .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))?;
+        }
+        st.read_loaded = false;
+        return Ok(len);
+    }
+    st.write_buf_bytes.extend_from_slice(data);
+    if st.buffering > 1 && st.write_buf_bytes.len() >= st.buffering as usize {
+        flush_write_buf(st)?;
+    }
+    Ok(len)
 }
 
 fn file_write(state: &BuiltinState, args: &[Value]) -> Result<Value> {
@@ -672,33 +1257,33 @@ fn file_write(state: &BuiltinState, args: &[Value]) -> Result<Value> {
         .downcast_mut::<FileState>()
         .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if st.closed {
-        return Err(PyError::named(
-            "ValueError",
-            "I/O operation on closed file.".to_string(),
-        ));
+        return Err(closed_file_error());
     }
-    if !st.is_write && !st.is_append {
+    if !st.is_writable() {
         return Err(PyError::named(
             "io.UnsupportedOperation",
             "not writable".to_string(),
         ));
     }
     if st.is_binary {
-        // Binary mode: accept bytes, reject str
-        match args.first().map(|v| v.kind()) {
-            Some(ValueKind::Bytes(rc)) => {
-                let data = rc.as_slice().to_vec();
-                let len = data.len() as i64;
-                st.write_buf_bytes.extend_from_slice(&data);
-                Ok(Value::int(len))
-            }
-            _ => Err(PyError::named(
+        let Some(arg) = args.first() else {
+            return Err(PyError::named(
                 "TypeError",
-                "a bytes-like object is required, not 'str'".to_string(),
-            )),
-        }
+                "write() takes exactly one argument (0 given)".to_string(),
+            ));
+        };
+        let Some(data) = extract_bytes_like(arg) else {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(arg)
+                ),
+            ));
+        };
+        let written = write_binary_chunk(st, &data)?;
+        Ok(Value::int(written))
     } else {
-        // Text mode: accept str, reject bytes
         let arg = args.first();
         match arg.map(|v| v.kind()) {
             Some(ValueKind::Bytes(_)) => Err(PyError::named(
@@ -711,9 +1296,8 @@ fn file_write(state: &BuiltinState, args: &[Value]) -> Result<Value> {
                     .ok_or_else(|| {
                         PyError::named("TypeError", "write() argument must be str".to_string())
                     })?;
-                let len = s.chars().count() as i64;
-                st.write_buf.push_str(&s);
-                Ok(Value::int(len))
+                let written = write_text_chunk(st, &s)?;
+                Ok(Value::int(written))
             }
         }
     }
@@ -735,27 +1319,34 @@ fn file_writelines(state: &BuiltinState, args: &[Value]) -> Result<Value> {
         .downcast_mut::<FileState>()
         .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if st.closed {
+        return Err(closed_file_error());
+    }
+    if !st.is_writable() {
         return Err(PyError::named(
-            "ValueError",
-            "I/O operation on closed file.".to_string(),
+            "io.UnsupportedOperation",
+            "not writable".to_string(),
         ));
     }
     if st.is_binary {
         for v in lines {
-            match v.kind() {
-                ValueKind::Bytes(rc) => st.write_buf_bytes.extend_from_slice(rc.as_slice()),
-                _ => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "a bytes-like object is required, not 'str'".to_string(),
-                    ));
-                }
-            }
+            let Some(data) = extract_bytes_like(&v) else {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "a bytes-like object is required, not '{}'",
+                        pyrust_core::builtin_type_name(&v)
+                    ),
+                ));
+            };
+            write_binary_chunk(st, &data)?;
         }
     } else {
         for v in lines {
             match v.kind() {
-                ValueKind::Str(s) => st.write_buf.push_str(s),
+                ValueKind::Str(s) => {
+                    let owned = s.to_string();
+                    write_text_chunk(st, &owned)?;
+                }
                 _ => {
                     return Err(PyError::named(
                         "TypeError",
@@ -768,18 +1359,74 @@ fn file_writelines(state: &BuiltinState, args: &[Value]) -> Result<Value> {
     Ok(Value::none())
 }
 
+/// Find the end byte offset of the next line starting at `start` in `bytes`
+/// according to `newline` mode (and optional `limit` codepoints).
+fn find_text_line_end(
+    bytes: &[u8],
+    start: usize,
+    newline: NewlineMode,
+    limit: Option<usize>,
+) -> usize {
+    let max_end = match limit {
+        Some(n) => advance_cesu8_chars(bytes, start, n),
+        None => bytes.len(),
+    };
+    let mut i = start;
+    match newline {
+        NewlineMode::UniversalTranslate | NewlineMode::Lf => {
+            while i < max_end {
+                if bytes[i] == b'\n' {
+                    return i + 1;
+                }
+                i += 1;
+            }
+            max_end
+        }
+        NewlineMode::UniversalNoTranslate => {
+            while i < max_end {
+                if bytes[i] == b'\n' {
+                    return i + 1;
+                }
+                if bytes[i] == b'\r' {
+                    if i + 1 < max_end && bytes[i + 1] == b'\n' {
+                        return i + 2;
+                    }
+                    return i + 1;
+                }
+                i += 1;
+            }
+            max_end
+        }
+        NewlineMode::Cr => {
+            while i < max_end {
+                if bytes[i] == b'\r' {
+                    return i + 1;
+                }
+                i += 1;
+            }
+            max_end
+        }
+        NewlineMode::CrLf => {
+            while i < max_end {
+                if bytes[i] == b'\r' && i + 1 < max_end && bytes[i + 1] == b'\n' {
+                    return i + 2;
+                }
+                i += 1;
+            }
+            max_end
+        }
+    }
+}
+
 /// Read the next line from a file and return it as the appropriate Value type
-/// (`bytes` in binary mode, `str` in text mode).  Returns `None` at EOF.
-fn read_line_value(state: &BuiltinState) -> Result<Option<Value>> {
+/// (`bytes` in binary mode, `str` in text mode). Returns `None` at EOF.
+fn read_line_value(state: &BuiltinState, limit: Option<usize>) -> Result<Option<Value>> {
     let mut borrow = state.borrow_mut();
     let s = borrow
         .downcast_mut::<FileState>()
         .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if s.closed {
-        return Err(PyError::named(
-            "ValueError",
-            "I/O operation on closed file.".to_string(),
-        ));
+        return Err(closed_file_error());
     }
     if !s.is_readable() {
         return Err(PyError::named(
@@ -787,16 +1434,54 @@ fn read_line_value(state: &BuiltinState) -> Result<Option<Value>> {
             "not readable".to_string(),
         ));
     }
+
+    if s.is_binary && s.buffering == 0 {
+        flush_write_buf(s)?;
+        let err_path = s.error_path().map(str::to_owned);
+        let Some(ref mut f) = s.os_file else {
+            return Ok(None);
+        };
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            if let Some(lim) = limit
+                && line.len() >= lim
+            {
+                break;
+            }
+            let got = f
+                .read(&mut byte)
+                .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))?;
+            if got == 0 {
+                break;
+            }
+            line.push(byte[0]);
+            if byte[0] == b'\n' {
+                break;
+            }
+        }
+        if line.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(Value::bytes(line)));
+    }
+
+    ensure_read_loaded(s)?;
+
     if s.is_binary {
         let bytes = &s.content_bytes;
         if s.pos >= bytes.len() {
             return Ok(None);
         }
+        let max_end = match limit {
+            Some(lim) => (s.pos + lim).min(bytes.len()),
+            None => bytes.len(),
+        };
         let mut end = s.pos;
-        while end < bytes.len() && bytes[end] != b'\n' {
+        while end < max_end && bytes[end] != b'\n' {
             end += 1;
         }
-        if end < bytes.len() {
+        if end < max_end {
             end += 1;
         }
         let line = bytes[s.pos..end].to_vec();
@@ -807,13 +1492,7 @@ fn read_line_value(state: &BuiltinState) -> Result<Option<Value>> {
         if s.pos >= bytes.len() {
             return Ok(None);
         }
-        let mut end = s.pos;
-        while end < bytes.len() && bytes[end] != b'\n' {
-            end += 1;
-        }
-        if end < bytes.len() {
-            end += 1;
-        }
+        let end = find_text_line_end(bytes, s.pos, s.newline, limit);
         let line = s.content[s.pos..end].to_string();
         s.pos = end;
         Ok(Some(Value::string(line)))
@@ -828,55 +1507,23 @@ fn close_file(state: &BuiltinState) -> Result<()> {
     if s.closed {
         return Ok(());
     }
-    if s.is_write {
-        if s.is_binary {
-            std::fs::write(&s.path, &s.write_buf_bytes)
-                .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
-        } else {
-            let enc = s.encoding.as_deref().unwrap_or("utf-8");
-            // On Windows, text mode translates \n -> \r\n on write.
-            #[cfg(windows)]
-            let text_to_encode = s.write_buf.replace('\n', "\r\n");
-            #[cfg(not(windows))]
-            let text_to_encode: &str = &s.write_buf;
-            // On Windows `text_to_encode` is an owned `String`, so the borrow is
-            // required there; on other platforms it is already a `&str`.
-            #[cfg_attr(not(windows), allow(clippy::needless_borrow))]
-            let text_bytes = encode_text_to_bytes(&text_to_encode, enc)?;
-            std::fs::write(&s.path, &text_bytes)
-                .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
-        }
-    } else if s.is_append {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&s.path)
-            .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
-        if s.is_binary {
-            f.write_all(&s.write_buf_bytes)
-                .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
-        } else {
-            let enc = s.encoding.as_deref().unwrap_or("utf-8");
-            #[cfg(windows)]
-            let text_to_encode = s.write_buf.replace('\n', "\r\n");
-            #[cfg(not(windows))]
-            let text_to_encode: &str = &s.write_buf;
-            // On Windows `text_to_encode` is an owned `String`, so the borrow is
-            // required there; on other platforms it is already a `&str`.
-            #[cfg_attr(not(windows), allow(clippy::needless_borrow))]
-            let text_bytes = encode_text_to_bytes(&text_to_encode, enc)?;
-            f.write_all(&text_bytes)
-                .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
-        }
-    }
+    let flush_result = if s.is_writable() {
+        flush_write_buf(s)
+    } else {
+        Ok(())
+    };
+    s.os_file = None;
     s.closed = true;
-    s.write_buf.clear();
     s.write_buf_bytes.clear();
-    Ok(())
+    if s.closefd
+        && let (Some(fd), Some(close_fn)) = (s.fd_num, s.close_fd_fn)
+    {
+        let _ = close_fn(fd);
+    }
+    flush_result
 }
 
-/// Returns true if `name` is a method on a file object.  Used by `hasattr`.
+/// Returns true if `name` is a method on a file object. Used by `hasattr`.
 pub fn has_method(name: &str) -> bool {
     matches!(
         name,
@@ -885,12 +1532,18 @@ pub fn has_method(name: &str) -> bool {
             | "__iter__"
             | "__next__"
             | "close"
+            | "fileno"
             | "flush"
+            | "isatty"
             | "read"
+            | "readable"
             | "readline"
             | "readlines"
             | "seek"
+            | "seekable"
             | "tell"
+            | "truncate"
+            | "writable"
             | "write"
             | "writelines"
     )
