@@ -556,7 +556,15 @@ pyrust_module! {
                     .len();
                 Ok(Value::int(len as i64))
             } else {
-                Ok(Value::int(st.data.borrow().len() as i64))
+                #[cfg(unix)]
+                {
+                    let err = std::io::Error::from_raw_os_error(libc::EBADF);
+                    Err(PyError::from_io_error(&err, None))
+                }
+                #[cfg(windows)]
+                {
+                    Ok(Value::int(st.data.borrow().len() as i64))
+                }
             }
         }
 

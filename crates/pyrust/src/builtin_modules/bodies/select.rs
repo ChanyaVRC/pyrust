@@ -504,7 +504,7 @@ pyrust_module! {
                 }
                 let wait_ms: libc::c_int = match (timeout_ms, deadline) {
                     (None, _) => -1,
-                    (Some(ms), _) if ms == 0.0 => 0,
+                    (Some(0.0), _) => 0,
                     (Some(_), Some(dl)) => {
                         let rem = dl.saturating_duration_since(Instant::now());
                         if rem.is_zero() {
@@ -710,7 +710,7 @@ pyrust_module! {
             loop {
                 let wait_ms: libc::c_int = match (timeout_secs, deadline) {
                     (None, _) => -1,
-                    (Some(s), _) if s == 0.0 => 0,
+                    (Some(0.0), _) => 0,
                     (Some(_), Some(dl)) => {
                         let rem = dl.saturating_duration_since(Instant::now());
                         if rem.is_zero() {

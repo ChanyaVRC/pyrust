@@ -2,6 +2,7 @@ import collections.abc
 import mmap
 import os
 import struct
+import sys
 import tempfile
 
 # 1. Constants and error alias
@@ -20,7 +21,14 @@ print("mmap_constants_ok")
 mm = mmap.mmap(-1, 32)
 assert mm.closed is False
 assert len(mm) == 32
-assert mm.size() == 32
+if sys.platform == "win32":
+    assert mm.size() == 32
+else:
+    try:
+        mm.size()
+        assert False, "expected OSError for anonymous mmap.size() on POSIX"
+    except OSError:
+        pass
 assert mm.tell() == 0
 
 assert mm.write(b"hello world\nsecond line\n") == 24
@@ -99,7 +107,8 @@ assert [b for b in mm][:4] == [b"0", b"1", b"2", b"3"]
 assert mm.flush() is None
 mm.resize(48)
 assert len(mm) == 48
-assert mm.size() == 48
+if sys.platform == "win32":
+    assert mm.size() == 48
 assert mm[:6] == b"012345"
 assert mm[32:48] == b"\x00" * 16
 
