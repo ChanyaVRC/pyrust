@@ -33,6 +33,9 @@ import os.path
 import collections.abc
 import html.entities
 import html.parser
+import http.client
+import http.cookies
+import http.server
 import importlib.machinery
 import importlib.util
 import urllib.parse
@@ -41,7 +44,7 @@ names = ["abc", "argparse", "ast", "asyncio", "atexit", "base64", "binascii", "b
          "calendar", "cmath", "codecs", "collections", "configparser", "contextlib", "contextvars",
          "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "enum", "errno", "fnmatch",
          "fractions", "functools", "glob", "graphlib", "gzip", "hashlib", "heapq", "hmac", "html",
-         "importlib", "inspect", "io", "ipaddress", "itertools", "json", "logging", "math",
+         "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "logging", "math",
          "numbers", "operator", "os", "pathlib", "pickle", "platform", "pprint", "queue", "random",
          "re", "secrets", "selectors", "shlex", "shutil", "signal", "socket", "stat", "statistics",
          "string", "subprocess", "sys", "tarfile", "tempfile", "textwrap", "threading", "time",
@@ -53,6 +56,9 @@ for name, module in [("os.path", os.path),
                      ("collections.abc", collections.abc),
                      ("html.entities", html.entities),
                      ("html.parser", html.parser),
+                     ("http.client", http.client),
+                     ("http.cookies", http.cookies),
+                     ("http.server", http.server),
                      ("importlib.machinery", importlib.machinery),
                      ("importlib.util", importlib.util),
                      ("urllib.parse", urllib.parse),
