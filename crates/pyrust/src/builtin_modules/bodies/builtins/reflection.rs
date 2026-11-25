@@ -690,8 +690,8 @@ pyrust_module! {
                 "compile(): invalid optimize value".to_string(),
             ));
         }
-        let effective_optimize: u8 = if optimize_raw <= 0 {
-            0
+        let effective_optimize: u8 = if optimize_raw == -1 {
+            _interp.compile_optimize_level()
         } else {
             optimize_raw as u8
         };

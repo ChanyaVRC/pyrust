@@ -213,19 +213,29 @@ impl Interpreter {
         validate_import_cache_entry(name, cached)
     }
 
-    /// Populate the per-interpreter `sys.path` when `sys` is first imported.
-    /// The generated built-in module constructor has no access to the active
-    /// script, so the initial import root cannot live in `bodies/sys.rs`.
+    /// Populate the per-interpreter `sys` module attributes when `sys` is first
+    /// imported. Applies `RuntimeConfig` flags, `warnoptions`, `_xoptions`,
+    /// `dont_write_bytecode`, `pycache_prefix`, `platlibdir`, prefixes,
+    /// `orig_argv`, and `PYTHONPATH`.
     pub(crate) fn initialize_system_module(&self, module: &Value) {
         let ValueKind::PyModule(sys) = module.kind() else {
             return;
         };
-        let initial_path = self
-            .cold
-            .script_dir
-            .as_ref()
-            .map(|dir| Value::string(dir.to_string_lossy()))
-            .unwrap_or_else(|| Value::string(""));
+        let cfg = &self.cold.runtime_config;
+        let mut initial_paths: Vec<Value> = Vec::new();
+        if !self.cold.cli_startup_managed && !cfg.safe_path {
+            let initial_path = self
+                .cold
+                .script_dir
+                .as_ref()
+                .map(|dir| Value::string(dir.to_string_lossy()))
+                .unwrap_or_else(|| Value::string(""));
+            initial_paths.push(initial_path);
+        }
+        for entry in &cfg.python_path {
+            initial_paths.push(Value::string(entry));
+        }
+
         let mut sys = sys.borrow_mut();
         // Seed the module slots at the *front* of the still-ordered `attrs`
         // before it is moved into the live dict, so `list(vars(sys))` starts
@@ -246,22 +256,60 @@ impl Interpreter {
             sys.attrs.shift_insert(index, name.to_string(), value);
         }
         sys.attach_live_namespace();
-        sys.insert_attr("path".to_string(), Value::list(vec![initial_path]));
+        sys.insert_attr("path".to_string(), Value::list(initial_paths));
         sys.insert_attr(
             "modules".to_string(),
             self.cold.bootstrap_module_registry.clone(),
         );
+        // Apply CLI + `PYTHON*` runtime configuration (#3243).
+        // (`sys.flags` is finalized in `builtin_modules/finalization.rs` so
+        // runtime code stays decoupled from concrete built-in module bodies.)
+        sys.insert_attr(
+            "dont_write_bytecode".to_string(),
+            Value::bool_(cfg.dont_write_bytecode != 0),
+        );
+        sys.insert_attr(
+            "pycache_prefix".to_string(),
+            cfg.pycache_prefix
+                .as_deref()
+                .map(Value::string)
+                .unwrap_or_else(Value::none),
+        );
+        if let Some(ref platlibdir) = cfg.platlibdir {
+            sys.insert_attr("platlibdir".to_string(), Value::string(platlibdir));
+        }
+        if let Some(ref prefix) = cfg.prefix_override {
+            sys.insert_attr("prefix".to_string(), Value::string(prefix));
+            sys.insert_attr("base_prefix".to_string(), Value::string(prefix));
+            let exec_prefix = cfg.exec_prefix_override.as_deref().unwrap_or(prefix);
+            sys.insert_attr("exec_prefix".to_string(), Value::string(exec_prefix));
+            sys.insert_attr("base_exec_prefix".to_string(), Value::string(exec_prefix));
+        }
         // Fresh per-interpreter mutable sys containers and aliases (#2970).
-        let orig_argv: Vec<Value> = self.cold.script_argv.iter().map(Value::string).collect();
+        let orig_argv_src = if !cfg.orig_argv.is_empty() {
+            &cfg.orig_argv
+        } else {
+            &self.cold.script_argv
+        };
+        let orig_argv: Vec<Value> = orig_argv_src.iter().map(Value::string).collect();
         sys.insert_attr("orig_argv".to_string(), Value::list(orig_argv));
-        sys.insert_attr("warnoptions".to_string(), Value::list(Vec::new()));
+        let warnoptions: Vec<Value> = cfg.warnoptions.iter().map(Value::string).collect();
+        sys.insert_attr("warnoptions".to_string(), Value::list(warnoptions));
         sys.insert_attr("meta_path".to_string(), Value::list(Vec::new()));
         sys.insert_attr("path_hooks".to_string(), Value::list(Vec::new()));
         sys.insert_attr(
             "path_importer_cache".to_string(),
             Value::dict(PyDict::default()),
         );
-        sys.insert_attr("_xoptions".to_string(), Value::dict(PyDict::default()));
+        let mut xopts = PyDict::default();
+        for (k, v) in &cfg.xoptions {
+            let py_val = match v {
+                Some(s) => Value::string(s),
+                None => Value::bool_(true),
+            };
+            xopts.insert(PyKey::str_from(k), py_val);
+        }
+        sys.insert_attr("_xoptions".to_string(), Value::dict(xopts));
         // Keep `sys.__stdout__ is sys.stdout` (and stderr/stdin/hooks) exact.
         for (src, alias) in [
             ("stdout", "__stdout__"),
@@ -563,6 +611,9 @@ impl Interpreter {
                 .insert(name.to_string(), val.clone());
             let initialization = (|| -> Result<()> {
                 self.register_in_sys_modules(name, &val)?;
+                if self.cold.runtime_config.verbose > 0 {
+                    eprintln!("import '{name}' # builtin");
+                }
                 // Python-source post-load injection: every `@inject` module in
                 // `pyrust_builtin_modules!` (collections, asyncio, string,
                 // operator, typing, abc, dataclasses, enum, json, …) exec's its
@@ -729,10 +780,14 @@ impl Interpreter {
                     module_cache: Rc::clone(&self.cold.module_cache),
                     bootstrap_module_registry: self.cold.bootstrap_module_registry.clone(),
                     atexit_state: Rc::clone(&self.cold.atexit_state),
+                    runtime_config: Rc::clone(&self.cold.runtime_config),
                     ..Default::default()
                 }),
                 ..Default::default()
             };
+            if self.cold.runtime_config.verbose > 0 {
+                eprintln!("import '{name}' # from '{module_filename}'");
+            }
             // CPython 3.12 `__package__` rules:
             // - Packages (`__init__.py`): equal to the full package name.
             // - Submodules: equal to the parent package name.
@@ -845,6 +900,7 @@ impl Interpreter {
             if let Some(source) = match module_name {
                 "timeit" => Some("import sys, timeit\nsys.exit(timeit.main())\n"),
                 "dis" => Some("import dis\ndis.main()\n"),
+                "site" => Some("import site\nsite._script()\n"),
                 _ => None,
             } {
                 return Ok(MainModuleTarget::Builtin {

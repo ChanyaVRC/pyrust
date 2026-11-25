@@ -297,7 +297,7 @@ pyrust_module! {
             }
         } else {
             print!("{}{}", rendered.join(&print_options.sep), print_options.end);
-            if print_options.flush {
+            if print_options.flush || _interp.cold.runtime_config.unbuffered {
                 use std::io::Write as _;
                 std::io::stdout().flush().ok();
             }

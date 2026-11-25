@@ -84,7 +84,13 @@ fn shared_module_namespace_mode_does_not_replace_script_fastlocals() {
     );
 
     let script = compile_script_with_linenos(&stmts, local_index, false, &[], "<script>").unwrap();
-    let shared = compile_shared_namespace_module_with_linenos(&stmts, &[], "<module>").unwrap();
+    let shared = compile_shared_namespace_module_with_linenos(
+        &stmts,
+        &[],
+        "<module>",
+        CompileOptions::default(),
+    )
+    .unwrap();
 
     assert!(
         script

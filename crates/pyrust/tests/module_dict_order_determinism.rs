@@ -53,14 +53,14 @@ import xml.etree
 import xml.etree.ElementPath
 import xml.etree.ElementTree
 import __future__
-names = ["abc", "antigravity", "argparse", "ast", "asyncio", "atexit", "base64", "binascii", "bisect", "builtins",
+names = ["_sitebuiltins", "abc", "antigravity", "argparse", "ast", "asyncio", "atexit", "base64", "binascii", "bisect", "builtins",
          "bz2", "calendar", "cmath", "cmd", "code", "codecs", "codeop", "collections", "colorsys", "configparser", "contextlib", "contextvars",
          "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "dis", "doctest", "email", "enum", "errno",
          "filecmp", "fileinput", "fnmatch", "fractions", "functools", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword",
          "linecache", "locale", "logging", "lzma", "math", "mimetypes", "mmap", "netrc", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pickle",
          "pickletools", "pkgutil", "platform", "pprint", "queue", "quopri", "random", "re", "reprlib", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shlex", "shutil",
-         "signal", "socket", "socketserver", "sqlite3", "stat", "statistics", "string", "subprocess", "sys", "sysconfig", "tarfile",
+         "signal", "site", "socket", "socketserver", "sqlite3", "stat", "statistics", "string", "subprocess", "sys", "sysconfig", "tarfile",
          "tempfile", "textwrap", "this", "threading", "time", "timeit", "token", "tokenize", "tomllib", "traceback",
          "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref", "webbrowser",
          "xml", "zipfile", "zlib", "zoneinfo"]

@@ -125,8 +125,16 @@ pub fn compile_shared_namespace_module_with_linenos(
     stmts: &[Stmt],
     linenos: &[u32],
     filename: &str,
+    options: CompileOptions,
 ) -> Result<FnCode, PyError> {
-    compile_script_with_linenos(stmts, Rc::new(HashMap::new()), false, linenos, filename)
+    compile_script_with_options(
+        stmts,
+        Rc::new(HashMap::new()),
+        false,
+        linenos,
+        filename,
+        options,
+    )
 }
 
 /// Compile a source body in eval mode: the body must consist of a single
@@ -137,6 +145,7 @@ pub fn compile_shared_namespace_module_with_linenos(
 /// Seeds the expression's source line number into the bytecode line table, so
 /// an error raised while evaluating an `eval()`'d expression reports the
 /// correct internal line (issue #2245).
+#[allow(dead_code)]
 pub fn compile_eval_expr_with_linenos(
     stmts: &[Stmt],
     local_index: Rc<HashMap<String, Reg>>,

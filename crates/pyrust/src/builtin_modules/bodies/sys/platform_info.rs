@@ -55,6 +55,28 @@ pub(super) fn sys_executable() -> String {
         .unwrap_or_default()
 }
 
+/// Default installation prefix derived from `sys.executable` (matching CPython's
+/// fallback layout: parent of `bin/` on Unix when installed in `bin/`, else
+/// executable's parent directory).
+pub(crate) fn default_sys_prefix() -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return String::new();
+    };
+    let Some(exe_dir) = exe.parent() else {
+        return String::new();
+    };
+    #[cfg(not(windows))]
+    if exe_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "bin")
+        && let Some(parent) = exe_dir.parent()
+    {
+        return parent.to_string_lossy().into_owned();
+    }
+    exe_dir.to_string_lossy().into_owned()
+}
+
 /// Build a simple named-attribute PyInstance under a fresh anonymous
 /// class with the given class name.  Used for the namespace-like sys
 /// members that only need attribute access.

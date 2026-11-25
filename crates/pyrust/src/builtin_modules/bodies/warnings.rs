@@ -67,6 +67,9 @@ pub(crate) struct WarningsState {
     filters_version: Cell<u64>,
     /// Active `catch_warnings(record=True)` sinks in nesting order.
     record_sinks: RefCell<Vec<RecordSink>>,
+    /// Ensures startup `-W` / `PYTHONWARNINGS` / `-b` filters are applied once
+    /// per interpreter even if `warnings` is reloaded.
+    startup_options_applied: Cell<bool>,
 }
 
 impl Default for WarningsState {
@@ -76,6 +79,7 @@ impl Default for WarningsState {
             onceregistry: RefCell::new(Value::dict(PyDict::default())),
             filters_version: Cell::new(0),
             record_sinks: RefCell::new(Vec::new()),
+            startup_options_applied: Cell::new(false),
         }
     }
 }
@@ -236,6 +240,210 @@ fn new_catch_warnings_class() -> Value {
         None,
         attrs,
     ))))
+}
+
+/// Native post-load hook for `warnings`: applies startup `-W` / `PYTHONWARNINGS`
+/// / `-X dev` / `-b` options once per interpreter (issue #3243).
+pub(crate) fn post_load_init(interp: &mut crate::Interpreter) -> Result<()> {
+    if interp.warnings_state.startup_options_applied.replace(true) {
+        return Ok(());
+    }
+    let options = interp.cold.runtime_config.warnoptions.clone();
+    let bytes_warning = interp.cold.runtime_config.bytes_warning;
+    if options.is_empty() && bytes_warning <= 0 {
+        return Ok(());
+    }
+
+    // `-b` / `-bb`: register BytesWarning filter before explicit `-W` options
+    // so explicit `-W` overrides it, matching CPython 3.12's `warnings._processoptions`.
+    if bytes_warning >= 2 {
+        if let Ok(cls) = built_in_warning_class("BytesWarning") {
+            let item = Value::tuple(vec![
+                Value::string("error"),
+                Value::none(),
+                Value::py_class(cls),
+                Value::none(),
+                Value::int(0),
+            ]);
+            add_filter_entry(interp, item, false)?;
+        }
+    } else if bytes_warning == 1
+        && let Ok(cls) = built_in_warning_class("BytesWarning")
+    {
+        let item = Value::tuple(vec![
+            Value::string("default"),
+            Value::none(),
+            Value::py_class(cls),
+            Value::none(),
+            Value::int(0),
+        ]);
+        add_filter_entry(interp, item, false)?;
+    }
+
+    for opt in options {
+        if let Err(msg) = apply_single_warnoption(interp, &opt) {
+            eprintln!("Invalid -W option ignored: {msg}");
+        }
+    }
+    Ok(())
+}
+
+fn regex_escape_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(
+            ch,
+            '.' | '^' | '$' | '*' | '+' | '?' | '{' | '}' | '[' | ']' | '\\' | '|' | '(' | ')'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn resolve_warning_category_spec(
+    interp: &mut crate::Interpreter,
+    spec: &str,
+) -> std::result::Result<Value, String> {
+    if spec.is_empty() {
+        return built_in_warning_class("Warning")
+            .map(Value::py_class)
+            .map_err(|e| e.to_string());
+    }
+    let val = if let Some((mod_name, cls_name)) = spec.rsplit_once('.') {
+        let m = interp
+            .load_module(mod_name)
+            .map_err(|_| format!("invalid module name: '{mod_name}'"))?;
+        interp
+            .get_attr(&m, cls_name)
+            .map_err(|_| format!("unknown warning category: '{spec}'"))?
+    } else {
+        let cls = built_in_warning_class(spec)
+            .map_err(|_| format!("unknown warning category: '{spec}'"))?;
+        Value::py_class(cls)
+    };
+    let warning_cls = built_in_warning_class("Warning").map_err(|e| e.to_string())?;
+    let is_warn = match val.kind() {
+        ValueKind::PyClass(cls) => class_is_subclass_of(cls, &warning_cls),
+        _ => false,
+    };
+    if !is_warn {
+        return Err(format!("invalid warning category: '{spec}'"));
+    }
+    Ok(val)
+}
+
+fn apply_single_warnoption(
+    interp: &mut crate::Interpreter,
+    arg: &str,
+) -> std::result::Result<(), String> {
+    let parts: Vec<&str> = arg.split(':').collect();
+    if parts.len() > 5 {
+        return Err(format!("too many fields (max 5): '{arg}'"));
+    }
+    let raw_action = parts.first().copied().unwrap_or("").trim();
+    let raw_message = parts.get(1).copied().unwrap_or("").trim();
+    let raw_category = parts.get(2).copied().unwrap_or("").trim();
+    let raw_module = parts.get(3).copied().unwrap_or("").trim();
+    let raw_lineno = parts.get(4).copied().unwrap_or("").trim();
+
+    let action_lower = raw_action.to_ascii_lowercase();
+    let action = if action_lower.is_empty() {
+        "default"
+    } else {
+        match VALID_ACTIONS
+            .iter()
+            .copied()
+            .find(|cand| cand.starts_with(&action_lower))
+        {
+            Some(matched) => matched,
+            None => return Err(format!("invalid action: '{raw_action}'")),
+        }
+    };
+
+    let lineno: i64 = if raw_lineno.is_empty() {
+        0
+    } else {
+        match raw_lineno.parse::<i64>() {
+            Ok(n) if n >= 0 => n,
+            _ => return Err(format!("invalid lineno '{raw_lineno}'")),
+        }
+    };
+
+    let category = resolve_warning_category_spec(interp, raw_category)?;
+    let msg_pat = if raw_message.is_empty() {
+        Value::none()
+    } else {
+        let escaped = regex_escape_literal(raw_message);
+        compile_regex(interp, &escaped, true).map_err(|e| e.to_string())?
+    };
+    let mod_pat = if raw_module.is_empty() {
+        Value::none()
+    } else {
+        let escaped = format!("{}$", regex_escape_literal(raw_module));
+        compile_regex(interp, &escaped, false).map_err(|e| e.to_string())?
+    };
+
+    let item = Value::tuple(vec![
+        Value::string(action),
+        msg_pat,
+        category,
+        mod_pat,
+        Value::int(lineno),
+    ]);
+    add_filter_entry(interp, item, false).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Emit or raise `BytesWarning` when `-b` / `-bb` is active (issue #3243).
+pub(crate) fn emit_bytes_warning(interp: &mut crate::Interpreter, message: &str) -> Result<()> {
+    let bw = interp.cold.runtime_config.bytes_warning;
+    if bw <= 0 {
+        return Ok(());
+    }
+    let cls = built_in_warning_class("BytesWarning")?;
+    if bw >= 2 {
+        let exc = interp.call_function_expanded(
+            Value::py_class(cls),
+            &[ExpandedCallArg {
+                name: None,
+                value: Value::string(message),
+            }],
+        )?;
+        return Err(PyError::raised(exc));
+    }
+    let (filename, lineno, module, registry) =
+        if let Some((filename, lineno, module, globals)) = interp.resolve_warning_caller(1) {
+            let reg = if matches!(globals.kind(), ValueKind::Dict(_)) {
+                let existing = dict_get_str(&globals, "__warningregistry__");
+                match existing {
+                    Some(r) => Some(r),
+                    None => {
+                        let fresh = Value::dict(PyDict::default());
+                        let _ = globals
+                            .dict_insert(PyKey::str_from("__warningregistry__"), fresh.clone());
+                        Some(fresh)
+                    }
+                }
+            } else {
+                None
+            };
+            (filename, lineno, Some(module), reg)
+        } else {
+            ("sys".to_string(), 1i64, Some("sys".to_string()), None)
+        };
+    warn_explicit_impl(
+        interp,
+        Value::string(message),
+        Some(Value::py_class(cls)),
+        &filename,
+        lineno,
+        module,
+        registry,
+        Value::none(),
+    )?;
+    Ok(())
 }
 
 /// Finalize one imported warnings generation: attach this interpreter's live
