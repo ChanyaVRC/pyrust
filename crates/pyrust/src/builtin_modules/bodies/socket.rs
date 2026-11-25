@@ -1163,6 +1163,230 @@ fn with_socket_mut<R>(
     f(sock)
 }
 
+// ── Cross-module helpers for native `ssl.SSLSocket` ──────────────────────────
+
+/// Move the live `SocketBackend` (and socket metadata/options/timeout) out of
+/// `handle_val` into a fresh `_socket_handle`, leaving `handle_val` closed
+/// (matching CPython's `sock.detach()` inside `SSLContext.wrap_socket`).
+pub(crate) fn detach_socket_handle(handle_val: &Value) -> Result<Value> {
+    with_socket_mut(handle_val, |sock| {
+        let backend = std::mem::replace(&mut sock.backend, SocketBackend::Closed);
+        let opts = std::mem::take(&mut sock.opts);
+        let new_state = SocketHandleState {
+            family: sock.family,
+            sock_type: sock.sock_type,
+            proto: sock.proto,
+            synthetic_fd: sock.synthetic_fd,
+            timeout: sock.timeout,
+            opts,
+            backend,
+        };
+        Ok(wrap_socket_handle(new_state))
+    })
+}
+
+pub(crate) fn is_tcp_connected(handle_val: &Value) -> Result<bool> {
+    with_socket(handle_val, |sock| {
+        Ok(matches!(sock.backend, SocketBackend::ConnectedTcp { .. }))
+    })
+}
+
+pub(crate) fn is_closed_handle(handle_val: &Value) -> bool {
+    with_socket(handle_val, |sock| {
+        Ok(matches!(sock.backend, SocketBackend::Closed))
+    })
+    .unwrap_or(true)
+}
+
+pub(crate) fn handle_timeout(handle_val: &Value) -> Option<Duration> {
+    with_socket(handle_val, |sock| Ok(sock.timeout))
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn handle_is_nonblocking(handle_val: &Value) -> bool {
+    matches!(handle_timeout(handle_val), Some(d) if d.is_zero())
+}
+
+pub(crate) fn handle_read_raw(
+    handle_val: &Value,
+    buf: &mut [u8],
+) -> std::result::Result<usize, std::io::Error> {
+    let mut out_err: Option<std::io::Error> = None;
+    let res = with_socket_mut(handle_val, |sock| match &mut sock.backend {
+        SocketBackend::ConnectedTcp { stream } => loop {
+            match stream.read(buf) {
+                Ok(n) => return Ok(Some(n)),
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    out_err = Some(e);
+                    return Ok(None);
+                }
+            }
+        },
+        SocketBackend::Closed => {
+            out_err = Some(std::io::Error::from_raw_os_error(plat::EBADF as i32));
+            Ok(None)
+        }
+        _ => {
+            out_err = Some(std::io::Error::from_raw_os_error(plat::ENOTCONN as i32));
+            Ok(None)
+        }
+    });
+    match (res, out_err) {
+        (Ok(Some(n)), _) => Ok(n),
+        (_, Some(e)) => Err(e),
+        _ => Err(std::io::Error::from_raw_os_error(plat::EINVAL as i32)),
+    }
+}
+
+pub(crate) fn handle_write_raw(
+    handle_val: &Value,
+    buf: &[u8],
+) -> std::result::Result<usize, std::io::Error> {
+    let mut out_err: Option<std::io::Error> = None;
+    let res = with_socket_mut(handle_val, |sock| match &mut sock.backend {
+        SocketBackend::ConnectedTcp { stream } => loop {
+            match stream.write(buf) {
+                Ok(n) => return Ok(Some(n)),
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    out_err = Some(e);
+                    return Ok(None);
+                }
+            }
+        },
+        SocketBackend::Closed => {
+            out_err = Some(std::io::Error::from_raw_os_error(plat::EBADF as i32));
+            Ok(None)
+        }
+        _ => {
+            out_err = Some(std::io::Error::from_raw_os_error(plat::ENOTCONN as i32));
+            Ok(None)
+        }
+    });
+    match (res, out_err) {
+        (Ok(Some(n)), _) => Ok(n),
+        (_, Some(e)) => Err(e),
+        _ => Err(std::io::Error::from_raw_os_error(plat::EINVAL as i32)),
+    }
+}
+
+pub(crate) fn handle_connect_raw(
+    handle_val: &Value,
+    addr: &Value,
+    gaierror_cls: &Value,
+) -> Result<()> {
+    with_socket_mut(handle_val, |sock| {
+        if matches!(sock.backend, SocketBackend::Closed) {
+            return Err(closed_socket_error());
+        }
+        let resolved = resolve_socket_addr(sock.family, addr, false, gaierror_cls)?;
+        let timeout = sock.timeout;
+        connect_inner(sock, resolved).map_err(|e| io_error_to_socket_py(&e, timeout))
+    })
+}
+
+pub(crate) fn handle_connect_ex_raw(
+    handle_val: &Value,
+    addr: &Value,
+    gaierror_cls: &Value,
+) -> Result<i64> {
+    with_socket_mut(handle_val, |sock| {
+        if matches!(sock.backend, SocketBackend::Closed) {
+            return Err(closed_socket_error());
+        }
+        let resolved = resolve_socket_addr(sock.family, addr, false, gaierror_cls)?;
+        match connect_inner(sock, resolved) {
+            Ok(()) => Ok(0),
+            Err(e) => Ok(io_error_to_errno(&e)),
+        }
+    })
+}
+
+pub(crate) fn handle_accept_raw(
+    handle_val: &Value,
+    default_timeout_val: &Value,
+) -> Result<(Value, Value)> {
+    let default_timeout = parse_timeout_value(default_timeout_val)?;
+    with_socket(handle_val, |sock| {
+        let SocketBackend::BoundTcp {
+            listener,
+            listening,
+        } = &sock.backend
+        else {
+            return if matches!(sock.backend, SocketBackend::Closed) {
+                Err(closed_socket_error())
+            } else {
+                Err(os_error(plat::EINVAL, "Invalid argument"))
+            };
+        };
+        if !*listening {
+            return Err(os_error(plat::EINVAL, "Invalid argument"));
+        }
+        if let Some(dur) = sock.timeout
+            && !dur.is_zero()
+        {
+            let raw = tcp_listener_raw(listener);
+            let (ready_r, _) = select_raw_handles(&[raw], &[], Some(dur))?;
+            if ready_r.is_empty() {
+                return Err(PyError::named("TimeoutError", "timed out".to_string()));
+            }
+        }
+        let (stream, peer_addr) = listener
+            .accept()
+            .map_err(|e| io_error_to_socket_py(&e, sock.timeout))?;
+        let new_state = SocketHandleState {
+            family: sock.family,
+            sock_type: sock.sock_type,
+            proto: sock.proto,
+            synthetic_fd: NEXT_SYNTHETIC_FD.fetch_add(1, Ordering::Relaxed),
+            timeout: default_timeout,
+            opts: SocketOptions::default(),
+            backend: SocketBackend::ConnectedTcp { stream },
+        };
+        new_state.apply_timeout_to_backend()?;
+        Ok((wrap_socket_handle(new_state), sockaddr_to_py(peer_addr)))
+    })
+}
+
+pub(crate) fn handle_shutdown_raw(handle_val: &Value, how: i64) -> Result<()> {
+    let mode = match how {
+        x if x == plat::SHUT_RD => Shutdown::Read,
+        x if x == plat::SHUT_WR => Shutdown::Write,
+        x if x == plat::SHUT_RDWR => Shutdown::Both,
+        _ => return Err(os_error(plat::EINVAL, "Invalid argument")),
+    };
+    with_socket(handle_val, |sock| match &sock.backend {
+        SocketBackend::Closed => Err(closed_socket_error()),
+        SocketBackend::ConnectedTcp { stream } => stream
+            .shutdown(mode)
+            .map_err(|e| io_error_to_socket_py(&e, sock.timeout)),
+        _ => Err(os_error(
+            plat::ENOTCONN,
+            "Transport endpoint is not connected",
+        )),
+    })
+}
+
+pub(crate) fn handle_close_raw(handle_val: &Value) -> Result<()> {
+    with_socket_mut(handle_val, |sock| {
+        sock.backend = SocketBackend::Closed;
+        Ok(())
+    })
+}
+
+pub(crate) fn io_error_to_socket_py_pub(
+    err: &std::io::Error,
+    timeout: Option<Duration>,
+) -> PyError {
+    io_error_to_socket_py(err, timeout)
+}
+
+pub(crate) fn extract_writable_buffer_pub(val: &Value) -> Result<WritableBufferRange> {
+    extract_writable_buffer(val)
+}
+
 // ── Address / argument conversion helpers ────────────────────────────────────
 
 fn extract_i64(val: &Value, what: &str) -> Result<i64> {

@@ -18,6 +18,7 @@
 pub(crate) mod macros;
 pub(crate) mod encodings_codecs;
 pub(crate) mod internal_shims;
+pub(crate) mod ssl_engine;
 
 use crate::builtin_registry::BuiltinReg;
 use crate::value::Value;
@@ -330,6 +331,8 @@ macro_rules! pyrust_builtin_modules {
                 }
                 "wsgiref.types" => return wsgiref_types::post_load_init(interp, module),
                 "xmlrpc.server" => return xmlrpc_server::post_load_init(interp, module),
+                "ssl" => return ssl::post_load_init(interp, module),
+                "_ssl" => return _ssl::post_load_init(interp, module),
                 _ => {}
             }
             if encodings_codecs::post_load_init(name, interp, module)? {
@@ -826,6 +829,10 @@ pyrust_builtin_modules! {
     _imp,
     _compression,
     _compat_pickle,
+    // `ssl` and `_ssl` (issue #3252): 100% native-Rust Python 3.12 TLS/SSL
+    // modules backed by pure-Rust `rustls` (no OpenSSL, no `@inject`).
+    ssl,
+    _ssl,
     _string,
     _strptime,
     // `pydoc_data`, `pydoc_data.topics`, and `pydoc` (issue #3255): 100%

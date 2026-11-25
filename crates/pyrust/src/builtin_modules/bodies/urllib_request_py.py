@@ -1185,6 +1185,39 @@ class HTTPHandler(AbstractHTTPHandler):
     http_request = AbstractHTTPHandler.do_request_
 
 
+if _have_ssl:
+    class HTTPSHandler(AbstractHTTPHandler):
+
+        def __init__(self, debuglevel=None, context=None, check_hostname=None):
+            import http.client
+
+            debuglevel = (
+                debuglevel
+                if debuglevel is not None
+                else http.client.HTTPSConnection.debuglevel
+            )
+            AbstractHTTPHandler.__init__(self, debuglevel)
+            if context is None:
+                http_version = http.client.HTTPSConnection._http_vsn
+                context = http.client._create_https_context(http_version)
+            if check_hostname is not None:
+                context.check_hostname = check_hostname
+            self._context = context
+
+        def https_open(self, req):
+            import http.client
+
+            return self.do_open(
+                http.client.HTTPSConnection,
+                req,
+                context=self._context,
+            )
+
+        https_request = AbstractHTTPHandler.do_request_
+
+    __all__.append("HTTPSHandler")
+
+
 class UnknownHandler(BaseHandler):
     def unknown_open(self, req):
         type = req.type

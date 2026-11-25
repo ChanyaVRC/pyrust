@@ -39,6 +39,7 @@ const URLLIB_REQUEST_PY_EXPORTS: &[&str] = &[
     "ProxyDigestAuthHandler",
     "AbstractHTTPHandler",
     "HTTPHandler",
+    "HTTPSHandler",
     "FileHandler",
     "DataHandler",
     "UnknownHandler",
