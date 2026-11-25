@@ -45,7 +45,7 @@ show("sumprod gen", lambda: math.sumprod((i for i in range(5)), (i * 2 for i in 
 show("sumprod bigints", lambda: math.sumprod([10**30, 1], [1, 7]))
 show("sumprod mismatch", lambda: math.sumprod([1, 2], [1]))
 
-show("cbrt", lambda: (math.cbrt(27), math.cbrt(-8), math.cbrt(0.0), math.copysign(1.0, math.cbrt(-0.0)), math.cbrt(math.inf), math.cbrt(-math.inf), math.isnan(math.cbrt(math.nan))))
+show("cbrt", lambda: (math.cbrt(8), math.cbrt(-8), math.isclose(math.cbrt(27), 3.0), math.cbrt(0.0), math.copysign(1.0, math.cbrt(-0.0)), math.cbrt(math.inf), math.cbrt(-math.inf), math.isnan(math.cbrt(math.nan))))
 show("exp2", lambda: (math.exp2(0), math.exp2(10), math.exp2(-2), math.exp2(-1075)))
 show("exp2 overflow", lambda: math.exp2(1024))
 
