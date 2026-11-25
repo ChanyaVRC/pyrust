@@ -2614,8 +2614,19 @@ _add_builtin_codec(
 )
 
 
+_encodings_loaded = False
+
+
 def _builtin_search_function(encoding):
-    return _BUILTIN_CODECS.get(encoding)
+    global _encodings_loaded
+    info = _BUILTIN_CODECS.get(encoding)
+    if info is not None:
+        return info
+    if not _encodings_loaded:
+        _encodings_loaded = True
+        import encodings
+        return encodings.search_function(encoding)
+    return None
 
 
 _search_path = [_builtin_search_function]

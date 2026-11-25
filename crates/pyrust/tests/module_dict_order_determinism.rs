@@ -36,6 +36,27 @@ import email.message
 import email.parser
 import email.policy
 import email.utils
+import encodings.aliases
+import encodings.ascii
+import encodings.base64_codec
+import encodings.cp1252
+import encodings.hex_codec
+import encodings.idna
+import encodings.latin_1
+import encodings.punycode
+import encodings.raw_unicode_escape
+import encodings.rot_13
+import encodings.unicode_escape
+import encodings.utf_7
+import encodings.utf_8
+import encodings.utf_8_sig
+import encodings.utf_16
+import encodings.utf_16_be
+import encodings.utf_16_le
+import encodings.utf_32
+import encodings.utf_32_be
+import encodings.utf_32_le
+import encodings.zlib_codec
 import html.entities
 import html.parser
 import http.client
@@ -61,14 +82,20 @@ import xml.etree
 import xml.etree.ElementPath
 import xml.etree.ElementTree
 import __future__
-names = ["_frozen_importlib", "_frozen_importlib_external", "_lsprof", "_sitebuiltins", "_tracemalloc", "abc", "antigravity", "argparse", "ast", "asyncio", "atexit", "base64", "bdb", "binascii", "bisect", "builtins",
+names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_collections", "_collections_abc",
+         "_compat_pickle", "_compression", "_contextvars", "_csv", "_datetime", "_decimal", "_elementtree",
+         "_frozen_importlib", "_frozen_importlib_external", "_functools", "_hashlib", "_heapq", "_imp", "_io", "_json", "_locale", "_lsprof", "_lzma", "_markupbase", "_md5",
+         "_opcode", "_operator", "_pickle", "_queue", "_random", "_sha1", "_sha2", "_sha3", "_signal", "_sitebuiltins",
+         "_socket", "_sqlite3", "_sre", "_stat", "_statistics", "_string", "_strptime", "_struct", "_thread",
+         "_threading_local", "_tokenize", "_tracemalloc", "_typing", "_uuid", "_warnings", "_weakref", "_weakrefset", "_zoneinfo",
+         "abc", "antigravity", "argparse", "ast", "asyncio", "atexit", "base64", "bdb", "binascii", "bisect", "builtins",
          "bz2", "cProfile", "calendar", "cmath", "cmd", "code", "codecs", "codeop", "collections", "colorsys", "configparser", "contextlib", "contextvars",
-         "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "dis", "doctest", "email", "enum", "errno", "faulthandler",
+         "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "dis", "doctest", "email", "encodings", "enum", "errno", "faulthandler",
          "filecmp", "fileinput", "fnmatch", "fractions", "functools", "gc", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword",
          "linecache", "locale", "logging", "lzma", "marshal", "math", "mimetypes", "mmap", "netrc", "ntpath", "nturl2path", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle",
          "pickletools", "pkgutil", "platform", "posixpath", "pprint", "profile", "pstats", "queue", "quopri", "random", "re", "reprlib", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shlex", "shutil",
-         "signal", "site", "socket", "socketserver", "sqlite3", "stat", "statistics", "string", "subprocess", "sys", "sysconfig", "tarfile",
+         "signal", "site", "socket", "socketserver", "sqlite3", "stat", "statistics", "string", "stringprep", "subprocess", "sys", "sysconfig", "tarfile",
          "tempfile", "textwrap", "this", "threading", "time", "timeit", "token", "tokenize", "tomllib", "trace", "traceback", "tracemalloc",
          "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref", "webbrowser",
          "xml", "zipfile", "zlib", "zoneinfo"]
@@ -81,6 +108,27 @@ for name, module in [("os.path", os.path),
                      ("email.parser", email.parser),
                      ("email.policy", email.policy),
                      ("email.utils", email.utils),
+                     ("encodings.aliases", encodings.aliases),
+                     ("encodings.ascii", encodings.ascii),
+                     ("encodings.base64_codec", encodings.base64_codec),
+                     ("encodings.cp1252", encodings.cp1252),
+                     ("encodings.hex_codec", encodings.hex_codec),
+                     ("encodings.idna", encodings.idna),
+                     ("encodings.latin_1", encodings.latin_1),
+                     ("encodings.punycode", encodings.punycode),
+                     ("encodings.raw_unicode_escape", encodings.raw_unicode_escape),
+                     ("encodings.rot_13", encodings.rot_13),
+                     ("encodings.unicode_escape", encodings.unicode_escape),
+                     ("encodings.utf_7", encodings.utf_7),
+                     ("encodings.utf_8", encodings.utf_8),
+                     ("encodings.utf_8_sig", encodings.utf_8_sig),
+                     ("encodings.utf_16", encodings.utf_16),
+                     ("encodings.utf_16_be", encodings.utf_16_be),
+                     ("encodings.utf_16_le", encodings.utf_16_le),
+                     ("encodings.utf_32", encodings.utf_32),
+                     ("encodings.utf_32_be", encodings.utf_32_be),
+                     ("encodings.utf_32_le", encodings.utf_32_le),
+                     ("encodings.zlib_codec", encodings.zlib_codec),
                      ("html.entities", html.entities),
                      ("html.parser", html.parser),
                      ("http.client", http.client),

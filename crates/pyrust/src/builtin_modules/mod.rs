@@ -16,6 +16,8 @@
 
 #[macro_use]
 pub(crate) mod macros;
+pub(crate) mod encodings_codecs;
+pub(crate) mod internal_shims;
 
 use crate::builtin_registry::BuiltinReg;
 use crate::value::Value;
@@ -181,6 +183,8 @@ macro_rules! pyrust_builtin_modules {
                     all.extend_from_slice($ident::regs());
                 }
             )*
+            all.extend(encodings_codecs::all_regs());
+            all.extend(internal_shims::all_regs());
             all
         }
 
@@ -196,7 +200,10 @@ macro_rules! pyrust_builtin_modules {
                     }
                 }
             )*
-            None
+            if let Some(m) = encodings_codecs::load_builtin_module(name) {
+                return Some(m);
+            }
+            internal_shims::load_builtin_module(name)
         }
 
         /// Return `true` when `name` is a built-in module declared in
@@ -210,7 +217,8 @@ macro_rules! pyrust_builtin_modules {
                     }
                 }
             )*
-            false
+            encodings_codecs::is_builtin_module(name)
+                || internal_shims::is_builtin_module(name)
         }
 
         /// Return `true` when `name` is a built-in package (matches CPython
@@ -292,7 +300,17 @@ macro_rules! pyrust_builtin_modules {
                 "_frozen_importlib_external" => {
                     return _frozen_importlib_external::post_load_init(interp, module);
                 }
+                "encodings" => return encodings::post_load_init(interp, module),
+                "encodings.punycode" => return encodings_punycode::post_load_init(interp, module),
+                "encodings.idna" => return encodings_idna::post_load_init(interp, module),
+                "_compression" => return _compression::post_load_init(interp, module),
                 _ => {}
+            }
+            if encodings_codecs::post_load_init(name, interp, module)? {
+                return Ok(());
+            }
+            if internal_shims::post_load_init(name, interp, module)? {
+                return Ok(());
             }
             $(
                 $(#[cfg($($cfg)*)])*
@@ -769,6 +787,19 @@ pyrust_builtin_modules! {
     tracemalloc,
     faulthandler,
     marshal,
+    // `stringprep`, `encodings` (+ `encodings.aliases`, `encodings.punycode`,
+    // `encodings.idna`, and macro-generated standard codec submodules), and
+    // native `_*` internal compatibility modules (issue #3250).
+    stringprep,
+    "encodings.aliases" as encodings_aliases,
+    "encodings.punycode" as encodings_punycode,
+    "encodings.idna" as encodings_idna,
+    encodings,
+    _imp,
+    _compression,
+    _compat_pickle,
+    _string,
+    _strptime,
 }
 
 include!("finalization.rs");
