@@ -43,6 +43,7 @@ import http.cookies
 import http.server
 import importlib.machinery
 import importlib.util
+import sqlite3.dbapi2
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -58,7 +59,7 @@ names = ["abc", "argparse", "ast", "asyncio", "atexit", "base64", "binascii", "b
          "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json",
          "logging", "lzma", "math", "mimetypes", "numbers", "operator", "os", "pathlib", "pickle",
          "platform", "pprint", "queue", "random", "re", "secrets", "selectors", "shlex", "shutil",
-         "signal", "socket", "socketserver", "stat", "statistics", "string", "subprocess", "sys", "tarfile",
+         "signal", "socket", "socketserver", "sqlite3", "stat", "statistics", "string", "subprocess", "sys", "tarfile",
          "tempfile", "textwrap", "threading", "time", "token", "tokenize", "tomllib", "traceback",
          "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref",
          "xml", "zipfile", "zlib"]
@@ -78,6 +79,7 @@ for name, module in [("os.path", os.path),
                      ("http.server", http.server),
                      ("importlib.machinery", importlib.machinery),
                      ("importlib.util", importlib.util),
+                     ("sqlite3.dbapi2", sqlite3.dbapi2),
                      ("urllib.error", urllib.error),
                      ("urllib.parse", urllib.parse),
                      ("urllib.request", urllib.request),
