@@ -149,6 +149,119 @@ pub(crate) struct AtexitCallback {
     pub(crate) args: Vec<ExpandedCallArg>,
 }
 
+/// Per-interpreter runtime state for the `gc` module (issue #3246).
+pub(crate) struct GcRuntimeState {
+    pub(crate) enabled: bool,
+    pub(crate) thresholds: (i64, i64, i64),
+    pub(crate) counts: (i64, i64, i64),
+    pub(crate) debug: i64,
+    pub(crate) stats: [(i64, i64, i64); 3],
+    pub(crate) freeze_count: i64,
+    pub(crate) garbage: Value,
+    pub(crate) callbacks: Value,
+}
+
+impl Default for GcRuntimeState {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            thresholds: (700, 10, 10),
+            counts: (0, 0, 0),
+            debug: 0,
+            stats: [(0, 0, 0); 3],
+            freeze_count: 0,
+            garbage: Value::list(Vec::new()),
+            callbacks: Value::list(Vec::new()),
+        }
+    }
+}
+
+/// Single traced allocation entry recorded by `_tracemalloc` (issue #3246).
+#[derive(Clone, Debug)]
+pub(crate) struct TracemallocRecord {
+    pub(crate) domain: u64,
+    pub(crate) size: usize,
+    pub(crate) frames: Vec<(String, i64)>,
+    pub(crate) total_nframe: usize,
+}
+
+/// Per-interpreter runtime state for `_tracemalloc` / `tracemalloc` (issue #3246).
+pub(crate) struct TracemallocRuntimeState {
+    pub(crate) tracing: bool,
+    pub(crate) traceback_limit: usize,
+    pub(crate) current_memory: usize,
+    pub(crate) peak_memory: usize,
+    pub(crate) tracked_objects: indexmap::IndexMap<i64, TracemallocRecord>,
+    pub(crate) ignored_objects: std::collections::HashSet<i64>,
+}
+
+impl Default for TracemallocRuntimeState {
+    fn default() -> Self {
+        Self {
+            tracing: false,
+            traceback_limit: 1,
+            current_memory: 0,
+            peak_memory: 0,
+            tracked_objects: indexmap::IndexMap::new(),
+            ignored_objects: std::collections::HashSet::new(),
+        }
+    }
+}
+
+/// Per-interpreter runtime state for `faulthandler` (issue #3246).
+pub(crate) struct FaulthandlerRuntimeState {
+    pub(crate) enabled: bool,
+    pub(crate) all_threads: bool,
+    pub(crate) enabled_file: Option<Value>,
+    pub(crate) later_cancel: Option<std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>,
+    #[cfg(unix)]
+    pub(crate) registered_signals: std::collections::HashMap<i32, (bool, bool)>,
+}
+
+impl Default for FaulthandlerRuntimeState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            all_threads: true,
+            enabled_file: None,
+            later_cancel: None,
+            #[cfg(unix)]
+            registered_signals: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl Drop for FaulthandlerRuntimeState {
+    fn drop(&mut self) {
+        if let Some(pair) = self.later_cancel.take() {
+            let (lock, cvar) = &*pair;
+            if let Ok(mut cancelled) = lock.lock() {
+                *cancelled = true;
+                cvar.notify_all();
+            }
+        }
+    }
+}
+
+/// Per-interpreter runtime state for `sys.monitoring` (PEP 669, issue #3246).
+pub(crate) struct MonitoringRuntimeState {
+    pub(crate) tools: [Option<String>; 6],
+    pub(crate) global_events: [i64; 6],
+    pub(crate) local_events: [std::collections::HashMap<i64, i64>; 6],
+    pub(crate) callbacks: [std::collections::HashMap<i64, Value>; 6],
+}
+
+impl Default for MonitoringRuntimeState {
+    fn default() -> Self {
+        Self {
+            tools: std::array::from_fn(|_| None),
+            global_events: [0; 6],
+            local_events: std::array::from_fn(|_| std::collections::HashMap::new()),
+            callbacks: std::array::from_fn(|_| std::collections::HashMap::new()),
+        }
+    }
+}
+
 /// Cold, rarely-used interpreter metadata, caches, and diagnostic/guard tables
 /// extracted behind a single `Box<InterpreterColdState>` (issue #3162).
 ///
@@ -180,7 +293,7 @@ pub(crate) struct InterpreterColdState {
     /// Guards `initialize_script_argv` from overwriting `sys.argv` once it has
     /// already been populated for the current interpreter invocation.
     script_argv_initialized: bool,
-    module_cache: ModuleCache,
+    pub(crate) module_cache: ModuleCache,
     /// Bootstrap `sys.modules` dictionary for this interpreter.
     ///
     /// This is authoritative only until the canonical `sys` module exists.
@@ -283,6 +396,14 @@ pub(crate) struct InterpreterColdState {
     /// Cloned by `Rc` into filesystem-import child interpreters so callbacks
     /// registered in imported modules execute on top-level interpreter shutdown.
     pub(crate) atexit_state: Rc<RefCell<Vec<Option<AtexitCallback>>>>,
+    /// Shared per-interpreter `gc` state (issue #3246).
+    pub(crate) gc_state: Rc<RefCell<GcRuntimeState>>,
+    /// Shared per-interpreter `_tracemalloc` / `tracemalloc` state (issue #3246).
+    pub(crate) tracemalloc_state: Rc<RefCell<TracemallocRuntimeState>>,
+    /// Shared per-interpreter `faulthandler` state (issue #3246).
+    pub(crate) faulthandler_state: Rc<RefCell<FaulthandlerRuntimeState>>,
+    /// Shared per-interpreter `sys.monitoring` state (PEP 669, issue #3246).
+    pub(crate) monitoring_state: Rc<RefCell<MonitoringRuntimeState>>,
     /// Startup CLI flags and `PYTHON*` environment configuration (issue #3243).
     /// Shared via `Rc` with child filesystem-import interpreters.
     pub(crate) runtime_config: Rc<RuntimeConfig>,
@@ -398,6 +519,10 @@ impl Default for InterpreterColdState {
             inlined_comp_escaped_span: None,
             call_site_lines: Vec::new(),
             atexit_state: Rc::new(RefCell::new(Vec::new())),
+            gc_state: Rc::new(RefCell::new(GcRuntimeState::default())),
+            tracemalloc_state: Rc::new(RefCell::new(TracemallocRuntimeState::default())),
+            faulthandler_state: Rc::new(RefCell::new(FaulthandlerRuntimeState::default())),
+            monitoring_state: Rc::new(RefCell::new(MonitoringRuntimeState::default())),
             runtime_config: Rc::new(RuntimeConfig::default()),
             cli_startup_managed: false,
             cli_startup_initialized: false,

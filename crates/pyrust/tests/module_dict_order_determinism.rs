@@ -53,15 +53,15 @@ import xml.etree
 import xml.etree.ElementPath
 import xml.etree.ElementTree
 import __future__
-names = ["_lsprof", "_sitebuiltins", "abc", "antigravity", "argparse", "ast", "asyncio", "atexit", "base64", "bdb", "binascii", "bisect", "builtins",
+names = ["_lsprof", "_sitebuiltins", "_tracemalloc", "abc", "antigravity", "argparse", "ast", "asyncio", "atexit", "base64", "bdb", "binascii", "bisect", "builtins",
          "bz2", "cProfile", "calendar", "cmath", "cmd", "code", "codecs", "codeop", "collections", "colorsys", "configparser", "contextlib", "contextvars",
-         "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "dis", "doctest", "email", "enum", "errno",
-         "filecmp", "fileinput", "fnmatch", "fractions", "functools", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
+         "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "dis", "doctest", "email", "enum", "errno", "faulthandler",
+         "filecmp", "fileinput", "fnmatch", "fractions", "functools", "gc", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword",
-         "linecache", "locale", "logging", "lzma", "math", "mimetypes", "mmap", "netrc", "ntpath", "nturl2path", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle",
+         "linecache", "locale", "logging", "lzma", "marshal", "math", "mimetypes", "mmap", "netrc", "ntpath", "nturl2path", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle",
          "pickletools", "pkgutil", "platform", "posixpath", "pprint", "profile", "pstats", "queue", "quopri", "random", "re", "reprlib", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shlex", "shutil",
          "signal", "site", "socket", "socketserver", "sqlite3", "stat", "statistics", "string", "subprocess", "sys", "sysconfig", "tarfile",
-         "tempfile", "textwrap", "this", "threading", "time", "timeit", "token", "tokenize", "tomllib", "trace", "traceback",
+         "tempfile", "textwrap", "this", "threading", "time", "timeit", "token", "tokenize", "tomllib", "trace", "traceback", "tracemalloc",
          "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref", "webbrowser",
          "xml", "zipfile", "zlib", "zoneinfo"]
 for name in names:

@@ -730,6 +730,13 @@ pyrust_builtin_modules! {
     profile,
     pstats,
     trace,
+    // `gc`, `_tracemalloc`, `tracemalloc`, `faulthandler`, and `marshal`
+    // (issue #3246): 100% native-Rust Python 3.12 runtime modules (no `@inject`).
+    gc,
+    _tracemalloc,
+    tracemalloc,
+    faulthandler,
+    marshal,
 }
 
 include!("finalization.rs");

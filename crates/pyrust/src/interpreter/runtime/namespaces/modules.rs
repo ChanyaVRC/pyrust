@@ -781,6 +781,10 @@ impl Interpreter {
                     bootstrap_module_registry: self.cold.bootstrap_module_registry.clone(),
                     atexit_state: Rc::clone(&self.cold.atexit_state),
                     runtime_config: Rc::clone(&self.cold.runtime_config),
+                    gc_state: Rc::clone(&self.cold.gc_state),
+                    tracemalloc_state: Rc::clone(&self.cold.tracemalloc_state),
+                    faulthandler_state: Rc::clone(&self.cold.faulthandler_state),
+                    monitoring_state: Rc::clone(&self.cold.monitoring_state),
                     ..Default::default()
                 }),
                 ..Default::default()

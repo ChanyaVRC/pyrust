@@ -344,4 +344,82 @@ impl Value {
     pub fn object_id(&self) -> Value {
         Value::int(self.object_identity().encode() as i64)
     }
+
+    /// Approximate CPython reference count for `sys.getrefcount(obj)`.
+    ///
+    /// - Heap-backed values (`list`, heap `tuple`, non-inline `str`, and
+    ///   `TAG_OPAQUE` objects) report their actual live reference count
+    ///   (combining `OpaqueSlot.strong` with any extra `Rc::strong_count`
+    ///   aliases of the inner payload).
+    /// - Immediate / immortal values (`None`, `bool`, small `int`, `float`,
+    ///   `Ellipsis`, `NotImplemented`, and inline SSO `str`) return CPython
+    ///   3.12's immortal sentinel (`u32::MAX`, PEP 683).
+    pub fn refcount(&self) -> usize {
+        const IMMORTAL_REFCOUNT: usize = u32::MAX as usize;
+        if self.is_float() || self.is_not_implemented() || self.is_ellipsis() {
+            return IMMORTAL_REFCOUNT;
+        }
+        match top16(self.0) {
+            TAG_NONE | TAG_BOOL | TAG_INT => IMMORTAL_REFCOUNT,
+            TAG_STR if str_is_inline_bits(self.0) => IMMORTAL_REFCOUNT,
+            TAG_STR => {
+                let hdr = (self.0 & PAYLOAD_MASK) as *const u32;
+                let rc = unsafe { (*hdr) >> 3 };
+                if rc == STR_RC_MAX {
+                    IMMORTAL_REFCOUNT
+                } else {
+                    rc as usize
+                }
+            }
+            TAG_TUPLE => unsafe {
+                let ptr = self.tuple_inner_ptr();
+                Rc::increment_strong_count(ptr);
+                let rc = Rc::from_raw(ptr);
+                let count = Rc::strong_count(&rc).saturating_sub(1);
+                drop(rc);
+                count
+            },
+            TAG_LIST => unsafe {
+                let ptr = self.list_inner_ptr();
+                Rc::increment_strong_count(ptr);
+                let rc = Rc::from_raw(ptr);
+                let count = Rc::strong_count(&rc).saturating_sub(1);
+                drop(rc);
+                count
+            },
+            TAG_OPAQUE => {
+                let slot = unsafe { &*self.opaque_slot_ptr() };
+                let slot_rc = slot.strong.get();
+                if slot_rc == u32::MAX {
+                    return IMMORTAL_REFCOUNT;
+                }
+                let inner_extra = match unsafe { &*self.opaque_ptr() } {
+                    Opaque::PyBigInt(rc) => Rc::strong_count(rc).saturating_sub(1),
+                    Opaque::Dict(rc) => Rc::strong_count(rc).saturating_sub(1),
+                    Opaque::Set(rc) => Rc::strong_count(rc).saturating_sub(1),
+                    Opaque::BigRange(rc) => Rc::strong_count(rc).saturating_sub(1),
+                    Opaque::UserFunction(rc) => Rc::strong_count(rc).saturating_sub(1),
+                    Opaque::PyClass(rc) => Rc::strong_count(rc).saturating_sub(1),
+                    Opaque::PyInstance(rc) => Rc::strong_count(rc).saturating_sub(1),
+                    Opaque::PyModule(rc) => Rc::strong_count(rc).saturating_sub(1),
+                    Opaque::Generator(rc) => Rc::strong_count(rc).saturating_sub(1),
+                    Opaque::Bytes(rc) => Rc::strong_count(rc).saturating_sub(1),
+                    Opaque::BuiltinObject { state, .. } => {
+                        Rc::strong_count(state).saturating_sub(1)
+                    }
+                    Opaque::Range { .. }
+                    | Opaque::BoundMethod { .. }
+                    | Opaque::ClassBoundMethod { .. }
+                    | Opaque::SuperProxy { .. }
+                    | Opaque::SuperProxyClass { .. }
+                    | Opaque::SuperProxyUnbound { .. }
+                    | Opaque::Complex(_, _)
+                    | Opaque::SmallTuple2 { .. }
+                    | Opaque::SmallTuple3 { .. } => 0,
+                };
+                (slot_rc as usize).saturating_add(inner_extra)
+            }
+            _ => IMMORTAL_REFCOUNT,
+        }
+    }
 }

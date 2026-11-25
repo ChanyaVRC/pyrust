@@ -281,7 +281,7 @@ impl Interpreter {
     }
 
     /// Resolve the live source line for `self.vm_frame_views[view_index]`.
-    fn resolve_view_lineno(
+    pub(crate) fn resolve_view_lineno(
         &self,
         view_index: usize,
         is_innermost: bool,
