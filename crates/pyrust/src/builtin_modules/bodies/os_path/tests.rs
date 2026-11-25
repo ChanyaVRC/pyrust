@@ -1,16 +1,18 @@
-//! ntpath-semantics unit tests.
+//! ntpath and posixpath semantics unit tests.
 //!
-//! pyrust's CI runs on Linux/WSL where the `os.path` parity fixture binds the
-//! posix arm, so these exercise the `nt_*` helpers directly. Expected values
-//! are taken verbatim from CPython 3.12's `ntpath`.
+//! Expected values are taken verbatim from CPython 3.12's `ntpath` and `posixpath`.
 
-use super::normalize::{nt_expandvars, nt_isabs, nt_normpath, nt_relpath, posix_expandvars};
-use super::split_join::{
-    nt_commonpath, nt_join, nt_split, nt_splitdrive, nt_splitext, nt_splitroot, posix_commonpath,
+use crate::builtin_modules::genericpath::ops::splitext_str;
+use crate::builtin_modules::ntpath::ops::{
+    nt_commonpath_str, nt_expandvars_str, nt_isabs_str, nt_join_str, nt_normpath_str,
+    nt_relpath_str, nt_split_str, nt_splitdrive_str, nt_splitroot_str,
+};
+use crate::builtin_modules::posixpath::ops::{
+    posix_commonpath_str, posix_expandvars_str, posix_splitroot_str,
 };
 
 fn sd(p: &str) -> (String, String) {
-    nt_splitdrive(p)
+    nt_splitdrive_str(p)
 }
 
 fn s2(a: &str, b: &str) -> (String, String) {
@@ -30,32 +32,35 @@ fn splitdrive_matches_cpython() {
 
 #[test]
 fn split_matches_cpython() {
-    assert_eq!(nt_split(r"C:\a\b"), s2(r"C:\a", "b"));
-    assert_eq!(nt_split("C:/a/b"), s2("C:/a", "b"));
-    assert_eq!(nt_split("a/b"), s2("a", "b"));
-    assert_eq!(nt_split(r"C:\"), s2(r"C:\", ""));
-    assert_eq!(nt_split(r"\\host\share\x\y"), s2(r"\\host\share\x", "y"));
-    assert_eq!(nt_split(r"\\host\share"), s2(r"\\host\share", ""));
-    assert_eq!(nt_split(""), s2("", ""));
-    assert_eq!(nt_split("/usr/bin"), s2("/usr", "bin"));
-    assert_eq!(nt_split(r"a\b\"), s2(r"a\b", ""));
+    assert_eq!(nt_split_str(r"C:\a\b"), s2(r"C:\a", "b"));
+    assert_eq!(nt_split_str("C:/a/b"), s2("C:/a", "b"));
+    assert_eq!(nt_split_str("a/b"), s2("a", "b"));
+    assert_eq!(nt_split_str(r"C:\"), s2(r"C:\", ""));
+    assert_eq!(
+        nt_split_str(r"\\host\share\x\y"),
+        s2(r"\\host\share\x", "y")
+    );
+    assert_eq!(nt_split_str(r"\\host\share"), s2(r"\\host\share", ""));
+    assert_eq!(nt_split_str(""), s2("", ""));
+    assert_eq!(nt_split_str("/usr/bin"), s2("/usr", "bin"));
+    assert_eq!(nt_split_str(r"a\b\"), s2(r"a\b", ""));
 }
 
 #[test]
 fn isabs_matches_cpython() {
-    assert!(nt_isabs(r"C:\x"));
-    assert!(nt_isabs("/x")); // legacy bug: bare separator is "absolute"
-    assert!(nt_isabs(r"\\x"));
-    assert!(!nt_isabs("C:x"));
-    assert!(!nt_isabs("x"));
-    assert!(nt_isabs("C:/"));
-    assert!(nt_isabs("/"));
-    assert!(nt_isabs(r"\\host\share"));
+    assert!(nt_isabs_str(r"C:\x"));
+    assert!(nt_isabs_str("/x"));
+    assert!(nt_isabs_str(r"\\x"));
+    assert!(!nt_isabs_str("C:x"));
+    assert!(!nt_isabs_str("x"));
+    assert!(nt_isabs_str("C:/"));
+    assert!(nt_isabs_str("/"));
+    assert!(nt_isabs_str(r"\\host\share"));
 }
 
 #[test]
 fn join_matches_cpython() {
-    let j = |parts: &[&str]| nt_join(&parts.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let j = |parts: &[&str]| nt_join_str(&parts.iter().map(|s| s.to_string()).collect::<Vec<_>>());
     assert_eq!(j(&[r"C:\a", "b"]), r"C:\a\b");
     assert_eq!(j(&["a", r"C:\b"]), r"C:\b");
     assert_eq!(j(&["C:", "b"]), "C:b");
@@ -69,71 +74,74 @@ fn join_matches_cpython() {
 
 #[test]
 fn normpath_matches_cpython() {
-    assert_eq!(nt_normpath("a/b"), r"a\b");
-    assert_eq!(nt_normpath(r"a\b"), r"a\b");
-    assert_eq!(nt_normpath("C:/a/../b"), r"C:\b");
-    assert_eq!(nt_normpath("//host/share/a/../b"), r"\\host\share\b");
-    assert_eq!(nt_normpath("C:/../x"), r"C:\x");
-    assert_eq!(nt_normpath(""), ".");
-    assert_eq!(nt_normpath("."), ".");
-    assert_eq!(nt_normpath("C://a//b"), r"C:\a\b");
-    assert_eq!(nt_normpath(r"C:\..\x"), r"C:\x");
-    assert_eq!(nt_normpath("foo/../.."), "..");
-    assert_eq!(nt_normpath("/a/b"), r"\a\b");
-    assert_eq!(nt_normpath("a/./b/"), r"a\b");
+    assert_eq!(nt_normpath_str("a/b"), r"a\b");
+    assert_eq!(nt_normpath_str(r"a\b"), r"a\b");
+    assert_eq!(nt_normpath_str("C:/a/../b"), r"C:\b");
+    assert_eq!(nt_normpath_str("//host/share/a/../b"), r"\\host\share\b");
+    assert_eq!(nt_normpath_str("C:/../x"), r"C:\x");
+    assert_eq!(nt_normpath_str(""), ".");
+    assert_eq!(nt_normpath_str("."), ".");
+    assert_eq!(nt_normpath_str("C://a//b"), r"C:\a\b");
+    assert_eq!(nt_normpath_str(r"C:\..\x"), r"C:\x");
+    assert_eq!(nt_normpath_str("foo/../.."), "..");
+    assert_eq!(nt_normpath_str("/a/b"), r"\a\b");
+    assert_eq!(nt_normpath_str("a/./b/"), r"a\b");
 }
 
 #[test]
 fn splitext_matches_cpython() {
-    assert_eq!(nt_splitext(r"C:\a\b.txt"), s2(r"C:\a\b", ".txt"));
-    assert_eq!(nt_splitext("a.b.c"), s2("a.b", ".c"));
-    assert_eq!(nt_splitext(".bashrc"), s2(".bashrc", ""));
-    assert_eq!(nt_splitext("/x/.y"), s2("/x/.y", ""));
-    assert_eq!(nt_splitext("a/b"), s2("a/b", ""));
-    assert_eq!(nt_splitext("foo."), s2("foo", "."));
-    assert_eq!(nt_splitext(r"C:\a.b\c"), s2(r"C:\a.b\c", ""));
+    let nt_ext = |p: &str| splitext_str(p, '\\', Some('/'), '.');
+    assert_eq!(nt_ext(r"C:\a\b.txt"), s2(r"C:\a\b", ".txt"));
+    assert_eq!(nt_ext("a.b.c"), s2("a.b", ".c"));
+    assert_eq!(nt_ext(".bashrc"), s2(".bashrc", ""));
+    assert_eq!(nt_ext("/x/.y"), s2("/x/.y", ""));
+    assert_eq!(nt_ext("a/b"), s2("a/b", ""));
+    assert_eq!(nt_ext("foo."), s2("foo", "."));
+    assert_eq!(nt_ext(r"C:\a.b\c"), s2(r"C:\a.b\c", ""));
 }
 
 #[test]
 fn dirname_basename_match_cpython() {
-    // dirname == split[0], basename == split[1].
-    assert_eq!(nt_split(r"C:\a\b").0, r"C:\a");
-    assert_eq!(nt_split(r"C:\a\b").1, "b");
-    assert_eq!(nt_split(r"C:\a\").1, "");
-    assert_eq!(nt_split(r"C:\a\").0, r"C:\a");
+    assert_eq!(nt_split_str(r"C:\a\b").0, r"C:\a");
+    assert_eq!(nt_split_str(r"C:\a\b").1, "b");
+    assert_eq!(nt_split_str(r"C:\a\").1, "");
+    assert_eq!(nt_split_str(r"C:\a\").0, r"C:\a");
 }
 
 #[test]
 fn relpath_matches_cpython() {
-    // Absolute inputs so the host cwd does not enter the computation.
-    assert_eq!(nt_relpath(r"C:\a\b\c", r"C:\a\d").unwrap(), r"..\b\c");
-    assert_eq!(nt_relpath(r"C:\a\b", r"C:\a\b").unwrap(), ".");
-    assert_eq!(nt_relpath(r"C:\a\b\c", r"C:\a").unwrap(), r"b\c");
-    let err = nt_relpath(r"C:\a", r"D:\b").unwrap_err();
+    assert_eq!(nt_relpath_str(r"C:\a\b\c", r"C:\a\d").unwrap(), r"..\b\c");
+    assert_eq!(nt_relpath_str(r"C:\a\b", r"C:\a\b").unwrap(), ".");
+    assert_eq!(nt_relpath_str(r"C:\a\b\c", r"C:\a").unwrap(), r"b\c");
+    let err = nt_relpath_str(r"C:\a", r"D:\b").unwrap_err();
     assert!(err.class_name_is("ValueError"));
 }
 
 #[test]
 fn splitroot_matches_cpython() {
-    let r = |p: &str| {
-        let (d, r, t) = nt_splitroot(p);
-        (d, r, t)
-    };
     assert_eq!(
-        r("//server/share/"),
+        nt_splitroot_str("//server/share/"),
         ("//server/share".into(), "/".into(), "".into())
     );
     assert_eq!(
-        r("C:/Users/Barney"),
+        nt_splitroot_str("C:/Users/Barney"),
         ("C:".into(), "/".into(), "Users/Barney".into())
     );
     assert_eq!(
-        r("C:///spam///ham"),
+        nt_splitroot_str("C:///spam///ham"),
         ("C:".into(), "/".into(), "//spam///ham".into())
     );
     assert_eq!(
-        r("Windows/notepad"),
+        nt_splitroot_str("Windows/notepad"),
         ("".into(), "".into(), "Windows/notepad".into())
+    );
+    assert_eq!(
+        posix_splitroot_str("//a/b"),
+        ("".into(), "//".into(), "a/b".into())
+    );
+    assert_eq!(
+        posix_splitroot_str("///a/b"),
+        ("".into(), "/".into(), "//a/b".into())
     );
 }
 
@@ -141,33 +149,39 @@ fn splitroot_matches_cpython() {
 fn commonpath_matches_cpython() {
     let s = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     assert_eq!(
-        posix_commonpath(&s(&["/usr/lib", "/usr/local/lib"])).unwrap(),
+        posix_commonpath_str(&s(&["/usr/lib", "/usr/local/lib"])).unwrap(),
         "/usr"
     );
-    assert_eq!(posix_commonpath(&s(&["/a/b", "/c/d"])).unwrap(), "/");
-    assert_eq!(posix_commonpath(&s(&["a/b/c", "a/b/d"])).unwrap(), "a/b");
-    assert_eq!(posix_commonpath(&s(&["a/b", "c/d"])).unwrap(), "");
+    assert_eq!(posix_commonpath_str(&s(&["/a/b", "/c/d"])).unwrap(), "/");
+    assert_eq!(
+        posix_commonpath_str(&s(&["a/b/c", "a/b/d"])).unwrap(),
+        "a/b"
+    );
+    assert_eq!(posix_commonpath_str(&s(&["a/b", "c/d"])).unwrap(), "");
     assert!(
-        posix_commonpath(&s(&["/a", "a"]))
+        posix_commonpath_str(&s(&["/a", "a"]))
             .unwrap_err()
             .class_name_is("ValueError")
     );
     assert!(
-        posix_commonpath(&s(&[]))
+        posix_commonpath_str(&s(&[]))
             .unwrap_err()
             .class_name_is("ValueError")
     );
 
-    assert_eq!(nt_commonpath(&s(&[r"C:\a\b", "c:/a/c"])).unwrap(), r"C:\a");
-    assert_eq!(nt_commonpath(&s(&[r"C:\a", r"C:\b"])).unwrap(), r"C:\");
-    assert_eq!(nt_commonpath(&s(&["a/b/c", r"a\b\d"])).unwrap(), r"a\b");
+    assert_eq!(
+        nt_commonpath_str(&s(&[r"C:\a\b", "c:/a/c"])).unwrap(),
+        r"C:\a"
+    );
+    assert_eq!(nt_commonpath_str(&s(&[r"C:\a", r"C:\b"])).unwrap(), r"C:\");
+    assert_eq!(nt_commonpath_str(&s(&["a/b/c", r"a\b\d"])).unwrap(), r"a\b");
     assert!(
-        nt_commonpath(&s(&[r"C:\a", r"D:\a"]))
+        nt_commonpath_str(&s(&[r"C:\a", r"D:\a"]))
             .unwrap_err()
             .class_name_is("ValueError")
     );
     assert!(
-        nt_commonpath(&s(&[r"C:\a", "a"]))
+        nt_commonpath_str(&s(&[r"C:\a", "a"]))
             .unwrap_err()
             .class_name_is("ValueError")
     );
@@ -176,12 +190,12 @@ fn commonpath_matches_cpython() {
 #[test]
 fn expandvars_preserves_unknown_vars() {
     assert_eq!(
-        posix_expandvars("$PYRUST_NO_SUCH_ENV_3206/${PYRUST_NO_SUCH_ENV_3206}"),
+        posix_expandvars_str("$PYRUST_NO_SUCH_ENV_3206/${PYRUST_NO_SUCH_ENV_3206}"),
         "$PYRUST_NO_SUCH_ENV_3206/${PYRUST_NO_SUCH_ENV_3206}"
     );
     assert_eq!(
-        nt_expandvars("%PYRUST_NO_SUCH_ENV_3206%/$PYRUST_NO_SUCH_ENV_3206/%%"),
+        nt_expandvars_str("%PYRUST_NO_SUCH_ENV_3206%/$PYRUST_NO_SUCH_ENV_3206/%%"),
         "%PYRUST_NO_SUCH_ENV_3206%/$PYRUST_NO_SUCH_ENV_3206/%"
     );
-    assert_eq!(nt_expandvars("'%PATH%'"), "'%PATH%'");
+    assert_eq!(nt_expandvars_str("'%PATH%'"), "'%PATH%'");
 }

@@ -1,46 +1,26 @@
-// `os.path` module — included into `pub mod os_path { … }` declared by
-// the `"os.path" as os_path` entry in `pyrust_builtin_modules!` in
-// `builtin_modules/mod.rs`.  The macro injects `MODULE_NAME = "os.path"` and
-// `FN_PREFIX = "os.path."`, so registered names look like `"os.path.join"`.
+// `os.path` module — delegates directly to `posixpath` on Unix and `ntpath`
+// on Windows, sharing implementation with `genericpath` (issue #3245).
 //
-// This file is the thin Python-registration facade; path splitting/joining,
-// normalization, and filesystem stat queries live in submodules under
-// `bodies/os_path/`.
-//
-// Reference: <https://docs.python.org/3/library/os.path.html>
+// Reference: <https://docs.python.org/3.12/library/os.path.html>
 
 use crate::error::Result;
 use crate::interpreter::ExpandedCallArg;
+use crate::interpreter::builtin_args::{PyBool, PyIndex, PyValueRef};
 use crate::value::Value;
 use pyrust_derive::pyrust_module;
 
-#[path = "os_path/normalize.rs"]
-mod normalize;
 #[cfg(test)]
 #[path = "os_path/tests.rs"]
 mod nt_tests;
-#[path = "os_path/split_join.rs"]
-mod split_join;
-#[path = "os_path/stat_queries.rs"]
-mod stat_queries;
 
-use self::normalize::{
-    expandvars_impl, host_abspath, host_expanduser, host_isabs, host_normpath, normcase_impl,
-    relpath_impl,
-};
-use self::split_join::{
-    commonpath_impl, commonprefix_impl, host_split, host_splitdrive, host_splitext, join_impl,
-    single_path,
-};
-use self::stat_queries::{
-    exists_impl, getatime_impl, getctime_impl, getmtime_impl, getsize_impl, isdir_impl,
-    isfile_impl, islink_impl, lexists_impl, realpath_impl, samefile_impl,
-};
+use crate::builtin_modules::genericpath::ops as gp;
+#[cfg(windows)]
+use crate::builtin_modules::ntpath::ops as host;
+#[cfg(not(windows))]
+use crate::builtin_modules::posixpath::ops as host;
 
 pyrust_module! {
     constants {
-        // Expose the path separator here so callers can build platform-aware
-        // paths without depending on `os` proper.
         "sep" => Value::string(std::path::MAIN_SEPARATOR.to_string()),
         "altsep" => {
             if cfg!(windows) {
@@ -53,176 +33,160 @@ pyrust_module! {
         "pardir" => Value::string(".."),
         "extsep" => Value::string("."),
         "pathsep" => Value::string(if cfg!(windows) { ";" } else { ":" }),
+        "defpath" => Value::string(if cfg!(windows) { ".;C:\\bin" } else { "/bin:/usr/bin" }),
         "devnull" => Value::string(if cfg!(windows) { "nul" } else { "/dev/null" }),
+        "supports_unicode_filenames" => Value::bool_(cfg!(any(windows, target_os = "macos"))),
     }
 
-    /// CPython: os.path.join(path, *paths) — join path components.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.join>
-    fn join(args) -> Result<Value> {
-        join_impl(_interp, FN_NAME, args)
+    fn join(path: PyValueRef<'_>, #[varargs] paths: &[Value]) -> Result<Value> {
+        host::join(_interp, path.0, paths)
     }
 
-    /// CPython: os.path.exists(path) — true if `path` refers to an existing path.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.exists>
-    fn exists(args) -> Result<Value> {
-        exists_impl(_interp, FN_NAME, args)
+    fn exists(path: PyValueRef<'_>) -> Result<Value> {
+        gp::exists(_interp, path.0)
     }
 
-    /// CPython: os.path.isfile(path) — true if `path` is a regular file.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.isfile>
-    fn isfile(args) -> Result<Value> {
-        isfile_impl(_interp, FN_NAME, args)
+    fn isfile(path: PyValueRef<'_>) -> Result<Value> {
+        gp::isfile(_interp, path.0)
     }
 
-    /// CPython: os.path.isdir(path) — true if `path` is a directory.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.isdir>
-    fn isdir(args) -> Result<Value> {
-        isdir_impl(_interp, FN_NAME, args)
+    fn isdir(s: PyValueRef<'_>) -> Result<Value> {
+        gp::isdir(_interp, s.0)
     }
 
-    /// CPython: os.path.dirname(path) — directory name of `path`.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.dirname>
-    fn dirname(args) -> Result<Value> {
-        let path = single_path(_interp, FN_NAME, args)?;
-        let (head, _) = host_split(&path);
-        Ok(Value::string(head))
+    fn dirname(p: PyValueRef<'_>) -> Result<Value> {
+        host::dirname(_interp, p.0)
     }
 
-    /// CPython: os.path.basename(path) — final path component.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.basename>
-    fn basename(args) -> Result<Value> {
-        let path = single_path(_interp, FN_NAME, args)?;
-        let (_, tail) = host_split(&path);
-        Ok(Value::string(tail))
+    fn basename(p: PyValueRef<'_>) -> Result<Value> {
+        host::basename(_interp, p.0)
     }
 
-    /// CPython: os.path.abspath(path) — absolute normalised form of `path`.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.abspath>
-    fn abspath(args) -> Result<Value> {
-        let path = single_path(_interp, FN_NAME, args)?;
-        Ok(Value::string(host_abspath(&path)?))
+    fn abspath(path: PyValueRef<'_>) -> Result<Value> {
+        host::abspath(_interp, path.0)
     }
 
-    /// CPython: os.path.splitext(path) -> (root, ext).
-    /// <https://docs.python.org/3/library/os.path.html#os.path.splitext>
-    fn splitext(args) -> Result<Value> {
-        let path = single_path(_interp, FN_NAME, args)?;
-        let (root, ext) = host_splitext(&path);
-        Ok(Value::tuple(vec![Value::string(root), Value::string(ext)]))
+    fn splitext(p: PyValueRef<'_>) -> Result<Value> {
+        host::splitext(_interp, p.0)
     }
 
-    /// CPython: os.path.split(path) -> (head, tail).
-    /// <https://docs.python.org/3/library/os.path.html#os.path.split>
-    fn split(args) -> Result<Value> {
-        let path = single_path(_interp, FN_NAME, args)?;
-        let (head, tail) = host_split(&path);
-        Ok(Value::tuple(vec![Value::string(head), Value::string(tail)]))
+    fn split(p: PyValueRef<'_>) -> Result<Value> {
+        host::split(_interp, p.0)
     }
 
-    /// CPython: os.path.isabs(path) — true if `path` is absolute.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.isabs>
-    fn isabs(args) -> Result<Value> {
-        let path = single_path(_interp, FN_NAME, args)?;
-        Ok(Value::bool_(host_isabs(&path)))
+    fn splitroot(p: PyValueRef<'_>) -> Result<Value> {
+        host::splitroot(_interp, p.0)
     }
 
-    /// CPython: os.path.normpath(path) — collapse redundant separators and `.`/`..`.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.normpath>
-    fn normpath(args) -> Result<Value> {
-        let path = single_path(_interp, FN_NAME, args)?;
-        Ok(Value::string(host_normpath(&path)))
+    fn isabs(s: PyValueRef<'_>) -> Result<Value> {
+        host::isabs(_interp, s.0)
     }
 
-    /// CPython: os.path.splitdrive(path) -> (drive, tail).
-    /// <https://docs.python.org/3/library/os.path.html#os.path.splitdrive>
-    fn splitdrive(args) -> Result<Value> {
-        let path = single_path(_interp, FN_NAME, args)?;
-        let (drive, tail) = host_splitdrive(&path);
-        Ok(Value::tuple(vec![Value::string(drive), Value::string(tail)]))
+    fn normpath(path: PyValueRef<'_>) -> Result<Value> {
+        host::normpath(_interp, path.0)
     }
 
-    /// CPython: os.path.commonpath(paths) — longest common sub-path.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.commonpath>
-    fn commonpath(args) -> Result<Value> {
-        commonpath_impl(_interp, FN_NAME, args)
+    fn splitdrive(p: PyValueRef<'_>) -> Result<Value> {
+        host::splitdrive(_interp, p.0)
     }
 
-    /// CPython: os.path.commonprefix(list) — longest common leading substring.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.commonprefix>
-    fn commonprefix(args) -> Result<Value> {
-        commonprefix_impl(_interp, FN_NAME, args)
+    fn commonpath(paths: PyValueRef<'_>) -> Result<Value> {
+        host::commonpath(_interp, paths.0)
     }
 
-    /// CPython: os.path.relpath(path, start=os.curdir) — relative path from `start` to `path`.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.relpath>
-    fn relpath(args) -> Result<Value> {
-        relpath_impl(_interp, FN_NAME, args)
+    fn commonprefix(m: PyValueRef<'_>) -> Result<Value> {
+        gp::commonprefix(_interp, m.0)
     }
 
-    /// CPython: os.path.expanduser(path) — expand a leading `~`.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.expanduser>
-    fn expanduser(args) -> Result<Value> {
-        let path = single_path(_interp, FN_NAME, args)?;
-        Ok(Value::string(host_expanduser(&path)))
+    fn relpath(
+        path: PyValueRef<'_>,
+        #[default(None)] start: Option<PyValueRef<'_>>,
+    ) -> Result<Value> {
+        host::relpath(_interp, path.0, start.map(|v| v.0))
     }
 
-    /// CPython: os.path.expandvars(path) — expand environment variables in `path`.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.expandvars>
-    fn expandvars(args) -> Result<Value> {
-        expandvars_impl(_interp, FN_NAME, args)
+    fn expanduser(path: PyValueRef<'_>) -> Result<Value> {
+        host::expanduser(_interp, path.0)
     }
 
-    /// CPython: os.path.realpath(path, *, strict=False) — canonical path.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.realpath>
-    fn realpath(args) -> Result<Value> {
-        realpath_impl(_interp, FN_NAME, args)
+    fn expandvars(path: PyValueRef<'_>) -> Result<Value> {
+        host::expandvars(_interp, path.0)
     }
 
-    /// CPython: os.path.normcase(path) — normalize case and separators for the host OS.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.normcase>
-    fn normcase(args) -> Result<Value> {
-        normcase_impl(_interp, FN_NAME, args)
+    fn realpath(
+        filename: PyValueRef<'_>,
+        #[keyword_only]
+        #[default(false.into())]
+        strict: PyBool,
+    ) -> Result<Value> {
+        host::realpath(_interp, filename.0, *strict)
     }
 
-    /// CPython: os.path.islink(path) — true if `path` refers to a symbolic link.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.islink>
-    fn islink(args) -> Result<Value> {
-        islink_impl(_interp, FN_NAME, args)
+    fn normcase(s: PyValueRef<'_>) -> Result<Value> {
+        host::normcase(_interp, s.0)
     }
 
-    /// CPython: os.path.lexists(path) — true if `path` exists (including broken symlinks).
-    /// <https://docs.python.org/3/library/os.path.html#os.path.lexists>
-    fn lexists(args) -> Result<Value> {
-        lexists_impl(_interp, FN_NAME, args)
+    fn islink(path: PyValueRef<'_>) -> Result<Value> {
+        gp::islink(_interp, path.0)
     }
 
-    /// CPython: os.path.samefile(path1, path2) — true if both paths refer to the same file.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.samefile>
-    fn samefile(args) -> Result<Value> {
-        samefile_impl(_interp, FN_NAME, args)
+    fn isjunction(path: PyValueRef<'_>) -> Result<Value> {
+        #[cfg(windows)]
+        {
+            host::isjunction(_interp, path.0)
+        }
+        #[cfg(not(windows))]
+        {
+            gp::generic_isjunction(_interp, path.0)
+        }
     }
 
-    /// CPython: os.path.getsize(path) — size of `path` in bytes.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.getsize>
-    fn getsize(args) -> Result<Value> {
-        getsize_impl(_interp, FN_NAME, args)
+    fn isdevdrive(path: PyValueRef<'_>) -> Result<Value> {
+        #[cfg(windows)]
+        {
+            host::isdevdrive(_interp, path.0)
+        }
+        #[cfg(not(windows))]
+        {
+            gp::generic_isdevdrive(_interp, path.0)
+        }
     }
 
-    /// CPython: os.path.getmtime(path) — last modification time of `path`.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.getmtime>
-    fn getmtime(args) -> Result<Value> {
-        getmtime_impl(_interp, FN_NAME, args)
+    fn ismount(path: PyValueRef<'_>) -> Result<Value> {
+        host::ismount(_interp, path.0)
     }
 
-    /// CPython: os.path.getatime(path) — last access time of `path`.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.getatime>
-    fn getatime(args) -> Result<Value> {
-        getatime_impl(_interp, FN_NAME, args)
+    fn lexists(path: PyValueRef<'_>) -> Result<Value> {
+        gp::lexists(_interp, path.0)
     }
 
-    /// CPython: os.path.getctime(path) — metadata change (POSIX) or creation (Windows) time.
-    /// <https://docs.python.org/3/library/os.path.html#os.path.getctime>
-    fn getctime(args) -> Result<Value> {
-        getctime_impl(_interp, FN_NAME, args)
+    fn samefile(f1: PyValueRef<'_>, f2: PyValueRef<'_>) -> Result<Value> {
+        gp::samefile(_interp, f1.0, f2.0)
+    }
+
+    fn sameopenfile(fp1: PyIndex, fp2: PyIndex) -> Result<Value> {
+        let fd1 = fp1.expect_i64(FN_NAME, "fp1")?;
+        let fd2 = fp2.expect_i64(FN_NAME, "fp2")?;
+        gp::sameopenfile(_interp, fd1, fd2)
+    }
+
+    fn samestat(s1: PyValueRef<'_>, s2: PyValueRef<'_>) -> Result<Value> {
+        gp::samestat(_interp, s1.0, s2.0)
+    }
+
+    fn getsize(filename: PyValueRef<'_>) -> Result<Value> {
+        gp::getsize(_interp, filename.0)
+    }
+
+    fn getmtime(filename: PyValueRef<'_>) -> Result<Value> {
+        gp::getmtime(_interp, filename.0)
+    }
+
+    fn getatime(filename: PyValueRef<'_>) -> Result<Value> {
+        gp::getatime(_interp, filename.0)
+    }
+
+    fn getctime(filename: PyValueRef<'_>) -> Result<Value> {
+        gp::getctime(_interp, filename.0)
     }
 }
