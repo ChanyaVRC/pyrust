@@ -11,7 +11,7 @@ use pyrust_derive::pyrust_module;
 use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{OptValueRef, OptionalArg, PyValue, PyValueRef};
 use crate::interpreter::{ExpandedCallArg, Interpreter, lookup_exc_class, render_instance_str};
-use crate::value::{Value, ValueKind};
+use crate::value::Value;
 
 struct QuitterState {
     name: Value,
@@ -260,63 +260,22 @@ pyrust_module! {
             #[varargs] args: &[Value],
             #[varkwargs] kwds: IndexMap<String, Value>,
         ) -> Result<Value> {
-            if let Ok(pydoc) = _interp.load_module("pydoc")
-                && let Ok(help_fn) = _interp.get_attr(&pydoc, "help")
-            {
-                let mut call_args = Vec::with_capacity(args.len() + kwds.len());
-                for a in args {
-                    call_args.push(ExpandedCallArg {
-                        name: None,
-                        value: a.clone(),
-                    });
-                }
-                for (k, v) in kwds {
-                    call_args.push(ExpandedCallArg {
-                        name: Some(k),
-                        value: v,
-                    });
-                }
-                return _interp.call_function_expanded(help_fn, &call_args);
+            let pydoc = _interp.load_module("pydoc")?;
+            let help_fn = _interp.get_attr(&pydoc, "help")?;
+            let mut call_args = Vec::with_capacity(args.len() + kwds.len());
+            for a in args {
+                call_args.push(ExpandedCallArg {
+                    name: None,
+                    value: a.clone(),
+                });
             }
-
-            if args.is_empty() {
-                call_builtin_print(
-                    _interp,
-                    "Welcome to PyRust 0.2 (Python 3.12) help utility!\n\
-                     Pass an object to help(obj) to display its documentation.",
-                )?;
-                return Ok(Value::none());
+            for (k, v) in kwds {
+                call_args.push(ExpandedCallArg {
+                    name: Some(k),
+                    value: v,
+                });
             }
-
-            let target = &args[0];
-            let header = match target.kind() {
-                ValueKind::PyModule(m) => {
-                    format!("Help on module {}:", m.borrow().name)
-                }
-                ValueKind::PyClass(c) => {
-                    format!("Help on class {}:", c.borrow().name)
-                }
-                ValueKind::UserFunction(f) => {
-                    format!("Help on function {}:", f.name)
-                }
-                ValueKind::BuiltinFunction(name) => {
-                    format!("Help on built-in function {name}:")
-                }
-                _ => {
-                    let type_name = crate::interpreter::value_type_name_str(target);
-                    format!("Help on {type_name} object:")
-                }
-            };
-            let doc = _interp
-                .get_attr(target, "__doc__")
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned));
-            let text = match doc {
-                Some(d) if !d.is_empty() => format!("{header}\n\n{d}"),
-                _ => header,
-            };
-            call_builtin_print(_interp, &text)?;
-            Ok(Value::none())
+            _interp.call_function_expanded(help_fn, &call_args)
         }
     }
 }

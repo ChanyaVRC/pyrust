@@ -942,4 +942,29 @@ fn flags_bytes_warning_verbose_skip_first_line_quiet_inspect_help_and_pyc() {
     assert!(m_site.status.success(), "{}", stderr_str(&m_site));
     let m_site_out = stdout_str(&m_site);
     assert!(m_site_out.contains("sys.path = [") && m_site_out.contains("USER_BASE:"));
+
+    // -m pydoc prints usage with no args, documents topics/objects, and writes HTML with -w.
+    let m_pydoc_usage = run_cli_with_env(None, &["-m", "pydoc"], &[]);
+    assert!(
+        m_pydoc_usage.status.success(),
+        "{}",
+        stderr_str(&m_pydoc_usage)
+    );
+    assert!(stdout_str(&m_pydoc_usage).contains("pydoc - the Python documentation tool"));
+
+    let m_pydoc_topic = run_cli_with_env(None, &["-m", "pydoc", "ASSERTION"], &[]);
+    assert!(
+        m_pydoc_topic.status.success(),
+        "{}",
+        stderr_str(&m_pydoc_topic)
+    );
+    assert!(stdout_str(&m_pydoc_topic).contains("assert"));
+
+    let m_pydoc_obj = run_cli_with_env(None, &["-m", "pydoc", "math.sin"], &[]);
+    assert!(m_pydoc_obj.status.success(), "{}", stderr_str(&m_pydoc_obj));
+    assert!(stdout_str(&m_pydoc_obj).contains("sin"));
+
+    let m_pydoc_missing = run_cli_with_env(None, &["-m", "pydoc", "no_such_module_3255"], &[]);
+    assert_eq!(m_pydoc_missing.status.code(), Some(1));
+    assert!(stdout_str(&m_pydoc_missing).contains("No Python documentation found"));
 }
