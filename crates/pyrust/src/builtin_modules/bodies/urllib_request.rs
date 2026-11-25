@@ -43,6 +43,7 @@ const URLLIB_REQUEST_PY_EXPORTS: &[&str] = &[
     "DataHandler",
     "UnknownHandler",
     "HTTPErrorProcessor",
+    "HTTPCookieProcessor",
     "urlopen",
     "install_opener",
     "build_opener",

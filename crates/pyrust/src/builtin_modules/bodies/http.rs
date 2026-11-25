@@ -48,5 +48,6 @@ pyrust_module! {
         "client" => super::http_client::module(),
         "server" => super::http_server::module(),
         "cookies" => super::http_cookies::module(),
+        "cookiejar" => super::http_cookiejar::module(),
     }
 }
