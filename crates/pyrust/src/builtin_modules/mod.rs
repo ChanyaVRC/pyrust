@@ -632,6 +632,13 @@ pyrust_builtin_modules! {
     timeit @inject,
     opcode @inject,
     dis @inject,
+    // `codeop`, `code`, `cmd`, and `rlcompleter` (issue #3228): Python 3.12
+    // interactive interpreter, command-shell, and readline-completion stdlib
+    // modules.
+    codeop @inject,
+    code @inject,
+    cmd @inject,
+    rlcompleter @inject,
 }
 
 include!("finalization.rs");
