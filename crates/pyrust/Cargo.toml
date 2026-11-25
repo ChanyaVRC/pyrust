@@ -26,7 +26,8 @@ rusqlite = { version = "0.38", default-features = false, features = [
     "blob",
     "collation",
 ] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.1.0-pre.0"
 rustls-pemfile = "2.2"
 rustls-pki-types = "1"
 rustls-native-certs = "0.8"

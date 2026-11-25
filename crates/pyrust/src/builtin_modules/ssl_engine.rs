@@ -1,9 +1,9 @@
 //! Pure-Rust TLS & X.509 engine backing PyRust's native `ssl` and `_ssl`
 //! modules (issue #3252).
 //!
-//! Built on `rustls` (with the `ring` crypto provider — ZERO OpenSSL C
-//! dependency), `rustls-pemfile`, `webpki-roots`, `rustls-native-certs`, and
-//! `x509-parser`.
+//! Built on `rustls` (with the 100% pure-Rust `rustls-rustcrypto` crypto
+//! provider — ZERO OpenSSL C dependency, ZERO C/asm crypto), `rustls-pemfile`,
+//! `webpki-roots`, `rustls-native-certs`, and `x509-parser`.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -99,8 +99,8 @@ pub(crate) const OPENSSL_VERSION_NUMBER_VAL: i64 = 0x3000_0000;
 
 // ── Crypto provider ──────────────────────────────────────────────────────────
 
-pub(crate) fn ring_provider() -> Arc<CryptoProvider> {
-    Arc::new(rustls::crypto::ring::default_provider())
+pub(crate) fn crypto_provider() -> Arc<CryptoProvider> {
+    Arc::new(rustls_rustcrypto::provider())
 }
 
 // ── Shared native states ─────────────────────────────────────────────────────
@@ -319,7 +319,7 @@ impl SslContextState {
             ));
         }
 
-        let provider = ring_provider();
+        let provider = crypto_provider();
         let versions = self.enabled_protocol_versions(interp)?;
         let builder = ClientConfig::builder_with_provider(Arc::clone(&provider))
             .with_protocol_versions(&versions)
@@ -416,7 +416,7 @@ impl SslContextState {
             ));
         }
 
-        let provider = ring_provider();
+        let provider = crypto_provider();
         let versions = self.enabled_protocol_versions(interp)?;
         let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
             .with_protocol_versions(&versions)
