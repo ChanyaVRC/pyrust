@@ -29,6 +29,8 @@ const HTTP_CLIENT_PY_EXPORTS: &[&str] = &[
     "parse_headers",
     "HTTPResponse",
     "HTTPConnection",
+    "HTTPSConnection",
+    "_create_https_context",
     "HTTPException",
     "NotConnected",
     "InvalidURL",

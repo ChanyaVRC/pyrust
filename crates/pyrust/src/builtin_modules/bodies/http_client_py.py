@@ -1222,6 +1222,58 @@ class HTTPConnection:
             raise
 
 
+try:
+    import ssl
+except ImportError:
+    pass
+else:
+    def _create_https_context(http_version):
+        context = ssl._create_default_https_context()
+        if http_version == 11:
+            context.set_alpn_protocols(['http/1.1'])
+        return context
+
+    class HTTPSConnection(HTTPConnection):
+        """This class allows communication via SSL."""
+
+        default_port = HTTPS_PORT
+
+        def __init__(
+            self,
+            host,
+            port=None,
+            *,
+            timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+            source_address=None,
+            context=None,
+            blocksize=8192,
+        ):
+            super().__init__(
+                host,
+                port,
+                timeout,
+                source_address,
+                blocksize=blocksize,
+            )
+            if context is None:
+                context = _create_https_context(self._http_vsn)
+            self._context = context
+
+        def connect(self):
+            """Connect to a host on a given (SSL) port."""
+            super().connect()
+            if self._tunnel_host:
+                server_hostname = self._tunnel_host
+            else:
+                server_hostname = self.host
+            self.sock = self._context.wrap_socket(
+                self.sock,
+                server_hostname=server_hostname,
+            )
+
+    __all__.append("HTTPSConnection")
+
+
 class HTTPException(Exception):
     pass
 
