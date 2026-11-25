@@ -355,6 +355,26 @@ macro_rules! pyrust_builtin_modules {
                 "email.mime.image" => return email_mime_image::post_load_init(interp, module),
                 "email.mime.message" => return email_mime_message::post_load_init(interp, module),
                 "mailbox" => return mailbox::post_load_init(interp, module),
+                "pyexpat" => return pyexpat::post_load_init(interp, module),
+                "xml.parsers.expat" => return xml_parsers_expat::post_load_init(interp, module),
+                "xml.sax" => return xml_sax::post_load_init(interp, module),
+                "xml.sax.xmlreader" => return xml_sax_xmlreader::post_load_init(interp, module),
+                "xml.sax.saxutils" => return xml_sax_saxutils::post_load_init(interp, module),
+                "xml.sax.expatreader" => return xml_sax_expatreader::post_load_init(interp, module),
+                "xml.dom" => return xml_dom::post_load_init(interp, module),
+                "xml.dom.minicompat" => return xml_dom_minicompat::post_load_init(interp, module),
+                "xml.dom.xmlbuilder" => return xml_dom_xmlbuilder::post_load_init(interp, module),
+                "xml.dom.minidom" => return xml_dom_minidom::post_load_init(interp, module),
+                "xml.dom.expatbuilder" => {
+                    return xml_dom_expatbuilder::post_load_init(interp, module);
+                }
+                "xml.dom.pulldom" => return xml_dom_pulldom::post_load_init(interp, module),
+                "xml.etree.ElementInclude" => {
+                    return xml_etree_elementinclude::post_load_init(interp, module);
+                }
+                "xml.etree.cElementTree" => {
+                    return xml_etree_celementtree::post_load_init(interp, module);
+                }
                 _ => {}
             }
             if encodings_codecs::post_load_init(name, interp, module)? {
@@ -765,11 +785,32 @@ pyrust_builtin_modules! {
     email @inject,
     mailbox,
     mimetypes @inject,
-    // `xml`, `xml.etree`, `xml.etree.ElementPath`, and `xml.etree.ElementTree`
-    // (issue #3210): Python 3.12 XML ElementTree API, streaming XML 1.0 parser
-    // and serializer, XPath subset evaluator, and C14N 2.0 canonicalizer.
+    // `pyexpat`, `xml.parsers.expat`, `xml.sax.*`, `xml.dom.*`, and
+    // `xml.etree.*` (issues #3210, #3260): 100% pure-Rust streaming XML/Expat
+    // parser, SAX2 drivers/utilities, W3C DOM (minidom/pulldom/expatbuilder),
+    // XInclude processor, and ElementTree.
+    "pyexpat.errors" as pyexpat_errors,
+    "pyexpat.model" as pyexpat_model,
+    pyexpat,
+    "xml.parsers.expat" as xml_parsers_expat,
+    "xml.parsers" as xml_parsers,
+    "xml.sax.handler" as xml_sax_handler,
+    "xml.sax.xmlreader" as xml_sax_xmlreader,
+    "xml.sax.saxutils" as xml_sax_saxutils,
+    "xml.sax.expatreader" as xml_sax_expatreader,
+    "xml.sax" as xml_sax,
+    "xml.dom.minicompat" as xml_dom_minicompat,
+    "xml.dom.domreg" as xml_dom_domreg,
+    "xml.dom.NodeFilter" as xml_dom_nodefilter,
+    "xml.dom.xmlbuilder" as xml_dom_xmlbuilder,
+    "xml.dom.minidom" as xml_dom_minidom,
+    "xml.dom.expatbuilder" as xml_dom_expatbuilder,
+    "xml.dom.pulldom" as xml_dom_pulldom,
+    "xml.dom" as xml_dom,
     "xml.etree.ElementPath" as xml_etree_elementpath @inject,
     "xml.etree.ElementTree" as xml_etree_elementtree @inject,
+    "xml.etree.ElementInclude" as xml_etree_elementinclude,
+    "xml.etree.cElementTree" as xml_etree_celementtree,
     "xml.etree" as xml_etree,
     xml,
     // `sqlite3` and `sqlite3.dbapi2` (issue #3225): Python 3.12 DB-API 2.0

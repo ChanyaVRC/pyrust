@@ -114,9 +114,28 @@ import wsgiref.simple_server
 import wsgiref.types
 import wsgiref.util
 import wsgiref.validate
+import pyexpat.errors
+import pyexpat.model
+import xml.dom
+import xml.dom.NodeFilter
+import xml.dom.domreg
+import xml.dom.expatbuilder
+import xml.dom.minicompat
+import xml.dom.minidom
+import xml.dom.pulldom
+import xml.dom.xmlbuilder
 import xml.etree
+import xml.etree.ElementInclude
 import xml.etree.ElementPath
 import xml.etree.ElementTree
+import xml.etree.cElementTree
+import xml.parsers
+import xml.parsers.expat
+import xml.sax
+import xml.sax.expatreader
+import xml.sax.handler
+import xml.sax.saxutils
+import xml.sax.xmlreader
 import xmlrpc.client
 import xmlrpc.server
 import __future__
@@ -132,7 +151,7 @@ names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_
          "filecmp", "fileinput", "fnmatch", "fractions", "functools", "gc", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword",
          "linecache", "locale", "logging", "lzma", "mailbox", "marshal", "math", "mimetypes", "mmap", "modulefinder", "netrc", "ntpath", "nturl2path", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle",
-         "pickletools", "pkgutil", "platform", "plistlib", "posixpath", "pprint", "profile", "pstats", "py_compile", "pyclbr", "pydoc", "pydoc_data", "queue", "quopri", "random", "re", "reprlib", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shelve", "shlex", "shutil",
+         "pickletools", "pkgutil", "platform", "plistlib", "posixpath", "pprint", "profile", "pstats", "py_compile", "pyclbr", "pydoc", "pydoc_data", "pyexpat", "queue", "quopri", "random", "re", "reprlib", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shelve", "shlex", "shutil",
          "signal", "site", "socket", "socketserver", "sqlite3", "ssl", "stat", "statistics", "string", "stringprep", "subprocess", "symtable", "sys", "sysconfig", "tabnanny", "tarfile",
          "tempfile", "textwrap", "this", "threading", "time", "timeit", "token", "tokenize", "tomllib", "trace", "traceback", "tracemalloc",
          "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "wave", "weakref", "webbrowser", "wsgiref",
@@ -224,9 +243,28 @@ for name, module in [("os.path", os.path),
                      ("wsgiref.types", wsgiref.types),
                      ("wsgiref.util", wsgiref.util),
                      ("wsgiref.validate", wsgiref.validate),
+                     ("pyexpat.errors", pyexpat.errors),
+                     ("pyexpat.model", pyexpat.model),
+                     ("xml.dom", xml.dom),
+                     ("xml.dom.NodeFilter", xml.dom.NodeFilter),
+                     ("xml.dom.domreg", xml.dom.domreg),
+                     ("xml.dom.expatbuilder", xml.dom.expatbuilder),
+                     ("xml.dom.minicompat", xml.dom.minicompat),
+                     ("xml.dom.minidom", xml.dom.minidom),
+                     ("xml.dom.pulldom", xml.dom.pulldom),
+                     ("xml.dom.xmlbuilder", xml.dom.xmlbuilder),
                      ("xml.etree", xml.etree),
+                     ("xml.etree.ElementInclude", xml.etree.ElementInclude),
                      ("xml.etree.ElementPath", xml.etree.ElementPath),
                      ("xml.etree.ElementTree", xml.etree.ElementTree),
+                     ("xml.etree.cElementTree", xml.etree.cElementTree),
+                     ("xml.parsers", xml.parsers),
+                     ("xml.parsers.expat", xml.parsers.expat),
+                     ("xml.sax", xml.sax),
+                     ("xml.sax.expatreader", xml.sax.expatreader),
+                     ("xml.sax.handler", xml.sax.handler),
+                     ("xml.sax.saxutils", xml.sax.saxutils),
+                     ("xml.sax.xmlreader", xml.sax.xmlreader),
                      ("xmlrpc.client", xmlrpc.client),
                      ("xmlrpc.server", xmlrpc.server),
                      ("__future__", __future__)]:
