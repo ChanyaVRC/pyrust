@@ -142,6 +142,13 @@ impl ExcClasses {
     }
 }
 
+/// One registered `atexit` callback entry: callable plus its bound positional
+/// and keyword arguments (issue #3209).
+pub(crate) struct AtexitCallback {
+    pub(crate) func: Value,
+    pub(crate) args: Vec<ExpandedCallArg>,
+}
+
 /// Cold, rarely-used interpreter metadata, caches, and diagnostic/guard tables
 /// extracted behind a single `Box<InterpreterColdState>` (issue #3162).
 ///
@@ -272,6 +279,10 @@ pub(crate) struct InterpreterColdState {
     /// cold frame inspection (`warnings.warn(stacklevel=...)`) can recover the
     /// exact caller line without changing `VmFrameView` or `Interpreter` size.
     pub(crate) call_site_lines: Vec<(*mut Value, u32)>,
+    /// Shared per-interpreter `atexit` callback registry (issue #3209).
+    /// Cloned by `Rc` into filesystem-import child interpreters so callbacks
+    /// registered in imported modules execute on top-level interpreter shutdown.
+    pub(crate) atexit_state: Rc<RefCell<Vec<Option<AtexitCallback>>>>,
 }
 
 impl Default for InterpreterColdState {
@@ -304,6 +315,7 @@ impl Default for InterpreterColdState {
             push_exc_ctx_marks: Vec::new(),
             inlined_comp_escaped_span: None,
             call_site_lines: Vec::new(),
+            atexit_state: Rc::new(RefCell::new(Vec::new())),
         }
     }
 }

@@ -330,6 +330,24 @@ where
     Ok(())
 }
 
+fn finish_cli_interpreter(interp: &mut Interpreter, result: Result<()>) -> Result<()> {
+    if let Err(err) = result {
+        if !interp.cold.atexit_state.borrow().is_empty() {
+            match err.kind() {
+                crate::error::PyErrorKind::Runtime(msg) => eprintln!("{msg}"),
+                other => eprintln!("{other}"),
+            }
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+            interp.run_atexit_callbacks();
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+            std::process::exit(1);
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
 fn run_file(path: &str, script_args: &[String]) -> Result<()> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| PyError::runtime(format!("failed to read '{path}': {e}")))?;
@@ -339,7 +357,8 @@ fn run_file(path: &str, script_args: &[String]) -> Result<()> {
 
     run_on_interpreter_thread(move || {
         let mut interp = Interpreter::with_script_path_and_args(&path_owned, &script_args);
-        interp.exec_program_with_linenos(&program, &linenos, &src, false)
+        let res = interp.exec_program_with_linenos(&program, &linenos, &src, false);
+        finish_cli_interpreter(&mut interp, res)
     })
 }
 
@@ -350,7 +369,8 @@ fn run_command(command: &str, script_args: &[String]) -> Result<()> {
 
     run_on_interpreter_thread(move || {
         let mut interp = Interpreter::with_command_args(&script_args);
-        interp.exec_program_with_linenos(&program, &linenos, &src, false)
+        let res = interp.exec_program_with_linenos(&program, &linenos, &src, false);
+        finish_cli_interpreter(&mut interp, res)
     })
 }
 
@@ -364,7 +384,8 @@ fn run_stdin(script_args: &[String]) -> Result<()> {
 
     run_on_interpreter_thread(move || {
         let mut interp = Interpreter::with_stdin_args(&script_args);
-        interp.exec_program_with_linenos(&program, &linenos, &src, false)
+        let res = interp.exec_program_with_linenos(&program, &linenos, &src, false);
+        finish_cli_interpreter(&mut interp, res)
     })
 }
 
@@ -375,7 +396,8 @@ fn run_module(module: &str, script_args: &[String], prog: &str) -> Result<()> {
 
     run_on_interpreter_thread(move || {
         let mut interp = Interpreter::with_module_args(&script_args);
-        interp.run_module_as_main(&module_owned, &prog_owned)
+        let res = interp.run_module_as_main(&module_owned, &prog_owned);
+        finish_cli_interpreter(&mut interp, res)
     })
 }
 
@@ -479,6 +501,7 @@ fn run_repl() -> Result<()> {
                     }
                 }
             }
+            interpreter.run_atexit_callbacks();
         })
         .expect("failed to spawn REPL thread")
         .join()

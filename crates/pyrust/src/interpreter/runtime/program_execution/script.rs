@@ -147,9 +147,62 @@ impl Interpreter {
         interp
     }
 
+    /// Run all registered `atexit` callbacks in LIFO order, catching and
+    /// reporting any exceptions to `sys.stderr` without aborting subsequent
+    /// callbacks, and clearing the callback table afterward (matching CPython
+    /// 3.12's `atexit_callfuncs`).
+    pub fn run_atexit_callbacks(&mut self) {
+        if self.cold.atexit_state.borrow().is_empty() {
+            return;
+        }
+        let mut index = self.cold.atexit_state.borrow().len();
+        while index > 0 {
+            index -= 1;
+            let maybe_cb = {
+                let mut state = self.cold.atexit_state.borrow_mut();
+                if index < state.len() {
+                    state[index].take()
+                } else {
+                    None
+                }
+            };
+            if let Some(cb) = maybe_cb
+                && let Err(err) = self.call_function_expanded(cb.func.clone(), &cb.args)
+            {
+                let _ = pyrust_core::take_captured_error_frames();
+                let func_repr = crate::interpreter::render_value_repr(self, &cb.func)
+                    .unwrap_or_else(|_| cb.func.repr_raw());
+                let err_line = self.format_error_line(&err);
+                let msg =
+                    format!("Exception ignored in atexit callback: {func_repr}\n{err_line}\n");
+                let wrote = if let Ok(sys_mod) = self.load_module("sys")
+                    && let Ok(stream) = self.get_attr(&sys_mod, "stderr")
+                    && !stream.is_none()
+                    && let Ok(write_fn) = self.get_attr(&stream, "write")
+                {
+                    self.call_function_expanded(
+                        write_fn,
+                        &[crate::interpreter::ExpandedCallArg {
+                            name: None,
+                            value: Value::string(msg.as_str()),
+                        }],
+                    )
+                    .is_ok()
+                } else {
+                    false
+                };
+                if !wrote {
+                    eprint!("{msg}");
+                }
+            }
+        }
+        self.cold.atexit_state.borrow_mut().clear();
+    }
+
     /// Exit the current process if `err` is an uncaught `SystemExit` instance,
-    /// matching CPython's exit-code extraction rules.
-    fn exit_if_system_exit(err: &PyError) {
+    /// matching CPython's exit-code extraction rules and running `atexit`
+    /// callbacks before termination.
+    fn exit_if_system_exit(&mut self, err: &PyError) {
         if let pyrust_core::PyErrorKind::Raised(exc) = err.kind()
             && let ValueKind::PyInstance(inst) = exc.kind()
         {
@@ -167,6 +220,7 @@ impl Interpreter {
                     },
                     None => 0,
                 };
+                self.run_atexit_callbacks();
                 let _ = std::io::Write::flush(&mut std::io::stdout());
                 let _ = std::io::Write::flush(&mut std::io::stderr());
                 std::process::exit(code);
@@ -189,7 +243,7 @@ impl Interpreter {
                 err,
                 mut frames,
             )) => {
-                Self::exit_if_system_exit(&err);
+                self.exit_if_system_exit(&err);
                 for fi in &mut frames {
                     if fi.source_line.is_none() {
                         fi.source_line = resolve_frame_source_line(&fi.filename, fi.lineno, "", "");
@@ -262,7 +316,9 @@ impl Interpreter {
         };
         // Intercept SystemExit so finally/with handlers run before the process exits.
         if let Err(err) = &result {
-            Self::exit_if_system_exit(err);
+            self.exit_if_system_exit(err);
+        } else if !repl_mode {
+            self.run_atexit_callbacks();
         }
         result
     }
@@ -536,7 +592,7 @@ impl Interpreter {
 
     /// Format the final exception summary line (e.g. `ValueError: boom`) for
     /// uncaught tracebacks.
-    fn format_error_line(&mut self, e: &PyError) -> String {
+    pub(crate) fn format_error_line(&mut self, e: &PyError) -> String {
         match e.kind() {
             pyrust_core::PyErrorKind::Lex(s) => format!("Lex error: {s}"),
             pyrust_core::PyErrorKind::Parse(s) => format!("Parse error: {s}"),

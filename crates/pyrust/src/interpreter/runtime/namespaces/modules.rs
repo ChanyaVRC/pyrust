@@ -721,6 +721,7 @@ impl Interpreter {
                     script_argv: self.cold.script_argv.clone(),
                     module_cache: Rc::clone(&self.cold.module_cache),
                     bootstrap_module_registry: self.cold.bootstrap_module_registry.clone(),
+                    atexit_state: Rc::clone(&self.cold.atexit_state),
                     ..Default::default()
                 }),
                 ..Default::default()
