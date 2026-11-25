@@ -272,6 +272,20 @@ macro_rules! pyrust_builtin_modules {
             interp: &mut crate::interpreter::Interpreter,
             module: &std::rc::Rc<std::cell::RefCell<crate::value::PyModule>>,
         ) -> crate::error::Result<()> {
+            if name == "sys" {
+                let zipimport_mod = interp.load_module("zipimport")?;
+                if let Ok(zipimporter_cls) = interp.get_attr(&zipimport_mod, "zipimporter")
+                    && let Some(path_hooks) = module.borrow().get_attr_value("path_hooks")
+                {
+                    path_hooks.list_push(zipimporter_cls)?;
+                }
+                return Ok(());
+            }
+            if name == "py_compile" {
+                let module_val = Value::py_module(std::rc::Rc::clone(module));
+                py_compile::prepare_module(interp, &module_val);
+                return Ok(());
+            }
             if name == "site" {
                 let module_val = Value::py_module(std::rc::Rc::clone(module));
                 return site::post_load_init(interp, &module_val);
@@ -821,6 +835,18 @@ pyrust_builtin_modules! {
     "json.encoder" as json_encoder,
     "json.tool" as json_tool,
     "sqlite3.dump" as sqlite3_dump,
+    // `_symtable`, `symtable`, `py_compile`, `compileall`, `zipimport`, `zipapp`,
+    // `modulefinder`, `pyclbr`, and `tabnanny` (issue #3249): 100% native-Rust
+    // Python 3.12 compiler, packaging, and source-analysis modules (no `@inject`).
+    _symtable,
+    symtable,
+    py_compile,
+    compileall,
+    zipimport,
+    zipapp,
+    modulefinder,
+    pyclbr,
+    tabnanny,
 }
 
 include!("finalization.rs");

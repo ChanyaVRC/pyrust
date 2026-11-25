@@ -1052,13 +1052,13 @@ impl<S: ByteSource> MarshalReader<S> {
     }
 }
 
-fn marshal_dumps_impl(val: &Value, version: i64) -> Result<Vec<u8>> {
+pub(crate) fn marshal_dumps_impl(val: &Value, version: i64) -> Result<Vec<u8>> {
     let mut writer = MarshalWriter::new(version);
     writer.write_object(val)?;
     Ok(writer.buf)
 }
 
-fn marshal_loads_impl(interp: &mut Interpreter, data: &[u8]) -> Result<Value> {
+pub(crate) fn marshal_loads_impl(interp: &mut Interpreter, data: &[u8]) -> Result<Value> {
     let mut reader = MarshalReader::new(SliceSource { data, pos: 0 });
     reader.read_object_required(interp)
 }
