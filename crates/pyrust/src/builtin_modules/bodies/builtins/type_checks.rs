@@ -264,7 +264,27 @@ fn isinstance_check(
             return protocol_structural_isinstance(obj, cls_rc);
         }
     }
-    Ok(isinstance_single(obj, cls))
+    if isinstance_single(obj, cls) {
+        return Ok(true);
+    }
+    // CPython's `PyObject_IsInstance` also checks `obj.__class__` when it
+    // differs from `type(obj)` (for example `unittest.mock.Mock(spec=Cls)`
+    // reports `Cls` via `__getattribute__`/`__class__`). Only consult
+    // `__class__` on the miss path for instances whose class defines a custom
+    // `__getattribute__` or `__class__` descriptor so ordinary instances pay
+    // zero extra cost.
+    if let ValueKind::PyInstance(inst) = obj.kind() {
+        let actual_cls = Rc::clone(&inst.borrow().class);
+        if (crate::interpreter::lookup_class_attr(&actual_cls, "__getattribute__").is_some()
+            || crate::interpreter::lookup_class_attr(&actual_cls, "__class__").is_some())
+            && let Ok(dynamic_cls) = interp.get_attr(obj, "__class__")
+            && !matches!(dynamic_cls.kind(), ValueKind::PyClass(c) if Rc::ptr_eq(c, &actual_cls))
+            && is_class_like(&dynamic_cls)
+        {
+            return issubclass_check(fn_name, &dynamic_cls, cls, interp);
+        }
+    }
+    Ok(false)
 }
 
 /// Structural `isinstance(obj, P)` for a `typing.Protocol` subclass `cls_rc`

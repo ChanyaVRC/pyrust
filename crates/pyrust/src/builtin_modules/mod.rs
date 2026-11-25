@@ -616,6 +616,13 @@ pyrust_builtin_modules! {
     // `sqlite3.rs` plus the full public surface in `sqlite3_py.py`.
     sqlite3 @inject,
     "sqlite3.dbapi2" as sqlite3_dbapi2 @inject,
+    // `unittest.mock` and `doctest` (issue #3222): Python 3.12 mocking/patching
+    // library (`Mock`, `MagicMock`, `AsyncMock`, `PropertyMock`, `patch`,
+    // `create_autospec`, `mock_open`, `seal`) and docstring example runner
+    // (`DocTestParser`, `DocTestFinder`, `DocTestRunner`, `OutputChecker`,
+    // `testmod`, `testfile`, `DocTestSuite`, `DocFileSuite`).
+    "unittest.mock" as unittest_mock @inject,
+    doctest @inject,
 }
 
 include!("finalization.rs");

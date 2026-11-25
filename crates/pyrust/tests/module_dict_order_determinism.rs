@@ -44,6 +44,7 @@ import http.server
 import importlib.machinery
 import importlib.util
 import sqlite3.dbapi2
+import unittest.mock
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -54,7 +55,7 @@ import xml.etree.ElementTree
 import __future__
 names = ["abc", "argparse", "ast", "asyncio", "atexit", "base64", "binascii", "bisect", "builtins",
          "bz2", "calendar", "cmath", "codecs", "collections", "configparser", "contextlib", "contextvars",
-         "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "email", "enum", "errno",
+         "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "doctest", "email", "enum", "errno",
          "fnmatch", "fractions", "functools", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json",
          "logging", "lzma", "math", "mimetypes", "numbers", "operator", "os", "pathlib", "pickle",
@@ -80,6 +81,7 @@ for name, module in [("os.path", os.path),
                      ("importlib.machinery", importlib.machinery),
                      ("importlib.util", importlib.util),
                      ("sqlite3.dbapi2", sqlite3.dbapi2),
+                     ("unittest.mock", unittest.mock),
                      ("urllib.error", urllib.error),
                      ("urllib.parse", urllib.parse),
                      ("urllib.request", urllib.request),
