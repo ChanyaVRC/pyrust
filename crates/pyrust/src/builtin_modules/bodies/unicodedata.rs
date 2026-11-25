@@ -175,6 +175,11 @@ fn check_arity_2(fn_short: &str, args: &[ExpandedCallArg]) -> Result<()> {
     Ok(())
 }
 
+/// Normalize `s` using Unicode NFKC (shared with `encodings.idna`).
+pub(crate) fn normalize_nfkc(s: &str) -> String {
+    normalize::normalize(NormForm::Nfkc, s)
+}
+
 /// Return the official Unicode 15.0.0 character name for `cp`, if any.
 pub(crate) fn unicode15_name(cp: u32) -> Option<String> {
     let rec = lookup_record(cp);
