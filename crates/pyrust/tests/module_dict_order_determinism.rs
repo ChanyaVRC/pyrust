@@ -41,11 +41,11 @@ names = ["abc", "argparse", "ast", "asyncio", "base64", "binascii", "bisect", "b
          "cmath", "codecs", "collections", "configparser", "contextlib", "contextvars", "copy", "csv",
          "dataclasses", "decimal", "difflib", "enum", "errno", "fnmatch", "fractions", "functools",
          "glob", "gzip", "hashlib", "heapq", "hmac", "html", "importlib", "inspect", "io",
-         "itertools", "json", "logging", "math", "numbers", "operator", "os", "pathlib", "pickle",
-         "pprint", "random", "re", "secrets", "shlex", "shutil", "statistics", "string",
-         "subprocess", "sys", "tarfile", "tempfile", "textwrap", "time", "token", "tokenize",
-         "tomllib", "traceback", "types", "typing", "unicodedata", "unittest", "urllib", "uuid",
-         "warnings", "weakref", "zipfile", "zlib"]
+         "ipaddress", "itertools", "json", "logging", "math", "numbers", "operator", "os",
+         "pathlib", "pickle", "pprint", "random", "re", "secrets", "selectors", "shlex", "shutil",
+         "socket", "statistics", "string", "subprocess", "sys", "tarfile", "tempfile", "textwrap",
+         "time", "token", "tokenize", "tomllib", "traceback", "types", "typing", "unicodedata",
+         "unittest", "urllib", "uuid", "warnings", "weakref", "zipfile", "zlib"]
 for name in names:
     print(name, list(vars(__import__(name))))
 for name, module in [("os.path", os.path),

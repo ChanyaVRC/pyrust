@@ -555,6 +555,14 @@ pyrust_builtin_modules! {
     token @inject,
     tokenize @inject,
     ast @inject,
+    // `ipaddress`, `socket`, and `selectors` (issue #3205): Python 3.12
+    // networking foundation modules — IPv4/IPv6 address/network/interface
+    // arithmetic in `ipaddress_py.py`, Rust `std::net`-backed `socket` in
+    // `socket.rs`/`socket_py.py`, and OS-backed I/O multiplexing in
+    // `selectors.rs`/`selectors_py.py`.
+    ipaddress @inject,
+    socket @inject,
+    selectors @inject,
 }
 
 include!("finalization.rs");
