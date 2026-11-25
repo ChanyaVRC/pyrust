@@ -44,6 +44,9 @@ import http.server
 import importlib.machinery
 import importlib.util
 import urllib.parse
+import xml.etree
+import xml.etree.ElementPath
+import xml.etree.ElementTree
 import __future__
 names = ["abc", "argparse", "ast", "asyncio", "atexit", "base64", "binascii", "bisect", "builtins",
          "calendar", "cmath", "codecs", "collections", "configparser", "contextlib", "contextvars",
@@ -55,7 +58,7 @@ names = ["abc", "argparse", "ast", "asyncio", "atexit", "base64", "binascii", "b
          "signal", "socket", "stat", "statistics", "string", "subprocess", "sys", "tarfile",
          "tempfile", "textwrap", "threading", "time", "token", "tokenize", "tomllib", "traceback",
          "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref",
-         "zipfile", "zlib"]
+         "xml", "zipfile", "zlib"]
 for name in names:
     print(name, list(vars(__import__(name))))
 for name, module in [("os.path", os.path),
@@ -73,6 +76,9 @@ for name, module in [("os.path", os.path),
                      ("importlib.machinery", importlib.machinery),
                      ("importlib.util", importlib.util),
                      ("urllib.parse", urllib.parse),
+                     ("xml.etree", xml.etree),
+                     ("xml.etree.ElementPath", xml.etree.ElementPath),
+                     ("xml.etree.ElementTree", xml.etree.ElementTree),
                      ("__future__", __future__)]:
     print(name, list(vars(module)))
 print(list(math.__dict__))
