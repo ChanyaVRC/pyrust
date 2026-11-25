@@ -447,6 +447,10 @@ class GzipFile(_io.BufferedIOBase):
     def seekable(self):
         return True
 
+    def fileno(self):
+        self._check_not_closed()
+        return self.fileobj.fileno()
+
     def write(self, data):
         self._check_not_closed()
         if self.mode != WRITE:
@@ -636,6 +640,9 @@ class _TextGzipWrapper(_io.TextIOBase):
 
     def seekable(self):
         return self.buffer.seekable()
+
+    def fileno(self):
+        return self.buffer.fileno()
 
     def _translate_read(self, text):
         if self._newline is None:

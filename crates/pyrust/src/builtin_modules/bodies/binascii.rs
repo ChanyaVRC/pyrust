@@ -736,13 +736,13 @@ fn encode_qp(data: &[u8], quotetabs: bool, istext: bool, header: bool) -> Vec<u8
     while i < n {
         let c = data[i];
         if istext && c == b'\n' {
-            out.push(b'\n');
+            out.extend_from_slice(eol);
             linelen = 0;
             i += 1;
             continue;
         }
         if istext && c == b'\r' && i + 1 < n && data[i + 1] == b'\n' {
-            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(eol);
             linelen = 0;
             i += 2;
             continue;
@@ -753,7 +753,7 @@ fn encode_qp(data: &[u8], quotetabs: bool, istext: bool, header: bool) -> Vec<u8
                 && (data[i + 1] == b'\n'
                     || (data[i + 1] == b'\r' && i + 2 < n && data[i + 2] == b'\n')));
 
-        if header && c == b' ' {
+        if header && c == b' ' && !quotetabs && i + 1 < n {
             if linelen >= QP_MAXLINESIZE - 1 && !next_is_eol {
                 out.push(b'=');
                 out.extend_from_slice(eol);
@@ -768,7 +768,7 @@ fn encode_qp(data: &[u8], quotetabs: bool, istext: bool, header: bool) -> Vec<u8
         let needs_quote = c > 126
             || c == b'='
             || (header && c == b'_')
-            || (c < 32 && !(c == b'\t' && !quotetabs))
+            || (c < 32 && !(c == b'\t' && !quotetabs) && !(istext && c == b'\r'))
             || ((c == b' ' || c == b'\t') && (quotetabs || next_is_eol))
             || (c == b'.' && linelen == 0 && next_is_eol);
 
@@ -804,7 +804,15 @@ fn decode_qp(data: &[u8], header: bool) -> Vec<u8> {
     while i < n {
         let c = data[i];
         if c == b'=' {
-            if i + 1 < n && data[i + 1] == b'\n' {
+            if i + 1 == n {
+                break;
+            }
+            if data[i + 1] == b'=' {
+                out.push(b'=');
+                i += 2;
+                continue;
+            }
+            if data[i + 1] == b'\n' {
                 i += 2;
                 continue;
             }
