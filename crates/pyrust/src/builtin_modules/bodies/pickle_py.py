@@ -4,6 +4,15 @@ Pure-Python implementation of Python 3.12's ``pickle`` module (issue #3188),
 wire-compatible with CPython 3.12 across protocols 0 through 5.
 """
 
+from copyreg import (
+    _extension_cache,
+    _extension_registry,
+    _inverted_registry,
+    _reconstructor as _copyreg_reconstructor,
+    __newobj__ as _copyreg_newobj,
+    __newobj_ex__ as _copyreg_newobj_ex,
+    dispatch_table as _dispatch_table,
+)
 from functools import partial
 import io
 from itertools import islice
@@ -518,8 +527,8 @@ _REVERSE_NAME_MAPPING[("builtins", "ModuleNotFoundError")] = ("exceptions", "Imp
 
 
 # ---------------------------------------------------------------------------
-# Built-in fallback helpers (for _codecs.encode and copyreg helpers when
-# _codecs / copyreg are not registered as standalone stdlib modules)
+# Built-in fallback helpers (for _codecs.encode and native object.__reduce__
+# helpers whose __module__ is None)
 # ---------------------------------------------------------------------------
 
 
@@ -530,39 +539,6 @@ def _codecs_encode(obj, encoding="utf-8", errors="strict"):
 _codecs_encode.__module__ = "_codecs"
 _codecs_encode.__name__ = "encode"
 _codecs_encode.__qualname__ = "encode"
-
-
-def _copyreg_reconstructor(cls, base, state):
-    if base is object:
-        obj = object.__new__(cls)
-    else:
-        obj = base.__new__(cls, state)
-        if base.__init__ != object.__init__:
-            base.__init__(obj, state)
-    return obj
-
-
-_copyreg_reconstructor.__module__ = "copyreg"
-_copyreg_reconstructor.__name__ = "_reconstructor"
-_copyreg_reconstructor.__qualname__ = "_reconstructor"
-
-
-def _copyreg_newobj(cls, *args):
-    return cls.__new__(cls, *args)
-
-
-_copyreg_newobj.__module__ = "copyreg"
-_copyreg_newobj.__name__ = "__newobj__"
-_copyreg_newobj.__qualname__ = "__newobj__"
-
-
-def _copyreg_newobj_ex(cls, args, kwargs):
-    return cls.__new__(cls, *args, **kwargs)
-
-
-_copyreg_newobj_ex.__module__ = "copyreg"
-_copyreg_newobj_ex.__name__ = "__newobj_ex__"
-_copyreg_newobj_ex.__qualname__ = "__newobj_ex__"
 
 
 # Detect the native copyreg._reconstructor / copyreg.__newobj__ returned by
@@ -590,12 +566,6 @@ _SYNTHETIC_GLOBAL_NAMES = {
     id(_NATIVE_COPYREG_RECONSTRUCTOR): ("copyreg", "_reconstructor"),
     id(_NATIVE_COPYREG_NEWOBJ): ("copyreg", "__newobj__"),
 }
-
-# Extension registry stubs (matching copyreg's extension tables)
-_extension_registry = {}
-_inverted_registry = {}
-_extension_cache = {}
-_dispatch_table = {}
 
 
 # ---------------------------------------------------------------------------
