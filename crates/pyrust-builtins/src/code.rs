@@ -10,8 +10,9 @@
 //! (issues #1959, #2171, #2185).
 
 use std::any::Any;
+use std::rc::Rc;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, Value};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, ValueKind, builtin_ops_is};
 
 // CPython code-object flag bits (subset that pyrust can determine).
 pub const CO_OPTIMIZED: i64 = 0x0001;
@@ -68,6 +69,9 @@ pub struct CodeState {
     /// `co_cellvars` — a tuple of the cell-variable name strings (locals
     /// captured by a nested scope), in CPython's sorted order.
     pub cellvars: Value,
+    /// Optional opaque handle to the underlying compiled `FnCode` (cold
+    /// introspection only; used by `dis` to read real bytecode instructions).
+    pub raw_code: Option<Rc<dyn Any>>,
 }
 
 pub struct CodeOps;
@@ -141,6 +145,7 @@ pub struct CodeBuild {
     pub names: Vec<Value>,
     pub freevars: Vec<Value>,
     pub cellvars: Vec<Value>,
+    pub raw_code: Option<Rc<dyn Any>>,
 }
 
 impl CodeBuild {
@@ -163,9 +168,23 @@ impl CodeBuild {
             names: Value::tuple(self.names),
             freevars: Value::tuple(self.freevars),
             cellvars: Value::tuple(self.cellvars),
+            raw_code: self.raw_code,
         });
         Value::builtin_object(CODE_OPS, state)
     }
+}
+
+/// Inspect the opaque `raw_code` handle attached to a `code` object, if any.
+pub fn with_raw_code<R>(value: &Value, f: impl FnOnce(&Rc<dyn Any>) -> R) -> Option<R> {
+    if let ValueKind::BuiltinObject { ops, state } = value.kind()
+        && builtin_ops_is::<CodeOps>(ops)
+    {
+        let borrow = state.borrow();
+        let cs = borrow.downcast_ref::<CodeState>()?;
+        let raw = cs.raw_code.as_ref()?;
+        return Some(f(raw));
+    }
+    None
 }
 
 /// Construct a minimal `code` object value carrying only the name/argcount/
@@ -206,6 +225,7 @@ pub fn code_with_loc(
         names: Vec::new(),
         freevars: Vec::new(),
         cellvars: Vec::new(),
+        raw_code: None,
     }
     .build()
 }

@@ -4,9 +4,15 @@ struct FilesystemModuleTarget {
 }
 
 /// Resolved execution target for `pyrust -m <module>`.
-pub(crate) struct MainModuleTarget {
-    pub(crate) file_path: PathBuf,
-    pub(crate) package_name: String,
+pub(crate) enum MainModuleTarget {
+    File {
+        file_path: PathBuf,
+        package_name: String,
+    },
+    Builtin {
+        virtual_path: String,
+        source: &'static str,
+    },
 }
 
 /// Failure modes while resolving `pyrust -m <module>`.
@@ -835,6 +841,16 @@ impl Interpreter {
             )));
         }
         if crate::builtin_modules::load_builtin_module(module_name).is_some() {
+            if let Some(source) = match module_name {
+                "timeit" => Some("import sys, timeit\nsys.exit(timeit.main())\n"),
+                "dis" => Some("import dis\ndis.main()\n"),
+                _ => None,
+            } {
+                return Ok(MainModuleTarget::Builtin {
+                    virtual_path: format!("<frozen {module_name}>"),
+                    source,
+                });
+            }
             return Err(MainModuleResolveError::Message(format!(
                 "No code object available for {module_name}"
             )));
@@ -881,10 +897,12 @@ impl Interpreter {
                     ))
                 })?;
             match find_filesystem_module(&pkg_dirs, "__main__") {
-                Some(main_target) if main_target.package_dir.is_none() => Ok(MainModuleTarget {
-                    file_path: main_target.file_path,
-                    package_name: pkg_name.to_string(),
-                }),
+                Some(main_target) if main_target.package_dir.is_none() => {
+                    Ok(MainModuleTarget::File {
+                        file_path: main_target.file_path,
+                        package_name: pkg_name.to_string(),
+                    })
+                }
                 Some(_) => Err(MainModuleResolveError::Message(format!(
                     "Cannot execute package '{pkg_name}.__main__'"
                 ))),
@@ -920,7 +938,7 @@ impl Interpreter {
             if target.package_dir.is_some() {
                 resolve_package_main(self, module_name)
             } else {
-                Ok(MainModuleTarget {
+                Ok(MainModuleTarget::File {
                     file_path: target.file_path,
                     package_name: parent_name.to_string(),
                 })
@@ -935,7 +953,7 @@ impl Interpreter {
             if target.package_dir.is_some() {
                 resolve_package_main(self, module_name)
             } else {
-                Ok(MainModuleTarget {
+                Ok(MainModuleTarget::File {
                     file_path: target.file_path,
                     package_name: String::new(),
                 })

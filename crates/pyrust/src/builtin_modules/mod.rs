@@ -623,6 +623,15 @@ pyrust_builtin_modules! {
     // `testmod`, `testfile`, `DocTestSuite`, `DocFileSuite`).
     "unittest.mock" as unittest_mock @inject,
     doctest @inject,
+    // `timeit`, `opcode`, and `dis` (issue #3227): Python 3.12 benchmarking
+    // (`Timer`, `timeit`, `repeat`, `main`), Python 3.12 bytecode opcode
+    // metadata and `stack_effect`, and bytecode disassembly (`Instruction`,
+    // `Positions`, `Bytecode`, `dis`, `distb`, `disassemble`,
+    // `get_instructions`, `show_code`, `code_info`, `pretty_flags`,
+    // `findlabels`, `findlinestarts`).
+    timeit @inject,
+    opcode @inject,
+    dis @inject,
 }
 
 include!("finalization.rs");

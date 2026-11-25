@@ -213,6 +213,9 @@ impl Interpreter {
             names,
             freevars,
             cellvars,
+            raw_code: fncode
+                .as_ref()
+                .map(|c| Rc::clone(c) as Rc<dyn std::any::Any>),
         }
         .build();
         if cacheable && let Some(fc) = fncode.as_ref() {

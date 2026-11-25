@@ -220,8 +220,13 @@ impl Compiler {
             &inner_index_rc,
             inner_code.own_cell_slots(),
         ));
-        let self_bind =
-            crate::bytecode::compute_self_bind(name, &inner_index_rc, inner_code.own_cell_slots());
+        // Do not overwrite a parameter that happens to share the function's own
+        // name (e.g. `def repeat(self, repeat=5): ...` in `timeit.Timer`).
+        let self_bind = if param_spec.names.iter().any(|p| p.as_str() == name) {
+            None
+        } else {
+            crate::bytecode::compute_self_bind(name, &inner_index_rc, inner_code.own_cell_slots())
+        };
         self.fn_protos.push(FnProto {
             name: Rc::from(name),
             qualname: Rc::from(fn_qualname.as_str()),

@@ -372,6 +372,21 @@ fn dash_m_error_cases_match_cpython() {
     assert_eq!(exit_init.status.code(), Some(9));
 }
 
+#[test]
+fn dash_m_timeit_executes_benchmark_cli() {
+    let output = run_cli(None, &["-m", "timeit", "-n", "10", "-r", "3", "1+1"]);
+    assert!(
+        output.status.success(),
+        "pyrust -m timeit failed:\n{}",
+        stderr_str(&output)
+    );
+    let out = stdout_str(&output);
+    assert!(
+        out.contains("10 loops, best of 3:") && out.contains("per loop"),
+        "unexpected timeit CLI output:\n{out}"
+    );
+}
+
 // ── -V / -VV / --version / -h ────────────────────────────────────────────────
 
 #[test]
