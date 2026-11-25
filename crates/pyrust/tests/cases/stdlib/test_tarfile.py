@@ -217,3 +217,74 @@ evil_buf.seek(0)
 with tempfile.TemporaryDirectory(prefix="pyrust_tar_sec_") as tmpdir:
     with tarfile.open(fileobj=evil_buf, mode="r:") as tf:
         print("err traversal:", expect_exc(tf.extractall, tmpdir, filter="data"))
+
+# 7. BZip2 (`r:bz2`, `w:bz2`, `r:*`) and XZ (`r:xz`, `w:xz`, `r:*`) integration (issue #3224)
+TARBZ2_CPY = bytes.fromhex(
+    "425a68393141592653594c8b1f0b0000945f80cc104001ff8000008000fe65de70080820009506a644c9b500d340"
+    "00008a8a1881a0687a86688cd4a65b4882156b104b71e56159b2100120d8246d13012b14372a1c2040390c011581"
+    "1465ac1e8503a8e0f6a3655b2e7a2ce42ad4b84b2d13b214f33ac49404c27948488901235098824d4cb3d26269d0"
+    "4889412ecf9d04a292143f8bb9229c284826458f8580"
+)
+TARXZ_CPY = bytes.fromhex(
+    "fd377a585a000004e6d6b4460200210116000000742fe5a3e027ff00855d003c1e880274166819b5cf16eca64866"
+    "c9acac24e791beec130b0f2ffcb28803d99884ef53d105431b5dd3f9ace31711cca337bfe6a15d55fc941a487531"
+    "5ca6c66335584669a0e5706f39caff34549f35127325c3b0f51b56e57633a7f154cadb1c9f46e1fd1c218722caf4"
+    "9adbb717bedabf9621c081708275f411441c4c32be6ce6acea0000000000751493687529e4980001a10180500000"
+    "ada790adb1c467fb020000000004595a"
+)
+
+print("is_tarfile cpy bz2:", tarfile.is_tarfile(io.BytesIO(TARBZ2_CPY)))
+print("is_tarfile cpy xz:", tarfile.is_tarfile(io.BytesIO(TARXZ_CPY)))
+
+for mode in ("r", "r:*", "r:bz2"):
+    with tarfile.open(fileobj=io.BytesIO(TARBZ2_CPY), mode=mode) as tf:
+        print(
+            "cpy bz2",
+            mode,
+            tf.getnames(),
+            tf.extractfile("bz2_dir/hello.txt").read() == b"cpython tar.bz2 content\n" * 10,
+        )
+
+for mode in ("r", "r:*", "r:xz"):
+    with tarfile.open(fileobj=io.BytesIO(TARXZ_CPY), mode=mode) as tf:
+        print(
+            "cpy xz",
+            mode,
+            tf.getnames(),
+            tf.extractfile("xz_dir/hello.txt").read() == b"cpython tar.xz content\n" * 10,
+        )
+
+for wmode, rmode in [("w:bz2", "r:bz2"), ("w:bz2", "r:*"), ("w:xz", "r:xz"), ("w:xz", "r:*")]:
+    tbuf = io.BytesIO()
+    with tarfile.open(fileobj=tbuf, mode=wmode) as tf:
+        payload = (b"compressed tar member " + wmode.encode("ascii") + b"\n") * 25
+        ti = tarfile.TarInfo("sub/item.txt")
+        ti.size = len(payload)
+        ti.mtime = 1700000200
+        tf.addfile(ti, io.BytesIO(payload))
+    tbuf.seek(0)
+    with tarfile.open(fileobj=tbuf, mode=rmode) as tf:
+        assert tf.getnames() == ["sub/item.txt"]
+        assert tf.extractfile("sub/item.txt").read() == payload
+print("in-memory bz2/xz roundtrip ok")
+
+with tempfile.TemporaryDirectory(prefix="pyrust_tar_comp_") as tmpdir:
+    src_file = os.path.join(tmpdir, "note.txt")
+    with open(src_file, "wb") as fh:
+        fh.write(b"disk compressed tar body\n" * 15)
+
+    for ext, wmode in [("tar.bz2", "w:bz2"), ("tar.xz", "w:xz")]:
+        arc = os.path.join(tmpdir, "pkg." + ext)
+        with tarfile.open(arc, wmode) as tf:
+            tf.add(src_file, arcname="note.txt")
+        print("fs is_tarfile", ext, tarfile.is_tarfile(arc))
+        with tarfile.open(arc, "r:*") as tf:
+            print(
+                "fs auto read",
+                ext,
+                tf.getnames(),
+                tf.extractfile("note.txt").read() == b"disk compressed tar body\n" * 15,
+            )
+
+print("err bad bz2:", expect_exc(tarfile.open, fileobj=io.BytesIO(b"not bz2"), mode="r:bz2"))
+print("err bad xz:", expect_exc(tarfile.open, fileobj=io.BytesIO(b"not xz"), mode="r:xz"))

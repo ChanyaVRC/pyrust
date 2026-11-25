@@ -5,9 +5,11 @@ Python 3.12 ``tarfile`` module implementation built on ``gzip``, ``zlib``,
 """
 
 import builtins as _builtins
+import bz2 as _bz2
 import copy as _copy
 import gzip as _gzip
 import io as _io
+import lzma as _lzma
 import os as _os
 import shutil as _shutil
 import struct as _struct
@@ -913,32 +915,60 @@ class TarFile:
             return cls.taropen(name, filemode, fileobj, **kwargs)
         if comptype == "gz":
             return cls.gzopen(name, filemode, fileobj, **kwargs)
+        if comptype == "bz2":
+            return cls.bz2open(name, filemode, fileobj, **kwargs)
+        if comptype == "xz":
+            return cls.xzopen(name, filemode, fileobj, **kwargs)
         raise CompressionError("compression method %r is not supported" % comptype)
 
     @classmethod
     def _open_auto_read(cls, name, fileobj, **kwargs):
-        # Peek magic bytes to decide between gzip and uncompressed tar.
+        # Peek magic bytes to decide between gzip, bzip2, xz, and uncompressed tar.
         if fileobj is not None:
             saved_pos = 0
             try:
                 saved_pos = fileobj.tell()
             except Exception:
                 saved_pos = None
-            head = fileobj.read(2)
+            head = fileobj.read(6)
             if saved_pos is not None:
                 fileobj.seek(saved_pos)
-            if head == b"\x1f\x8b":
+            if head[:2] == b"\x1f\x8b":
                 return cls.gzopen(name, "r", fileobj, **kwargs)
-            return cls.taropen(name, "r", fileobj, **kwargs)
+            if head[:3] == b"BZh":
+                return cls.bz2open(name, "r", fileobj, **kwargs)
+            if head[:6] == b"\xfd7zXZ\x00":
+                return cls.xzopen(name, "r", fileobj, **kwargs)
+            try:
+                return cls.taropen(name, "r", fileobj, **kwargs)
+            except ReadError:
+                if saved_pos is not None:
+                    fileobj.seek(saved_pos)
+                    try:
+                        return cls.xzopen(name, "r", fileobj, **kwargs)
+                    except ReadError:
+                        fileobj.seek(saved_pos)
+                raise
 
         if name is None:
             raise ValueError("nothing to open")
         path_s = _fspath_str(name)
         with _builtins.open(path_s, "rb") as probe:
-            head = probe.read(2)
-        if head == b"\x1f\x8b":
+            head = probe.read(6)
+        if head[:2] == b"\x1f\x8b":
             return cls.gzopen(path_s, "r", None, **kwargs)
-        return cls.taropen(path_s, "r", None, **kwargs)
+        if head[:3] == b"BZh":
+            return cls.bz2open(path_s, "r", None, **kwargs)
+        if head[:6] == b"\xfd7zXZ\x00":
+            return cls.xzopen(path_s, "r", None, **kwargs)
+        try:
+            return cls.taropen(path_s, "r", None, **kwargs)
+        except ReadError:
+            try:
+                return cls.xzopen(path_s, "r", None, **kwargs)
+            except ReadError:
+                pass
+            raise
 
     @classmethod
     def taropen(cls, name, mode="r", fileobj=None, **kwargs):
@@ -963,6 +993,44 @@ class TarFile:
             raise ReadError("not a gzip file") from exc
         except Exception:
             gzfile.close()
+            raise
+        t._extfileobj = False
+        return t
+
+    @classmethod
+    def bz2open(cls, name, mode="r", fileobj=None, compresslevel=9, **kwargs):
+        if mode not in ("r", "w", "x"):
+            raise ValueError("mode must be 'r', 'w' or 'x'")
+        target = fileobj if fileobj is not None else name
+        bz2file = _bz2.BZ2File(target, mode, compresslevel=compresslevel)
+        try:
+            t = cls.taropen(name, mode, bz2file, **kwargs)
+        except (OSError, EOFError, ValueError) as exc:
+            bz2file.close()
+            if mode == "r":
+                raise ReadError("not a bzip2 file") from exc
+            raise
+        except Exception:
+            bz2file.close()
+            raise
+        t._extfileobj = False
+        return t
+
+    @classmethod
+    def xzopen(cls, name, mode="r", fileobj=None, preset=None, **kwargs):
+        if mode not in ("r", "w", "x"):
+            raise ValueError("mode must be 'r', 'w' or 'x'")
+        target = fileobj if fileobj is not None else name
+        lzmafile = _lzma.LZMAFile(target, mode, preset=preset)
+        try:
+            t = cls.taropen(name, mode, lzmafile, **kwargs)
+        except (_lzma.LZMAError, EOFError, OSError) as exc:
+            lzmafile.close()
+            if mode == "r":
+                raise ReadError("not an lzma file") from exc
+            raise
+        except Exception:
+            lzmafile.close()
             raise
         t._extfileobj = False
         return t
