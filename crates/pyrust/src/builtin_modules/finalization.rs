@@ -25,6 +25,9 @@ pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, 
         "optparse" => optparse::prepare_module(interpreter, module),
         "this" => this::prepare_module(interpreter),
         "antigravity" => antigravity::prepare_module(interpreter),
+        "pdb" => pdb::prepare_module(interpreter, module),
+        "cProfile" => cprofile::prepare_module(interpreter, module),
+        "pstats" => pstats::prepare_module(interpreter, module),
         _ => {}
     }
 }

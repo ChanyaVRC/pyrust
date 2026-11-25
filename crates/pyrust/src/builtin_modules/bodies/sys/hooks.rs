@@ -319,7 +319,7 @@ pub(super) fn breakpointhook(interp: &mut Interpreter, args: &[ExpandedCallArg])
     let hookname = match std::env::var("PYTHONBREAKPOINT") {
         Ok(v) if v == "0" => return Ok(Value::none()),
         Ok(v) if !v.is_empty() => v,
-        _ => return Ok(Value::none()),
+        _ => "pdb.set_trace".to_string(),
     };
     let (mod_name, attr_path) = match hookname.rsplit_once('.') {
         Some((m, a)) if !m.is_empty() && !a.is_empty() => (m, a),

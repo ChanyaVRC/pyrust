@@ -719,6 +719,17 @@ pyrust_builtin_modules! {
     // site configuration, `.pth` processing, and interactive builtins.
     _sitebuiltins,
     site,
+    // `bdb`, `pdb`, `_lsprof`, `cProfile`, `profile`, `pstats`, and `trace`
+    // (issue #3247): 100% native-Rust Python 3.12 debugging, profiling, and
+    // execution-tracing stdlib modules built on PyRust's live `sys.settrace` /
+    // `sys.setprofile` hooks and expanded macro toolkit (no `@inject`).
+    bdb,
+    pdb,
+    _lsprof,
+    "cProfile" as cprofile,
+    profile,
+    pstats,
+    trace,
 }
 
 include!("finalization.rs");

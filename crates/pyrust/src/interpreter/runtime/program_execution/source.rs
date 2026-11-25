@@ -172,7 +172,8 @@ impl Interpreter {
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let namespace_mirror_guard =
                     self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
-                let vm_result = self.run_bytecode(&code, regs_slice);
+                let vm_result =
+                    self.run_script_bytecode_with_hooks(&code, regs_slice, CellSlice::empty());
                 drop(namespace_mirror_guard);
                 self.detach_vm_frame_view();
                 record_exec_string_frame(self, &vm_result, &code.filename);
@@ -250,7 +251,7 @@ impl Interpreter {
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let namespace_mirror_guard =
             self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
-        let vm_result = self.run_bytecode(code, regs_slice);
+        let vm_result = self.run_script_bytecode_with_hooks(code, regs_slice, CellSlice::empty());
         drop(namespace_mirror_guard);
         self.detach_vm_frame_view();
         drop(regs);
