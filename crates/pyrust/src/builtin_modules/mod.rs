@@ -212,6 +212,7 @@ macro_rules! pyrust_builtin_modules {
                     | "json"
                     | "logging"
                     | "re"
+                    | "sqlite3"
                     | "tomllib"
                     | "unittest"
                     | "urllib"
@@ -610,6 +611,11 @@ pyrust_builtin_modules! {
     "xml.etree.ElementTree" as xml_etree_elementtree @inject,
     "xml.etree" as xml_etree,
     xml,
+    // `sqlite3` and `sqlite3.dbapi2` (issue #3225): Python 3.12 DB-API 2.0
+    // SQLite interface backed by bundled SQLite (`rusqlite::ffi`) in
+    // `sqlite3.rs` plus the full public surface in `sqlite3_py.py`.
+    sqlite3 @inject,
+    "sqlite3.dbapi2" as sqlite3_dbapi2 @inject,
 }
 
 include!("finalization.rs");

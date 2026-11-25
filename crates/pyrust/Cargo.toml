@@ -19,6 +19,13 @@ rustyline = "14"
 smallvec = "1"
 stacker = "0.1.24"
 unicode_names2 = "2.0.0"
+rusqlite = { version = "0.38", default-features = false, features = [
+    "bundled",
+    "functions",
+    "backup",
+    "blob",
+    "collation",
+] }
 pyrust-core = { path = "../pyrust-core" }
 pyrust-builtins = { path = "../pyrust-builtins" }
 pyrust-derive = { path = "../pyrust-derive" }
