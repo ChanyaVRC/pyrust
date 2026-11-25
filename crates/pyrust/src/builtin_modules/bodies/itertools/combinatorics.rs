@@ -4,7 +4,7 @@
 use super::combinatoric_cursors;
 use super::helpers::expect_self;
 use crate::error::{PyError, Result};
-use crate::interpreter::{ExpandedCallArg, Interpreter, reject_keyword_args_expanded};
+use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::value::{Value, ValueKind};
 
 pub(super) fn product_init(
@@ -75,35 +75,60 @@ pub(super) fn init_combo_state(
     with_replacement: bool,
 ) -> Result<Value> {
     let inst = expect_self(args, fn_name)?;
-    let user = &args[1..];
-    reject_keyword_args_expanded(fn_name, user)?;
-    if user.is_empty() {
-        return Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}() missing required argument 'iterable' (pos 1)"),
-        ));
+    let mut positional: Vec<Value> = Vec::new();
+    let mut iterable_kw: Option<Value> = None;
+    let mut r_kw: Option<Value> = None;
+    for a in &args[1..] {
+        match a.name.as_deref() {
+            Some("iterable") => iterable_kw = Some(a.value.clone()),
+            Some("r") => r_kw = Some(a.value.clone()),
+            Some(other) => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{other}' is an invalid keyword argument for {fn_name}()"),
+                ));
+            }
+            None => positional.push(a.value.clone()),
+        }
     }
-    if user.len() == 1 {
-        return Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}() missing required argument 'r' (pos 2)"),
-        ));
-    }
-    if user.len() > 2 {
+    if positional.len() > 2 {
         return Err(PyError::named(
             "TypeError",
             format!(
                 "{fn_name}() takes at most 2 arguments ({} given)",
-                user.len()
+                positional.len()
             ),
         ));
     }
+    if !positional.is_empty() && iterable_kw.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            format!("argument for {fn_name}() given by name ('iterable') and position (1)"),
+        ));
+    }
+    if positional.len() >= 2 && r_kw.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            format!("argument for {fn_name}() given by name ('r') and position (2)"),
+        ));
+    }
+    let iterable_val = iterable_kw
+        .or_else(|| positional.first().cloned())
+        .ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                format!("{fn_name}() missing required argument 'iterable' (pos 1)"),
+            )
+        })?;
+    let r_val = r_kw.or_else(|| positional.get(1).cloned()).ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            format!("{fn_name}() missing required argument 'r' (pos 2)"),
+        )
+    })?;
 
-    let pool = interp.collect_iterable(&user[0].value)?;
-    let r = interp.value_to_isize(
-        &user[1].value,
-        "Python int too large to convert to C ssize_t",
-    )?;
+    let pool = interp.collect_iterable(&iterable_val)?;
+    let r = interp.value_to_isize(&r_val, "Python int too large to convert to C ssize_t")?;
     if r < 0 {
         return Err(PyError::named(
             "ValueError",
@@ -171,25 +196,54 @@ pub(super) fn permutations_init(
     fn_name: &str,
 ) -> Result<Value> {
     let inst = expect_self(args, fn_name)?;
-    let user = &args[1..];
-    reject_keyword_args_expanded("permutations", user)?;
-    if user.is_empty() {
-        return Err(PyError::named(
-            "TypeError",
-            "permutations() missing required argument 'iterable' (pos 1)".to_string(),
-        ));
+    let mut positional: Vec<Value> = Vec::new();
+    let mut iterable_kw: Option<Value> = None;
+    let mut r_kw: Option<Value> = None;
+    for a in &args[1..] {
+        match a.name.as_deref() {
+            Some("iterable") => iterable_kw = Some(a.value.clone()),
+            Some("r") => r_kw = Some(a.value.clone()),
+            Some(other) => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{other}' is an invalid keyword argument for permutations()"),
+                ));
+            }
+            None => positional.push(a.value.clone()),
+        }
     }
-    if user.len() > 2 {
+    if positional.len() > 2 {
         return Err(PyError::named(
             "TypeError",
             format!(
                 "permutations() takes at most 2 arguments ({} given)",
-                user.len()
+                positional.len()
             ),
         ));
     }
-    let pool: Vec<Value> = interp.collect_iterable(&user[0].value)?;
-    let r = match user.get(1).map(|argument| argument.value.kind()) {
+    if !positional.is_empty() && iterable_kw.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "argument for permutations() given by name ('iterable') and position (1)".to_string(),
+        ));
+    }
+    if positional.len() >= 2 && r_kw.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "argument for permutations() given by name ('r') and position (2)".to_string(),
+        ));
+    }
+    let iterable_val = iterable_kw
+        .or_else(|| positional.first().cloned())
+        .ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "permutations() missing required argument 'iterable' (pos 1)".to_string(),
+            )
+        })?;
+    let r_opt = r_kw.or_else(|| positional.get(1).cloned());
+    let pool: Vec<Value> = interp.collect_iterable(&iterable_val)?;
+    let r = match r_opt.as_ref().map(|v| v.kind()) {
         None | Some(ValueKind::None) => pool.len(),
         Some(ValueKind::Int(r)) if r >= 0 => r as usize,
         Some(ValueKind::Int(_)) => {
@@ -200,7 +254,7 @@ pub(super) fn permutations_init(
         }
         Some(ValueKind::Bool(r)) => r as usize,
         Some(ValueKind::BigInt(_) | ValueKind::PyInstance(_)) => {
-            permutations_non_plain_r(interp, &user[1].value)?
+            permutations_non_plain_r(interp, r_opt.as_ref().unwrap())?
         }
         _ => {
             return Err(PyError::named("TypeError", "Expected int as r".to_string()));

@@ -264,7 +264,7 @@ pub(super) fn nextafter(
     let x = math_arg_to_float(interp, &positional[0].value)?;
     let y = math_arg_to_float(interp, &positional[1].value)?;
     let steps = match args.iter().find(|a| a.name.as_deref() == Some("steps")) {
-        Some(a) => {
+        Some(a) if !a.value.is_none() => {
             let s = value_to_steps_int(interp, fn_name, &a.value)?;
             if s < 0 {
                 return Err(PyError::named(
@@ -274,7 +274,7 @@ pub(super) fn nextafter(
             }
             s
         }
-        None => 1,
+        _ => 1,
     };
     Ok(Value::float(nextafter_f64(x, y, steps)))
 }

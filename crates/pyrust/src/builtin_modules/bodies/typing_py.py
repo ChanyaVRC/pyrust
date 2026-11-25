@@ -1,4 +1,4 @@
-# Python-source members of the `typing` module (issue #2516).
+# Python-source members of the `typing` module (issue #2516, #3231).
 #
 # These names are most naturally expressed in Python and are exec'd once into
 # a throwaway namespace at first import of `typing`; the resulting public names
@@ -8,6 +8,7 @@
 # may reference them via the names the exec namespace is pre-seeded with.
 
 import collections as _collections
+import collections.abc as _collections_abc
 import sys as _sys
 import types as _types
 
@@ -16,6 +17,7 @@ def get_origin(tp):
     """Return the unsubscripted origin of a typing/PEP 585 generic.
 
     `get_origin(List[int])` is `list`, `get_origin(Optional[str])` is `Union`,
+    `get_origin(Callable[[int], str])` is `collections.abc.Callable`,
     `get_origin(int)` is `None`.  Mirrors CPython's `typing.get_origin`.
     """
     # `Annotated[X, ...]` reports the `Annotated` marker as its origin, even
@@ -33,6 +35,8 @@ def get_origin(tp):
     # `__origin__`.  Normalise to match CPython's observable origins.
     if origin is Optional or origin is Union:
         return Union
+    if origin is Callable:
+        return _collections_abc.Callable
     # The deprecated `List`/`Dict`/`Type`/… aliases carry the alias class as
     # their `__origin__`; CPython reports the underlying builtin (`list`,
     # `type`, …), which is stashed on the alias as `__pyrust_legacy_alias_of__`.
@@ -63,56 +67,68 @@ def get_args(tp):
     return tuple(args)
 
 
-def _resolve(value, globalns):
-    """Resolve a single annotation: eval string forward refs, else identity."""
+def _resolve(value, globalns, localns):
+    """Resolve a single annotation: eval string forward refs, normalize None."""
+    if value is None:
+        return type(None)
     if isinstance(value, str):
         try:
-            return eval(value, globalns)
+            resolved = eval(value, globalns, localns)
+            return type(None) if resolved is None else resolved
         except Exception:
             return value
     return value
 
 
-def _strip_annotated(value):
-    """Strip an `Annotated[X, ...]` alias down to its underlying type `X`.
+def _strip_extras(value):
+    """Strip `Annotated[X, ...]`, `Required[X]`, and `NotRequired[X]` down to `X`.
 
-    Used by `get_type_hints` when `include_extras=False`, mirroring CPython,
-    which discards the metadata and keeps only the annotated type.
+    Used by `get_type_hints` when `include_extras=False`, mirroring CPython 3.12.
     """
     if isinstance(value, _AnnotatedAlias):
-        return value.__origin__
+        return _strip_extras(value.__origin__)
+    if isinstance(value, _SpecialFormAlias) and value.__origin__ in (Required, NotRequired):
+        return _strip_extras(value.__args__[0])
     return value
 
 
 def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
     """Return a dict of type hints for a function, class, or module.
 
-    String (forward-reference) annotations are evaluated against the object's
-    globals.  For classes, annotations are collected across the MRO with base
+    String (forward-reference) annotations are evaluated against `globalns` and
+    `localns`.  For classes, annotations are collected across the MRO with base
     classes contributing first (subclass annotations win on conflict).  Unless
-    `include_extras` is set, `Annotated[X, ...]` hints are stripped to `X`.
+    `include_extras` is set, `Annotated[X, ...]`, `Required[X]`, and
+    `NotRequired[X]` hints are stripped to `X`.
     """
     if isinstance(obj, type):
         hints = {}
         for base in reversed(obj.__mro__):
-            base_globals = globalns
-            if base_globals is None:
+            if globalns is None:
                 module = getattr(base, "__module__", None)
                 mod = _sys.modules.get(module) if module else None
                 base_globals = getattr(mod, "__dict__", {}) if mod else {}
+            else:
+                base_globals = globalns
+            base_locals = base_globals if localns is None else localns
             ann = base.__dict__.get("__annotations__", {})
             for name, value in ann.items():
-                hints[name] = _resolve(value, base_globals)
+                hints[name] = _resolve(value, base_globals, base_locals)
     else:
         ann = getattr(obj, "__annotations__", None)
         if ann is None:
             return {}
         if globalns is None:
-            globalns = getattr(obj, "__globals__", {})
-        hints = {name: _resolve(value, globalns) for name, value in ann.items()}
+            if isinstance(obj, _types.ModuleType):
+                globalns = obj.__dict__
+            else:
+                globalns = getattr(obj, "__globals__", {})
+        if localns is None:
+            localns = globalns
+        hints = {name: _resolve(value, globalns, localns) for name, value in ann.items()}
 
     if not include_extras:
-        hints = {name: _strip_annotated(value) for name, value in hints.items()}
+        hints = {name: _strip_extras(value) for name, value in hints.items()}
     return hints
 
 
@@ -169,20 +185,20 @@ def _build_namedtuple_class(typename, fields, defaults, namespace):
     return cls
 
 
+def _typeddict_field_qualifier(tp):
+    """Return `'required'`, `'optional'`, or `None` for a TypedDict field annotation."""
+    while isinstance(tp, _AnnotatedAlias):
+        tp = tp.__origin__
+    origin = get_origin(tp)
+    if origin is Required:
+        return "required"
+    if origin is NotRequired:
+        return "optional"
+    return None
+
+
 class _TypedDictMeta(type):
-    """Metaclass for `TypedDict` classes (PEP 589, issue #2718).
-
-    A TypedDict is an *annotation* type: at runtime its instances are plain
-    `dict`s, so calling the class (`Movie(title='x')`) just builds a dict.
-    CPython's `_TypedDictMeta` does the same; the metaclass only carries the
-    `__annotations__` / `__required_keys__` / `__optional_keys__` / `__total__`
-    bookkeeping for static checkers and introspection.
-
-    `__new__` merges the fields declared in the class body with those of every
-    TypedDict base, so a subclass's `__annotations__` / `__required_keys__` /
-    `__optional_keys__` reflect the whole inheritance chain (issue #2732),
-    matching CPython's `_TypedDictMeta.__new__`.
-    """
+    """Metaclass for `TypedDict` classes (PEP 589 / PEP 655, issues #2718, #3231)."""
 
     def __new__(mcls, name, bases, ns, total=True):
         own = dict(ns.get("__annotations__", {}))
@@ -191,9 +207,6 @@ class _TypedDictMeta(type):
         required = set()
         optional = set()
         # Merge ancestor TypedDict fields first; own fields override on conflict.
-        # A key's required/optional status follows the *last* base to declare it
-        # (each base moves the key between the two sets), matching CPython's
-        # `_TypedDictMeta.__new__`; the two sets must stay disjoint.
         for base in bases:
             merged.update(getattr(base, "__annotations__", {}))
             base_required = getattr(base, "__required_keys__", ())
@@ -204,12 +217,20 @@ class _TypedDictMeta(type):
             optional.update(base_optional)
 
         merged.update(own)
-        if total:
-            required.update(own)
-            optional.difference_update(own)
-        else:
-            optional.update(own)
-            required.difference_update(own)
+        for key, ann in own.items():
+            qual = _typeddict_field_qualifier(ann)
+            if qual == "required":
+                required.add(key)
+                optional.discard(key)
+            elif qual == "optional":
+                optional.add(key)
+                required.discard(key)
+            elif total:
+                required.add(key)
+                optional.discard(key)
+            else:
+                optional.add(key)
+                required.discard(key)
 
         ns["__annotations__"] = merged
         ns["__required_keys__"] = frozenset(required)
@@ -231,29 +252,19 @@ class _TypedDictMeta(type):
     __instancecheck__ = __subclasscheck__
 
 
+def is_typeddict(tp):
+    """Check if an annotation is a TypedDict class (Python 3.10+)."""
+    return _TypedDictMeta in getattr(type(tp), "__mro__", ())
+
+
 def _build_typeddict_class(typename, annotations, total=True):
-    """Build a TypedDict class from its annotations (issue #2718).
-
-    `annotations` is an ordered mapping of field name -> type.  `total` controls
-    whether the keys are required (`total=True`, the default) or optional.  This
-    backs both the class form (`class Movie(TypedDict): ...`) and the functional
-    form (`TypedDict('Movie', {...})`).  Per-key `Required[]` / `NotRequired[]`
-    is out of scope (issue #2718); all keys share the class-level `total`.
-
-    The key accounting lives in `_TypedDictMeta.__new__`, so subclassing one of
-    these classes (`class Child(Base): ...`) merges inherited fields (#2732).
-    """
+    """Build a TypedDict class from its annotations (issue #2718)."""
     namespace = {"__annotations__": dict(annotations)}
     return _TypedDictMeta(typename, (dict,), namespace, total=total)
 
 
 def _typeddict_functional(typename, fields=None, /, *, total=True, **kwargs):
-    """Functional form of `typing.TypedDict` (issue #2718).
-
-    `TypedDict('Movie', {'title': str, 'year': int})` and the keyword form
-    `TypedDict('Movie', title=str, year=int)` both build a TypedDict class.
-    The class form `class Movie(TypedDict): ...` is handled natively.
-    """
+    """Functional form of `typing.TypedDict` (issue #2718)."""
     if fields is None:
         fields = kwargs
     elif kwargs:
@@ -277,14 +288,7 @@ _PROTOCOL_EXCLUDED_ATTRS = frozenset({
 
 
 def _collect_protocol_attrs(cls):
-    """Collect the member names a `@runtime_checkable` Protocol requires.
-
-    Mirrors CPython 3.12's `typing._get_protocol_attrs`: the union of names
-    declared in the protocol body and in any protocol *bases* (but not on
-    `object` / `Protocol` / `Generic`), minus typing bookkeeping names.  For a
-    simple protocol this is just the method/attribute names the user wrote,
-    plus any annotation-only data members (`name: str`).
-    """
+    """Collect the member names a `@runtime_checkable` Protocol requires."""
     attrs = set()
     for base in getattr(cls, "__mro__", (cls,)):
         if getattr(base, "__name__", "") in ("Protocol", "Generic", "object"):
@@ -301,23 +305,10 @@ def _collect_protocol_attrs(cls):
 
 
 def runtime_checkable(cls):
-    """Mark a `Protocol` as runtime-checkable and record its member names.
-
-    Sets `__protocol_runtime_checkable__` plus `__protocol_attrs__` — the set
-    of attribute names a subject must have for a structural `isinstance` check
-    to succeed (issue #2526) — and `__non_callable_proto_members__`, the subset
-    of those attrs whose class value is not callable (data members).  The
-    structural check itself lives in the `isinstance` builtin; it mirrors
-    CPython 3.12, which treats a member resolved to `None` as absent unless the
-    member is a declared non-callable.
-    """
+    """Mark a `Protocol` as runtime-checkable and record its member names."""
     cls.__protocol_runtime_checkable__ = True
     attrs = _collect_protocol_attrs(cls)
     cls.__protocol_attrs__ = attrs
-    # Mirror CPython's `runtime_checkable`: a protocol attr whose class value is
-    # not callable is a data member.  `isinstance` allows such a member to hold
-    # `None` on the subject, but a callable (method) member resolved to `None`
-    # is treated as absent.
     non_callable = set()
     for attr in attrs:
         if not callable(getattr(cls, attr, None)):
@@ -327,7 +318,7 @@ def runtime_checkable(cls):
 
 
 def final(f):
-    """`@final` decorator — runtime no-op marker."""
+    """`@final` decorator — sets `__final__ = True` and returns `f`."""
     try:
         f.__final__ = True
     except (AttributeError, TypeError):
@@ -335,18 +326,44 @@ def final(f):
     return f
 
 
-def no_type_check(arg):
-    """`@no_type_check` decorator — runtime no-op marker."""
+def override(arg, /):
+    """`@override` decorator (PEP 698, Python 3.12) — sets `__override__ = True`."""
+    try:
+        arg.__override__ = True
+    except (AttributeError, TypeError):
+        pass
     return arg
 
 
-def reveal_type(obj):
+def no_type_check(arg):
+    """`@no_type_check` decorator — sets `__no_type_check__ = True`."""
+    if isinstance(arg, type):
+        for obj in arg.__dict__.values():
+            if isinstance(obj, _types.FunctionType):
+                obj.__no_type_check__ = True
+    else:
+        try:
+            arg.__no_type_check__ = True
+        except (AttributeError, TypeError):
+            pass
+    return arg
+
+
+def no_type_check_decorator(decorator):
+    """Decorator to give another decorator the `no_type_check()` effect."""
+    def wrapped_decorator(*args, **kwds):
+        func = decorator(*args, **kwds)
+        return no_type_check(func)
+    return wrapped_decorator
+
+
+def reveal_type(obj, /):
     """Stub for static checkers: prints the runtime type and returns `obj`."""
     print(f"Runtime type is {type(obj).__name__!r}", file=_sys.stderr)
     return obj
 
 
-def assert_never(arg):
+def assert_never(arg, /):
     """`assert_never` — raises at runtime if ever reached."""
     raise AssertionError("Expected code to be unreachable, but got: " + repr(arg))
 
@@ -356,12 +373,27 @@ def assert_type(val, typ, /):
     return val
 
 
-def dataclass_transform(*args, **kwargs):
-    """`@dataclass_transform()` decorator factory — runtime no-op marker."""
+def dataclass_transform(
+    *,
+    eq_default=True,
+    order_default=False,
+    kw_only_default=False,
+    frozen_default=False,
+    field_specifiers=(),
+    **kwargs,
+):
+    """`@dataclass_transform()` decorator factory (PEP 681, Python 3.11)."""
 
     def decorator(cls_or_fn):
         try:
-            cls_or_fn.__dataclass_transform__ = {}
+            cls_or_fn.__dataclass_transform__ = {
+                "eq_default": eq_default,
+                "order_default": order_default,
+                "kw_only_default": kw_only_default,
+                "frozen_default": frozen_default,
+                "field_specifiers": field_specifiers,
+                "kwargs": kwargs,
+            }
         except (AttributeError, TypeError):
             pass
         return cls_or_fn
@@ -369,39 +401,82 @@ def dataclass_transform(*args, **kwargs):
     return decorator
 
 
+_overload_registry = {}
+
+
+def _overload_dummy(*args, **kwds):
+    """Helper for `@overload` to raise when called directly."""
+    raise NotImplementedError(
+        "You should not call an overloaded function. "
+        "A series of @overload-decorated functions "
+        "outside a stub module should always be followed "
+        "by an implementation that is not @overload-ed."
+    )
+
+
+def overload(func):
+    """Decorator for overloaded functions/methods (Python 3.11+ registry)."""
+    f = getattr(func, "__func__", func)
+    try:
+        key = (f.__module__, f.__qualname__)
+        _overload_registry.setdefault(key, []).append(func)
+    except AttributeError:
+        pass
+    return _overload_dummy
+
+
 def get_overloads(func):
-    """Return registered `@overload` definitions (none, since pyrust drops them)."""
-    return []
+    """Return a sequence of `@overload`-decorated definitions for `func`."""
+    f = getattr(func, "__func__", func)
+    try:
+        key = (f.__module__, f.__qualname__)
+        return list(_overload_registry.get(key, ()))
+    except AttributeError:
+        return []
 
 
 def clear_overloads():
-    """Clear the overload registry — no-op in pyrust."""
-    return None
+    """Clear all registered overloads."""
+    _overload_registry.clear()
 
 
-class _SpecialMarker:
-    """Lightweight stand-in for special forms that are only subscripted or
-    used as annotations (`Self`, `Never`, `LiteralString`, `Annotated`, …)."""
+class NewType:
+    """NewType creates simple unique types with almost zero runtime overhead."""
 
-    def __init__(self, name):
-        self._name = name
+    def __init__(self, name, tp):
+        self.__qualname__ = name
+        self.__name__ = name
+        self.__supertype__ = tp
+        try:
+            frame = _sys._getframe(1)
+            mod = frame.f_globals.get("__name__", "__main__")
+        except (AttributeError, ValueError):
+            mod = "__main__"
+        self.__module__ = mod
+
+    def __call__(self, x, /):
+        return x
+
+    def __mro_entries__(self, bases):
+        raise TypeError(
+            "Cannot subclass an instance of NewType. "
+            "Perhaps you were looking for: https://peps.python.org/pep-0484/#newtype-helper-function"
+        )
 
     def __repr__(self):
-        return "typing." + self._name
+        return f"{self.__module__}.{self.__qualname__}"
 
-    def __getitem__(self, item):
-        return self
+    def __or__(self, other):
+        return Union[self, other]
 
-    def __call__(self, *args, **kwargs):
-        return self
+    def __ror__(self, other):
+        return Union[other, self]
 
 
 def _type_repr(obj):
-    """Render a type/metadata value as CPython's `typing._type_repr` would.
-
-    Plain classes show as their (qualified) name rather than `<class '...'>`;
-    everything else uses `repr`.  Used by `_AnnotatedAlias.__repr__`.
-    """
+    """Render a type/metadata value as CPython's `typing._type_repr` would."""
+    if obj is Ellipsis:
+        return "..."
     if isinstance(obj, type):
         module = getattr(obj, "__module__", None)
         qualname = getattr(obj, "__qualname__", obj.__name__)
@@ -411,19 +486,110 @@ def _type_repr(obj):
     return repr(obj)
 
 
-class _AnnotatedAlias:
-    """Runtime form of `Annotated[X, m1, m2, ...]` (PEP 593).
+def _collect_type_params(args):
+    params = []
+    for a in args:
+        if isinstance(a, (TypeVar, ParamSpec, TypeVarTuple)):
+            if a not in params:
+                params.append(a)
+        else:
+            for p in getattr(a, "__parameters__", ()):
+                if p not in params:
+                    params.append(p)
+    return tuple(params)
 
-    Carries the annotated type as `__origin__`, the metadata tuple as
-    `__metadata__`, and `(__origin__,)` as `__args__` (the metadata is *not*
-    in `__args__`, matching CPython 3.12; `get_args` re-appends it) so that
-    `get_origin`, `get_args`, and `repr` match CPython 3.12.
-    """
+
+class _SpecialForm:
+    """Non-subscriptable typing special form (`Self`, `Never`, `LiteralString`, …)."""
+
+    def __init__(self, name):
+        self._name = name
+
+    def __repr__(self):
+        return "typing." + self._name
+
+    def __getitem__(self, item):
+        raise TypeError(f"{self!r} is not subscriptable")
+
+    def __call__(self, *args, **kwargs):
+        raise TypeError(f"Cannot instantiate {self!r}")
+
+    def __or__(self, other):
+        return Union[self, other]
+
+    def __ror__(self, other):
+        return Union[other, self]
+
+
+class _SpecialFormAlias:
+    """Subscripted alias for `Required`, `NotRequired`, `TypeGuard`, `Concatenate`."""
+
+    def __init__(self, origin, args):
+        self.__origin__ = origin
+        self.__args__ = tuple(args)
+        self.__parameters__ = _collect_type_params(self.__args__)
+
+    def __repr__(self):
+        rendered = ", ".join(_type_repr(a) for a in self.__args__)
+        return f"typing.{self.__origin__._name}[{rendered}]"
+
+    def __eq__(self, other):
+        if not isinstance(other, _SpecialFormAlias):
+            return NotImplemented
+        return (
+            self.__origin__ == other.__origin__
+            and self.__args__ == other.__args__
+        )
+
+    def __hash__(self):
+        return hash((self.__origin__, self.__args__))
+
+    def __or__(self, other):
+        return Union[self, other]
+
+    def __ror__(self, other):
+        return Union[other, self]
+
+
+class _SingleArgSpecialForm(_SpecialForm):
+    """Special form accepting exactly one type argument (`Required`, `NotRequired`, `TypeGuard`)."""
+
+    def __getitem__(self, item):
+        if isinstance(item, tuple):
+            raise TypeError(f"{self!r} accepts only single type.")
+        if item is None:
+            item = type(None)
+        return _SpecialFormAlias(self, (item,))
+
+
+class _ConcatenateForm(_SpecialForm):
+    """Special form for `Concatenate[T1, ..., ParamSpec]` (PEP 612)."""
+
+    def __getitem__(self, parameters):
+        if not isinstance(parameters, tuple):
+            parameters = (parameters,)
+        if len(parameters) < 2:
+            if not isinstance(parameters[-1], ParamSpec) and parameters[-1] is not Ellipsis:
+                raise TypeError(
+                    "The last parameter to Concatenate should be a ParamSpec variable or ellipsis."
+                )
+            raise TypeError("Concatenate takes at least two arguments")
+        if not isinstance(parameters[-1], ParamSpec) and parameters[-1] is not Ellipsis:
+            raise TypeError(
+                "The last parameter to Concatenate should be a ParamSpec variable or ellipsis."
+            )
+        norm = tuple(type(None) if p is None else p for p in parameters)
+        return _SpecialFormAlias(self, norm)
+
+
+class _AnnotatedAlias:
+    """Runtime form of `Annotated[X, m1, m2, ...]` (PEP 593)."""
 
     def __init__(self, origin, metadata):
         self.__origin__ = origin
         self.__metadata__ = tuple(metadata)
         self.__args__ = (origin,)
+        self.__parameters__ = _collect_type_params((origin,))
 
     def __repr__(self):
         meta = ", ".join(_type_repr(m) for m in self.__metadata__)
@@ -440,15 +606,15 @@ class _AnnotatedAlias:
     def __hash__(self):
         return hash((self.__origin__, self.__metadata__))
 
+    def __or__(self, other):
+        return Union[self, other]
+
+    def __ror__(self, other):
+        return Union[other, self]
+
 
 class _AnnotatedMarker:
-    """Special form for `Annotated` (PEP 593).
-
-    `Annotated[X, m1, ...]` builds an `_AnnotatedAlias`; it requires at least a
-    type plus one metadata element, matching CPython's `TypeError`.  A nested
-    `Annotated[Annotated[X, a], b]` is flattened to `Annotated[X, a, b]` at
-    construction, mirroring CPython 3.12.
-    """
+    """Special form for `Annotated` (PEP 593)."""
 
     def __repr__(self):
         return "typing.Annotated"
@@ -460,9 +626,9 @@ class _AnnotatedMarker:
                 "(a type and an annotation)."
             )
         origin = params[0]
+        if origin is None:
+            origin = type(None)
         metadata = params[1:]
-        # Flatten nested aliases: the underlying type collapses to its own
-        # origin and its metadata is prepended (CPython `Annotated.__class_getitem__`).
         if isinstance(origin, _AnnotatedAlias):
             metadata = origin.__metadata__ + metadata
             origin = origin.__origin__
@@ -475,16 +641,7 @@ class _UnpackGenericAlias:
     def __init__(self, origin, args):
         self.__origin__ = origin
         self.__args__ = args
-        params = []
-        for a in args:
-            if isinstance(a, (TypeVar, ParamSpec, TypeVarTuple)):
-                if a not in params:
-                    params.append(a)
-            else:
-                for p in getattr(a, "__parameters__", ()):
-                    if p not in params:
-                        params.append(p)
-        self.__parameters__ = tuple(params)
+        self.__parameters__ = _collect_type_params(args)
 
     def __repr__(self):
         return "typing.Unpack[" + _type_repr(self.__args__[0]) + "]"
@@ -513,13 +670,14 @@ class _UnpackMarker:
         return _UnpackGenericAlias(self, (item,))
 
 
-Self = _SpecialMarker("Self")
-Never = _SpecialMarker("Never")
-LiteralString = _SpecialMarker("LiteralString")
+Self = _SpecialForm("Self")
+Never = _SpecialForm("Never")
+NoReturn = _SpecialForm("NoReturn")
+LiteralString = _SpecialForm("LiteralString")
 Annotated = _AnnotatedMarker()
-TypeAlias = _SpecialMarker("TypeAlias")
-Concatenate = _SpecialMarker("Concatenate")
+TypeAlias = _SpecialForm("TypeAlias")
+Concatenate = _ConcatenateForm("Concatenate")
 Unpack = _UnpackMarker()
-Required = _SpecialMarker("Required")
-NotRequired = _SpecialMarker("NotRequired")
-TypeGuard = _SpecialMarker("TypeGuard")
+Required = _SingleArgSpecialForm("Required")
+NotRequired = _SingleArgSpecialForm("NotRequired")
+TypeGuard = _SingleArgSpecialForm("TypeGuard")

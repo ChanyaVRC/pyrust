@@ -7,7 +7,7 @@ use super::helpers::{
     internal, is_stop_iteration, make_iter,
 };
 use crate::error::{PyError, Result};
-use crate::interpreter::{ExpandedCallArg, Interpreter, reject_keyword_args_expanded};
+use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::value::{Value, ValueKind};
 
 pub(super) fn takewhile_init(
@@ -129,9 +129,13 @@ pub(super) fn accumulate_init(
 ) -> Result<Value> {
     let inst = expect_self(args, fn_name)?;
     let mut positional: Vec<Value> = Vec::new();
+    let mut iterable_kw: Option<Value> = None;
+    let mut func_kw: Option<Value> = None;
     let mut initial: Option<Value> = None;
     for a in &args[1..] {
         match a.name.as_deref() {
+            Some("iterable") => iterable_kw = Some(a.value.clone()),
+            Some("func") => func_kw = Some(a.value.clone()),
             Some("initial") => {
                 if !a.value.is_none() {
                     initial = Some(a.value.clone());
@@ -146,12 +150,6 @@ pub(super) fn accumulate_init(
             None => positional.push(a.value.clone()),
         }
     }
-    if positional.is_empty() {
-        return Err(PyError::named(
-            "TypeError",
-            "accumulate() missing required argument 'iterable' (pos 1)".to_string(),
-        ));
-    }
     if positional.len() > 2 {
         return Err(PyError::named(
             "TypeError",
@@ -161,8 +159,30 @@ pub(super) fn accumulate_init(
             ),
         ));
     }
-    let iter = make_iter(interp, &positional[0])?;
-    let func = positional.get(1).cloned().unwrap_or_else(Value::none);
+    if !positional.is_empty() && iterable_kw.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "argument for accumulate() given by name ('iterable') and position (1)".to_string(),
+        ));
+    }
+    if positional.len() >= 2 && func_kw.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "argument for accumulate() given by name ('func') and position (2)".to_string(),
+        ));
+    }
+    let iterable_val = iterable_kw
+        .or_else(|| positional.first().cloned())
+        .ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "accumulate() missing required argument 'iterable' (pos 1)".to_string(),
+            )
+        })?;
+    let iter = make_iter(interp, &iterable_val)?;
+    let func = func_kw
+        .or_else(|| positional.get(1).cloned())
+        .unwrap_or_else(Value::none);
     let use_initial = initial.is_some();
     let mut a = inst.borrow_mut();
     a.attrs.insert("_func", func);
@@ -222,31 +242,61 @@ pub(super) fn compress_init(
     fn_name: &str,
 ) -> Result<Value> {
     let inst = expect_self(args, fn_name)?;
-    let user = &args[1..];
-    reject_keyword_args_expanded("compress", user)?;
-    if user.is_empty() {
-        return Err(PyError::named(
-            "TypeError",
-            "compress() missing required argument 'data' (pos 1)".to_string(),
-        ));
+    let mut positional: Vec<Value> = Vec::new();
+    let mut data_kw: Option<Value> = None;
+    let mut selectors_kw: Option<Value> = None;
+    for a in &args[1..] {
+        match a.name.as_deref() {
+            Some("data") => data_kw = Some(a.value.clone()),
+            Some("selectors") => selectors_kw = Some(a.value.clone()),
+            Some(other) => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{other}' is an invalid keyword argument for compress()"),
+                ));
+            }
+            None => positional.push(a.value.clone()),
+        }
     }
-    if user.len() == 1 {
-        return Err(PyError::named(
-            "TypeError",
-            "compress() missing required argument 'selectors' (pos 2)".to_string(),
-        ));
-    }
-    if user.len() > 2 {
+    if positional.len() > 2 {
         return Err(PyError::named(
             "TypeError",
             format!(
                 "compress() takes at most 2 arguments ({} given)",
-                user.len()
+                positional.len()
             ),
         ));
     }
-    let data_iter = make_iter(interp, &user[0].value)?;
-    let selectors_iter = make_iter(interp, &user[1].value)?;
+    if !positional.is_empty() && data_kw.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "argument for compress() given by name ('data') and position (1)".to_string(),
+        ));
+    }
+    if positional.len() >= 2 && selectors_kw.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "argument for compress() given by name ('selectors') and position (2)".to_string(),
+        ));
+    }
+    let data_val = data_kw
+        .or_else(|| positional.first().cloned())
+        .ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "compress() missing required argument 'data' (pos 1)".to_string(),
+            )
+        })?;
+    let selectors_val = selectors_kw
+        .or_else(|| positional.get(1).cloned())
+        .ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "compress() missing required argument 'selectors' (pos 2)".to_string(),
+            )
+        })?;
+    let data_iter = make_iter(interp, &data_val)?;
+    let selectors_iter = make_iter(interp, &selectors_val)?;
     let mut a = inst.borrow_mut();
     a.attrs.insert("_data", data_iter);
     a.attrs.insert("_selectors", selectors_iter);

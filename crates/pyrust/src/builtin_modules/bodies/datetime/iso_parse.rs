@@ -123,7 +123,8 @@ fn parse_optional_sec_frac(
 
 fn parse_iso_tz(raw: &[u8], full: &str) -> Result<i64> {
     let bad = || invalid_iso(full);
-    if raw == b"Z" || raw == b"z" {
+    // CPython 3.11+ accepts uppercase 'Z' only (lowercase 'z' is rejected).
+    if raw == b"Z" {
         return Ok(0);
     }
     if raw.is_empty() {
@@ -135,10 +136,16 @@ fn parse_iso_tz(raw: &[u8], full: &str) -> Result<i64> {
         _ => return Err(bad()),
     };
     let rest = &raw[1..];
-    if rest.len() < 4 {
+    if rest.len() < 2 {
         return Err(bad());
     }
     let hh = parse_ascii_digits(&rest[0..2]).ok_or_else(bad)?;
+    if rest.len() == 2 {
+        if hh > 23 {
+            return Err(bad());
+        }
+        return Ok(sign * hh * 3600 * 1_000_000);
+    }
     let (extended, pos) = if rest.get(2) == Some(&b':') {
         (true, 3usize)
     } else {

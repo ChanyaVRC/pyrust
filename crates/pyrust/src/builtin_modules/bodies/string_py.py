@@ -168,24 +168,26 @@ class Template:
         return self._scan(mapping, True)
 
     def get_identifiers(self):
+        # CPython 3.11+: collect all valid identifiers in order of first
+        # appearance, skipping invalid placeholders without raising ValueError.
         ids = []
         template = self.template
         delim = self.delimiter
+        dlen = len(delim)
         i = 0
         n = len(template)
         while i < n:
-            if template[i] != delim:
+            if not template.startswith(delim, i):
                 i += 1
                 continue
-            dollar = i
-            j = i + 1
+            j = i + dlen
             if j >= n:
-                self._invalid(dollar)
-            nxt = template[j]
-            if nxt == delim:
-                i = j + 1
+                break
+            if template.startswith(delim, j):
+                i = j + dlen
                 continue
             name = None
+            nxt = template[j]
             if nxt == "{":
                 k = j + 1
                 if k < n and _is_id_start(template[k]):
@@ -196,7 +198,8 @@ class Template:
                         name = template[j + 1 : k]
                         i = k + 1
                 if name is None:
-                    self._invalid(dollar)
+                    i = j
+                    continue
             elif _is_id_start(nxt):
                 k = j + 1
                 while k < n and _is_id_cont(template[k]):
@@ -204,15 +207,45 @@ class Template:
                 name = template[j:k]
                 i = k
             else:
-                self._invalid(dollar)
-            if name is not None and name not in ids:
+                i = j
+                continue
+            if name not in ids:
                 ids.append(name)
         return ids
 
     def is_valid(self):
-        try:
-            self.get_identifiers()
-        except ValueError:
+        template = self.template
+        delim = self.delimiter
+        dlen = len(delim)
+        i = 0
+        n = len(template)
+        while i < n:
+            if not template.startswith(delim, i):
+                i += 1
+                continue
+            j = i + dlen
+            if j >= n:
+                return False
+            if template.startswith(delim, j):
+                i = j + dlen
+                continue
+            nxt = template[j]
+            if nxt == "{":
+                k = j + 1
+                if k < n and _is_id_start(template[k]):
+                    k += 1
+                    while k < n and _is_id_cont(template[k]):
+                        k += 1
+                    if k < n and template[k] == "}":
+                        i = k + 1
+                        continue
+                return False
+            elif _is_id_start(nxt):
+                k = j + 1
+                while k < n and _is_id_cont(template[k]):
+                    k += 1
+                i = k
+                continue
             return False
         return True
 
