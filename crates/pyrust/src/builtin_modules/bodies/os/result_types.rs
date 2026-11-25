@@ -1,9 +1,11 @@
-//! Construction and presentation of `os` result objects.
+//! Construction and presentation of `os` result objects (`terminal_size`,
+//! `stat_result`, `times_result`).
 //!
 //! Host operations pass metadata or scalar fields into this module. Python
 //! class identity, instance attributes, and repr formatting stay here.
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
@@ -15,6 +17,12 @@ use super::{
     STAT_RESULT_NEW_REGISTRY, STAT_RESULT_REPR_REGISTRY, TERMINAL_SIZE_NEW_REGISTRY,
     TERMINAL_SIZE_REPR_REGISTRY,
 };
+
+pyrust_struct_seq! {
+    pub(crate) times_result in "os" {
+        fields: [user, system, children_user, children_system, elapsed],
+    }
+}
 
 // Thread-local justification:
 // (a) Why `thread_local!`: Holds `!Send` `Rc<RefCell<PyClass>>` singletons for
@@ -99,6 +107,26 @@ pub(super) fn terminal_size_class_value() -> Value {
 
 pub(super) fn stat_result_class_value() -> Value {
     STAT_RESULT_CLASS.with(|class| Value::py_class(Rc::clone(class)))
+}
+
+pub(super) fn times_result_class_value() -> Value {
+    times_result::class()
+}
+
+pub(super) fn make_times_result(
+    user: f64,
+    system: f64,
+    children_user: f64,
+    children_system: f64,
+    elapsed: f64,
+) -> Value {
+    times_result::make([
+        Value::float(user),
+        Value::float(system),
+        Value::float(children_user),
+        Value::float(children_system),
+        Value::float(elapsed),
+    ])
 }
 
 fn make_result_instance(
@@ -299,9 +327,6 @@ pub(super) fn stat_result_repr(args: &[ExpandedCallArg], fn_name: &str) -> Resul
         }
     };
     let instance = instance.borrow();
-    // A struct-sequence's repr shows its ten tuple-visible fields.  The
-    // optional constructor dictionary may override supplemental named attrs
-    // such as `st_atime`, but it does not rewrite tuple slots or their repr.
     let sequence = instance
         .attrs
         .builtin_data()
@@ -343,34 +368,97 @@ pub(super) fn make_terminal_size(columns: i64, lines: i64) -> Value {
     })
 }
 
-pub(crate) fn make_stat_result(metadata: &std::fs::Metadata) -> Value {
-    fn seconds_since_epoch(result: std::io::Result<std::time::SystemTime>) -> f64 {
-        result
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs_f64())
-            .unwrap_or(0.0)
-    }
+fn seconds_and_nanos(result: std::io::Result<std::time::SystemTime>) -> (f64, i64) {
+    result
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| (duration.as_secs_f64(), duration.as_nanos() as i64))
+        .unwrap_or((0.0, 0))
+}
 
-    let modified = seconds_since_epoch(metadata.modified());
-    let accessed = seconds_since_epoch(metadata.accessed());
-    let created = seconds_since_epoch(metadata.created());
+/// Query Windows `(st_ino, st_dev, st_nlink)` from an open OS `HANDLE`.
+#[cfg(windows)]
+pub(super) fn win_handle_file_ids(
+    raw_handle: windows_sys::Win32::Foundation::HANDLE,
+) -> Option<(u64, u32, u32)> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    // SAFETY: `info` is zero-initialized and `raw_handle` is a borrowed Win32 handle.
+    unsafe {
+        let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        if GetFileInformationByHandle(raw_handle, &mut info) != 0 {
+            let ino = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+            return Some((ino, info.dwVolumeSerialNumber, info.nNumberOfLinks));
+        }
+    }
+    None
+}
+
+/// Query Windows `(st_ino, st_dev, st_nlink)` for a filesystem path without
+/// requiring read/write permissions (`dwDesiredAccess = 0`).
+#[cfg(windows)]
+pub(super) fn win_path_file_ids(path: &Path, follow_symlinks: bool) -> Option<(u64, u32, u32)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let mut flags = FILE_FLAG_BACKUP_SEMANTICS;
+    if !follow_symlinks {
+        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    }
+    // SAFETY: `wide` is NUL-terminated; any valid handle is closed before returning.
+    unsafe {
+        let handle = CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            flags,
+            std::ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let ids = win_handle_file_ids(handle);
+        CloseHandle(handle);
+        ids
+    }
+}
+
+fn build_stat_result_with_ids(
+    metadata: &std::fs::Metadata,
+    override_ids: Option<(u64, u32, u32)>,
+) -> Value {
+    let (modified, modified_ns) = seconds_and_nanos(metadata.modified());
+    let (accessed, accessed_ns) = seconds_and_nanos(metadata.accessed());
 
     #[cfg(unix)]
-    let (mode, inode, links, user, group, device) = {
+    let (mode, inode_val, links, user, group, device, ctime_f, ctime_ns_val) = {
         use std::os::unix::fs::MetadataExt;
+        let _ = override_ids;
+        let ct_ns = metadata.ctime() * 1_000_000_000 + metadata.ctime_nsec();
+        let ct_f = metadata.ctime() as f64 + (metadata.ctime_nsec() as f64) / 1_000_000_000.0;
         (
             metadata.mode() as i64,
-            metadata.ino() as i64,
+            Value::int(metadata.ino() as i64),
             metadata.nlink() as i64,
             metadata.uid() as i64,
             metadata.gid() as i64,
             metadata.dev() as i64,
+            ct_f,
+            ct_ns,
         )
     };
     #[cfg(not(unix))]
-    let (mode, inode, links, user, group, device) = (
-        if metadata.file_type().is_symlink() {
+    let (mode, inode_val, links, user, group, device, ctime_f, ctime_ns_val) = {
+        let (created, created_ns) = seconds_and_nanos(metadata.created());
+        let mode = if metadata.file_type().is_symlink() {
             0o120777_i64
         } else if metadata.is_dir() {
             0o040777_i64
@@ -378,18 +466,29 @@ pub(crate) fn make_stat_result(metadata: &std::fs::Metadata) -> Value {
             0o100444_i64
         } else {
             0o100666_i64
-        },
-        0_i64,
-        0_i64,
-        0_i64,
-        0_i64,
-        0_i64,
-    );
+        };
+        let (ino, dev, nlink) = override_ids.unwrap_or((0, 0, 1));
+        let ino_val = if ino <= i64::MAX as u64 {
+            Value::int(ino as i64)
+        } else {
+            Value::bigint(crate::value::PyBigInt::from(ino))
+        };
+        (
+            mode,
+            ino_val,
+            nlink as i64,
+            0_i64,
+            0_i64,
+            dev as i64,
+            created,
+            created_ns,
+        )
+    };
 
     STAT_RESULT_CLASS.with(|class| {
         let visible = vec![
             Value::int(mode),
-            Value::int(inode),
+            inode_val,
             Value::int(device),
             Value::int(links),
             Value::int(user),
@@ -397,7 +496,7 @@ pub(crate) fn make_stat_result(metadata: &std::fs::Metadata) -> Value {
             Value::int(metadata.len() as i64),
             Value::float(accessed),
             Value::float(modified),
-            Value::float(created),
+            Value::float(ctime_f),
         ];
         make_result_instance(
             Rc::clone(class),
@@ -413,22 +512,132 @@ pub(crate) fn make_stat_result(metadata: &std::fs::Metadata) -> Value {
                 ("st_atime", visible[7].clone()),
                 ("st_mtime", visible[8].clone()),
                 ("st_ctime", visible[9].clone()),
-                (
-                    "st_atime_ns",
-                    Value::int((accessed * 1_000_000_000.0) as i64),
-                ),
-                (
-                    "st_mtime_ns",
-                    Value::int((modified * 1_000_000_000.0) as i64),
-                ),
-                (
-                    "st_ctime_ns",
-                    Value::int((created * 1_000_000_000.0) as i64),
-                ),
+                ("st_atime_ns", Value::int(accessed_ns)),
+                ("st_mtime_ns", Value::int(modified_ns)),
+                ("st_ctime_ns", Value::int(ctime_ns_val)),
                 ("st_blksize", Value::none()),
                 ("st_blocks", Value::none()),
                 ("st_rdev", Value::none()),
             ],
         )
     })
+}
+
+pub(crate) fn make_stat_result(metadata: &std::fs::Metadata) -> Value {
+    build_stat_result_with_ids(metadata, None)
+}
+
+pub(super) fn make_stat_result_for_path(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    follow_symlinks: bool,
+) -> Value {
+    #[cfg(windows)]
+    let ids = win_path_file_ids(path, follow_symlinks);
+    #[cfg(not(windows))]
+    let ids = {
+        let _ = (path, follow_symlinks);
+        None
+    };
+    build_stat_result_with_ids(metadata, ids)
+}
+
+#[cfg(windows)]
+pub(super) fn make_stat_result_for_win_handle(
+    raw_handle: windows_sys::Win32::Foundation::HANDLE,
+    metadata: &std::fs::Metadata,
+) -> Value {
+    let ids = win_handle_file_ids(raw_handle);
+    build_stat_result_with_ids(metadata, ids)
+}
+
+/// Build an `os.stat_result` directly from a Windows `HANDLE` via
+/// `GetFileInformationByHandle` (used when we have a borrowed handle from
+/// `open(path).fileno()` or stdio).
+#[cfg(windows)]
+pub(super) fn stat_result_from_borrowed_win_handle(
+    raw_handle: windows_sys::Win32::Foundation::HANDLE,
+) -> std::io::Result<Value> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY,
+        FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
+    };
+    fn filetime_to_unix(ft: windows_sys::Win32::Foundation::FILETIME) -> (f64, i64) {
+        const EPOCH_DIFF_100NS: u64 = 116_444_736_000_000_000;
+        let ticks = ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
+        if ticks < EPOCH_DIFF_100NS {
+            return (0.0, 0);
+        }
+        let rel = ticks - EPOCH_DIFF_100NS;
+        let ns = (rel.saturating_mul(100)) as i64;
+        let secs = (rel as f64) / 10_000_000.0;
+        (secs, ns)
+    }
+
+    // SAFETY: `info` is zero-initialized and `raw_handle` is a live borrowed handle.
+    let info = unsafe {
+        let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        if GetFileInformationByHandle(raw_handle, &mut info) == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        info
+    };
+
+    let attrs = info.dwFileAttributes;
+    let mode = if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+        0o120777_i64
+    } else if (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        0o040777_i64
+    } else if (attrs & FILE_ATTRIBUTE_READONLY) != 0 {
+        0o100444_i64
+    } else {
+        0o100666_i64
+    };
+    let ino = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+    let ino_val = if ino <= i64::MAX as u64 {
+        Value::int(ino as i64)
+    } else {
+        Value::bigint(crate::value::PyBigInt::from(ino))
+    };
+    let size = (((info.nFileSizeHigh as u64) << 32) | (info.nFileSizeLow as u64)) as i64;
+    let (atime, atime_ns) = filetime_to_unix(info.ftLastAccessTime);
+    let (mtime, mtime_ns) = filetime_to_unix(info.ftLastWriteTime);
+    let (ctime, ctime_ns) = filetime_to_unix(info.ftCreationTime);
+
+    Ok(STAT_RESULT_CLASS.with(|class| {
+        let visible = vec![
+            Value::int(mode),
+            ino_val,
+            Value::int(info.dwVolumeSerialNumber as i64),
+            Value::int(info.nNumberOfLinks as i64),
+            Value::int(0),
+            Value::int(0),
+            Value::int(size),
+            Value::float(atime),
+            Value::float(mtime),
+            Value::float(ctime),
+        ];
+        make_result_instance(
+            Rc::clone(class),
+            visible.clone(),
+            [
+                ("st_mode", visible[0].clone()),
+                ("st_ino", visible[1].clone()),
+                ("st_dev", visible[2].clone()),
+                ("st_nlink", visible[3].clone()),
+                ("st_uid", visible[4].clone()),
+                ("st_gid", visible[5].clone()),
+                ("st_size", visible[6].clone()),
+                ("st_atime", visible[7].clone()),
+                ("st_mtime", visible[8].clone()),
+                ("st_ctime", visible[9].clone()),
+                ("st_atime_ns", Value::int(atime_ns)),
+                ("st_mtime_ns", Value::int(mtime_ns)),
+                ("st_ctime_ns", Value::int(ctime_ns)),
+                ("st_blksize", Value::none()),
+                ("st_blocks", Value::none()),
+                ("st_rdev", Value::none()),
+            ],
+        )
+    }))
 }

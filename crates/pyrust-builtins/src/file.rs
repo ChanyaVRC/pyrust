@@ -955,6 +955,14 @@ pub fn try_clone_file_by_fd(fd: i64) -> Option<std::io::Result<std::fs::File>> {
     }
 }
 
+/// Look up the borrowed raw Windows `HANDLE` for a synthetic fd returned by
+/// `open(path).fileno()`. Returns `None` once the file is closed or dropped.
+#[cfg(windows)]
+pub fn lookup_open_file_raw_handle(fd: i64) -> Option<isize> {
+    let table = WIN_FD_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+    table.get(&fd).map(|&raw| raw as isize)
+}
+
 #[cfg(windows)]
 fn unregister_win_fd(s: &mut FileState) {
     if s.close_fd_fn.is_none()

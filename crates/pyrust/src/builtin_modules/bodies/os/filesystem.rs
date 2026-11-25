@@ -1,75 +1,42 @@
 //! Host-filesystem operations exposed by `os`.
 //!
-//! This module owns path-consuming I/O and recursive traversal. It does not
-//! construct Python-facing result classes or access process-environment state.
+//! This module owns path-consuming I/O and recursive traversal. Low-level fd
+//! operations live in `fd_ops.rs` and `scandir` lives in `scandir.rs`.
 
-use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::path::Path;
 
+use crate::builtin_modules::genericpath::ops::{fspath_resolve, path_buf_to_bytes};
 use crate::error::{PyError, Result};
-use crate::interpreter::{ExpandedCallArg, reject_keyword_args_expanded, value_type_name_str};
+use crate::interpreter::builtin_args::PyPath;
+use crate::interpreter::{ExpandedCallArg, Interpreter, reject_keyword_args_expanded};
 use crate::value::{Value, ValueKind};
 
-use super::arguments::{require_int, require_str, single_path_arg, value_is_truthy};
-use super::result_types::make_stat_result;
+use super::arguments::{require_int, value_is_truthy};
+use super::fd_ops;
+use super::result_types::make_stat_result_for_path;
 
-/// Standard POSIX / Windows file-open flag constants exposed on `os`.
-pub(crate) const O_RDONLY: i64 = 0x0000;
-pub(crate) const O_WRONLY: i64 = 0x0001;
-pub(crate) const O_RDWR: i64 = 0x0002;
-pub(crate) const O_APPEND: i64 = 0x0008;
-pub(crate) const O_CREAT: i64 = 0x0100;
-pub(crate) const O_TRUNC: i64 = 0x0200;
-pub(crate) const O_EXCL: i64 = 0x0400;
-
-/// Process-local table of open OS file handles backing integer file descriptors
-/// returned by `tempfile.mkstemp()` and consumed by `os.read` / `os.write` /
-/// `os.close`.
-static FD_TABLE: LazyLock<Mutex<HashMap<i64, std::fs::File>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static NEXT_FD: AtomicI64 = AtomicI64::new(3);
-
-/// Register an open `std::fs::File` in the descriptor table and return its fd.
-pub(crate) fn register_fd(file: std::fs::File) -> i64 {
-    let fd = NEXT_FD.fetch_add(1, Ordering::Relaxed);
-    let mut table = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
-    table.insert(fd, file);
-    fd
+fn extract_path_str(interp: &mut Interpreter, value: &Value) -> Result<String> {
+    let pv = fspath_resolve(interp, value)?;
+    let pb = pv.to_path_buf()?;
+    Ok(pb.to_string_lossy().into_owned())
 }
 
-/// Duplicate an open `std::fs::File` registered in the descriptor table.
-pub(crate) fn clone_fd(fd: i64) -> std::io::Result<std::fs::File> {
-    let table = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
-    match table.get(&fd) {
-        Some(file) => file.try_clone(),
-        None => Err(ebadf_error()),
+fn single_fspath_arg(
+    interp: &mut Interpreter,
+    fn_name: &str,
+    args: &[ExpandedCallArg],
+) -> Result<String> {
+    reject_keyword_args_expanded(fn_name, args)?;
+    if args.len() != 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "{fn_name}() takes exactly 1 argument ({} given)",
+                args.len()
+            ),
+        ));
     }
-}
-
-/// Remove and drop an fd from the descriptor table, returning `EBADF` if absent.
-pub(crate) fn close_fd_raw(fd: i64) -> std::io::Result<()> {
-    let file = {
-        let mut table = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
-        table.remove(&fd)
-    };
-    if file.is_some() {
-        Ok(())
-    } else {
-        Err(ebadf_error())
-    }
-}
-
-fn ebadf_error() -> std::io::Error {
-    #[cfg(unix)]
-    {
-        std::io::Error::from_raw_os_error(libc::EBADF)
-    }
-    #[cfg(not(unix))]
-    {
-        std::io::Error::from_raw_os_error(9)
-    }
+    extract_path_str(interp, &args[0].value)
 }
 
 pub(super) fn getcwd(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
@@ -84,14 +51,27 @@ pub(super) fn getcwd(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
     Ok(Value::string(cwd.to_string_lossy()))
 }
 
-pub(super) fn chdir(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    let path = single_path_arg(fn_name, args)?;
+pub(super) fn getcwdb() -> Result<Value> {
+    let cwd = std::env::current_dir().map_err(|error| PyError::from_io_error(&error, None))?;
+    Ok(Value::bytes(path_buf_to_bytes(&cwd)))
+}
+
+pub(super) fn chdir(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let path = single_fspath_arg(interp, fn_name, args)?;
     std::env::set_current_dir(&path)
         .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
     Ok(Value::none())
 }
 
-pub(super) fn listdir(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+pub(super) fn listdir(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.len() > 1 {
         return Err(PyError::named(
@@ -102,21 +82,37 @@ pub(super) fn listdir(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> 
             ),
         ));
     }
-    let path = match args.first() {
-        Some(arg) => require_str(fn_name, &arg.value, "path")?,
-        None => ".".to_string(),
+    let (path_buf, path_disp, is_bytes) = match args.first() {
+        Some(arg) if !arg.value.is_none() => {
+            let pv = fspath_resolve(interp, &arg.value)?;
+            let is_b = pv.is_bytes();
+            let pb = pv.to_path_buf()?;
+            let disp = pb.to_string_lossy().into_owned();
+            (pb, disp, is_b)
+        }
+        _ => (std::path::PathBuf::from("."), ".".to_string(), false),
     };
-    let entries =
-        std::fs::read_dir(&path).map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+    let entries = std::fs::read_dir(&path_buf)
+        .map_err(|error| PyError::from_io_error(&error, Some(&path_disp)))?;
     let mut names = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
-        names.push(Value::string(entry.file_name().to_string_lossy()));
+        let entry = entry.map_err(|error| PyError::from_io_error(&error, Some(&path_disp)))?;
+        if is_bytes {
+            names.push(Value::bytes(path_buf_to_bytes(Path::new(
+                &entry.file_name(),
+            ))));
+        } else {
+            names.push(Value::string(entry.file_name().to_string_lossy()));
+        }
     }
     Ok(Value::list(names))
 }
 
-pub(super) fn mkdir(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+pub(super) fn mkdir(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.is_empty() || args.len() > 2 {
         return Err(PyError::named(
@@ -124,7 +120,7 @@ pub(super) fn mkdir(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
             format!("{fn_name}() takes 1 or 2 arguments ({} given)", args.len()),
         ));
     }
-    let path = require_str(fn_name, &args[0].value, "path")?;
+    let path = extract_path_str(interp, &args[0].value)?;
     let mode = match args.get(1) {
         Some(mode) => Some(require_int(fn_name, &mode.value, "mode")?),
         None => None,
@@ -148,14 +144,18 @@ pub(super) fn mkdir(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
     Ok(Value::none())
 }
 
-pub(super) fn makedirs(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+pub(super) fn makedirs(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
     if args.is_empty() {
         return Err(PyError::named(
             "TypeError",
             format!("{fn_name}() missing required argument: 'name'"),
         ));
     }
-    let path = require_str(fn_name, &args[0].value, "path")?;
+    let path = extract_path_str(interp, &args[0].value)?;
     let mut exist_ok = false;
     let mut seen_mode_positional = false;
     let mut seen_mode_keyword = false;
@@ -209,7 +209,7 @@ pub(super) fn makedirs(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value>
         }
     }
 
-    if !exist_ok && std::path::Path::new(&path).exists() {
+    if !exist_ok && Path::new(&path).exists() {
         return match std::fs::create_dir(&path) {
             Ok(()) => Ok(Value::none()),
             Err(error) => Err(PyError::from_io_error(&error, Some(&path))),
@@ -219,8 +219,12 @@ pub(super) fn makedirs(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value>
     Ok(Value::none())
 }
 
-pub(super) fn remove(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    let path = single_path_arg(fn_name, args)?;
+pub(super) fn remove(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let path = single_fspath_arg(interp, fn_name, args)?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::FileTypeExt;
@@ -234,17 +238,29 @@ pub(super) fn remove(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
     Ok(Value::none())
 }
 
-pub(super) fn unlink(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    remove(args, fn_name)
+pub(super) fn unlink(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    remove(interp, args, fn_name)
 }
 
-pub(super) fn rmdir(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    let path = single_path_arg(fn_name, args)?;
+pub(super) fn rmdir(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let path = single_fspath_arg(interp, fn_name, args)?;
     std::fs::remove_dir(&path).map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
     Ok(Value::none())
 }
 
-pub(super) fn rename(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+pub(super) fn rename(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.len() != 2 {
         return Err(PyError::named(
@@ -255,169 +271,357 @@ pub(super) fn rename(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
             ),
         ));
     }
-    let source = require_str(fn_name, &args[0].value, "src")?;
-    let destination = require_str(fn_name, &args[1].value, "dst")?;
+    let source = extract_path_str(interp, &args[0].value)?;
+    let destination = extract_path_str(interp, &args[1].value)?;
     std::fs::rename(&source, &destination)
         .map_err(|error| PyError::from_io_error2(&error, Some(&source), Some(&destination)))?;
     Ok(Value::none())
 }
 
-pub(super) fn walk(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    let top = single_path_arg(fn_name, args)?;
+pub(super) fn replace(src: PyPath, dst: PyPath) -> Result<Value> {
+    let s = src.as_path();
+    let d = dst.as_path();
+    let s_disp = s.to_string_lossy();
+    let d_disp = d.to_string_lossy();
+    std::fs::rename(s, d)
+        .map_err(|error| PyError::from_io_error2(&error, Some(&s_disp), Some(&d_disp)))?;
+    Ok(Value::none())
+}
+
+pub(super) fn link(src: PyPath, dst: PyPath) -> Result<Value> {
+    let s = src.as_path();
+    let d = dst.as_path();
+    let s_disp = s.to_string_lossy();
+    let d_disp = d.to_string_lossy();
+    std::fs::hard_link(s, d)
+        .map_err(|error| PyError::from_io_error2(&error, Some(&s_disp), Some(&d_disp)))?;
+    Ok(Value::none())
+}
+
+fn host_split(path: &str) -> (String, String) {
+    #[cfg(windows)]
+    {
+        crate::builtin_modules::ntpath::ops::nt_split_str(path)
+    }
+    #[cfg(not(windows))]
+    {
+        crate::builtin_modules::posixpath::ops::posix_split_str(path)
+    }
+}
+
+pub(super) fn removedirs(name: PyPath) -> Result<Value> {
+    let p_str = name.as_path().to_string_lossy().into_owned();
+    std::fs::remove_dir(&p_str).map_err(|e| PyError::from_io_error(&e, Some(&p_str)))?;
+    let (mut head, mut tail) = host_split(&p_str);
+    if tail.is_empty() {
+        let (h, t) = host_split(&head);
+        head = h;
+        tail = t;
+    }
+    while !head.is_empty() && !tail.is_empty() {
+        if std::fs::remove_dir(&head).is_err() {
+            break;
+        }
+        let (h, t) = host_split(&head);
+        head = h;
+        tail = t;
+    }
+    Ok(Value::none())
+}
+
+pub(super) fn renames(old: PyPath, new: PyPath) -> Result<Value> {
+    let old_str = old.as_path().to_string_lossy().into_owned();
+    let new_str = new.as_path().to_string_lossy().into_owned();
+    let (new_head, new_tail) = host_split(&new_str);
+    if !new_head.is_empty() && !new_tail.is_empty() && !Path::new(&new_head).exists() {
+        std::fs::create_dir_all(&new_head)
+            .map_err(|e| PyError::from_io_error(&e, Some(&new_head)))?;
+    }
+    std::fs::rename(&old_str, &new_str)
+        .map_err(|e| PyError::from_io_error2(&e, Some(&old_str), Some(&new_str)))?;
+    let (old_head, old_tail) = host_split(&old_str);
+    if !old_head.is_empty() && !old_tail.is_empty() {
+        let _ = removedirs(PyPath::from(old_head));
+    }
+    Ok(Value::none())
+}
+
+fn value_to_seconds_ns(v: &Value, fn_name: &str) -> Result<(i64, i64)> {
+    match v.kind() {
+        ValueKind::Int(n) => Ok((n, 0)),
+        ValueKind::Bool(b) => Ok((i64::from(b), 0)),
+        ValueKind::Float(f) => {
+            if !f.is_finite() {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!("{fn_name}: timestamp out of range"),
+                ));
+            }
+            let secs = f.floor() as i64;
+            let nanos = ((f - secs as f64) * 1_000_000_000.0).round() as i64;
+            if nanos >= 1_000_000_000 {
+                Ok((secs + 1, nanos - 1_000_000_000))
+            } else if nanos < 0 {
+                Ok((secs - 1, nanos + 1_000_000_000))
+            } else {
+                Ok((secs, nanos))
+            }
+        }
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() times must be a 2-tuple of numbers"),
+        )),
+    }
+}
+
+fn value_to_ns_pair(v: &Value, fn_name: &str) -> Result<(i64, i64)> {
+    let total_ns = match v.kind() {
+        ValueKind::Int(n) => n,
+        ValueKind::Bool(b) => i64::from(b),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{fn_name}() ns must be a 2-tuple of ints"),
+            ));
+        }
+    };
+    let secs = total_ns.div_euclid(1_000_000_000);
+    let nanos = total_ns.rem_euclid(1_000_000_000);
+    Ok((secs, nanos))
+}
+
+pub(super) fn utime(
+    interp: &mut Interpreter,
+    path: PyPath,
+    times: Option<&Value>,
+    ns: Option<&Value>,
+    follow_symlinks: bool,
+) -> Result<Value> {
+    let has_times = times.is_some_and(|v| !v.is_none());
+    let has_ns = ns.is_some_and(|v| !v.is_none());
+    if has_times && has_ns {
+        return Err(PyError::named(
+            "ValueError",
+            "utime: you may specify either 'times' or 'ns' but not both".to_string(),
+        ));
+    }
+
+    let timestamps: Option<((i64, i64), (i64, i64))> = if has_times {
+        let items = interp.collect_iterable(times.unwrap())?;
+        if items.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                "utime: 'times' must be either a tuple of two ints or None".to_string(),
+            ));
+        }
+        Some((
+            value_to_seconds_ns(&items[0], "utime")?,
+            value_to_seconds_ns(&items[1], "utime")?,
+        ))
+    } else if has_ns {
+        let items = interp.collect_iterable(ns.unwrap())?;
+        if items.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                "utime: 'ns' must be a tuple of two ints".to_string(),
+            ));
+        }
+        Some((
+            value_to_ns_pair(&items[0], "utime")?,
+            value_to_ns_pair(&items[1], "utime")?,
+        ))
+    } else {
+        None
+    };
+
+    let p = path.as_path();
+    let p_disp = p.to_string_lossy();
+
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let cpath = CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| PyError::named("ValueError", "embedded null byte".to_string()))?;
+        let flags = if follow_symlinks {
+            0
+        } else {
+            libc::AT_SYMLINK_NOFOLLOW
+        };
+        let rc = if let Some(((a_s, a_ns), (m_s, m_ns))) = timestamps {
+            let arr = [
+                libc::timespec {
+                    tv_sec: a_s as libc::time_t,
+                    tv_nsec: a_ns as libc::c_long,
+                },
+                libc::timespec {
+                    tv_sec: m_s as libc::time_t,
+                    tv_nsec: m_ns as libc::c_long,
+                },
+            ];
+            // SAFETY: `cpath` is NUL-terminated and `arr` is a 2-element timespec array.
+            unsafe { libc::utimensat(libc::AT_FDCWD, cpath.as_ptr(), arr.as_ptr(), flags) }
+        } else {
+            // SAFETY: NULL timespec sets both timestamps to current time.
+            unsafe { libc::utimensat(libc::AT_FDCWD, cpath.as_ptr(), std::ptr::null(), flags) }
+        };
+        if rc < 0 {
+            return Err(PyError::from_io_error(
+                &std::io::Error::last_os_error(),
+                Some(&p_disp),
+            ));
+        }
+        Ok(Value::none())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+            OPEN_EXISTING, SetFileTime,
+        };
+
+        fn unix_to_filetime(secs: i64, nanos: i64) -> FILETIME {
+            const EPOCH_DIFF_SECS: i64 = 11_644_473_600;
+            let ticks = (secs + EPOCH_DIFF_SECS)
+                .saturating_mul(10_000_000)
+                .saturating_add(nanos / 100) as u64;
+            FILETIME {
+                dwLowDateTime: ticks as u32,
+                dwHighDateTime: (ticks >> 32) as u32,
+            }
+        }
+
+        let (a_ft, m_ft) = match timestamps {
+            Some(((a_s, a_ns), (m_s, m_ns))) => {
+                (unix_to_filetime(a_s, a_ns), unix_to_filetime(m_s, m_ns))
+            }
+            None => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let ft = unix_to_filetime(now.as_secs() as i64, now.subsec_nanos() as i64);
+                (ft, ft)
+            }
+        };
+
+        let mut wide: Vec<u16> = p.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let mut flags = FILE_FLAG_BACKUP_SEMANTICS;
+        if !follow_symlinks {
+            flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+        }
+        // SAFETY: `wide` is NUL-terminated; valid handles are closed before returning.
+        unsafe {
+            let handle = CreateFileW(
+                wide.as_ptr(),
+                FILE_WRITE_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                flags,
+                std::ptr::null_mut(),
+            );
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(PyError::from_io_error(
+                    &std::io::Error::last_os_error(),
+                    Some(&p_disp),
+                ));
+            }
+            let ok = SetFileTime(handle, std::ptr::null(), &a_ft, &m_ft);
+            let err = std::io::Error::last_os_error();
+            CloseHandle(handle);
+            if ok == 0 {
+                return Err(PyError::from_io_error(&err, Some(&p_disp)));
+            }
+        }
+        Ok(Value::none())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (timestamps, follow_symlinks, p_disp);
+        Err(PyError::named(
+            "NotImplementedError",
+            "os.utime is not supported on this platform".to_string(),
+        ))
+    }
+}
+
+pub(super) fn walk(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let top = single_fspath_arg(interp, fn_name, args)?;
     let mut results = Vec::new();
     walk_collect(&top, &mut results)?;
     Ok(Value::list(results))
 }
 
-pub(super) fn stat(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    let path = single_path_arg(fn_name, args)?;
-    let metadata =
-        std::fs::metadata(&path).map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
-    Ok(make_stat_result(&metadata))
-}
-
-pub(super) fn lstat(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    let path = single_path_arg(fn_name, args)?;
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
-    Ok(make_stat_result(&metadata))
-}
-
-pub(super) fn open_path(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    if args.len() < 2 {
+pub(super) fn stat(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    if args.is_empty() {
         return Err(PyError::named(
             "TypeError",
-            format!("{fn_name}() missing required positional arguments"),
+            format!("{fn_name}() missing required argument 'path'"),
         ));
     }
-    let path = require_str(fn_name, &args[0].value, "path")?;
-    let flags = require_int(fn_name, &args[1].value, "flags")?;
-    let mode = match args.get(2) {
-        Some(arg) => require_int(fn_name, &arg.value, "mode")?,
-        None => 0o777,
-    };
-    let access = flags & 0x3;
-    let mut opts = std::fs::OpenOptions::new();
-    match access {
-        O_WRONLY => {
-            opts.write(true);
-        }
-        O_RDWR => {
-            opts.read(true).write(true);
-        }
-        _ => {
-            opts.read(true);
-        }
-    }
-    if (flags & O_APPEND) != 0 {
-        opts.append(true);
-    }
-    if (flags & O_TRUNC) != 0 {
-        opts.truncate(true);
-    }
-    if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 {
-        opts.create_new(true);
-    } else if (flags & O_CREAT) != 0 {
-        opts.create(true);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode((mode & 0o7777) as u32);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = mode;
-    }
-    let file = opts
-        .open(&path)
-        .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
-    Ok(Value::int(register_fd(file)))
-}
-
-pub(super) fn close(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    if args.len() != 1 {
-        return Err(PyError::named(
-            "TypeError",
-            format!(
-                "{fn_name}() takes exactly 1 argument ({} given)",
-                args.len()
-            ),
-        ));
-    }
-    let fd = require_int(fn_name, &args[0].value, "fd")?;
-    close_fd_raw(fd).map_err(|error| PyError::from_io_error(&error, None))?;
-    Ok(Value::none())
-}
-
-pub(super) fn read_fd(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    if args.len() != 2 {
-        return Err(PyError::named(
-            "TypeError",
-            format!(
-                "{fn_name}() takes exactly 2 arguments ({} given)",
-                args.len()
-            ),
-        ));
-    }
-    let fd = require_int(fn_name, &args[0].value, "fd")?;
-    let n = require_int(fn_name, &args[1].value, "n")?;
-    if n < 0 {
-        return Err(PyError::named("OSError", "Invalid argument".to_string()));
-    }
-    let mut table = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
-    let file = table
-        .get_mut(&fd)
-        .ok_or_else(|| PyError::from_io_error(&ebadf_error(), None))?;
-    let mut buf = vec![0u8; n as usize];
-    let count = file
-        .read(&mut buf)
-        .map_err(|error| PyError::from_io_error(&error, None))?;
-    buf.truncate(count);
-    Ok(Value::bytes(buf))
-}
-
-pub(super) fn write_fd(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    if args.len() != 2 {
-        return Err(PyError::named(
-            "TypeError",
-            format!(
-                "{fn_name}() takes exactly 2 arguments ({} given)",
-                args.len()
-            ),
-        ));
-    }
-    let fd = require_int(fn_name, &args[0].value, "fd")?;
-    let data: Vec<u8> = match args[1].value.kind() {
-        ValueKind::Bytes(b) => b.as_ref().clone(),
-        _ => {
-            if let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(&args[1].value) {
-                snap
-            } else {
+    let mut follow_symlinks = true;
+    for arg in args.iter().skip(1) {
+        match arg.name.as_deref() {
+            Some("follow_symlinks") => follow_symlinks = value_is_truthy(&arg.value),
+            Some(other) => {
                 return Err(PyError::named(
                     "TypeError",
-                    format!(
-                        "a bytes-like object is required, not '{}'",
-                        value_type_name_str(&args[1].value)
-                    ),
+                    format!("{fn_name}() got an unexpected keyword argument '{other}'"),
+                ));
+            }
+            None => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{fn_name}() takes at most 1 positional argument"),
                 ));
             }
         }
-    };
-    let mut table = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
-    let file = table
-        .get_mut(&fd)
-        .ok_or_else(|| PyError::from_io_error(&ebadf_error(), None))?;
-    let written = file
-        .write(&data)
-        .map_err(|error| PyError::from_io_error(&error, None))?;
-    Ok(Value::int(written as i64))
+    }
+    match args[0].value.kind() {
+        ValueKind::Int(fd) => return fd_ops::fstat(fd),
+        ValueKind::Bool(b) => return fd_ops::fstat(i64::from(b)),
+        _ => {}
+    }
+    let path = extract_path_str(interp, &args[0].value)?;
+    let p = Path::new(&path);
+    let metadata = if follow_symlinks {
+        std::fs::metadata(p)
+    } else {
+        std::fs::symlink_metadata(p)
+    }
+    .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+    Ok(make_stat_result_for_path(p, &metadata, follow_symlinks))
 }
 
-pub(super) fn access(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+pub(super) fn lstat(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let path = single_fspath_arg(interp, fn_name, args)?;
+    let p = Path::new(&path);
+    let metadata = std::fs::symlink_metadata(p)
+        .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+    Ok(make_stat_result_for_path(p, &metadata, false))
+}
+
+pub(super) fn access(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.len() != 2 {
         return Err(PyError::named(
@@ -428,7 +632,7 @@ pub(super) fn access(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
             ),
         ));
     }
-    let path = require_str(fn_name, &args[0].value, "path")?;
+    let path = extract_path_str(interp, &args[0].value)?;
     let mode = require_int(fn_name, &args[1].value, "mode")?;
     #[cfg(unix)]
     {
@@ -445,7 +649,6 @@ pub(super) fn access(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
         let Ok(meta) = std::fs::metadata(&path) else {
             return Ok(Value::bool_(false));
         };
-        // W_OK == 2: non-directory files marked read-only fail W_OK on Windows.
         if (mode & 2) != 0 && !meta.is_dir() && meta.permissions().readonly() {
             return Ok(Value::bool_(false));
         }
@@ -453,7 +656,11 @@ pub(super) fn access(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
     }
 }
 
-pub(super) fn chmod(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+pub(super) fn chmod(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
     if args.len() < 2 {
         return Err(PyError::named(
             "TypeError",
@@ -463,7 +670,7 @@ pub(super) fn chmod(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
             ),
         ));
     }
-    let path = require_str(fn_name, &args[0].value, "path")?;
+    let path = extract_path_str(interp, &args[0].value)?;
     let mode = require_int(fn_name, &args[1].value, "mode")?;
     let mut follow_symlinks = true;
     for arg in args.iter().skip(2) {
@@ -503,7 +710,11 @@ pub(super) fn chmod(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
     Ok(Value::none())
 }
 
-pub(super) fn symlink(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+pub(super) fn symlink(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
     if args.len() < 2 {
         return Err(PyError::named(
             "TypeError",
@@ -513,8 +724,8 @@ pub(super) fn symlink(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> 
             ),
         ));
     }
-    let src = require_str(fn_name, &args[0].value, "src")?;
-    let dst = require_str(fn_name, &args[1].value, "dst")?;
+    let src = extract_path_str(interp, &args[0].value)?;
+    let dst = extract_path_str(interp, &args[1].value)?;
     let mut target_is_directory = false;
     for (idx, arg) in args.iter().enumerate().skip(2) {
         match arg.name.as_deref() {
@@ -543,12 +754,12 @@ pub(super) fn symlink(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> 
     #[cfg(windows)]
     {
         let is_dir = target_is_directory || {
-            let candidate = if std::path::Path::new(&src).is_absolute() {
+            let candidate = if Path::new(&src).is_absolute() {
                 std::path::PathBuf::from(&src)
             } else {
-                std::path::Path::new(&dst)
+                Path::new(&dst)
                     .parent()
-                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .unwrap_or_else(|| Path::new("."))
                     .join(&src)
             };
             candidate.is_dir()
@@ -571,8 +782,12 @@ pub(super) fn symlink(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> 
     Ok(Value::none())
 }
 
-pub(super) fn readlink(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    let path = single_path_arg(fn_name, args)?;
+pub(super) fn readlink(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let path = single_fspath_arg(interp, fn_name, args)?;
     let target =
         std::fs::read_link(&path).map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
     Ok(Value::string(target.to_string_lossy()))
@@ -605,7 +820,7 @@ fn walk_collect(directory: &str, output: &mut Vec<Value>) -> Result<()> {
     ]));
 
     for subdirectory in subdirectories {
-        let child = std::path::Path::new(directory)
+        let child = Path::new(directory)
             .join(&subdirectory)
             .to_string_lossy()
             .into_owned();

@@ -299,6 +299,12 @@ pyrust_builtin_modules! {
     sys,
     errno,
     @flat builtins,
+    // Cross-platform path modules (issue #3245): pure native Rust, importable
+    // on ALL platforms matching CPython 3.12. Must precede `os.path` and `os`.
+    genericpath,
+    posixpath,
+    ntpath,
+    nturl2path,
     "os.path" as os_path,
     // `os` is a parent for `os.path` — see `bodies/os.rs`.  Must come
     // after `os.path` in the order so the `super::os_path::module()`

@@ -5,23 +5,8 @@
 //! belong to their respective implementation modules.
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{ExpandedCallArg, reject_keyword_args_expanded, value_type_name_str};
+use crate::interpreter::{ExpandedCallArg, value_type_name_str};
 use crate::value::{Value, ValueKind};
-
-/// Pull exactly one positional path argument.
-pub(super) fn single_path_arg(fn_name: &str, args: &[ExpandedCallArg]) -> Result<String> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    if args.len() != 1 {
-        return Err(PyError::named(
-            "TypeError",
-            format!(
-                "{fn_name}() takes exactly 1 argument ({} given)",
-                args.len()
-            ),
-        ));
-    }
-    require_str(fn_name, &args[0].value, "path")
-}
 
 /// Coerce a value to a Rust string, preserving the existing `os` diagnostics.
 pub(super) fn require_str(fn_name: &str, value: &Value, what: &str) -> Result<String> {

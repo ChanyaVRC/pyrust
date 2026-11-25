@@ -398,21 +398,23 @@ pyrust_module! {
                     }
                 }
             };
-            // Compute POSIX/CPython-style open flags from `mode`.
-            let has_plus = mode.contains('+');
-            let mut flags: i64 = if mode.contains('w') {
-                (if has_plus { 0x0002 } else { 0x0001 }) | 0x0100 | 0x0200
-            } else if mode.contains('x') {
-                (if has_plus { 0x0002 } else { 0x0001 }) | 0x0100 | 0x0400
-            } else if mode.contains('a') {
-                (if has_plus { 0x0002 } else { 0x0001 }) | 0x0100 | 0x0008
-            } else if has_plus {
-                0x0002
-            } else {
-                0x0000
+            // Compute platform-native `os.O_*` flags from `mode`.
+            use crate::builtin_modules::os::{
+                O_APPEND, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
             };
-            // Ensure flags uses the exact `os.O_*` constants.
-            let _ = &mut flags;
+            let has_plus = mode.contains('+');
+            let access = if has_plus { O_RDWR } else { O_WRONLY };
+            let flags: i64 = if mode.contains('w') {
+                access | O_CREAT | O_TRUNC
+            } else if mode.contains('x') {
+                access | O_CREAT | O_EXCL
+            } else if mode.contains('a') {
+                access | O_CREAT | O_APPEND
+            } else if has_plus {
+                O_RDWR
+            } else {
+                O_RDONLY
+            };
             let fd_val = _interp.call_function_expanded(
                 opener_fn,
                 &[
