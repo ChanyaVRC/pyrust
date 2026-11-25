@@ -519,7 +519,12 @@ pyrust_module! {
         #[default(OptionalArg::Omitted)] dont_inherit: OptValueRef,
         #[default(OptionalArg::Omitted)] optimize: OptValueRef,
     ) -> Result<Value> {
-        let _ = (flags, dont_inherit, optimize);
+        let _ = (dont_inherit, optimize);
+        const CO_FUTURE_ANNOTATIONS: i64 = 0x100_0000;
+        let future_annotations = flags
+            .as_value()
+            .and_then(|v| v.as_int())
+            .is_some_and(|f| (f & CO_FUTURE_ANNOTATIONS) != 0);
         let source_val = source.0;
         let source = source_val.as_str().ok_or_else(|| {
             PyError::named(
@@ -549,12 +554,51 @@ pyrust_module! {
                 ),
             )
         })?;
+        let inject_future_annotations = |program: &mut Vec<crate::ast::Stmt>,
+                                         linenos: &mut Vec<u32>| {
+            if !future_annotations {
+                return;
+            }
+            let future_sym = pyrust_core::Symbol::intern("__future__");
+            let annotations_sym = pyrust_core::Symbol::intern("annotations");
+            // Count any leading `from __future__ import ...` statements so that
+            // we keep all future imports at the very top of the module/command
+            // (and skip injection if `annotations` is already imported there).
+            let mut future_end = 0usize;
+            while let Some(crate::ast::Stmt::ImportFrom { module, names }) = program.get(future_end)
+            {
+                if *module != future_sym {
+                    break;
+                }
+                if names.iter().any(|(name, _)| *name == annotations_sym) {
+                    return;
+                }
+                future_end += 1;
+            }
+            let alias = pyrust_core::Symbol::intern("__pyrust_future_annotations__");
+            let first_line = linenos.first().copied().unwrap_or(1);
+            program.insert(
+                0,
+                crate::ast::Stmt::ImportFrom {
+                    module: future_sym,
+                    names: vec![(annotations_sym, Some(alias))],
+                },
+            );
+            linenos.insert(0, first_line);
+            let del_pos = future_end + 1;
+            program.insert(
+                del_pos,
+                crate::ast::Stmt::Delete(vec![crate::ast::Expr::Var(alias, None)]),
+            );
+            linenos.insert(del_pos, first_line);
+        };
         match mode {
             "exec" => {
                 // Thread the lexer line table through so errors inside the
                 // compiled code report correct internal line numbers (#2245).
-                let (program, linenos) =
+                let (mut program, mut linenos) =
                     crate::interpreter::Interpreter::parse_source_to_stmts_with_linenos(source)?;
+                inject_future_annotations(&mut program, &mut linenos);
                 let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let global_names = crate::interpreter::collect_global_names(&program);
                 let local_names = crate::interpreter::collect_local_names(
@@ -610,10 +654,11 @@ pyrust_module! {
                 ))
             }
             "single" => {
-                let (program, linenos) =
+                let (mut program, mut linenos) =
                     crate::interpreter::Interpreter::parse_single_source_to_stmts_with_linenos(
                         source,
                     )?;
+                inject_future_annotations(&mut program, &mut linenos);
                 let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let global_names = crate::interpreter::collect_global_names(&program);
                 let local_names = crate::interpreter::collect_local_names(
