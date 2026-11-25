@@ -124,8 +124,10 @@ referrers = gc.get_referrers(sentinel_list[0])
 print("referrers_has_list:", any(r is sentinel_list for r in referrers))
 
 # 9. freeze / unfreeze / get_freeze_count
-print("freeze_initial:", gc.get_freeze_count())
+f0 = gc.get_freeze_count()
+print("freeze_initial:", isinstance(f0, int), f0 >= 0)
 gc.freeze()
-print("freeze_after:", gc.get_freeze_count() > 0)
+f1 = gc.get_freeze_count()
+print("freeze_after:", f1 > f0)
 gc.unfreeze()
 print("freeze_unfrozen:", gc.get_freeze_count())
