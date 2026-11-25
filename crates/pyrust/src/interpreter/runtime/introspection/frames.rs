@@ -988,6 +988,18 @@ impl Interpreter {
     /// Build or reuse the Python frame object for the concrete `VmFrameView`
     /// at `view_index`.
     pub(super) fn build_frame_object_at_view(&mut self, view_index: usize, lineno: i64) -> Value {
+        self.build_frame_object_at_view_with_code(view_index, lineno, None)
+    }
+
+    /// Build or reuse the Python frame object for `view_index`, optionally
+    /// supplying the live `FnCode` when entering a script/`exec`/`eval` frame
+    /// before it appears on `tramp_stack`.
+    pub(super) fn build_frame_object_at_view_with_code(
+        &mut self,
+        view_index: usize,
+        lineno: i64,
+        active_code: Option<&crate::bytecode::FnCode>,
+    ) -> Value {
         // A live activation owns one Python frame identity. Upgrade the weak
         // value only on introspection; an ordinary call allocates no side
         // storage. A successful upgrade reconstructs a Value that shares the
@@ -1054,10 +1066,10 @@ impl Interpreter {
                         .unwrap_or_else(|| "<unknown>".to_string());
                     ("<module>".to_string(), filename)
                 };
-                if let Some(code_ptr) = saved_code_ptr {
-                    // SAFETY: `saved_code_ptr` points at the suspended caller's
-                    // live `FnCode` for the full lifetime of the frame on
-                    // `tramp_stack` / `gen_drive_stack`.
+                if let Some(code_ptr) = active_code.map(std::ptr::from_ref).or(saved_code_ptr) {
+                    // SAFETY: `code_ptr` points either to the active `FnCode`
+                    // passed by the caller or at the suspended caller's live
+                    // `FnCode` on `tramp_stack` / `gen_drive_stack`.
                     let fncode = unsafe { &*code_ptr };
                     let firstlineno = fncode.first_lineno as i64;
                     let (lines, positions) = build_code_lines_and_positions(fncode, firstlineno);

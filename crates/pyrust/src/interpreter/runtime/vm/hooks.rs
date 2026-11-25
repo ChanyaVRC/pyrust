@@ -732,7 +732,7 @@ impl Interpreter {
         } else {
             code.line_at(0) as i64
         };
-        let frame = self.build_frame_object_at_view(view_index, first_line);
+        let frame = self.build_frame_object_at_view_with_code(view_index, first_line, Some(code));
 
         if self.vm_hooks_flags & VM_HOOK_TRACE != 0 {
             let global_trace = self.sys_state.borrow().trace_func.clone();
@@ -813,6 +813,34 @@ impl Interpreter {
             self.set_frame_trace_for_vm(&frame, None, ret);
         }
         Ok(())
+    }
+
+    /// Execute a compiled script/`exec`/`eval` code object with `'call'` and
+    /// `'return'` trace/profile hooks when active (zero overhead when hooks
+    /// are inactive).
+    pub(crate) fn run_script_bytecode_with_hooks(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs_slice: RegSlice,
+        cells_slice: CellSlice,
+    ) -> Result<Value> {
+        let call_hook_res = if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) != 0 {
+            self.vm_hook_function_call(code)
+        } else {
+            Ok(())
+        };
+        let vm_result = match call_hook_res {
+            Ok(()) => self.run_bytecode_with_cells(code, regs_slice, cells_slice),
+            Err(e) => Err(e),
+        };
+        if self.vm_hooks_flags & (VM_HOOK_TRACE | VM_HOOK_PROFILE) != 0 {
+            match self.vm_hook_function_return(code, vm_result.as_ref().ok()) {
+                Ok(()) => vm_result,
+                Err(e) => Err(e),
+            }
+        } else {
+            vm_result
+        }
     }
 
     /// Emit `'c_call'` profile event before invoking a built-in function.

@@ -70,6 +70,25 @@ impl BuiltinTypeOps for FrameOps {
         true
     }
 
+    fn eq(&self, state: &BuiltinState, other: &Value) -> bool {
+        matches!(
+            other.kind(),
+            pyrust_core::ValueKind::BuiltinObject { ops, state: other_state }
+                if pyrust_core::builtin_ops_is::<FrameOps>(ops)
+                    && std::rc::Rc::ptr_eq(state, other_state)
+        )
+    }
+
+    fn hash(&self, state: &BuiltinState) -> Option<u64> {
+        Some(std::rc::Rc::as_ptr(state) as usize as u64)
+    }
+
+    fn to_key(&self, state: &BuiltinState) -> Option<pyrust_core::PyKey> {
+        let hash = self.hash(state)?;
+        let value = Value::builtin_object_shared(FRAME_OPS, state.clone());
+        Some(pyrust_core::PyKey::Object { hash, value })
+    }
+
     fn getattr(&self, state: &BuiltinState, name: &str) -> Option<Value> {
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<FrameState>()?;

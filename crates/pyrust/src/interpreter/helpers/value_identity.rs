@@ -4,6 +4,6 @@
 /// interpreter helper as a delegation point preserves the existing call sites
 /// while making `is` and `id()` consume one total definition (#2956).
 #[inline]
-fn values_are_identical(left: &Value, right: &Value) -> bool {
+pub(crate) fn values_are_identical(left: &Value, right: &Value) -> bool {
     left.is_identical_to(right)
 }
