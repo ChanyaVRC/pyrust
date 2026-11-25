@@ -3,9 +3,9 @@
 import binascii
 import re
 
+from email.charset import Charset
+from email.errors import HeaderParseError
 from email.utils import (
-    _Charset as Charset,
-    _HeaderParseError as HeaderParseError,
     _UNKNOWN8BIT as UNKNOWN8BIT,
     _b64_decode,
     _encode_with_codec,

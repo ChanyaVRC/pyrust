@@ -32,10 +32,29 @@ import math
 import os.path
 import collections.abc
 import dbm.dumb
+import email.base64mime
+import email.charset
+import email.contentmanager
+import email.encoders
+import email.errors
+import email.feedparser
+import email.generator
 import email.header
+import email.headerregistry
+import email.iterators
 import email.message
+import email.mime
+import email.mime.application
+import email.mime.audio
+import email.mime.base
+import email.mime.image
+import email.mime.message
+import email.mime.multipart
+import email.mime.nonmultipart
+import email.mime.text
 import email.parser
 import email.policy
+import email.quoprimime
 import email.utils
 import encodings.aliases
 import encodings.ascii
@@ -112,7 +131,7 @@ names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_
          "copy", "copyreg", "csv", "dataclasses", "dbm", "decimal", "difflib", "dis", "doctest", "email", "encodings", "enum", "errno", "faulthandler",
          "filecmp", "fileinput", "fnmatch", "fractions", "functools", "gc", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword",
-         "linecache", "locale", "logging", "lzma", "marshal", "math", "mimetypes", "mmap", "modulefinder", "netrc", "ntpath", "nturl2path", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle",
+         "linecache", "locale", "logging", "lzma", "mailbox", "marshal", "math", "mimetypes", "mmap", "modulefinder", "netrc", "ntpath", "nturl2path", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle",
          "pickletools", "pkgutil", "platform", "plistlib", "posixpath", "pprint", "profile", "pstats", "py_compile", "pyclbr", "pydoc", "pydoc_data", "queue", "quopri", "random", "re", "reprlib", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shelve", "shlex", "shutil",
          "signal", "site", "socket", "socketserver", "sqlite3", "ssl", "stat", "statistics", "string", "stringprep", "subprocess", "symtable", "sys", "sysconfig", "tabnanny", "tarfile",
          "tempfile", "textwrap", "this", "threading", "time", "timeit", "token", "tokenize", "tomllib", "trace", "traceback", "tracemalloc",
@@ -123,10 +142,29 @@ for name in names:
 for name, module in [("os.path", os.path),
                      ("collections.abc", collections.abc),
                      ("dbm.dumb", dbm.dumb),
+                     ("email.base64mime", email.base64mime),
+                     ("email.charset", email.charset),
+                     ("email.contentmanager", email.contentmanager),
+                     ("email.encoders", email.encoders),
+                     ("email.errors", email.errors),
+                     ("email.feedparser", email.feedparser),
+                     ("email.generator", email.generator),
                      ("email.header", email.header),
+                     ("email.headerregistry", email.headerregistry),
+                     ("email.iterators", email.iterators),
                      ("email.message", email.message),
+                     ("email.mime", email.mime),
+                     ("email.mime.application", email.mime.application),
+                     ("email.mime.audio", email.mime.audio),
+                     ("email.mime.base", email.mime.base),
+                     ("email.mime.image", email.mime.image),
+                     ("email.mime.message", email.mime.message),
+                     ("email.mime.multipart", email.mime.multipart),
+                     ("email.mime.nonmultipart", email.mime.nonmultipart),
+                     ("email.mime.text", email.mime.text),
                      ("email.parser", email.parser),
                      ("email.policy", email.policy),
+                     ("email.quoprimime", email.quoprimime),
                      ("email.utils", email.utils),
                      ("encodings.aliases", encodings.aliases),
                      ("encodings.ascii", encodings.ascii),

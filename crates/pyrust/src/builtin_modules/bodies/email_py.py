@@ -1,14 +1,22 @@
 """A package for parsing, handling, and generating email messages (issue #3211)."""
 
 __all__ = [
+    "base64mime",
+    "charset",
+    "encoders",
+    "errors",
+    "feedparser",
+    "generator",
     "header",
+    "iterators",
     "message",
     "message_from_file",
     "message_from_binary_file",
     "message_from_string",
     "message_from_bytes",
+    "mime",
     "parser",
-    "policy",
+    "quoprimime",
     "utils",
 ]
 

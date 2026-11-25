@@ -43,7 +43,9 @@ pub(crate) fn inject_python_members(
         .ok_or_else(|| PyError::runtime("email.parser: exec namespace not a dict".into()))?;
     for name in EMAIL_PARSER_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            if let ValueKind::PyClass(cls_rc) = val.kind() {
+            if !matches!(*name, "FeedParser" | "BytesFeedParser")
+                && let ValueKind::PyClass(cls_rc) = val.kind()
+            {
                 cls_rc
                     .borrow_mut()
                     .attrs

@@ -333,6 +333,28 @@ macro_rules! pyrust_builtin_modules {
                 "xmlrpc.server" => return xmlrpc_server::post_load_init(interp, module),
                 "ssl" => return ssl::post_load_init(interp, module),
                 "_ssl" => return _ssl::post_load_init(interp, module),
+                "email.errors" => return email_errors::post_load_init(interp, module),
+                "email.contentmanager" => {
+                    return email_contentmanager::post_load_init(interp, module);
+                }
+                "email.headerregistry" => {
+                    return email_headerregistry::post_load_init(interp, module);
+                }
+                "email.mime.base" => return email_mime_base::post_load_init(interp, module),
+                "email.mime.nonmultipart" => {
+                    return email_mime_nonmultipart::post_load_init(interp, module);
+                }
+                "email.mime.multipart" => {
+                    return email_mime_multipart::post_load_init(interp, module);
+                }
+                "email.mime.text" => return email_mime_text::post_load_init(interp, module),
+                "email.mime.application" => {
+                    return email_mime_application::post_load_init(interp, module);
+                }
+                "email.mime.audio" => return email_mime_audio::post_load_init(interp, module),
+                "email.mime.image" => return email_mime_image::post_load_init(interp, module),
+                "email.mime.message" => return email_mime_message::post_load_init(interp, module),
+                "mailbox" => return mailbox::post_load_init(interp, module),
                 _ => {}
             }
             if encodings_codecs::post_load_init(name, interp, module)? {
@@ -714,15 +736,34 @@ pyrust_builtin_modules! {
     "http.cookiejar" as http_cookiejar,
     http @inject,
     // `email` (`email.utils`, `email.header`, `email.policy`, `email.message`,
-    // `email.parser`) and `mimetypes` (issue #3211): Python 3.12 RFC 2822/MIME
-    // email parsing, header/address/date utilities, policies, message objects,
-    // and filename/URL MIME type mapping.
+    // `email.parser`) and `mimetypes` (issue #3211), plus all remaining 19
+    // native-Rust `email.*` submodules and `mailbox` (issue #3257).
+    "email.errors" as email_errors,
+    "email.base64mime" as email_base64mime,
+    "email.quoprimime" as email_quoprimime,
+    "email.encoders" as email_encoders,
+    "email.charset" as email_charset,
+    "email.iterators" as email_iterators,
+    "email.feedparser" as email_feedparser,
+    "email.generator" as email_generator,
+    "email.contentmanager" as email_contentmanager,
+    "email.headerregistry" as email_headerregistry,
+    "email.mime" as email_mime,
+    "email.mime.base" as email_mime_base,
+    "email.mime.nonmultipart" as email_mime_nonmultipart,
+    "email.mime.multipart" as email_mime_multipart,
+    "email.mime.text" as email_mime_text,
+    "email.mime.application" as email_mime_application,
+    "email.mime.audio" as email_mime_audio,
+    "email.mime.image" as email_mime_image,
+    "email.mime.message" as email_mime_message,
     "email.utils" as email_utils @inject,
     "email.header" as email_header @inject,
     "email.policy" as email_policy @inject,
     "email.message" as email_message @inject,
     "email.parser" as email_parser @inject,
     email @inject,
+    mailbox,
     mimetypes @inject,
     // `xml`, `xml.etree`, `xml.etree.ElementPath`, and `xml.etree.ElementTree`
     // (issue #3210): Python 3.12 XML ElementTree API, streaming XML 1.0 parser
