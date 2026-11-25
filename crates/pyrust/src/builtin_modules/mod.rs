@@ -696,6 +696,12 @@ pyrust_builtin_modules! {
     optparse,
     this,
     antigravity,
+    // `select`, `mmap`, `getpass`, and `webbrowser` (issue #3253): 100% native
+    // Rust stdlib modules built with PyRust's expanded macro toolkit.
+    select,
+    mmap,
+    getpass,
+    webbrowser,
 }
 
 include!("finalization.rs");

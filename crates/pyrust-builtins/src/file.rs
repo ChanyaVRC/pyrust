@@ -6,8 +6,14 @@
 //! `BuiltinObject` whose `BuiltinTypeOps` impl dispatches through this module.
 
 use std::any::Any;
+#[cfg(windows)]
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicI64, Ordering};
+#[cfg(windows)]
+use std::sync::{LazyLock, Mutex};
 
 use indexmap::IndexMap;
 use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, Result, Value, ValueKind};
@@ -923,10 +929,53 @@ fn parse_optional_size_arg(args: &[Value]) -> Result<Option<usize>> {
     }
 }
 
+#[cfg(windows)]
+static NEXT_WIN_FILENO: AtomicI64 = AtomicI64::new(20_000);
+#[cfg(windows)]
+static WIN_FD_HANDLES: LazyLock<Mutex<HashMap<i64, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Clone the underlying `std::fs::File` for a Windows file descriptor returned
+/// by `open(...).fileno()`. Returns `None` on non-Windows or if unknown.
+pub fn try_clone_file_by_fd(fd: i64) -> Option<std::io::Result<std::fs::File>> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{BorrowedHandle, RawHandle};
+        let table = WIN_FD_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+        let &raw = table.get(&fd)?;
+        // SAFETY: `WIN_FD_HANDLES` only retains raw handles while their owning
+        // `FileState` holds `os_file` open and removes them before closing/dropping.
+        let borrowed = unsafe { BorrowedHandle::borrow_raw(raw as RawHandle) };
+        Some(borrowed.try_clone_to_owned().map(std::fs::File::from))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = fd;
+        None
+    }
+}
+
+#[cfg(windows)]
+fn unregister_win_fd(s: &mut FileState) {
+    if s.close_fd_fn.is_none()
+        && let Some(fd) = s.fd_num
+    {
+        let mut table = WIN_FD_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+        table.remove(&fd);
+    }
+}
+
+impl Drop for FileState {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unregister_win_fd(self);
+    }
+}
+
 fn file_fileno(state: &BuiltinState) -> Result<Value> {
-    let borrow = state.borrow();
+    let mut borrow = state.borrow_mut();
     let s = borrow
-        .downcast_ref::<FileState>()
+        .downcast_mut::<FileState>()
         .ok_or_else(|| PyError::runtime("internal: bad file state".to_string()))?;
     if s.closed {
         return Err(closed_file_error());
@@ -945,9 +994,14 @@ fn file_fileno(state: &BuiltinState) -> Result<Value> {
     {
         use std::os::windows::io::AsRawHandle;
         if let Some(ref f) = s.os_file {
-            // Return a positive non-stdio integer descriptor handle proxy.
+            let fd = NEXT_WIN_FILENO.fetch_add(1, Ordering::Relaxed);
             let raw = f.as_raw_handle() as usize;
-            return Ok(Value::int(((raw % 65000) + 3) as i64));
+            WIN_FD_HANDLES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(fd, raw);
+            s.fd_num = Some(fd);
+            return Ok(Value::int(fd));
         }
     }
     Err(PyError::named(
@@ -1512,6 +1566,8 @@ fn close_file(state: &BuiltinState) -> Result<()> {
     } else {
         Ok(())
     };
+    #[cfg(windows)]
+    unregister_win_fd(s);
     s.os_file = None;
     s.closed = true;
     s.write_buf_bytes.clear();
