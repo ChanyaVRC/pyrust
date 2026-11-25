@@ -259,18 +259,27 @@ impl Interpreter {
             }
         };
 
-        let src = std::fs::read_to_string(&target.file_path).map_err(|e| {
-            PyError::runtime(format!(
-                "failed to read '{}': {e}",
-                target.file_path.display()
-            ))
-        })?;
+        let (src, resolved_path, package_name, define_file_dunder) = match target {
+            crate::interpreter::namespaces::MainModuleTarget::File {
+                file_path,
+                package_name,
+            } => {
+                let src = std::fs::read_to_string(&file_path).map_err(|e| {
+                    PyError::runtime(format!("failed to read '{}': {e}", file_path.display()))
+                })?;
+                let resolved_path = file_path.to_string_lossy().into_owned();
+                (src, resolved_path, package_name, true)
+            }
+            crate::interpreter::namespaces::MainModuleTarget::Builtin {
+                virtual_path,
+                source,
+            } => (source.to_string(), virtual_path, String::new(), false),
+        };
         let (program, linenos) = Self::parse_source_to_stmts_with_linenos(&src)?;
 
-        let resolved_path = target.file_path.to_string_lossy().into_owned();
         self.cold.script_filename = Some(std::sync::Arc::from(resolved_path.as_str()));
-        self.cold.script_define_file_dunder = true;
-        self.cold.script_package = Some(target.package_name);
+        self.cold.script_define_file_dunder = define_file_dunder;
+        self.cold.script_package = Some(package_name);
         if let Some(arg0) = self.cold.script_argv.first_mut() {
             *arg0 = resolved_path.clone();
         } else {

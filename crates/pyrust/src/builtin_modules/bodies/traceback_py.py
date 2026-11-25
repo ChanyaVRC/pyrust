@@ -46,6 +46,8 @@ def _checkcache(filename=None):
         if entry is None:
             continue
         size, mtime, _ = entry
+        if mtime is None:
+            continue
         try:
             st = os.stat(name)
         except OSError:
@@ -56,11 +58,13 @@ def _checkcache(filename=None):
 
 
 def _getlines(filename):
-    if not filename or (filename.startswith('<') and filename.endswith('>')):
+    if not filename:
         return []
     entry = _line_cache.get(filename)
     if entry is not None:
         return entry[2]
+    if filename.startswith('<') and filename.endswith('>'):
+        return []
     try:
         st = os.stat(filename)
         with open(filename, 'r', encoding='utf-8', errors='replace') as fp:
