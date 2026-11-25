@@ -1572,6 +1572,7 @@ impl Interpreter {
                 "timeit" => Some("import sys, timeit\nsys.exit(timeit.main())\n"),
                 "dis" => Some("import dis\ndis.main()\n"),
                 "site" => Some("import site\nsite._script()\n"),
+                "pydoc" => Some("import pydoc\npydoc.cli()\n"),
                 _ => None,
             } {
                 return Ok(MainModuleTarget::Builtin {

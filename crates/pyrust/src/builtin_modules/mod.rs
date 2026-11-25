@@ -800,6 +800,12 @@ pyrust_builtin_modules! {
     _compat_pickle,
     _string,
     _strptime,
+    // `pydoc_data`, `pydoc_data.topics`, and `pydoc` (issue #3255): 100%
+    // native-Rust Python 3.12 documentation generator and help topic database
+    // built with PyRust's expanded macro toolkit (no `@inject`).
+    "pydoc_data.topics" as pydoc_data_topics,
+    pydoc_data,
+    pydoc,
 }
 
 include!("finalization.rs");

@@ -28,6 +28,7 @@ pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, 
         "pdb" => pdb::prepare_module(interpreter, module),
         "cProfile" => cprofile::prepare_module(interpreter, module),
         "pstats" => pstats::prepare_module(interpreter, module),
+        "pydoc" => pydoc::prepare_module(interpreter, module),
         "gc" => gc::prepare_module(interpreter, module),
         _ => {}
     }

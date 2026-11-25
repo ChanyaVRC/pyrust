@@ -72,6 +72,7 @@ import importlib.resources.readers
 import importlib.resources.simple
 import importlib.simple
 import importlib.util
+import pydoc_data.topics
 import sqlite3.dbapi2
 import unittest.mock
 import urllib.error
@@ -94,7 +95,7 @@ names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_
          "filecmp", "fileinput", "fnmatch", "fractions", "functools", "gc", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword",
          "linecache", "locale", "logging", "lzma", "marshal", "math", "mimetypes", "mmap", "netrc", "ntpath", "nturl2path", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle",
-         "pickletools", "pkgutil", "platform", "posixpath", "pprint", "profile", "pstats", "queue", "quopri", "random", "re", "reprlib", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shlex", "shutil",
+         "pickletools", "pkgutil", "platform", "posixpath", "pprint", "profile", "pstats", "pydoc", "pydoc_data", "queue", "quopri", "random", "re", "reprlib", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shlex", "shutil",
          "signal", "site", "socket", "socketserver", "sqlite3", "stat", "statistics", "string", "stringprep", "subprocess", "sys", "sysconfig", "tarfile",
          "tempfile", "textwrap", "this", "threading", "time", "timeit", "token", "tokenize", "tomllib", "trace", "traceback", "tracemalloc",
          "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref", "webbrowser",
@@ -144,6 +145,7 @@ for name, module in [("os.path", os.path),
                      ("importlib.resources.simple", importlib.resources.simple),
                      ("importlib.simple", importlib.simple),
                      ("importlib.util", importlib.util),
+                     ("pydoc_data.topics", pydoc_data.topics),
                      ("sqlite3.dbapi2", sqlite3.dbapi2),
                      ("unittest.mock", unittest.mock),
                      ("urllib.error", urllib.error),
