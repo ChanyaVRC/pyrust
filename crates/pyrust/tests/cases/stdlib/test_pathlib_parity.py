@@ -304,13 +304,13 @@ try:
     link_path = tmpdir / "sym_to_f2"
     symlink_created = False
     try:
-        os.symlink(str(f2), str(link_path))
+        os.symlink("file2.txt", str(link_path))
         symlink_created = True
     except OSError:
         pass
     if symlink_created:
         assert link_path.is_symlink() is True
-        assert link_path.readlink() == f2
+        assert link_path.readlink() == Path("file2.txt")
         assert link_path.samefile(f2) is True
         assert link_path.stat().st_size == 11
         assert link_path.lstat().st_mode != 0
