@@ -540,6 +540,15 @@ pyrust_builtin_modules! {
     // `getweakrefs`, `WeakMethod`, `WeakKeyDictionary`, `WeakValueDictionary`,
     // `WeakSet`, and `finalize` backed by native weak handles in `weakref.rs`.
     weakref @inject,
+    // `unicodedata` (issue #3203): Unicode 15.0.0 character database (`category`,
+    // `bidirectional`, `combining`, `east_asian_width`, `mirrored`,
+    // `decomposition`, `decimal`, `digit`, `numeric`, `name`, `lookup`,
+    // `normalize`, `is_normalized`, `unidata_version`, `UCD`, `ucd_3_2_0`).
+    unicodedata @inject,
+    // `codecs` (issue #3203): Python 3.12 codec registry, error handlers,
+    // BOM constants, incremental/stream/recoder classes, and standard text +
+    // binary/text transform codecs.
+    codecs @inject,
 }
 
 include!("finalization.rs");
