@@ -158,3 +158,48 @@ with zipfile.ZipFile(io.BytesIO(bytes(corrupt)), "r") as zf:
 
 print("err not a zip:", expect_exc(zipfile.ZipFile, io.BytesIO(b"hello"), "r"))
 print("err pre-1980:", expect_exc(zipfile.ZipInfo, "old.txt", (1979, 12, 31, 0, 0, 0)))
+
+# 6. ZIP_BZIP2 (12) and ZIP_LZMA (14) integration (issue #3224)
+print("bz2/lzma constants:", zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA)
+
+ZIP_BZ2_LZMA_CPY = bytes.fromhex(
+    "504b03042e0000000c008318225ac16a7bc252000000080200000f000000627a6970325f656e7472792e74787442"
+    "5a683931415926535989f517ec0000599980400010003c65c43020007053000014aa8d1e811fa9d9344d89d13627"
+    "64f44fa2689f898261344c27f2609c1309a2724e89f0984f05dc914e1424227d45fb00504b03043f0002000e0083"
+    "18225a186c218031000000f40100000e0000006c7a6d615f656e7472792e747874090405005d0000800000319c0b"
+    "92dd2f1db7ff886be246792591753919b89e5d0c812fc959201911a0ae77fffff1808000504b01022e002e000000"
+    "0c008318225ac16a7bc252000000080200000f0000000000000000000000800100000000627a6970325f656e7472"
+    "792e747874504b01023f003f0002000e008318225a186c218031000000f40100000e000000000000000000000080"
+    "017f0000006c7a6d615f656e7472792e747874504b0506000000000200020079000000dc0000000000"
+)
+
+with zipfile.ZipFile(io.BytesIO(ZIP_BZ2_LZMA_CPY), "r") as zf:
+    print("cpy bz2/lzma namelist:", zf.namelist())
+    print("cpy bz2/lzma testzip:", zf.testzip())
+    print("cpy bz2 read:", zf.read("bzip2_entry.txt") == b"cpython zip bzip2 payload " * 20)
+    print("cpy lzma read:", zf.read("lzma_entry.txt") == b"cpython zip lzma payload " * 20)
+    with zf.open("bzip2_entry.txt", "r") as f:
+        print("cpy bz2 chunk:", f.read(16), f.tell())
+        f.seek(0)
+        print("cpy bz2 seek0:", f.read(16))
+    with zf.open("lzma_entry.txt", "r") as f:
+        print("cpy lzma chunk:", f.read(16), f.tell())
+        f.seek(0)
+        print("cpy lzma seek0:", f.read(16))
+
+# Roundtrip writing & reading ZIP_BZIP2 and ZIP_LZMA (including empty file & compresslevel)
+zbuf = io.BytesIO()
+with zipfile.ZipFile(zbuf, "w") as zf:
+    zf.writestr("bz.txt", b"zip bzip2 data " * 60, compress_type=zipfile.ZIP_BZIP2, compresslevel=5)
+    zf.writestr("lz.txt", b"zip lzma data " * 60, compress_type=zipfile.ZIP_LZMA)
+    zf.writestr("empty_bz.txt", b"", compress_type=zipfile.ZIP_BZIP2)
+    zf.writestr("empty_lz.txt", b"", compress_type=zipfile.ZIP_LZMA)
+
+zbuf.seek(0)
+with zipfile.ZipFile(zbuf, "r") as zf:
+    print("rt bz2/lzma testzip:", zf.testzip())
+    print("rt bz:", zf.read("bz.txt") == b"zip bzip2 data " * 60, zf.getinfo("bz.txt").compress_type)
+    print("rt lz:", zf.read("lz.txt") == b"zip lzma data " * 60, zf.getinfo("lz.txt").compress_type)
+    print("rt empty bz/lz:", zf.read("empty_bz.txt"), zf.read("empty_lz.txt"))
+    print("rt bz compressed smaller:", zf.getinfo("bz.txt").compress_size < zf.getinfo("bz.txt").file_size)
+    print("rt lz compressed smaller:", zf.getinfo("lz.txt").compress_size < zf.getinfo("lz.txt").file_size)

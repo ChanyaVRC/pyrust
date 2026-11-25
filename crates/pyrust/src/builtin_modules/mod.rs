@@ -515,6 +515,10 @@ pyrust_builtin_modules! {
     // streaming/archive surfaces injected from `*_py.py`.
     zlib @inject,
     gzip @inject,
+    // `bz2` and `lzma` (issue #3224): pure-Rust BZip2 (`bzip2` / `libbz2-rs-sys`)
+    // and XZ/LZMA (`lzma-rust2`) compression modules with CPython 3.12 wire parity.
+    bz2 @inject,
+    lzma @inject,
     zipfile @inject,
     tarfile @inject,
     // `subprocess` (issue #3187): Python 3.12 subprocess management (`Popen`,

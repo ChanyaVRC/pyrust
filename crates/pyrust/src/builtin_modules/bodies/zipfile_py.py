@@ -5,7 +5,9 @@ Python 3.12 ``zipfile`` module implementation built on ``zlib``, ``struct``,
 """
 
 import builtins as _builtins
+import bz2 as _bz2
 import io as _io
+import lzma as _lzma
 import os as _os
 import shutil as _shutil
 import struct as _struct
@@ -80,11 +82,71 @@ def _fspath_str(path):
     return p
 
 
+class LZMACompressor:
+    """ZIP method 14 (LZMA) compressor matching CPython's ``zipfile.LZMACompressor``."""
+
+    def __init__(self):
+        self._comp = None
+
+    def _init(self):
+        props = _lzma._encode_filter_properties({"id": _lzma.FILTER_LZMA1})
+        self._comp = _lzma.LZMACompressor(
+            _lzma.FORMAT_RAW,
+            filters=[_lzma._decode_filter_properties(_lzma.FILTER_LZMA1, props)],
+        )
+        return _struct.pack("<BBH", 9, 4, len(props)) + props
+
+    def compress(self, data):
+        if self._comp is None:
+            return self._init() + self._comp.compress(data)
+        return self._comp.compress(data)
+
+    def flush(self):
+        if self._comp is None:
+            return self._init() + self._comp.flush()
+        return self._comp.flush()
+
+
+class LZMADecompressor:
+    """ZIP method 14 (LZMA) decompressor matching CPython's ``zipfile.LZMADecompressor``."""
+
+    def __init__(self):
+        self._decomp = None
+        self._unconsumed = b""
+        self.eof = False
+        self.needs_input = True
+
+    def decompress(self, data, max_length=-1):
+        if self._decomp is None:
+            self._unconsumed += data
+            if len(self._unconsumed) <= 4:
+                self.needs_input = True
+                return b""
+            (psize,) = _struct.unpack("<H", self._unconsumed[2:4])
+            if len(self._unconsumed) <= 4 + psize:
+                self.needs_input = True
+                return b""
+
+            self._decomp = _lzma.LZMADecompressor(
+                _lzma.FORMAT_RAW,
+                filters=[
+                    _lzma._decode_filter_properties(
+                        _lzma.FILTER_LZMA1, self._unconsumed[4 : 4 + psize]
+                    )
+                ],
+            )
+            data = self._unconsumed[4 + psize :]
+            self._unconsumed = b""
+
+        result = self._decomp.decompress(data, max_length=max_length)
+        self.eof = self._decomp.eof
+        self.needs_input = self._decomp.needs_input
+        return result
+
+
 def _check_compression(compression):
-    if compression == ZIP_STORED or compression == ZIP_DEFLATED:
+    if compression in (ZIP_STORED, ZIP_DEFLATED, ZIP_BZIP2, ZIP_LZMA):
         return
-    if compression in (ZIP_BZIP2, ZIP_LZMA):
-        raise NotImplementedError("That compression method is not supported")
     raise NotImplementedError("That compression method is not supported")
 
 
@@ -92,6 +154,12 @@ def _get_compressor(compress_type, compresslevel=None):
     if compress_type == ZIP_DEFLATED:
         level = _zlib.Z_DEFAULT_COMPRESSION if compresslevel is None else compresslevel
         return _zlib.compressobj(level, _zlib.DEFLATED, -_zlib.MAX_WBITS)
+    if compress_type == ZIP_BZIP2:
+        if compresslevel is not None:
+            return _bz2.BZ2Compressor(compresslevel)
+        return _bz2.BZ2Compressor()
+    if compress_type == ZIP_LZMA:
+        return LZMACompressor()
     if compress_type == ZIP_STORED:
         return None
     _check_compression(compress_type)
@@ -103,6 +171,10 @@ def _get_decompressor(compress_type):
         return None
     if compress_type == ZIP_DEFLATED:
         return _zlib.decompressobj(-_zlib.MAX_WBITS)
+    if compress_type == ZIP_BZIP2:
+        return _bz2.BZ2Decompressor()
+    if compress_type == ZIP_LZMA:
+        return LZMADecompressor()
     _check_compression(compress_type)
     return None
 
@@ -239,7 +311,8 @@ class ZipInfo:
     def __repr__(self):
         parts = ["<%s filename=%r" % (self.__class__.__name__, self.filename)]
         if self.compress_type != ZIP_STORED:
-            ctype = "deflate" if self.compress_type == ZIP_DEFLATED else str(self.compress_type)
+            _cnames = {ZIP_DEFLATED: "deflate", ZIP_BZIP2: "bzip2", ZIP_LZMA: "lzma"}
+            ctype = _cnames.get(self.compress_type, str(self.compress_type))
             parts.append(" compress_type=%s" % ctype)
         if not self.is_dir():
             parts.append(" file_size=%r" % self.file_size)
@@ -297,6 +370,10 @@ class ZipInfo:
 
         if self.compress_type == ZIP_DEFLATED:
             min_version = max(min_version, 20)
+        elif self.compress_type == ZIP_BZIP2:
+            min_version = max(min_version, 46)
+        elif self.compress_type == ZIP_LZMA:
+            min_version = max(min_version, 63)
         self.extract_version = max(20, min_version)
         self.create_version = max(20, min_version)
 
@@ -413,6 +490,40 @@ class ZipExtFile(_io.BufferedIOBase):
                 self._eof = True
                 if (self._crc & 0xFFFFFFFF) != (self._zinfo.CRC & 0xFFFFFFFF):
                     raise BadZipFile("Bad CRC-32 for file %r" % self._zinfo.filename)
+            return
+
+        if self._zinfo.compress_type in (ZIP_BZIP2, ZIP_LZMA):
+            while not self._eof and (size < 0 or len(self._buf) < size):
+                if self._decompressor.needs_input:
+                    if self._raw_pos < len(self._raw):
+                        end = min(self._raw_pos + 32768, len(self._raw))
+                        chunk = self._raw[self._raw_pos : end]
+                        self._raw_pos = end
+                    else:
+                        if not self._decompressor.eof:
+                            raise BadZipFile(
+                                "Truncated compressed stream for file %r"
+                                % self._zinfo.filename
+                            )
+                        break
+                else:
+                    chunk = b""
+
+                max_len = -1 if size < 0 else max(size - len(self._buf), 1)
+                try:
+                    data = self._decompressor.decompress(chunk, max_len)
+                except (OSError, _lzma.LZMAError, EOFError) as exc:
+                    raise BadZipFile(str(exc)) from exc
+                if data:
+                    self._crc = _zlib.crc32(data, self._crc)
+                    self._buf.extend(data)
+                if self._decompressor.eof:
+                    self._eof = True
+                    if (self._crc & 0xFFFFFFFF) != (self._zinfo.CRC & 0xFFFFFFFF):
+                        raise BadZipFile(
+                            "Bad CRC-32 for file %r" % self._zinfo.filename
+                        )
+                    break
             return
 
         # ZIP_DEFLATED

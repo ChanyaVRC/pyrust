@@ -52,11 +52,11 @@ import xml.etree.ElementPath
 import xml.etree.ElementTree
 import __future__
 names = ["abc", "argparse", "ast", "asyncio", "atexit", "base64", "binascii", "bisect", "builtins",
-         "calendar", "cmath", "codecs", "collections", "configparser", "contextlib", "contextvars",
+         "bz2", "calendar", "cmath", "codecs", "collections", "configparser", "contextlib", "contextvars",
          "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "email", "enum", "errno",
          "fnmatch", "fractions", "functools", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json",
-         "logging", "math", "mimetypes", "numbers", "operator", "os", "pathlib", "pickle",
+         "logging", "lzma", "math", "mimetypes", "numbers", "operator", "os", "pathlib", "pickle",
          "platform", "pprint", "queue", "random", "re", "secrets", "selectors", "shlex", "shutil",
          "signal", "socket", "socketserver", "stat", "statistics", "string", "subprocess", "sys", "tarfile",
          "tempfile", "textwrap", "threading", "time", "token", "tokenize", "tomllib", "traceback",

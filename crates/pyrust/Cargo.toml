@@ -8,8 +8,10 @@ name = "pyrust"
 path = "src/main.rs"
 
 [dependencies]
+bzip2 = "0.6.1"
 getrandom = "0.2"
 indexmap = "2"
+lzma-rust2 = { version = "0.25.0", default-features = false, features = ["std", "encoder", "optimization", "xz"] }
 rustc-hash = "2"
 num-bigint = "0.4"
 num-traits = "0.2"
