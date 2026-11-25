@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
     with open(os.path.join(pkg_dir, "__init__.py"), "w", encoding="utf-8") as f:
         f.write("PKG_CONST = 1\n")
     with open(os.path.join(pkg_dir, "helper.py"), "w", encoding="utf-8") as f:
-        f.write("import math\nVAL = math.pi\n")
+        f.write("import sys\nVAL = sys.maxsize\n")
     script_path = os.path.join(tmpdir, "entry.py")
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(
@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         "__main__" in finder.modules,
         "mfpkg" in finder.modules,
         "mfpkg.helper" in finder.modules,
-        "math" in finder.modules,
+        "sys" in finder.modules,
         "TOP_VAR" in finder.modules["__main__"].globalnames,
     )
     print(
