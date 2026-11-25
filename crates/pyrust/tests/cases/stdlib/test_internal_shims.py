@@ -242,7 +242,7 @@ print("_tokenize:", hasattr(_tokenize, "TokenizerIter") or hasattr(_tokenize, "g
 
 # 15. _imp
 _imp = imported["_imp"]
-print("_imp is_builtin:", _imp.is_builtin("sys"), _imp.is_builtin("math") != 0, _imp.is_builtin("no_such_mod_3250"))
+print("_imp is_builtin:", _imp.is_builtin("sys"), _imp.is_builtin("builtins"), _imp.is_builtin("errno") != 0, _imp.is_builtin("no_such_mod_3250"))
 print("_imp is_frozen:", _imp.is_frozen("no_such_mod_3250"))
 print("_imp lock:", _imp.lock_held())
 _imp.acquire_lock()
