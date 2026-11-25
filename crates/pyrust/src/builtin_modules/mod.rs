@@ -82,90 +82,83 @@ fn publish_exec_dunder_all(
 /// Body files therefore never need to know their own module name — the
 /// macro injects `MODULE_NAME` / `FN_PREFIX` and the body's
 /// `pyrust_module!` reads them via the surrounding scope.
-macro_rules! pyrust_builtin_modules {
-    ($($spec:tt)*) => {
-        pyrust_builtin_modules_internal! { @parse [] [] $($spec)* }
+/// Helper emitting one `pub mod <ident>` item per entry in
+/// [`pyrust_builtin_modules!`]. Expanding each entry independently keeps
+/// macro recursion depth O(1) regardless of how many built-in modules exist.
+macro_rules! pyrust_builtin_mod_def {
+    (@flat $ident:ident $(@inject)?) => {
+        pub mod $ident {
+            /// Python-level name of this built-in module.  Used for
+            /// `PyModule.name` and as the key for `import`.
+            pub(crate) const MODULE_NAME: &str = stringify!($ident);
+            /// Empty prefix for `@flat` modules whose functions live in the
+            /// global namespace (`abs`, `len`, …).
+            #[allow(dead_code)]
+            pub(crate) const FN_PREFIX: &str = "";
+
+            include!(concat!("bodies/", stringify!($ident), ".rs"));
+        }
+    };
+    ($py_name:literal as $ident:ident $(@inject)?) => {
+        pub mod $ident {
+            /// Python-level name of this built-in module.  Used for
+            /// `PyModule.name` and as the key for `import`.
+            pub(crate) const MODULE_NAME: &str = $py_name;
+            /// Prefix prepended to every function's short name to form its
+            /// Python-level registration name.
+            #[allow(dead_code)]
+            pub(crate) const FN_PREFIX: &str = concat!($py_name, ".");
+
+            include!(concat!("bodies/", stringify!($ident), ".rs"));
+        }
+    };
+    ($ident:ident $(@inject)?) => {
+        pub mod $ident {
+            /// Python-level name of this built-in module.  Used for
+            /// `PyModule.name` and as the key for `import`.
+            pub(crate) const MODULE_NAME: &str = stringify!($ident);
+            /// Prefix prepended to every function's short name to form its
+            /// Python-level registration name.
+            #[allow(dead_code)]
+            pub(crate) const FN_PREFIX: &str = concat!(stringify!($ident), ".");
+
+            include!(concat!("bodies/", stringify!($ident), ".rs"));
+        }
     };
 }
 
-/// Implementation detail of [`pyrust_builtin_modules!`].  Threads two
-/// accumulators through a TT-muncher: the first collects every entry as a
-/// `(py_name_lit, rust_ident, fn_prefix_lit)` triple; the second collects a
-/// `(py_name_lit, rust_ident)` pair for every entry carrying `@inject`, so
-/// the generated `post_load_inject` dispatcher can call that module's
-/// `inject_python_members` after import.  Once the input is drained both
-/// lists are emitted as the full module + registry plumbing.
-macro_rules! pyrust_builtin_modules_internal {
-    // --- `@inject` arms (must precede the plain arms so the trailing
-    //     `@ inject` token pair is matched before the plain arm consumes the
-    //     entry without it). ---
+/// Helper expanding one entry's Python-level module name expression.
+macro_rules! pyrust_builtin_mod_name {
+    ($py_name:literal as $ident:ident) => {
+        $py_name
+    };
+    ($ident:ident) => {
+        stringify!($ident)
+    };
+}
 
-    // Entry: `@flat ident @inject,` — flat namespace, post-load injection.
-    (@parse [$($acc:tt)*] [$($inj:tt)*] @flat $ident:ident @ inject $(, $($rest:tt)*)?) => {
-        pyrust_builtin_modules_internal! {
-            @parse [$($acc)* (stringify!($ident), $ident, "")]
-                   [$($inj)* (stringify!($ident), $ident)] $($($rest)*)?
-        }
-    };
-    // Entry: `"py.dotted.name" as ident @inject,` — post-load injection.
-    (@parse [$($acc:tt)*] [$($inj:tt)*] $py_name:literal as $ident:ident @ inject $(, $($rest:tt)*)?) => {
-        pyrust_builtin_modules_internal! {
-            @parse [$($acc)* ($py_name, $ident, concat!($py_name, "."))]
-                   [$($inj)* ($py_name, $ident)] $($($rest)*)?
-        }
-    };
-    // Entry: `ident @inject,` — post-load injection.
-    (@parse [$($acc:tt)*] [$($inj:tt)*] $ident:ident @ inject $(, $($rest:tt)*)?) => {
-        pyrust_builtin_modules_internal! {
-            @parse [$($acc)* (stringify!($ident), $ident, concat!(stringify!($ident), "."))]
-                   [$($inj)* (stringify!($ident), $ident)] $($($rest)*)?
-        }
-    };
-
-    // --- plain arms (no `@inject`) ---
-
-    // Entry: `@flat ident,` — flat namespace, no fn prefix.
-    (@parse [$($acc:tt)*] [$($inj:tt)*] @flat $ident:ident $(, $($rest:tt)*)?) => {
-        pyrust_builtin_modules_internal! {
-            @parse [$($acc)* (stringify!($ident), $ident, "")] [$($inj)*] $($($rest)*)?
-        }
-    };
-    // Entry: `"py.dotted.name" as ident,` — fn prefix = "<py.name>.".
-    (@parse [$($acc:tt)*] [$($inj:tt)*] $py_name:literal as $ident:ident $(, $($rest:tt)*)?) => {
-        pyrust_builtin_modules_internal! {
-            @parse [$($acc)* ($py_name, $ident, concat!($py_name, "."))] [$($inj)*] $($($rest)*)?
-        }
-    };
-    // Entry: `ident,` — Python name = stringify!(ident), fn prefix = "<ident>.".
-    (@parse [$($acc:tt)*] [$($inj:tt)*] $ident:ident $(, $($rest:tt)*)?) => {
-        pyrust_builtin_modules_internal! {
-            @parse [$($acc)* (stringify!($ident), $ident, concat!(stringify!($ident), "."))] [$($inj)*] $($($rest)*)?
-        }
-    };
-    // Done — emit.
-    (@parse [$(($py_name:expr, $ident:ident, $fn_prefix:expr))*]
-            [$(($inj_py_name:expr, $inj_ident:ident))*]) => {
-        $(
-            pub mod $ident {
-                /// Python-level name of this built-in module.  Used for
-                /// `PyModule.name` and as the key for `import`.
-                pub(crate) const MODULE_NAME: &str = $py_name;
-                /// Prefix prepended to every function's short name to
-                /// form its Python-level registration name (e.g.
-                /// `"math."` so `sqrt` becomes `"math.sqrt"`).  Empty
-                /// for `@flat` modules whose functions live in the
-                /// global namespace (`abs`, `len`, …).
-                ///
-                /// `dead_code` allow because constants-only bodies
-                /// (`os.rs`, …) declare no fns, so the macro-emitted
-                /// `pyrust_module!` expansion doesn't reference this
-                /// const.  The other 99% of bodies use it via
-                /// `emit_fn_artefacts`.
-                #[allow(dead_code)]
-                pub(crate) const FN_PREFIX: &str = $fn_prefix;
-
-                include!(concat!("bodies/", stringify!($ident), ".rs"));
+/// Helper emitting one `post_load_inject` dispatch check for `@inject` modules.
+macro_rules! pyrust_builtin_mod_inject {
+    ($name:expr, $interp:expr, $module:expr, $py_name:expr, $ident:ident @inject) => {
+        if $name == $py_name {
+            let exec_ns = $ident::inject_python_members($interp, $module)?;
+            if let Some(exec_ns) = exec_ns {
+                publish_exec_dunder_all($module, &exec_ns)?;
             }
+            return Ok(());
+        }
+    };
+    ($name:expr, $interp:expr, $module:expr, $py_name:expr, $ident:ident) => {};
+}
+
+macro_rules! pyrust_builtin_modules {
+    (
+        $(
+            $(@ $flat:ident)? $($py_name:literal as)? $ident:ident $(@ $inj:ident)?
+        ),* $(,)?
+    ) => {
+        $(
+            pyrust_builtin_mod_def!($(@$flat)? $($py_name as)? $ident $(@$inj)?);
         )*
 
         /// Concatenate every per-module `regs()` slice — consumed by
@@ -183,7 +176,7 @@ macro_rules! pyrust_builtin_modules_internal {
         /// previously sitting inside `env.rs::load_module`.
         pub fn load_builtin_module(name: &str) -> Option<Value> {
             $(
-                if name == $py_name {
+                if name == pyrust_builtin_mod_name!($($py_name as)? $ident) {
                     return Some($ident::module());
                 }
             )*
@@ -194,7 +187,7 @@ macro_rules! pyrust_builtin_modules_internal {
         /// `pyrust_builtin_modules!` without allocating a module object.
         pub fn is_builtin_module(name: &str) -> bool {
             $(
-                if name == $py_name {
+                if name == pyrust_builtin_mod_name!($($py_name as)? $ident) {
                     return true;
                 }
             )*
@@ -213,6 +206,7 @@ macro_rules! pyrust_builtin_modules_internal {
                 "asyncio"
                     | "collections"
                     | "html"
+                    | "http"
                     | "importlib"
                     | "json"
                     | "logging"
@@ -225,7 +219,7 @@ macro_rules! pyrust_builtin_modules_internal {
                 return true;
             }
             $(
-                if let Some(rest) = $py_name.strip_prefix(name)
+                if let Some(rest) = pyrust_builtin_mod_name!($($py_name as)? $ident).strip_prefix(name)
                     && rest.starts_with('.')
                 {
                     return true;
@@ -245,13 +239,15 @@ macro_rules! pyrust_builtin_modules_internal {
             interp: &mut crate::interpreter::Interpreter,
             module: &std::rc::Rc<std::cell::RefCell<crate::value::PyModule>>,
         ) -> crate::error::Result<()> {
-            let exec_ns = match name {
-                $($inj_py_name => $inj_ident::inject_python_members(interp, module)?,)*
-                _ => None,
-            };
-            if let Some(exec_ns) = exec_ns {
-                publish_exec_dunder_all(module, &exec_ns)?;
-            }
+            $(
+                pyrust_builtin_mod_inject!(
+                    name,
+                    interp,
+                    module,
+                    pyrust_builtin_mod_name!($($py_name as)? $ident),
+                    $ident $(@$inj)?
+                );
+            )*
             Ok(())
         }
     };
@@ -576,6 +572,14 @@ pyrust_builtin_modules! {
     platform @inject,
     atexit,
     signal @inject,
+    // `http`, `http.client`, `http.server`, and `http.cookies` (issue #3207):
+    // Python 3.12 HTTP enums (`HTTPStatus`, `HTTPMethod`), HTTP/1.1 client,
+    // socket-backed HTTP server and static file handler, and RFC cookie
+    // serialization/parsing.
+    "http.client" as http_client @inject,
+    "http.server" as http_server @inject,
+    "http.cookies" as http_cookies @inject,
+    http @inject,
 }
 
 include!("finalization.rs");

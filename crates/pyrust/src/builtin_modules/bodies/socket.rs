@@ -130,6 +130,7 @@ const SOCKET_PY_EXPORTS: &[&str] = &[
     "inet_ntoa",
     "inet_pton",
     "inet_ntop",
+    "_GLOBAL_DEFAULT_TIMEOUT",
 ];
 
 // ── Platform constants ───────────────────────────────────────────────────────
