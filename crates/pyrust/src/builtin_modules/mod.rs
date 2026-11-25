@@ -205,6 +205,7 @@ macro_rules! pyrust_builtin_modules {
                 name,
                 "asyncio"
                     | "collections"
+                    | "email"
                     | "html"
                     | "http"
                     | "importlib"
@@ -580,6 +581,17 @@ pyrust_builtin_modules! {
     "http.server" as http_server @inject,
     "http.cookies" as http_cookies @inject,
     http @inject,
+    // `email` (`email.utils`, `email.header`, `email.policy`, `email.message`,
+    // `email.parser`) and `mimetypes` (issue #3211): Python 3.12 RFC 2822/MIME
+    // email parsing, header/address/date utilities, policies, message objects,
+    // and filename/URL MIME type mapping.
+    "email.utils" as email_utils @inject,
+    "email.header" as email_header @inject,
+    "email.policy" as email_policy @inject,
+    "email.message" as email_message @inject,
+    "email.parser" as email_parser @inject,
+    email @inject,
+    mimetypes @inject,
 }
 
 include!("finalization.rs");
