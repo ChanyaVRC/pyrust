@@ -60,6 +60,7 @@ import encodings.zlib_codec
 import html.entities
 import html.parser
 import http.client
+import http.cookiejar
 import http.cookies
 import http.server
 import importlib.abc
@@ -86,9 +87,18 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import urllib.response
+import urllib.robotparser
+import wsgiref.handlers
+import wsgiref.headers
+import wsgiref.simple_server
+import wsgiref.types
+import wsgiref.util
+import wsgiref.validate
 import xml.etree
 import xml.etree.ElementPath
 import xml.etree.ElementTree
+import xmlrpc.client
+import xmlrpc.server
 import __future__
 names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_collections", "_collections_abc",
          "_compat_pickle", "_compression", "_contextvars", "_csv", "_datetime", "_decimal", "_elementtree",
@@ -105,8 +115,8 @@ names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_
          "pickletools", "pkgutil", "platform", "posixpath", "pprint", "profile", "pstats", "py_compile", "pyclbr", "pydoc", "pydoc_data", "queue", "quopri", "random", "re", "reprlib", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shlex", "shutil",
          "signal", "site", "socket", "socketserver", "sqlite3", "stat", "statistics", "string", "stringprep", "subprocess", "symtable", "sys", "sysconfig", "tabnanny", "tarfile",
          "tempfile", "textwrap", "this", "threading", "time", "timeit", "token", "tokenize", "tomllib", "trace", "traceback", "tracemalloc",
-         "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref", "webbrowser",
-         "xml", "zipapp", "zipfile", "zipimport", "zlib", "zoneinfo"]
+         "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "weakref", "webbrowser", "wsgiref",
+         "xml", "xmlrpc", "zipapp", "zipfile", "zipimport", "zlib", "zoneinfo"]
 for name in names:
     print(name, list(vars(__import__(name))))
 for name, module in [("os.path", os.path),
@@ -140,6 +150,7 @@ for name, module in [("os.path", os.path),
                      ("html.entities", html.entities),
                      ("html.parser", html.parser),
                      ("http.client", http.client),
+                     ("http.cookiejar", http.cookiejar),
                      ("http.cookies", http.cookies),
                      ("http.server", http.server),
                      ("importlib.abc", importlib.abc),
@@ -166,9 +177,18 @@ for name, module in [("os.path", os.path),
                      ("urllib.parse", urllib.parse),
                      ("urllib.request", urllib.request),
                      ("urllib.response", urllib.response),
+                     ("urllib.robotparser", urllib.robotparser),
+                     ("wsgiref.handlers", wsgiref.handlers),
+                     ("wsgiref.headers", wsgiref.headers),
+                     ("wsgiref.simple_server", wsgiref.simple_server),
+                     ("wsgiref.types", wsgiref.types),
+                     ("wsgiref.util", wsgiref.util),
+                     ("wsgiref.validate", wsgiref.validate),
                      ("xml.etree", xml.etree),
                      ("xml.etree.ElementPath", xml.etree.ElementPath),
                      ("xml.etree.ElementTree", xml.etree.ElementTree),
+                     ("xmlrpc.client", xmlrpc.client),
+                     ("xmlrpc.server", xmlrpc.server),
                      ("__future__", __future__)]:
     print(name, list(vars(module)))
 print(list(math.__dict__))

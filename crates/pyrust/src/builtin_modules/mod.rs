@@ -243,6 +243,8 @@ macro_rules! pyrust_builtin_modules {
                     | "tomllib"
                     | "unittest"
                     | "urllib"
+                    | "wsgiref"
+                    | "xmlrpc"
                     | "zipfile"
                     | "zoneinfo"
             ) {
@@ -323,6 +325,11 @@ macro_rules! pyrust_builtin_modules {
                 "json.scanner" => return json_scanner::post_load_init(interp, module),
                 "json.decoder" => return json_decoder::post_load_init(interp, module),
                 "json.encoder" => return json_encoder::post_load_init(interp, module),
+                "wsgiref.simple_server" => {
+                    return wsgiref_simple_server::post_load_init(interp, module);
+                }
+                "wsgiref.types" => return wsgiref_types::post_load_init(interp, module),
+                "xmlrpc.server" => return xmlrpc_server::post_load_init(interp, module),
                 _ => {}
             }
             if encodings_codecs::post_load_init(name, interp, module)? {
@@ -569,6 +576,7 @@ pyrust_builtin_modules! {
     "urllib.response" as urllib_response @inject,
     "urllib.error" as urllib_error @inject,
     "urllib.request" as urllib_request @inject,
+    "urllib.robotparser" as urllib_robotparser,
     urllib,
     // `html.entities`, `html.parser`, and `html` (issue #3149): static HTML4 /
     // HTML5 character reference tables in `html_entities.rs`, `escape` /
@@ -700,6 +708,7 @@ pyrust_builtin_modules! {
     "http.client" as http_client @inject,
     "http.server" as http_server @inject,
     "http.cookies" as http_cookies @inject,
+    "http.cookiejar" as http_cookiejar,
     http @inject,
     // `email` (`email.utils`, `email.header`, `email.policy`, `email.message`,
     // `email.parser`) and `mimetypes` (issue #3211): Python 3.12 RFC 2822/MIME
@@ -847,6 +856,20 @@ pyrust_builtin_modules! {
     modulefinder,
     pyclbr,
     tabnanny,
+    // `wsgiref` (`.util`, `.headers`, `.handlers`, `.simple_server`,
+    // `.validate`, `.types`) and `xmlrpc` (`.client`, `.server`) (issue #3256):
+    // 100% native-Rust Python 3.12 web & RPC stdlib modules built with PyRust's
+    // expanded macro toolkit (no `@inject`).
+    "wsgiref.util" as wsgiref_util,
+    "wsgiref.headers" as wsgiref_headers,
+    "wsgiref.handlers" as wsgiref_handlers,
+    "wsgiref.simple_server" as wsgiref_simple_server,
+    "wsgiref.validate" as wsgiref_validate,
+    "wsgiref.types" as wsgiref_types,
+    wsgiref,
+    "xmlrpc.client" as xmlrpc_client,
+    "xmlrpc.server" as xmlrpc_server,
+    xmlrpc,
 }
 
 include!("finalization.rs");

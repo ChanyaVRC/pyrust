@@ -20,5 +20,6 @@ pyrust_module! {
         "response" => super::urllib_response::module(),
         "error" => super::urllib_error::module(),
         "request" => super::urllib_request::module(),
+        "robotparser" => super::urllib_robotparser::module(),
     }
 }

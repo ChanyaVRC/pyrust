@@ -33,7 +33,7 @@ __all__ = [
     'HTTPBasicAuthHandler', 'ProxyBasicAuthHandler', 'AbstractDigestAuthHandler',
     'HTTPDigestAuthHandler', 'ProxyDigestAuthHandler', 'HTTPHandler',
     'FileHandler', 'DataHandler',
-    'UnknownHandler', 'HTTPErrorProcessor',
+    'UnknownHandler', 'HTTPErrorProcessor', 'HTTPCookieProcessor',
     # Functions
     'urlopen', 'install_opener', 'build_opener',
     'pathname2url', 'url2pathname', 'getproxies',
@@ -1344,6 +1344,26 @@ class DataHandler(BaseHandler):
         )
 
         return urllib.response.addinfourl(io.BytesIO(data), headers, url)
+
+
+class HTTPCookieProcessor(BaseHandler):
+    def __init__(self, cookiejar=None):
+        import http.cookiejar
+
+        if cookiejar is None:
+            cookiejar = http.cookiejar.CookieJar()
+        self.cookiejar = cookiejar
+
+    def http_request(self, request):
+        self.cookiejar.add_cookie_header(request)
+        return request
+
+    def http_response(self, request, response):
+        self.cookiejar.extract_cookies(response, request)
+        return response
+
+    https_request = http_request
+    https_response = http_response
 
 
 # ── OS-specific pathname <-> file URL conversion ─────────────────────────────
