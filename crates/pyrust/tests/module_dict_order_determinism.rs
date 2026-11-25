@@ -41,7 +41,15 @@ import html.parser
 import http.client
 import http.cookies
 import http.server
+import importlib.abc
 import importlib.machinery
+import importlib.metadata
+import importlib.readers
+import importlib.resources
+import importlib.resources.abc
+import importlib.resources.readers
+import importlib.resources.simple
+import importlib.simple
 import importlib.util
 import sqlite3.dbapi2
 import unittest.mock
@@ -53,7 +61,7 @@ import xml.etree
 import xml.etree.ElementPath
 import xml.etree.ElementTree
 import __future__
-names = ["_lsprof", "_sitebuiltins", "_tracemalloc", "abc", "antigravity", "argparse", "ast", "asyncio", "atexit", "base64", "bdb", "binascii", "bisect", "builtins",
+names = ["_frozen_importlib", "_frozen_importlib_external", "_lsprof", "_sitebuiltins", "_tracemalloc", "abc", "antigravity", "argparse", "ast", "asyncio", "atexit", "base64", "bdb", "binascii", "bisect", "builtins",
          "bz2", "cProfile", "calendar", "cmath", "cmd", "code", "codecs", "codeop", "collections", "colorsys", "configparser", "contextlib", "contextvars",
          "copy", "copyreg", "csv", "dataclasses", "decimal", "difflib", "dis", "doctest", "email", "enum", "errno", "faulthandler",
          "filecmp", "fileinput", "fnmatch", "fractions", "functools", "gc", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
@@ -78,7 +86,15 @@ for name, module in [("os.path", os.path),
                      ("http.client", http.client),
                      ("http.cookies", http.cookies),
                      ("http.server", http.server),
+                     ("importlib.abc", importlib.abc),
                      ("importlib.machinery", importlib.machinery),
+                     ("importlib.metadata", importlib.metadata),
+                     ("importlib.readers", importlib.readers),
+                     ("importlib.resources", importlib.resources),
+                     ("importlib.resources.abc", importlib.resources.abc),
+                     ("importlib.resources.readers", importlib.resources.readers),
+                     ("importlib.resources.simple", importlib.resources.simple),
+                     ("importlib.simple", importlib.simple),
                      ("importlib.util", importlib.util),
                      ("sqlite3.dbapi2", sqlite3.dbapi2),
                      ("unittest.mock", unittest.mock),

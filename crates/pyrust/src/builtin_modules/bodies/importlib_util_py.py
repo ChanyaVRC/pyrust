@@ -254,8 +254,8 @@ def _synthesize_loaded_module_spec(fullname, module):
     if _is_builtin_module(fullname):
         return _builtin_spec(fullname)
     file_attr = getattr(module, '__file__', None)
+    pkg_path = getattr(module, '__path__', None)
     if isinstance(file_attr, str) and file_attr:
-        pkg_path = getattr(module, '__path__', None)
         if pkg_path is not None:
             return spec_from_file_location(
                 fullname,
@@ -265,6 +265,12 @@ def _synthesize_loaded_module_spec(fullname, module):
         return spec_from_file_location(
             fullname, file_attr, submodule_search_locations=None
         )
+    if file_attr is None and pkg_path is not None:
+        locations = list(pkg_path)
+        loader = NamespaceLoader(fullname, locations, PathFinder)
+        spec = ModuleSpec(fullname, loader, origin=None)
+        spec.submodule_search_locations = locations
+        return spec
     return None
 
 

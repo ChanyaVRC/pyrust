@@ -35,6 +35,11 @@ pyrust_module! {
     constants {
         "machinery" => super::importlib_machinery::module(),
         "util" => super::importlib_util::module(),
+        "abc" => super::importlib_abc::module(),
+        "resources" => super::importlib_resources::module(),
+        "readers" => super::importlib_readers::module(),
+        "simple" => super::importlib_simple::module(),
+        "metadata" => super::importlib_metadata::module(),
     }
 
     /// Private bridge into `Interpreter::load_module` for `importlib.import_module`.

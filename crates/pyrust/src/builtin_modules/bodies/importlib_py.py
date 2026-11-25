@@ -58,44 +58,7 @@ def import_module(name, package=None):
             raise ValueError('Empty module name')
         fullname = rel_name
 
-    try:
-        return _load_module(fullname)
-    except ModuleNotFoundError as exc:
-        # If PyRust's built-in/filesystem importer didn't find the module,
-        # consult any custom finders registered in sys.meta_path.
-        if getattr(exc, 'name', None) == fullname and sys.meta_path:
-            if fullname in sys.modules and sys.modules[fullname] is None:
-                raise
-            import importlib.util as _util
-
-            parent_name = fullname.rpartition('.')[0]
-            parent_path = None
-            if parent_name:
-                parent_mod = import_module(parent_name)
-                parent_path = getattr(parent_mod, '__path__', None)
-            for finder in sys.meta_path:
-                if hasattr(finder, 'find_spec'):
-                    spec = finder.find_spec(fullname, parent_path, None)
-                    if spec is not None:
-                        mod = _util.module_from_spec(spec)
-                        sys.modules[fullname] = mod
-                        try:
-                            if spec.loader is not None and hasattr(
-                                spec.loader, 'exec_module'
-                            ):
-                                spec.loader.exec_module(mod)
-                        except BaseException:
-                            sys.modules.pop(fullname, None)
-                            raise
-                        if parent_name and parent_name in sys.modules:
-                            leaf = fullname.rpartition('.')[2]
-                            setattr(
-                                sys.modules[parent_name],
-                                leaf,
-                                sys.modules.get(fullname, mod),
-                            )
-                        return sys.modules.get(fullname, mod)
-        raise
+    return _load_module(fullname)
 
 
 def reload(module):
