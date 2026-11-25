@@ -30,6 +30,10 @@ pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, 
         "pstats" => pstats::prepare_module(interpreter, module),
         "pydoc" => pydoc::prepare_module(interpreter, module),
         "gc" => gc::prepare_module(interpreter, module),
+        "dbm.dumb" => dbm_dumb::prepare_module(interpreter, module),
+        "dbm" => dbm::prepare_module(interpreter, module),
+        "shelve" => shelve::prepare_module(interpreter, module),
+        "plistlib" => plistlib::prepare_module(interpreter, module),
         _ => {}
     }
 }

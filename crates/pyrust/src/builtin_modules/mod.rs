@@ -877,6 +877,14 @@ pyrust_builtin_modules! {
     "xmlrpc.client" as xmlrpc_client,
     "xmlrpc.server" as xmlrpc_server,
     xmlrpc,
+    // `dbm`, `dbm.dumb`, `shelve`, `plistlib`, and `wave` (issue #3259): 100%
+    // native-Rust Python 3.12 persistence and binary format stdlib modules
+    // built with PyRust's expanded macro toolkit (no `@inject`).
+    "dbm.dumb" as dbm_dumb,
+    dbm,
+    shelve,
+    plistlib,
+    wave,
 }
 
 include!("finalization.rs");
