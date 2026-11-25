@@ -126,6 +126,10 @@ thread_local! {
     /// Reset to 0 at the start of each top-level script execution.
     static CURRENT_VM_LINE: RefCell<u32> = const { RefCell::new(0) };
 
+    /// The instruction index (PC) of the most recently published VM call site
+    /// (for `frame.f_lasti`).  Reset to 0 alongside `CURRENT_VM_LINE`.
+    static CURRENT_VM_PC: RefCell<u32> = const { RefCell::new(0) };
+
     /// The PEP 657 caret anchor `(col_offset, end_col_offset)` of the
     /// instruction at which the unwinding error was raised in the innermost
     /// VM dispatch loop (issue #2426).  Unlike `CURRENT_VM_LINE`, this is NOT
@@ -210,11 +214,24 @@ pub fn get_current_vm_line() -> u32 {
     CURRENT_VM_LINE.with(|c| *c.borrow())
 }
 
+/// Update the current VM instruction PC counter (for `frame.f_lasti`).
+#[inline]
+pub fn set_current_vm_pc(pc: u32) {
+    CURRENT_VM_PC.with(|c| *c.borrow_mut() = pc);
+}
+
+/// Read the current VM instruction PC counter.
+#[inline]
+pub fn get_current_vm_pc() -> u32 {
+    CURRENT_VM_PC.with(|c| *c.borrow())
+}
+
 /// Reset the current VM line counter.  Called at the start of each top-level
 /// script execution (via `reset_captured_error_frames`).
 #[inline]
 pub fn reset_current_vm_line() {
     CURRENT_VM_LINE.with(|c| *c.borrow_mut() = 0);
+    CURRENT_VM_PC.with(|c| *c.borrow_mut() = 0);
     CURRENT_VM_COL_SPAN.with(|c| *c.borrow_mut() = None);
 }
 

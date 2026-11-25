@@ -1045,6 +1045,36 @@ fn warn_explicit_impl(
     Ok(Value::none())
 }
 
+/// Emit a compile-time `SyntaxWarning` (e.g. invalid escape sequence) through
+/// the live `warnings` filter/recording machinery.  Matches CPython 3.12
+/// (`Parser/string_parser.c::warn_invalid_escape_sequence`): when an active
+/// filter turns `SyntaxWarning` into an error, the raised `SyntaxWarning` is
+/// converted into `SyntaxError` with the same message.
+pub(crate) fn emit_syntax_warning(
+    interp: &mut crate::Interpreter,
+    msg: &str,
+    filename: &str,
+    lineno: i64,
+) -> Result<()> {
+    let category = Value::py_class(built_in_warning_class("SyntaxWarning")?);
+    match warn_explicit_impl(
+        interp,
+        Value::string(msg),
+        Some(category),
+        filename,
+        lineno,
+        None,
+        None,
+        Value::none(),
+    ) {
+        Ok(_) => Ok(()),
+        Err(ref err) if err.class_name_is("SyntaxWarning") => {
+            Err(PyError::named("SyntaxError", msg.to_string()))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 // ── module ────────────────────────────────────────────────────────────────────
 
 pyrust_module! {

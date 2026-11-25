@@ -365,29 +365,66 @@ pyrust_module! {
         Ok(current_locals_value(_interp))
     }
 
-    /// CPython: exec(source[, globals[, locals]]) — execute Python source code.
+    /// CPython: `__build_class__(func, name, /, *bases, metaclass=None, **kwds)` —
+    /// internal helper used by the `class` statement and exposed on `builtins`.
+    fn __build_class__(args) -> Result<Value> {
+        _interp.builtin_build_class(args)
+    }
+
+    /// CPython: exec(source, globals=None, locals=None, /, *, closure=None) —
+    /// execute Python source code or a code object.
     /// <https://docs.python.org/3/library/functions.html#exec>
-    ///
-    /// `source` may be a string or a code object returned by `compile()`.
-    /// When `globals` and `locals` are omitted the code uses the current
-    /// frame's globals and locals namespaces.
-    /// When an explicit `globals` dict is supplied the code runs in that
-    /// namespace.  Returns `None`.
-    #[arity_style(clinic)]
-    fn exec(
-        #[positional_only] source: PyValueRef,
-        #[positional_only] #[default(OptionalArg::Omitted)] globals: OptValueRef,
-        #[positional_only] #[default(OptionalArg::Omitted)] locals: OptValueRef,
-    ) -> Result<Value> {
-        let source_val = source.0;
-        let mut globals_opt = globals
-            .as_value()
+    fn exec(args) -> Result<Value> {
+        let mut positional: Vec<&Value> = Vec::with_capacity(3);
+        let mut closure_val: Option<Value> = None;
+        for arg in args {
+            match arg.name.as_deref() {
+                None => positional.push(&arg.value),
+                Some("closure") => {
+                    if closure_val.is_some() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "exec() got multiple values for keyword argument 'closure'".to_string(),
+                        ));
+                    }
+                    closure_val = Some(arg.value.clone());
+                }
+                Some(other) => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("'{other}' is an invalid keyword argument for exec()"),
+                    ));
+                }
+            }
+        }
+        if positional.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "exec() takes at least 1 positional argument (0 given)".to_string(),
+            ));
+        }
+        if positional.len() > 3 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "exec() takes at most 3 positional arguments ({} given)",
+                    positional.len()
+                ),
+            ));
+        }
+        let source_val = positional[0];
+        let mut globals_opt = positional
+            .get(1)
+            .copied()
             .filter(|v| !matches!(v.kind(), ValueKind::None))
             .cloned();
-        let mut locals_opt = locals
-            .as_value()
+        let mut locals_opt = positional
+            .get(2)
+            .copied()
             .filter(|v| !matches!(v.kind(), ValueKind::None))
             .cloned();
+        let closure_opt = closure_val.filter(|v| !matches!(v.kind(), ValueKind::None));
+
         if globals_opt.is_none()
             && _interp
                 .vm_frame_views
@@ -405,48 +442,96 @@ pyrust_module! {
         if let Some(g) = &globals_opt {
             inject_builtins_into_globals(g);
         }
-        // Code object path (from compile()).
-        if let Some(result) = crate::interpreter::with_code_state(source_val, |cs| {
+
+        // Code object path (both `compile()` objects and `func.__code__`).
+        if pyrust_builtins::code::is_code(source_val) {
+            let compiled = crate::interpreter::with_code_state(source_val, |cs| {
+                (Rc::clone(&cs.code), cs.mode, Rc::clone(&cs.local_index))
+            })
+            .or_else(|| {
+                pyrust_builtins::code::with_raw_code(source_val, |raw| {
+                    raw.downcast_ref::<crate::bytecode::FnCode>().map(|fc| {
+                        (
+                            Rc::new(fc.clone()),
+                            crate::interpreter::CodeMode::Exec,
+                            Rc::new(std::collections::HashMap::new()),
+                        )
+                    })
+                })
+                .flatten()
+            });
+            let (fn_code, mode, local_index) = compiled.ok_or_else(|| {
+                PyError::named("TypeError", "exec() code object has no executable bytecode")
+            })?;
+
+            let num_free = fn_code.free_var_slots().len();
+            let closure_slots: Option<Vec<pyrust_core::CellSlot>> = if num_free == 0 {
+                if closure_opt.is_some() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "cannot use a closure with this code object".to_string(),
+                    ));
+                }
+                None
+            } else {
+                let mut slots = Vec::with_capacity(num_free);
+                let ok = match closure_opt.as_ref().map(|v| v.kind()) {
+                    Some(ValueKind::Tuple(items)) if items.len() == num_free => {
+                        let mut all_cells = true;
+                        for item in items.iter() {
+                            if let Some(slot) = pyrust_builtins::cell::cell_slot(item) {
+                                slots.push(slot);
+                            } else {
+                                all_cells = false;
+                                break;
+                            }
+                        }
+                        all_cells
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("code object requires a closure of exactly length {num_free}"),
+                    ));
+                }
+                Some(slots)
+            };
+
             use crate::interpreter::CodeMode;
-            match cs.mode {
+            match mode {
                 CodeMode::Exec | CodeMode::Single => {
-                    _interp.run_exec_code(
-                        Rc::clone(&cs.code),
-                        Rc::clone(&cs.local_index),
-                        globals_opt.clone(),
-                        locals_opt.clone(),
-                    )
+                    _interp.run_exec_code_with_closure(
+                        fn_code,
+                        local_index,
+                        globals_opt,
+                        locals_opt,
+                        closure_slots,
+                    )?;
                 }
                 CodeMode::Eval => {
-                    // exec() can take an eval-mode code object too (CPython allows it).
-                    _interp.run_eval_code_dispatch(
-                        Rc::clone(&cs.code),
-                        Rc::clone(&cs.local_index),
-                        globals_opt.clone(),
-                        locals_opt.clone(),
-                    ).map(|_| ())
+                    _interp.run_eval_code_dispatch(fn_code, local_index, globals_opt, locals_opt)?;
                 }
             }
-        }) {
-            result?;
             return Ok(Value::none());
         }
-        // String path.
-        let source = source_val.as_str().ok_or_else(|| {
-            PyError::named(
+
+        if closure_opt.is_some() {
+            return Err(PyError::named(
                 "TypeError",
-                format!(
-                    "{FN_NAME}() arg 1 must be a string or code object, not '{}'",
-                    value_type_name_str(source_val),
-                ),
-            )
-        })?;
-        _interp.exec_source(source, globals_opt, locals_opt)?;
+                "closure can only be used when source is a code object".to_string(),
+            ));
+        }
+
+        // String / bytes / bytearray path.
+        let source = extract_source_text(_interp, source_val, FN_NAME, "string, bytes or code object")?;
+        _interp.exec_source(&source, globals_opt, locals_opt)?;
         Ok(Value::none())
     }
 
     /// CPython: eval(expression[, globals[, locals]]) — evaluate a Python
-    /// expression string and return its value.
+    /// expression string, bytes, or code object and return its value.
     /// <https://docs.python.org/3/library/functions.html#eval>
     #[arity_style(expected_got)]
     fn eval(
@@ -468,48 +553,50 @@ pyrust_module! {
         if let Some(g) = &globals_opt {
             inject_builtins_into_globals(g);
         }
-        // Code object path (from compile()).
-        if let Some(result) = crate::interpreter::with_code_state(source_val, |cs| {
-            use crate::interpreter::CodeMode;
-            match cs.mode {
-                CodeMode::Eval => _interp.run_eval_code_dispatch(
-                    Rc::clone(&cs.code),
-                    Rc::clone(&cs.local_index),
-                    globals_opt.clone(),
-                    locals_opt.clone(),
-                ),
-                CodeMode::Exec | CodeMode::Single => _interp
-                    .run_exec_code(
+        // Code object path (from compile() or func.__code__).
+        if pyrust_builtins::code::is_code(source_val) {
+            if let Some(result) = crate::interpreter::with_code_state(source_val, |cs| {
+                use crate::interpreter::CodeMode;
+                match cs.mode {
+                    CodeMode::Eval => _interp.run_eval_code_dispatch(
                         Rc::clone(&cs.code),
                         Rc::clone(&cs.local_index),
                         globals_opt.clone(),
                         locals_opt.clone(),
-                    )
-                    .map(|()| Value::none()),
+                    ),
+                    CodeMode::Exec | CodeMode::Single => _interp
+                        .run_exec_code(
+                            Rc::clone(&cs.code),
+                            Rc::clone(&cs.local_index),
+                            globals_opt.clone(),
+                            locals_opt.clone(),
+                        )
+                        .map(|()| Value::none()),
+                }
+            }) {
+                return result;
             }
-        }) {
-            return result;
+            if let Some(fn_code) = pyrust_builtins::code::with_raw_code(source_val, |raw| {
+                raw.downcast_ref::<crate::bytecode::FnCode>().cloned()
+            })
+            .flatten()
+            {
+                return _interp.run_eval_code_dispatch(
+                    Rc::new(fn_code),
+                    Rc::new(std::collections::HashMap::new()),
+                    globals_opt,
+                    locals_opt,
+                );
+            }
         }
-        // String path.
-        let source = source_val.as_str().ok_or_else(|| {
-            PyError::named(
-                "TypeError",
-                format!(
-                    "{FN_NAME}() arg 1 must be a string or code object, not '{}'",
-                    value_type_name_str(source_val),
-                ),
-            )
-        })?;
-        _interp.eval_source(source, globals_opt, locals_opt)
+        // String / bytes / bytearray path.
+        let source = extract_source_text(_interp, source_val, FN_NAME, "string, bytes or code object")?;
+        _interp.eval_source(&source, globals_opt, locals_opt)
     }
 
     /// CPython: compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1) —
-    /// compile source to a code object.
+    /// compile source (str, bytes, bytearray, or ast.AST) to a code object or AST.
     /// <https://docs.python.org/3/library/functions.html#compile>
-    ///
-    /// pyrust stores the compiled `FnCode` wrapped in a `Value`; the returned
-    /// value can be passed to `exec()` or `eval()`.  Supports `"exec"`,
-    /// `"eval"`, and `"single"` modes.
     #[arity_style(clinic)]
     fn compile(
         source: PyValueRef,
@@ -519,33 +606,109 @@ pyrust_module! {
         #[default(OptionalArg::Omitted)] dont_inherit: OptValueRef,
         #[default(OptionalArg::Omitted)] optimize: OptValueRef,
     ) -> Result<Value> {
-        let _ = (dont_inherit, optimize);
+        const PYCF_ONLY_AST: i64 = 0x0400;
+        const PYCF_TYPE_COMMENTS: i64 = 0x1000;
+        const PYCF_ALLOW_TOP_LEVEL_AWAIT: i64 = 0x2000;
         const CO_FUTURE_ANNOTATIONS: i64 = 0x100_0000;
-        let future_annotations = flags
-            .as_value()
-            .and_then(|v| v.as_int())
-            .is_some_and(|f| (f & CO_FUTURE_ANNOTATIONS) != 0);
-        let source_val = source.0;
-        let source = source_val.as_str().ok_or_else(|| {
-            PyError::named(
-                "TypeError",
-                format!(
-                    "{FN_NAME}() arg 1 must be a string, not '{}'",
-                    value_type_name_str(source_val),
-                ),
-            )
-        })?;
-        // filename (arg 2) — CPython tags the resulting code object's
-        // `co_filename` with it, so an exception raised inside the compiled code
-        // reports this name in its traceback (#2438).  Non-string filenames
-        // (CPython also accepts bytes / path-like) fall back to `<unknown>`.
-        let compile_filename = filename
-            .0
-            .as_str()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "<unknown>".to_string());
+        // All recognised CPython 3.12 compiler & __future__ flags.
+        const KNOWN_FLAGS_MASK: i64 = 0x0010 // CO_NESTED
+            | 0x0100 // PyCF_SOURCE_IS_UTF8
+            | 0x0200 // PyCF_DONT_IMPLY_DEDENT
+            | PYCF_ONLY_AST
+            | 0x0800 // PyCF_IGNORE_COOKIE
+            | PYCF_TYPE_COMMENTS
+            | PYCF_ALLOW_TOP_LEVEL_AWAIT
+            | 0x4000 // PyCF_ALLOW_INCOMPLETE_INPUT
+            | 0x2_0000 // CO_FUTURE_DIVISION
+            | 0x4_0000 // CO_FUTURE_ABSOLUTE_IMPORT
+            | 0x8_0000 // CO_FUTURE_WITH_STATEMENT
+            | 0x10_0000 // CO_FUTURE_PRINT_FUNCTION
+            | 0x20_0000 // CO_FUTURE_UNICODE_LITERALS
+            | 0x40_0000 // CO_FUTURE_BARRY_AS_BDFL
+            | 0x80_0000 // CO_FUTURE_GENERATOR_STOP
+            | CO_FUTURE_ANNOTATIONS;
+
+        let mut flags_int: i64 = match flags.as_value() {
+            None => 0,
+            Some(v) => match v.kind() {
+                ValueKind::Int(n) => n,
+                ValueKind::Bool(b) => i64::from(b),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            value_type_name_str(v),
+                        ),
+                    ));
+                }
+            },
+        };
+        if (flags_int & !KNOWN_FLAGS_MASK) != 0 {
+            return Err(PyError::named(
+                "ValueError",
+                "compile(): unrecognised flags".to_string(),
+            ));
+        }
+
+        let dont_inherit_bool = match dont_inherit.as_value() {
+            None => false,
+            Some(v) => match v.kind() {
+                ValueKind::Int(n) => n != 0,
+                ValueKind::Bool(b) => b,
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            value_type_name_str(v),
+                        ),
+                    ));
+                }
+            },
+        };
+
+        let optimize_raw: i64 = match optimize.as_value() {
+            None => -1,
+            Some(v) => match v.kind() {
+                ValueKind::Int(n) => n,
+                ValueKind::Bool(b) => i64::from(b),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            value_type_name_str(v),
+                        ),
+                    ));
+                }
+            },
+        };
+        if !(-1..=2).contains(&optimize_raw) {
+            return Err(PyError::named(
+                "ValueError",
+                "compile(): invalid optimize value".to_string(),
+            ));
+        }
+        let effective_optimize: u8 = if optimize_raw <= 0 {
+            0
+        } else {
+            optimize_raw as u8
+        };
+
+        if !dont_inherit_bool && calling_frame_has_future_annotations(_interp) {
+            flags_int |= CO_FUTURE_ANNOTATIONS;
+        }
+
+        let only_ast = (flags_int & PYCF_ONLY_AST) != 0;
+        let type_comments = (flags_int & PYCF_TYPE_COMMENTS) != 0;
+        let allow_top_level_await = (flags_int & PYCF_ALLOW_TOP_LEVEL_AWAIT) != 0;
+        let future_annotations = (flags_int & CO_FUTURE_ANNOTATIONS) != 0;
+
+        let compile_filename = extract_compile_filename(_interp, filename.0)?;
+
         let mode_val = mode.0;
-        let mode = mode_val.as_str().ok_or_else(|| {
+        let mode_str = mode_val.as_str().ok_or_else(|| {
             PyError::named(
                 "TypeError",
                 format!(
@@ -554,6 +717,115 @@ pyrust_module! {
                 ),
             )
         })?;
+        match mode_str {
+            "exec" | "eval" | "single" => {}
+            "func_type" => {
+                if !only_ast {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "compile() mode 'func_type' requires flag PyCF_ONLY_AST".to_string(),
+                    ));
+                }
+            }
+            _ => {
+                let msg = if only_ast {
+                    "compile() mode must be 'exec', 'eval', 'single' or 'func_type'"
+                } else {
+                    "compile() mode must be 'exec', 'eval' or 'single'"
+                };
+                return Err(PyError::named("ValueError", msg.to_string()));
+            }
+        }
+
+        let source_val = source.0;
+        let source_is_ast = is_ast_node(source_val);
+
+        // `ast.PyCF_ONLY_AST`: parse source to an `ast.AST` node (or return an
+        // already-parsed AST node after mode validation).
+        if only_ast {
+            if source_is_ast {
+                return Ok(source_val.clone());
+            }
+            let source_text =
+                extract_source_text(_interp, source_val, FN_NAME, "string, bytes or AST object")?;
+            // Emit invalid-escape SyntaxWarnings via lexer when parsing non-func_type source.
+            if mode_str != "func_type"
+                && let Ok(lexer) = crate::lexer::Lexer::new(&source_text)
+            {
+                let (_, _, _, _, warnings) = lexer.into_tokens_with_pos_and_warnings();
+                for (lineno, msg) in warnings {
+                    crate::builtin_modules::warnings::emit_syntax_warning(
+                        _interp,
+                        &msg,
+                        &compile_filename,
+                        lineno as i64,
+                    )?;
+                }
+            }
+            let ast_mod = _interp.load_module("ast")?;
+            let parse_fn = _interp.get_attr(&ast_mod, "parse")?;
+            return _interp.call_function_expanded(
+                parse_fn,
+                &[
+                    ExpandedCallArg {
+                        name: None,
+                        value: Value::string(source_text),
+                    },
+                    ExpandedCallArg {
+                        name: Some("filename".to_string()),
+                        value: Value::string(compile_filename),
+                    },
+                    ExpandedCallArg {
+                        name: Some("mode".to_string()),
+                        value: Value::string(mode_str),
+                    },
+                    ExpandedCallArg {
+                        name: Some("type_comments".to_string()),
+                        value: Value::bool_(type_comments),
+                    },
+                ],
+            );
+        }
+
+        // Convert `ast.AST` or `str`/`bytes`/`bytearray` into source text (plus
+        // optional AST-derived line overrides).
+        let (source_text, ast_linenos): (String, Vec<u32>) = if source_is_ast {
+            let expected_node = match mode_str {
+                "exec" => "Module",
+                "eval" => "Expression",
+                "single" => "Interactive",
+                _ => unreachable!(),
+            };
+            if !instance_is_ast_subclass(source_val, expected_node) {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "expected {expected_node} node, got {}",
+                        value_type_name_str(source_val),
+                    ),
+                ));
+            }
+            let explicit_linenos = extract_ast_linenos(_interp, source_val, mode_str);
+            let ast_mod = _interp.load_module("ast")?;
+            let unparse_fn = _interp.get_attr(&ast_mod, "unparse")?;
+            let unparsed = _interp.call_function_expanded(
+                unparse_fn,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: source_val.clone(),
+                }],
+            )?;
+            let text = unparsed
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| PyError::runtime("ast.unparse() did not return str".to_string()))?;
+            (text, explicit_linenos)
+        } else {
+            let text =
+                extract_source_text(_interp, source_val, FN_NAME, "string, bytes or AST object")?;
+            (text, Vec::new())
+        };
+
         let inject_future_annotations = |program: &mut Vec<crate::ast::Stmt>,
                                          linenos: &mut Vec<u32>| {
             if !future_annotations {
@@ -561,9 +833,6 @@ pyrust_module! {
             }
             let future_sym = pyrust_core::Symbol::intern("__future__");
             let annotations_sym = pyrust_core::Symbol::intern("annotations");
-            // Count any leading `from __future__ import ...` statements so that
-            // we keep all future imports at the very top of the module/command
-            // (and skip injection if `annotations` is already imported there).
             let mut future_end = 0usize;
             while let Some(crate::ast::Stmt::ImportFrom { module, names }) = program.get(future_end)
             {
@@ -592,12 +861,28 @@ pyrust_module! {
             );
             linenos.insert(del_pos, first_line);
         };
-        match mode {
+
+        let compile_opts = crate::compiler::CompileOptions {
+            optimize: effective_optimize,
+            allow_top_level_await,
+        };
+        let extra_co_flags = if future_annotations {
+            CO_FUTURE_ANNOTATIONS
+        } else {
+            0
+        };
+
+        match mode_str {
             "exec" => {
-                // Thread the lexer line table through so errors inside the
-                // compiled code report correct internal line numbers (#2245).
-                let (mut program, mut linenos) =
-                    crate::interpreter::Interpreter::parse_source_to_stmts_with_linenos(source)?;
+                let (mut program, mut linenos) = _interp
+                    .parse_source_to_stmts_with_warnings(&source_text, &compile_filename)?;
+                if ast_linenos.len() == linenos.len() {
+                    for (dst, &src_ln) in linenos.iter_mut().zip(ast_linenos.iter()) {
+                        if src_ln != 0 {
+                            *dst = src_ln;
+                        }
+                    }
+                }
                 inject_future_annotations(&mut program, &mut linenos);
                 let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let global_names = crate::interpreter::collect_global_names(&program);
@@ -607,11 +892,6 @@ pyrust_module! {
                     &global_names,
                     &empty,
                 );
-                // A code object may later run under exec(globals, locals).
-                // Preserve every ordinary assignment as a fast local so it
-                // remains distinguishable from an explicit `global` write,
-                // even for code with more than the script runner's 200-name
-                // all-env threshold.
                 let local_index: Rc<
                     std::collections::HashMap<String, crate::bytecode::Reg>,
                 > = Rc::new(
@@ -620,44 +900,60 @@ pyrust_module! {
                         .map(|(i, n)| (n.clone(), i))
                         .collect(),
                 );
-                let code = crate::compiler::compile_script_with_linenos(
+                let code = crate::compiler::compile_script_with_options(
                     &program,
                     Rc::clone(&local_index),
                     false,
                     &linenos,
                     &compile_filename,
+                    compile_opts,
                 )
                 .map(|c| Rc::new(crate::optimizer::optimize(c)))?;
-                Ok(crate::interpreter::value_code_object(
+                Ok(crate::interpreter::value_code_object_with_flags(
                     code,
                     crate::interpreter::CodeMode::Exec,
                     local_index,
+                    extra_co_flags,
                 ))
             }
             "eval" => {
-                let trimmed = source.trim();
-                let (program, linenos) =
-                    crate::interpreter::Interpreter::parse_source_to_stmts_with_linenos(trimmed)?;
+                let trimmed = source_text.trim();
+                let (program, mut linenos) = _interp
+                    .parse_source_to_stmts_with_warnings(trimmed, &compile_filename)?;
+                if ast_linenos.len() == linenos.len() {
+                    for (dst, &src_ln) in linenos.iter_mut().zip(ast_linenos.iter()) {
+                        if src_ln != 0 {
+                            *dst = src_ln;
+                        }
+                    }
+                }
                 let local_index: Rc<std::collections::HashMap<String, crate::bytecode::Reg>> =
                     Rc::new(std::collections::HashMap::new());
-                let code = crate::compiler::compile_eval_expr_with_linenos(
+                let code = crate::compiler::compile_eval_expr_with_options(
                     &program,
                     Rc::clone(&local_index),
                     &linenos,
                     &compile_filename,
+                    compile_opts,
                 )
                 .map(|c| Rc::new(crate::optimizer::optimize(c)))?;
-                Ok(crate::interpreter::value_code_object(
+                Ok(crate::interpreter::value_code_object_with_flags(
                     code,
                     crate::interpreter::CodeMode::Eval,
                     local_index,
+                    extra_co_flags,
                 ))
             }
             "single" => {
-                let (mut program, mut linenos) =
-                    crate::interpreter::Interpreter::parse_single_source_to_stmts_with_linenos(
-                        source,
-                    )?;
+                let (mut program, mut linenos) = _interp
+                    .parse_single_source_to_stmts_with_warnings(&source_text, &compile_filename)?;
+                if ast_linenos.len() == linenos.len() {
+                    for (dst, &src_ln) in linenos.iter_mut().zip(ast_linenos.iter()) {
+                        if src_ln != 0 {
+                            *dst = src_ln;
+                        }
+                    }
+                }
                 inject_future_annotations(&mut program, &mut linenos);
                 let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let global_names = crate::interpreter::collect_global_names(&program);
@@ -675,24 +971,23 @@ pyrust_module! {
                         .map(|(i, n)| (n.clone(), i))
                         .collect(),
                 );
-                let code = crate::compiler::compile_script_with_linenos(
+                let code = crate::compiler::compile_script_with_options(
                     &program,
                     Rc::clone(&local_index),
                     true,
                     &linenos,
                     &compile_filename,
+                    compile_opts,
                 )
                 .map(|c| Rc::new(crate::optimizer::optimize(c)))?;
-                Ok(crate::interpreter::value_code_object(
+                Ok(crate::interpreter::value_code_object_with_flags(
                     code,
                     crate::interpreter::CodeMode::Single,
                     local_index,
+                    extra_co_flags,
                 ))
             }
-            other => Err(PyError::named(
-                "ValueError",
-                format!("compile() mode must be 'exec', 'eval' or 'single', not {other:?}"),
-            )),
+            _ => unreachable!(),
         }
     }
 

@@ -336,7 +336,6 @@ pyrust_module! {
         #[default(None)]
         opener: Option<PyValue>,
     ) -> Result<Value> {
-        let _ = opener;
         let buffering_i64 = match buffering.0.kind() {
             ValueKind::Int(n) => n,
             ValueKind::Bool(b) => i64::from(b),
@@ -362,6 +361,93 @@ pyrust_module! {
             newline: newline.as_deref(),
             closefd: closefd_bool,
         };
+        let active_opener = opener.map(|v| v.0).filter(|v| !v.is_none());
+        if let Some(opener_fn) = active_opener {
+            if matches!(file.0.kind(), ValueKind::Int(_) | ValueKind::Bool(_)) {
+                return Err(PyError::named(
+                    "ValueError",
+                    "Cannot use opener with file descriptor".to_string(),
+                ));
+            }
+            let path_arg = match file.0.kind() {
+                ValueKind::Str(_) | ValueKind::Bytes(_) => file.0.clone(),
+                _ => {
+                    if let Ok(method) = _interp.get_attr(&file.0, "__fspath__") {
+                        let result = _interp.call_function_expanded(method, &[])?;
+                        match result.kind() {
+                            ValueKind::Str(_) | ValueKind::Bytes(_) => result.clone(),
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "expected {}.__fspath__() to return str or bytes, not {}",
+                                        pyrust_core::py_value_display_name(&file.0),
+                                        pyrust_core::py_value_display_name(&result),
+                                    ),
+                                ));
+                            }
+                        }
+                    } else {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "expected str, bytes or os.PathLike object, not {}",
+                                pyrust_core::py_value_display_name(&file.0),
+                            ),
+                        ));
+                    }
+                }
+            };
+            // Compute POSIX/CPython-style open flags from `mode`.
+            let has_plus = mode.contains('+');
+            let mut flags: i64 = if mode.contains('w') {
+                (if has_plus { 0x0002 } else { 0x0001 }) | 0x0100 | 0x0200
+            } else if mode.contains('x') {
+                (if has_plus { 0x0002 } else { 0x0001 }) | 0x0100 | 0x0400
+            } else if mode.contains('a') {
+                (if has_plus { 0x0002 } else { 0x0001 }) | 0x0100 | 0x0008
+            } else if has_plus {
+                0x0002
+            } else {
+                0x0000
+            };
+            // Ensure flags uses the exact `os.O_*` constants.
+            let _ = &mut flags;
+            let fd_val = _interp.call_function_expanded(
+                opener_fn,
+                &[
+                    ExpandedCallArg {
+                        name: None,
+                        value: path_arg,
+                    },
+                    ExpandedCallArg {
+                        name: None,
+                        value: Value::int(flags),
+                    },
+                ],
+            )?;
+            let fd = match fd_val.kind() {
+                ValueKind::Int(n) => n,
+                ValueKind::Bool(b) => i64::from(b),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "expected integer from opener".to_string(),
+                    ));
+                }
+            };
+            if fd < 0 {
+                return Err(PyError::named("ValueError", format!("opener returned {fd}")));
+            }
+            let os_file = crate::builtin_modules::os::clone_fd(fd)
+                .map_err(|e| PyError::from_io_error(&e, None))?;
+            return pyrust_builtins::file::open_fd(
+                fd,
+                os_file,
+                crate::builtin_modules::os::close_fd_raw,
+                opts,
+            );
+        }
         match file.0.kind() {
             ValueKind::Int(fd) => {
                 if fd < 0 {

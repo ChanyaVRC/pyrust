@@ -82,6 +82,13 @@ pyrust_module! {
         "R_OK" => Value::int(4),
         "W_OK" => Value::int(2),
         "X_OK" => Value::int(1),
+        "O_RDONLY" => Value::int(filesystem::O_RDONLY),
+        "O_WRONLY" => Value::int(filesystem::O_WRONLY),
+        "O_RDWR" => Value::int(filesystem::O_RDWR),
+        "O_CREAT" => Value::int(filesystem::O_CREAT),
+        "O_EXCL" => Value::int(filesystem::O_EXCL),
+        "O_TRUNC" => Value::int(filesystem::O_TRUNC),
+        "O_APPEND" => Value::int(filesystem::O_APPEND),
         // Struct-sequence classes are process-canonical, just like CPython's
         // `posix.stat_result` / `os.terminal_size` exports.  Host factories and
         // direct Python construction share these exact class objects.
@@ -186,6 +193,10 @@ pyrust_module! {
 
     fn lstat(args) -> Result<Value> {
         filesystem::lstat(args, FN_NAME)
+    }
+
+    fn open(args) -> Result<Value> {
+        filesystem::open_path(args, FN_NAME)
     }
 
     fn close(args) -> Result<Value> {

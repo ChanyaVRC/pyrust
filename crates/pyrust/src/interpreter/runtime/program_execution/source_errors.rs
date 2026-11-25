@@ -15,7 +15,9 @@ pub(crate) fn lex_parse_to_exc(e: PyError) -> PyError {
         }
         _ => return e,
     };
-    if is_indentation_message(&msg) {
+    if msg == "inconsistent use of tabs and spaces in indentation" {
+        pyrust_core::py_err!("TabError", msg)
+    } else if is_indentation_message(&msg) {
         pyrust_core::py_err!("IndentationError", msg)
     } else {
         pyrust_core::py_err!("SyntaxError", msg)
@@ -25,7 +27,12 @@ pub(crate) fn lex_parse_to_exc(e: PyError) -> PyError {
 /// Whether a lexer/parser error message describes an indentation failure that
 /// CPython reports as `IndentationError` rather than a bare `SyntaxError`.
 fn is_indentation_message(msg: &str) -> bool {
-    msg == "too many levels of indentation"
+    matches!(
+        msg,
+        "too many levels of indentation"
+            | "unindent does not match any outer indentation level"
+            | "inconsistent indentation"
+    )
 }
 
 /// Resolve the source-line text for a captured traceback frame (issue #2428).

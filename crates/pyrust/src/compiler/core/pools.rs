@@ -75,6 +75,9 @@ impl Compiler {
             is_inlined_comp: false,
             comp_enclosing_locals: None,
             comp_outer_for_span: None,
+            optimize: 0,
+            allow_top_level_await: false,
+            saw_top_level_await: false,
         }
     }
 

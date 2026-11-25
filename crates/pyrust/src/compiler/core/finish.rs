@@ -80,7 +80,8 @@ impl Compiler {
         // bare `yield` (the only thing that makes an `async def` an async
         // generator; `yield from` inside `async def` is a SyntaxError) emits
         // `Insn::Yield`, so for async functions we scan for `Insn::Yield` only.
-        let is_generator = if self.is_async_function {
+        let is_coroutine = self.is_async_function || self.saw_top_level_await;
+        let is_generator = if is_coroutine {
             self.insns.iter().any(|i| matches!(i, Insn::Yield { .. })) || self.has_dead_yield
         } else {
             self.insns
@@ -113,7 +114,7 @@ impl Compiler {
             own_cell_count: self.own_cell_count,
             free_var_candidates: std::cell::OnceCell::new(),
             is_generator,
-            is_coroutine: self.is_async_function,
+            is_coroutine,
             is_class_method: self.is_class_method,
             is_function_scope: self.is_function_scope,
             is_inlined_comp: self.is_inlined_comp,

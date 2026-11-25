@@ -52,7 +52,8 @@ impl Interpreter {
                             .unwrap_or_else(|| Value::dict(Default::default())),
                     ),
                 };
-                frame_obj::frame(co, lineno, Value::none(), globals, locals)
+                let builtins = frame_builtins_for_globals(&globals);
+                frame_obj::frame(co, lineno, Value::none(), globals, locals, builtins, 0)
             };
             // Carry the captured frame's PEP 657 caret anchor onto the node so a
             // re-raised / chained exception renders the same carets (#2411).
@@ -100,12 +101,15 @@ impl Interpreter {
                     .cloned()
                     .unwrap_or_else(|| Value::dict(Default::default()))
             };
+            let catch_builtins = frame_builtins_for_globals(&catch_globals);
             frame_obj::frame(
                 catch_code,
                 catch.lineno,
                 Value::none(),
                 catch_globals,
                 catch_locals,
+                catch_builtins,
+                0,
             )
         };
         tb_obj::traceback_node_with_col(catch_frame, node, catch.lineno, -1, catch.col_span)

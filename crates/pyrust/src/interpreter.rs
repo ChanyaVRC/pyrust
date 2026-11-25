@@ -1006,7 +1006,7 @@ pub(crate) enum CodeMode {
     Single,
 }
 
-/// State held by a code object `Value`.
+/// Execution metadata attached to a `compile()`-created `code` object.
 pub(crate) struct CodeState {
     pub(crate) code: Rc<FnCode>,
     pub(crate) mode: CodeMode,
@@ -1014,93 +1014,90 @@ pub(crate) struct CodeState {
     pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
 }
 
-struct CodeObjectOps;
-
-static CODE_OBJECT_OPS: CodeObjectOps = CodeObjectOps;
-
-impl pyrust_core::BuiltinTypeOps for CodeObjectOps {
-    fn type_name(&self) -> &'static str {
-        "code"
-    }
-
-    fn repr(&self, state: &pyrust_core::BuiltinState) -> String {
-        let borrow = state.borrow();
-        match borrow.downcast_ref::<CodeState>() {
-            Some(cs) => {
-                let firstlineno = if cs.code.first_lineno != 0 {
-                    cs.code.first_lineno
-                } else {
-                    1
-                };
-                format!(
-                    "<code object {} at 0x0, file \"{}\", line {}>",
-                    cs.code.qualname, cs.code.filename, firstlineno
-                )
-            }
-            None => "<code object>".to_string(),
-        }
-    }
-
-    fn truthy(&self, _state: &pyrust_core::BuiltinState) -> bool {
-        true
-    }
-
-    fn getattr(&self, state: &pyrust_core::BuiltinState, name: &str) -> Option<Value> {
-        let borrow = state.borrow();
-        let cs = borrow.downcast_ref::<CodeState>()?;
-        let firstlineno = if cs.code.first_lineno != 0 {
-            cs.code.first_lineno as i64
-        } else {
-            1
-        };
-        match name {
-            "co_name" => Some(Value::string(cs.code.qualname.as_ref())),
-            "co_qualname" => Some(Value::string(cs.code.qualname.as_ref())),
-            "co_filename" => Some(Value::string(cs.code.filename.as_ref())),
-            "co_firstlineno" => Some(Value::int(firstlineno)),
-            "co_argcount" | "co_posonlyargcount" | "co_kwonlyargcount" | "co_nlocals"
-            | "co_flags" => Some(Value::int(0)),
-            "co_stacksize" => Some(Value::int(cs.code.num_regs as i64)),
-            "co_varnames" | "co_freevars" | "co_cellvars" => Some(Value::tuple(Vec::new())),
-            "co_consts" => Some(Value::tuple(cs.code.consts.clone())),
-            "co_names" => Some(Value::tuple(
-                cs.code
-                    .names
-                    .iter()
-                    .map(|sym| Value::string(sym.as_str()))
-                    .collect(),
-            )),
-            "co_code" => Some(Value::bytes(Vec::new())),
-            _ => None,
-        }
-    }
-}
-
-/// Construct a `Value` wrapping a compiled code object.
-pub(crate) fn value_code_object(
+/// Construct a unified `code` object (`pyrust_builtins::code::CODE_OPS`)
+/// wrapping a compiled [`FnCode`], so `compile()` results and `func.__code__`
+/// share identical type, attributes, and methods (`co_lines`, `co_positions`,
+/// `replace`, `dis`, etc.), with explicit `co_flags` bits (e.g.
+/// `CO_FUTURE_ANNOTATIONS`, `CO_COROUTINE`).
+pub(crate) fn value_code_object_with_flags(
     code: Rc<FnCode>,
     mode: CodeMode,
     local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+    extra_flags: i64,
 ) -> Value {
-    use std::any::Any;
-    let state: Box<dyn Any> = Box::new(CodeState {
-        code,
+    let firstlineno = if code.first_lineno != 0 {
+        code.first_lineno as i64
+    } else {
+        1
+    };
+    let (lines, positions) = build_code_lines_and_positions(&code, firstlineno);
+    let linetable = pyrust_builtins::code::encode_linetable(&lines, firstlineno);
+    let mut flags = extra_flags;
+    if code.is_coroutine && !code.is_generator {
+        flags |= pyrust_builtins::code::CO_COROUTINE;
+    }
+    let freevars: Vec<Value> = code
+        .free_var_slots()
+        .iter()
+        .map(|slot| Value::string(slot.name.as_str()))
+        .collect();
+    let cellvars: Vec<Value> = code
+        .own_cell_slots()
+        .iter()
+        .map(|slot| Value::string(slot.name.as_str()))
+        .collect();
+    let names: Vec<Value> = code
+        .names
+        .iter()
+        .map(|sym| Value::string(sym.as_str()))
+        .collect();
+    let meta: Rc<dyn std::any::Any> = Rc::new(CodeState {
+        code: Rc::clone(&code),
         mode,
         local_index,
     });
-    Value::builtin_object(&CODE_OBJECT_OPS, state)
+    pyrust_builtins::code::CodeBuild {
+        name: code.qualname.to_string(),
+        qualname: code.qualname.to_string(),
+        argcount: 0,
+        posonlyargcount: 0,
+        kwonlyargcount: 0,
+        nlocals: 0,
+        stacksize: code.num_regs as i64,
+        varnames: Vec::new(),
+        flags,
+        filename: code.filename.to_string(),
+        firstlineno,
+        consts: code.consts.clone(),
+        names,
+        freevars,
+        cellvars,
+        code_bytes: Vec::new(),
+        linetable,
+        exceptiontable: Vec::new(),
+        lines,
+        positions,
+        raw_code: Some(Rc::clone(&code) as Rc<dyn std::any::Any>),
+        exec_meta: Some(meta),
+    }
+    .build()
 }
 
-/// If `value` is a code object, call `f` with its `CodeState` and return the result.
+/// If `value` is a `compile()`-created code object, call `f` with its
+/// `CodeState` and return the result.
 pub(crate) fn with_code_state<R>(value: &Value, f: impl FnOnce(&CodeState) -> R) -> Option<R> {
-    if let ValueKind::BuiltinObject { ops, state } = value.kind()
-        && pyrust_core::builtin_ops_is::<CodeObjectOps>(ops)
-    {
-        let borrow = state.borrow();
-        let cs = borrow.downcast_ref::<CodeState>()?;
-        return Some(f(cs));
-    }
-    None
+    pyrust_builtins::code::with_exec_meta(value, |meta| meta.downcast_ref::<CodeState>().map(f))
+        .flatten()
+}
+
+/// Forward a compile-time `SyntaxWarning` to the `warnings` module.
+pub(crate) fn emit_syntax_warning_via_module(
+    interp: &mut Interpreter,
+    msg: &str,
+    filename: &str,
+    lineno: i64,
+) -> Result<()> {
+    crate::builtin_modules::warnings::emit_syntax_warning(interp, msg, filename, lineno)
 }
 
 include!("interpreter/runtime.rs");

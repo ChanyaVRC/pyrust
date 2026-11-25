@@ -156,9 +156,18 @@ impl Compiler {
         if self.is_function_scope {
             sub.outer_locals.push(Rc::clone(&self.local_index));
         }
-        // Propagate PEP 563 lazy-annotation flag to the class body compiler.
+        // Propagate PEP 563 lazy-annotation and optimization level to the class body compiler.
         sub.future_annotations = self.future_annotations;
-        sub.compile_block(body);
+        sub.optimize = self.optimize;
+        let effective_body = if self.optimize >= 2 {
+            match body {
+                [Stmt::Expr(Expr::Str(_)), rest @ ..] => rest,
+                _ => body,
+            }
+        } else {
+            body
+        };
+        sub.compile_block(effective_body);
         // Add implicit ReturnNone at end of class body
         sub.emit(Insn::ReturnNone);
         let body_code = match sub.finish() {
@@ -191,10 +200,15 @@ impl Compiler {
         let proto_idx = self.fn_protos.len() as u16;
         let local_names = Rc::new(body_index_rc.keys().cloned().collect::<HashSet<_>>());
         // Extract docstring: if the first statement in the class body is a bare
-        // string literal, capture it as the class's __doc__ (CPython parity).
-        let class_docstring = match body {
-            [Stmt::Expr(Expr::Str(s)), ..] => Some(s.clone()),
-            _ => None,
+        // string literal, capture it as the class's __doc__ (CPython parity),
+        // unless `optimize >= 2` strips docstrings.
+        let class_docstring = if self.optimize >= 2 {
+            None
+        } else {
+            match body {
+                [Stmt::Expr(Expr::Str(s)), ..] => Some(s.clone()),
+                _ => None,
+            }
         };
         self.fn_protos.push(FnProto {
             name: Rc::from(name),

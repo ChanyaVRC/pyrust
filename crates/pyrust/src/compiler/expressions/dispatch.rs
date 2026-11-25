@@ -23,7 +23,13 @@ impl Compiler {
             Expr::Bytes(b) => self.compile_literal(Value::bytes(b.clone())),
             Expr::Complex(re, im) => self.compile_literal(Value::complex(*re, *im)),
             Expr::Bool(b) => self.compile_literal(Value::bool_(*b)),
-            Expr::Var(name, span) => self.compile_var_expr(name, *span),
+            Expr::Var(name, span) => {
+                if self.optimize >= 1 && name.as_str() == "__debug__" {
+                    self.compile_literal(Value::bool_(false))
+                } else {
+                    self.compile_var_expr(name, *span)
+                }
+            }
             Expr::Unary { op, expr, span } => {
                 let src = self.compile_expr(expr);
                 let dst = self.ensure_dst(src);
@@ -258,10 +264,13 @@ impl Compiler {
         lineno: u32,
     ) -> Reg {
         if !self.is_function_scope {
-            self.set_syntax_error("'await' outside function");
-            return 0;
-        }
-        if !self.is_async_function {
+            if self.allow_top_level_await {
+                self.saw_top_level_await = true;
+            } else {
+                self.set_syntax_error("'await' outside function");
+                return 0;
+            }
+        } else if !self.is_async_function {
             self.set_syntax_error("'await' outside async function");
             return 0;
         }

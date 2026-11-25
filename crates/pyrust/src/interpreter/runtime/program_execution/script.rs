@@ -275,7 +275,7 @@ impl Interpreter {
                 source,
             } => (source.to_string(), virtual_path, String::new(), false),
         };
-        let (program, linenos) = Self::parse_source_to_stmts_with_linenos(&src)?;
+        let (program, linenos) = self.parse_source_to_stmts_with_warnings(&src, &resolved_path)?;
 
         self.cold.script_filename = Some(std::sync::Arc::from(resolved_path.as_str()));
         self.cold.script_define_file_dunder = define_file_dunder;

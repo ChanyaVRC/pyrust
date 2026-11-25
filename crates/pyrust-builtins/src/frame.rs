@@ -27,6 +27,10 @@ pub struct FrameState {
     pub globals: Value,
     /// `f_locals` — the frame's local namespace snapshot.
     pub locals: Value,
+    /// `f_builtins` — the builtins namespace dict (distinct from `f_globals`).
+    pub builtins: Value,
+    /// `f_lasti` — last executed bytecode offset (`-1` if not yet started).
+    pub lasti: i64,
     /// `f_trace` — the per-frame local trace function, or `None`.
     pub trace: Value,
     /// `f_trace_lines` — whether `'line'` events are emitted for this frame.
@@ -75,14 +79,8 @@ impl BuiltinTypeOps for FrameOps {
             "f_back" => Some(s.back.clone()),
             "f_globals" => Some(s.globals.clone()),
             "f_locals" => Some(s.locals.clone()),
-            // `f_builtins` is the builtins namespace; pyrust resolves builtins
-            // through the env chain rather than a dedicated dict, so surface the
-            // globals dict (a non-error, mapping-typed best effort).
-            "f_builtins" => Some(s.globals.clone()),
-            // `f_lasti` is the last executed bytecode offset; pyrust exposes no
-            // stable bytecode offset, so report `-1` (the value CPython uses for
-            // a frame that has not yet executed an instruction).
-            "f_lasti" => Some(Value::int(-1)),
+            "f_builtins" => Some(s.builtins.clone()),
+            "f_lasti" => Some(Value::int(s.lasti)),
             // `f_trace` is the per-frame trace function (writable, defaults to None).
             "f_trace" => Some(s.trace.clone()),
             "f_trace_lines" => Some(Value::bool_(s.trace_lines)),
@@ -90,16 +88,30 @@ impl BuiltinTypeOps for FrameOps {
             _ => None,
         }
     }
+
+    fn has_method(&self, name: &str) -> bool {
+        name == "clear"
+    }
 }
 
-/// Construct a `frame` snapshot value.
-pub fn frame(code: Value, lineno: i64, back: Value, globals: Value, locals: Value) -> Value {
+/// Construct a `frame` snapshot value with explicit `f_builtins` and `f_lasti`.
+pub fn frame(
+    code: Value,
+    lineno: i64,
+    back: Value,
+    globals: Value,
+    locals: Value,
+    builtins: Value,
+    lasti: i64,
+) -> Value {
     let state: Box<dyn Any> = Box::new(FrameState {
         code,
         lineno,
         back,
         globals,
         locals,
+        builtins,
+        lasti,
         trace: Value::none(),
         trace_lines: true,
         trace_opcodes: false,
@@ -218,5 +230,36 @@ pub fn set_lineno(value: &Value, lineno: i64) {
     let mut borrow = state.borrow_mut();
     if let Some(s) = borrow.downcast_mut::<FrameState>() {
         s.lineno = lineno;
+    }
+}
+
+/// Update `f_lasti` on this frame.
+pub fn set_lasti(value: &Value, lasti: i64) {
+    let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return;
+    };
+    if !builtin_ops_is::<FrameOps>(ops) {
+        return;
+    }
+    let mut borrow = state.borrow_mut();
+    if let Some(s) = borrow.downcast_mut::<FrameState>() {
+        s.lasti = lasti;
+    }
+}
+
+/// Clear a non-executing frame's local bindings and trace hook (`frame.clear()`).
+pub fn clear_inactive_frame(value: &Value) {
+    let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return;
+    };
+    if !builtin_ops_is::<FrameOps>(ops) {
+        return;
+    }
+    let mut borrow = state.borrow_mut();
+    if let Some(s) = borrow.downcast_mut::<FrameState>() {
+        s.trace = Value::none();
+        if !s.locals.is_identical_to(&s.globals) {
+            let _ = s.locals.dict_clear();
+        }
     }
 }

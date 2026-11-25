@@ -1,4 +1,39 @@
-fn refresh_cached_frame_state(frame: &Value, lineno: i64) {
+/// Resolve the Python `dict` backing `frame.f_builtins` from a frame's
+/// `f_globals` dict (CPython parity: `f_builtins` is the builtins namespace
+/// dict, never `f_globals` itself).
+pub(super) fn frame_builtins_for_globals(globals: &Value) -> Value {
+    let provider = globals
+        .as_dict()
+        .and_then(|d| d.get(&PyKey::str_from("__builtins__")).cloned())
+        .unwrap_or_else(cached_builtins_module);
+    match provider.kind() {
+        ValueKind::Dict(_) => provider.clone(),
+        ValueKind::PyModule(module) => module.borrow_mut().attach_live_namespace_with_dunders(),
+        _ => {
+            let builtins_mod = cached_builtins_module();
+            if let ValueKind::PyModule(module) = builtins_mod.kind() {
+                module.borrow_mut().attach_live_namespace_with_dunders()
+            } else {
+                Value::dict(PyDict::default())
+            }
+        }
+    }
+}
+
+fn clamp_lasti_for_code(code: &Value, lasti: i64) -> i64 {
+    if lasti < 0 {
+        return lasti;
+    }
+    let positions_len = code_obj::with_code_state_ref(code, |cs| cs.positions.len()).unwrap_or(0);
+    if positions_len == 0 {
+        -1
+    } else {
+        let max_lasti = ((positions_len - 1) as i64) * 2;
+        lasti.clamp(0, max_lasti)
+    }
+}
+
+fn refresh_cached_frame_state(frame: &Value, lineno: i64, lasti: Option<i64>) {
     let ValueKind::BuiltinObject { state, .. } = frame.kind() else {
         return;
     };
@@ -11,6 +46,9 @@ fn refresh_cached_frame_state(frame: &Value, lineno: i64) {
     // lookup of that same cached object.
     if lineno != 0 {
         state.lineno = lineno;
+    }
+    if let Some(offset) = lasti {
+        state.lasti = clamp_lasti_for_code(&state.code, offset);
     }
 }
 
@@ -196,7 +234,50 @@ impl Interpreter {
             ValueKind::BuiltinFunction(name) if name.ends_with("_getframe") || name == "warnings.warn"
         ) {
             pyrust_core::set_current_vm_line(code.line_at(call_site_pc));
+            pyrust_core::set_current_vm_pc(call_site_pc as u32);
         }
+    }
+
+    /// Resolve the live instruction byte offset (`f_lasti`) for
+    /// `self.vm_frame_views[view_index]`.
+    fn resolve_view_lasti(&self, view_index: usize, is_innermost: bool) -> i64 {
+        let view = &self.vm_frame_views[view_index];
+        let regs_ptr = view.regs_ptr.as_ptr();
+        if is_innermost {
+            return (pyrust_core::get_current_vm_pc() as i64) * 2;
+        }
+        if let Some(pc) = self
+            .tramp_stack
+            .iter()
+            .rev()
+            .find(|frame| frame.saved_regs_ptr() == regs_ptr)
+            .map(|frame| frame.saved_pc().saturating_sub(1))
+        {
+            return (pc as i64) * 2;
+        }
+        if let Some(pc) = self
+            .gen_drive_stack
+            .iter()
+            .rev()
+            .find(|frame| frame.saved_regs_ptr() == regs_ptr)
+            .map(|frame| frame.saved_pc().saturating_sub(1))
+        {
+            return (pc as i64) * 2;
+        }
+        0
+    }
+
+    /// Return `true` if `frame` is currently executing on `self.vm_frame_views`
+    /// (used by `frame.clear()` to raise `RuntimeError("cannot clear an executing frame")`).
+    pub(crate) fn is_frame_currently_executing(&self, frame: &Value) -> bool {
+        self.vm_frame_views
+            .iter()
+            .enumerate()
+            .any(|(view_index, _)| {
+                cached_frame_object(self, view_index)
+                    .as_ref()
+                    .is_some_and(|cached| values_are_identical(cached, frame))
+            })
     }
 
     /// Resolve the live source line for `self.vm_frame_views[view_index]`.
@@ -598,7 +679,7 @@ impl Interpreter {
             self.sync_cached_function_locals_at(view_index);
         }
         if let Some(frame) = cached_frame_object(self, view_index) {
-            refresh_cached_frame_state(&frame, lineno.map(|n| n as i64).unwrap_or(0));
+            refresh_cached_frame_state(&frame, lineno.map(|n| n as i64).unwrap_or(0), None);
             return (None, Some(frame));
         }
         let locals = match kind {
@@ -754,6 +835,7 @@ impl Interpreter {
             return None;
         }
         frame_obj::set_lineno(&frame, cur_line as i64);
+        frame_obj::set_lasti(&frame, (pc as i64) * 2);
         Some((frame, local_trace))
     }
 
@@ -910,8 +992,10 @@ impl Interpreter {
         // value only on introspection; an ordinary call allocates no side
         // storage. A successful upgrade reconstructs a Value that shares the
         // existing frame state.
+        let is_innermost = self.visible_view_index_for_depth(0) == Some(view_index);
+        let lasti = self.resolve_view_lasti(view_index, is_innermost);
         if let Some(frame) = cached_frame_object(self, view_index) {
-            refresh_cached_frame_state(&frame, lineno);
+            refresh_cached_frame_state(&frame, lineno, Some(lasti));
             return frame;
         }
 
@@ -940,33 +1024,82 @@ impl Interpreter {
                 (self.build_code_object(&gen_frame.function), line)
             }
             (None, None) => {
-                if view.kind() == FrameKind::Class
+                let regs_ptr = view.regs_ptr.as_ptr();
+                let saved_code_ptr = self
+                    .tramp_stack
+                    .iter()
+                    .rev()
+                    .find(|frame| frame.saved_regs_ptr() == regs_ptr)
+                    .map(|frame| frame.saved_code_ptr())
+                    .or_else(|| {
+                        self.gen_drive_stack
+                            .iter()
+                            .rev()
+                            .find(|frame| frame.saved_regs_ptr() == regs_ptr)
+                            .map(|frame| frame.saved_code_ptr())
+                    });
+                let (name, filename) = if view.kind() == FrameKind::Class
                     && let Some((class_name, filename)) = class_frame_identity(self, view)
                 {
-                    (
-                        code_obj::code_with_loc(
-                            class_name.to_string(),
-                            0,
-                            Vec::new(),
-                            filename.to_string(),
-                            0,
-                        ),
-                        lineno,
-                    )
+                    (class_name.to_string(), filename.to_string())
                 } else {
-                    // Script frame: synthesise a minimal code object whose
-                    // co_name matches CPython (`<module>` for module scope).
-                    // Carry the running script's path into `co_filename`
-                    // (#2438) so `sys._getframe().f_code.co_filename` reports
-                    // the source file rather than `<unknown>`.
+                    // Script frame: synthesise a code object whose co_name
+                    // matches CPython (`<module>` for module scope) and carry
+                    // the running script's path into `co_filename` (#2438).
                     let filename = self
                         .cold
                         .script_filename
                         .as_ref()
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| "<unknown>".to_string());
+                    ("<module>".to_string(), filename)
+                };
+                if let Some(code_ptr) = saved_code_ptr {
+                    // SAFETY: `saved_code_ptr` points at the suspended caller's
+                    // live `FnCode` for the full lifetime of the frame on
+                    // `tramp_stack` / `gen_drive_stack`.
+                    let fncode = unsafe { &*code_ptr };
+                    let firstlineno = fncode.first_lineno as i64;
+                    let (lines, positions) = build_code_lines_and_positions(fncode, firstlineno);
+                    let linetable = code_obj::encode_linetable(&lines, firstlineno);
+                    let co_filename = if !fncode.filename.is_empty() {
+                        fncode.filename.to_string()
+                    } else {
+                        filename
+                    };
+                    let co = code_obj::CodeBuild {
+                        qualname: name.clone(),
+                        name,
+                        argcount: 0,
+                        posonlyargcount: 0,
+                        kwonlyargcount: 0,
+                        nlocals: 0,
+                        stacksize: fncode.num_regs as i64,
+                        varnames: Vec::new(),
+                        flags: 0,
+                        filename: co_filename,
+                        firstlineno,
+                        consts: fncode.consts.clone(),
+                        names: fncode
+                            .names
+                            .iter()
+                            .map(|n| Value::string(n.as_str()))
+                            .collect(),
+                        freevars: Vec::new(),
+                        cellvars: Vec::new(),
+                        code_bytes: Vec::new(),
+                        linetable,
+                        exceptiontable: Vec::new(),
+                        lines,
+                        positions,
+                        raw_code: None,
+                        exec_meta: None,
+                    }
+                    .build();
+                    (co, lineno)
+                } else {
                     (
-                        code_obj::code_with_loc("<module>".to_string(), 0, Vec::new(), filename, 0),
+                        code_obj::code_with_loc(name, 0, Vec::new(), filename, 0),
                         lineno,
                     )
                 }
@@ -1013,7 +1146,17 @@ impl Interpreter {
                     .expect("function frame locals must be a dict"),
             )
         });
-        let frame = frame_obj::frame(code, effective_lineno, back, globals, locals);
+        let builtins = frame_builtins_for_globals(&globals);
+        let lasti = clamp_lasti_for_code(&code, lasti);
+        let frame = frame_obj::frame(
+            code,
+            effective_lineno,
+            back,
+            globals,
+            locals,
+            builtins,
+            lasti,
+        );
         let object = pyrust_core::WeakValueCache::new(&frame)
             .expect("frame BuiltinObject must support weak caching");
         install_materialized_frame_cache(
@@ -1093,19 +1236,28 @@ impl Interpreter {
                 }),
             )
         });
+        let gen_lasti = if frame.pc == 0 {
+            -1
+        } else {
+            ((frame.pc - 1) as i64) * 2
+        };
         if let Some(cached_frame) = cached_frame {
-            refresh_cached_frame_state(&cached_frame, lineno);
+            refresh_cached_frame_state(&cached_frame, lineno, Some(gen_lasti));
             return cached_frame;
         }
 
         let code = self.build_code_object(&frame.function);
         let locals = retained_locals.unwrap_or_default();
+        let globals = self.globals_for_environment(&frame.function.env);
+        let builtins = frame_builtins_for_globals(&globals);
         let frame_object = frame_obj::frame(
             code,
             lineno,
             Value::none(),
-            self.globals_for_environment(&frame.function.env),
+            globals,
             Value::dict_shared(Rc::clone(&locals)),
+            builtins,
+            gen_lasti,
         );
         let object = pyrust_core::WeakValueCache::new(&frame_object)
             .expect("frame BuiltinObject must support weak caching");

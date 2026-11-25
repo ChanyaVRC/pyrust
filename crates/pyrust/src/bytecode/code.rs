@@ -93,6 +93,12 @@ impl LinenoTable {
         out
     }
 
+    /// Borrow the underlying `(start_pc, line)` RLE runs.
+    #[inline]
+    pub(crate) fn runs(&self) -> &[(u32, u32)] {
+        &self.0
+    }
+
     #[cfg(test)]
     #[inline]
     pub(crate) fn heap_bytes(&self) -> usize {

@@ -9,6 +9,73 @@
 
 use pyrust_builtins::{code as code_obj, frame as frame_obj, traceback as tb_obj};
 
+/// Derive CPython-style `(start, end, lineno)` line-table entries and per-
+/// instruction `(lineno, end_lineno, col_offset, end_col_offset)` position
+/// entries from a compiled [`crate::bytecode::FnCode`].
+pub(crate) fn build_code_lines_and_positions(
+    fncode: &crate::bytecode::FnCode,
+    firstlineno: i64,
+) -> (
+    Vec<code_obj::CodeLineEntry>,
+    Vec<code_obj::CodePositionEntry>,
+) {
+    let n = fncode.insns.len();
+    let mut lines = Vec::new();
+    if n > 0 {
+        let runs = fncode.lineno_table.runs();
+        if runs.is_empty() {
+            lines.push((0, (n * 2) as i64, (firstlineno > 0).then_some(firstlineno)));
+        } else {
+            let first_pc = (runs[0].0 as usize).min(n);
+            if first_pc > 0 {
+                lines.push((
+                    0,
+                    (first_pc * 2) as i64,
+                    (firstlineno > 0).then_some(firstlineno),
+                ));
+            }
+            for i in 0..runs.len() {
+                let start_pc = (runs[i].0 as usize).min(n);
+                let end_pc = runs
+                    .get(i + 1)
+                    .map_or(n, |&(next_pc, _)| (next_pc as usize).min(n));
+                if start_pc < end_pc {
+                    let ln = runs[i].1;
+                    lines.push((
+                        (start_pc * 2) as i64,
+                        (end_pc * 2) as i64,
+                        (ln > 0).then_some(ln as i64),
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut positions = Vec::with_capacity(n);
+    for pc in 0..n {
+        let ln = fncode.line_at(pc);
+        let ln_opt = if ln != 0 {
+            Some(ln as i64)
+        } else if firstlineno > 0 {
+            Some(firstlineno)
+        } else {
+            None
+        };
+        if let Some((full_start, _, _, full_end)) = fncode.col_at(pc) {
+            let col = Some(full_start as i64);
+            let end_col = if full_end == crate::ast::MULTILINE_FULL_END || full_end == 0 {
+                None
+            } else {
+                Some(full_end as i64)
+            };
+            positions.push((ln_opt, ln_opt, col, end_col));
+        } else {
+            positions.push((ln_opt, ln_opt, None, None));
+        }
+    }
+    (lines, positions)
+}
+
 impl Interpreter {
     /// Build a full `code` object for `function`, populating the best-effort
     /// `co_*` attributes (`co_flags`, `co_filename`, `co_firstlineno`,
@@ -197,6 +264,12 @@ impl Interpreter {
             .map(|(name, _)| Value::string(name))
             .collect();
 
+        let (lines, positions) = match fncode.as_ref() {
+            Some(fc) => build_code_lines_and_positions(fc, firstlineno),
+            None => (Vec::new(), Vec::new()),
+        };
+        let linetable = code_obj::encode_linetable(&lines, firstlineno);
+
         let code = code_obj::CodeBuild {
             name: co_name,
             qualname,
@@ -213,9 +286,15 @@ impl Interpreter {
             names,
             freevars,
             cellvars,
+            code_bytes: Vec::new(),
+            linetable,
+            exceptiontable: Vec::new(),
+            lines,
+            positions,
             raw_code: fncode
                 .as_ref()
                 .map(|c| Rc::clone(c) as Rc<dyn std::any::Any>),
+            exec_meta: None,
         }
         .build();
         if cacheable && let Some(fc) = fncode.as_ref() {

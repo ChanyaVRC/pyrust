@@ -1315,6 +1315,10 @@ fn build_code_from_proto(proto: &FnProto) -> Value {
         .map(|s| Value::string(s.name.as_str()))
         .collect();
 
+    let firstlineno = fncode.first_lineno as i64;
+    let (lines, positions) =
+        crate::interpreter::build_code_lines_and_positions(fncode, firstlineno);
+    let linetable = code_obj::encode_linetable(&lines, firstlineno);
     code_obj::CodeBuild {
         name: proto.name.to_string(),
         qualname: proto.qualname.to_string(),
@@ -1326,12 +1330,18 @@ fn build_code_from_proto(proto: &FnProto) -> Value {
         varnames,
         flags,
         filename: fncode.filename.to_string(),
-        firstlineno: fncode.first_lineno as i64,
+        firstlineno,
         consts,
         names,
         freevars,
         cellvars,
+        code_bytes: Vec::new(),
+        linetable,
+        exceptiontable: Vec::new(),
+        lines,
+        positions,
         raw_code: Some(Rc::clone(fncode) as Rc<dyn Any>),
+        exec_meta: None,
     }
     .build()
 }

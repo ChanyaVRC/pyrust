@@ -152,4 +152,46 @@ mod tests {
             other => panic!("expected FString token, got {other:?}"),
         }
     }
+
+    #[test]
+    fn tab_indentation_8_col_expansion_and_tab_error() {
+        let tokens = Lexer::new("if True:\n\tx = 1\n\tif True:\n\t\ty = 2\n")
+            .expect("pure tab indentation should succeed")
+            .into_tokens();
+        assert!(tokens.contains(&Token::Indent));
+        assert!(tokens.contains(&Token::Dedent));
+
+        let err = Lexer::new("if True:\n\tx = 1\n        y = 2\n")
+            .err()
+            .expect("mixed tab and 8 spaces must fail");
+        assert!(
+            err.to_string()
+                .contains("inconsistent use of tabs and spaces in indentation"),
+            "unexpected error: {err}"
+        );
+
+        let err2 = Lexer::new("if True:\n    x = 1\n\ty = 2\n")
+            .err()
+            .expect("4 spaces followed by tab must fail");
+        assert!(
+            err2.to_string()
+                .contains("inconsistent use of tabs and spaces in indentation"),
+            "unexpected error: {err2}"
+        );
+    }
+
+    #[test]
+    fn invalid_escape_records_syntax_warning_3_12_message() {
+        let (_, _, _, _, warnings) = Lexer::new(r"x = '\d'; y = b'\w'; z = b'\400'; r = r'\d'")
+            .expect("lex failed")
+            .into_tokens_with_pos_and_warnings();
+        assert_eq!(
+            warnings,
+            vec![
+                (1, "invalid escape sequence '\\d'".to_string()),
+                (1, "invalid escape sequence '\\w'".to_string()),
+                (1, "invalid octal escape sequence '\\400'".to_string()),
+            ]
+        );
+    }
 }

@@ -30,12 +30,14 @@ impl Compiler {
                     self.set_syntax_error("nonlocal declaration not allowed at module level");
                 }
                 Stmt::For { is_async: true, .. }
-                    if !self.is_function_scope || !self.is_async_function =>
+                    if (!self.is_function_scope && !self.allow_top_level_await)
+                        || (self.is_function_scope && !self.is_async_function) =>
                 {
                     self.set_syntax_error("'async for' outside async function");
                 }
                 Stmt::With { is_async: true, .. }
-                    if !self.is_function_scope || !self.is_async_function =>
+                    if (!self.is_function_scope && !self.allow_top_level_await)
+                        || (self.is_function_scope && !self.is_async_function) =>
                 {
                     self.set_syntax_error("'async with' outside async function");
                 }
@@ -219,7 +221,12 @@ impl Compiler {
             }
             Expr::Await { expr: value, .. } => {
                 if !self.is_function_scope {
-                    self.set_syntax_error("'await' outside function");
+                    if self.allow_top_level_await {
+                        self.saw_top_level_await = true;
+                        self.check_dead_expr(value);
+                    } else {
+                        self.set_syntax_error("'await' outside function");
+                    }
                 } else if !self.is_async_function {
                     self.set_syntax_error("'await' outside async function");
                 } else {

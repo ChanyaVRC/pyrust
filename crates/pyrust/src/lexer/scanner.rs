@@ -7,6 +7,12 @@
 /// native stack (issue #2221).
 const MAX_INDENT_LEVELS: usize = 100;
 
+/// Compile-time `SyntaxWarning` entry `(lineno, message)` emitted by the lexer.
+pub type LexerWarning = (u32, String);
+
+/// Tokens, per-token line/column spans, and lexer-level syntax warnings.
+pub type TokensWithPosAndWarnings = (Vec<Token>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<LexerWarning>);
+
 pub struct Lexer {
     tokens: Vec<Token>,
     /// 1-based source line number of each token, recorded as the token is
@@ -45,6 +51,10 @@ pub struct Lexer {
     /// Start column of the token about to be emitted (issue #2426).  Set at the
     /// single per-token dispatch point in `lex_line_tokens`; read by `emit`.
     cur_col: u32,
+    /// Pending compile-time `SyntaxWarning` entries `(1-based lineno, message)`
+    /// collected during lexing (e.g. invalid escape sequences in string/bytes
+    /// literals, matching CPython 3.12).
+    warnings: Vec<(u32, String)>,
 }
 
 impl Lexer {
@@ -57,6 +67,7 @@ impl Lexer {
             line: 1,
             line_start_pos: 0,
             cur_col: 0,
+            warnings: Vec::new(),
         };
         lexer.lex_source_inner(src, false)?;
         Ok(lexer)
@@ -75,6 +86,7 @@ impl Lexer {
             line: 1,
             line_start_pos: 0,
             cur_col: 0,
+            warnings: Vec::new(),
         };
         lexer.lex_source_inner(src, true)?;
         Ok(lexer)
@@ -135,8 +147,26 @@ impl Lexer {
         (self.tokens, self.line_nos, self.cols, self.cols_end)
     }
 
+    /// Like [`Lexer::into_tokens_with_pos`] but also returns any compile-time
+    /// `SyntaxWarning` entries `(lineno, message)` collected during lexing.
+    pub fn into_tokens_with_pos_and_warnings(self) -> TokensWithPosAndWarnings {
+        debug_assert_eq!(self.tokens.len(), self.line_nos.len());
+        debug_assert_eq!(self.tokens.len(), self.cols.len());
+        debug_assert_eq!(self.tokens.len(), self.cols_end.len());
+        (
+            self.tokens,
+            self.line_nos,
+            self.cols,
+            self.cols_end,
+            self.warnings,
+        )
+    }
+
     fn lex_source_inner(&mut self, src: &str, suppress_newlines: bool) -> Result<()> {
-        let mut indent_stack: Vec<usize> = vec![0];
+        // CPython 3.12 dual-column indentation stack: `(col, altcol)` where
+        // `col` expands tabs to 8-column tab stops and `altcol` counts tabs as
+        // 1 column for inconsistent tab/space mixing (`TabError`) detection.
+        let mut indent_stack: Vec<(usize, usize)> = vec![(0, 0)];
         let mut paren_depth: usize = 0; // track ( [ { for implicit line continuation
 
         // Work on the full source as a flat char array so that string literals
@@ -153,19 +183,18 @@ impl Lexer {
             // their start column as `token_start - line_start_pos` (#2426).
             self.line_start_pos = line_start;
 
-            // Count leading spaces (tabs are rejected by count_indent_chars
-            // when indentation is significant; inside f-string expressions
-            // leading spaces/tabs are ignored just like inside parentheses).
-            let indent = if suppress_newlines {
+            // Measure leading whitespace using 8-column tab expansion plus
+            // alternate 1-column tab counter for TabError detection.
+            let (indent_chars, indent_col, indent_altcol) = if suppress_newlines {
                 let mut n = 0;
-                while matches!(chars.get(pos + n), Some(&' ') | Some(&'\t')) {
+                while matches!(chars.get(pos + n), Some(&' ') | Some(&'\t') | Some(&'\x0c')) {
                     n += 1;
                 }
-                n
+                (n, n, n)
             } else {
-                count_indent_chars(&chars, pos)?
+                count_indent_chars(&chars, pos)
             };
-            pos += indent;
+            pos += indent_chars;
 
             // Collect the rest of this line (up to '\n' or end-of-source) to
             // decide whether it is blank / comment-only before we emit INDENT /
@@ -207,7 +236,7 @@ impl Lexer {
 
             // Non-blank line: handle indentation.
             if !suppress_newlines && paren_depth == 0 {
-                self.handle_indent(indent, &mut indent_stack)?;
+                self.handle_indent((indent_col, indent_altcol), &mut indent_stack)?;
             }
 
             // Lex tokens on this logical line.  `lex_line_tokens` advances
@@ -230,9 +259,26 @@ impl Lexer {
         Ok(())
     }
 
-    fn handle_indent(&mut self, indent: usize, stack: &mut Vec<usize>) -> Result<()> {
-        let current = *stack.last().expect("indent stack is never empty");
-        if indent > current {
+    fn handle_indent(
+        &mut self,
+        (col, altcol): (usize, usize),
+        stack: &mut Vec<(usize, usize)>,
+    ) -> Result<()> {
+        let (cur_col, cur_altcol) = *stack.last().expect("indent stack is never empty");
+        if col == cur_col {
+            if altcol != cur_altcol {
+                return Err(PyError::lex(
+                    "inconsistent use of tabs and spaces in indentation".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        if col > cur_col {
+            if altcol <= cur_altcol {
+                return Err(PyError::lex(
+                    "inconsistent use of tabs and spaces in indentation".to_string(),
+                ));
+            }
             // CPython's tokenizer caps indentation nesting at `MAXINDENT` (100)
             // levels, raising `IndentationError: too many levels of indentation`.
             // Because a deeper *compound statement* always requires a deeper
@@ -247,20 +293,25 @@ impl Lexer {
             if stack.len() >= MAX_INDENT_LEVELS {
                 return Err(PyError::lex("too many levels of indentation".to_string()));
             }
-            stack.push(indent);
+            stack.push((col, altcol));
             self.emit(Token::Indent);
             return Ok(());
         }
 
-        if indent < current {
-            while indent < *stack.last().expect("indent stack is never empty") {
-                stack.pop();
-                self.emit(Token::Dedent);
-            }
-            let after = *stack.last().expect("indent stack is never empty");
-            if indent != after {
-                return Err(PyError::lex("inconsistent indentation".to_string()));
-            }
+        while col < stack.last().expect("indent stack is never empty").0 {
+            stack.pop();
+            self.emit(Token::Dedent);
+        }
+        let (after_col, after_altcol) = *stack.last().expect("indent stack is never empty");
+        if col != after_col {
+            return Err(PyError::lex(
+                "unindent does not match any outer indentation level".to_string(),
+            ));
+        }
+        if altcol != after_altcol {
+            return Err(PyError::lex(
+                "inconsistent use of tabs and spaces in indentation".to_string(),
+            ));
         }
         Ok(())
     }
@@ -362,8 +413,15 @@ impl Lexer {
                             && matches!(chars.get(pos + 2), Some('"') | Some('\'')))
                     {
                         let quote = chars[pos + 2];
-                        let (tok, next) =
-                            lex_fstring(chars, pos + 3, quote, true, self.line_start_pos)?;
+                        let mut first_invalid = None;
+                        let (tok, next) = lex_fstring(
+                            chars,
+                            pos + 3,
+                            quote,
+                            true,
+                            self.line_start_pos,
+                            &mut first_invalid,
+                        )?;
                         self.emit(tok);
                         pos = next;
                     } else if (c == 'f' || c == 'F')
@@ -371,15 +429,29 @@ impl Lexer {
                     {
                         // Check for f-string prefix: f" or f' (or F" / F')
                         let quote = chars[pos + 1];
-                        let (tok, next) =
-                            lex_fstring(chars, pos + 2, quote, false, self.line_start_pos)?;
+                        let mut first_invalid = None;
+                        let (tok, next) = lex_fstring(
+                            chars,
+                            pos + 2,
+                            quote,
+                            false,
+                            self.line_start_pos,
+                            &mut first_invalid,
+                        )?;
+                        if let Some(msg) = first_invalid {
+                            self.warnings.push((self.line, msg));
+                        }
                         self.emit(tok);
                         pos = next;
                     } else if (c == 'b' || c == 'B')
                         && matches!(chars.get(pos + 1), Some('"') | Some('\''))
                     {
                         // Bytes literal: b"..." or b'...'
-                        let (tok, next) = lex_bytes(chars, pos + 1, false)?;
+                        let mut first_invalid = None;
+                        let (tok, next) = lex_bytes(chars, pos + 1, false, &mut first_invalid)?;
+                        if let Some(msg) = first_invalid {
+                            self.warnings.push((self.line, msg));
+                        }
                         self.emit(tok);
                         pos = next;
                     } else if (c == 'b' || c == 'B')
@@ -387,14 +459,16 @@ impl Lexer {
                         && matches!(chars.get(pos + 2), Some('"') | Some('\''))
                     {
                         // Raw bytes literal: br"..." / bR"..." / BR"..." / Br"..."
-                        let (tok, next) = lex_bytes(chars, pos + 2, true)?;
+                        let mut first_invalid = None;
+                        let (tok, next) = lex_bytes(chars, pos + 2, true, &mut first_invalid)?;
                         self.emit(tok);
                         pos = next;
                     } else if (c == 'r' || c == 'R')
                         && matches!(chars.get(pos + 1), Some('"') | Some('\''))
                     {
                         // Raw string literal: r"..." / R"..."
-                        let (tok, next) = lex_string(chars, pos + 1, true)?;
+                        let mut first_invalid = None;
+                        let (tok, next) = lex_string(chars, pos + 1, true, &mut first_invalid)?;
                         self.emit(tok);
                         pos = next;
                     } else if (c == 'r' || c == 'R')
@@ -402,7 +476,8 @@ impl Lexer {
                         && matches!(chars.get(pos + 2), Some('"') | Some('\''))
                     {
                         // Raw bytes literal: rb"..." / rB"..." / RB"..." / Rb"..."
-                        let (tok, next) = lex_bytes(chars, pos + 2, true)?;
+                        let mut first_invalid = None;
+                        let (tok, next) = lex_bytes(chars, pos + 2, true, &mut first_invalid)?;
                         self.emit(tok);
                         pos = next;
                     } else if (c == 'u' || c == 'U')
@@ -411,7 +486,11 @@ impl Lexer {
                         // Unicode string literal: u"..." / U"..."
                         // In Python 3.3+, u"..." is identical to a plain string literal.
                         // Combinations like ur"", ub"" are not valid in Python 3.
-                        let (tok, next) = lex_string(chars, pos + 1, false)?;
+                        let mut first_invalid = None;
+                        let (tok, next) = lex_string(chars, pos + 1, false, &mut first_invalid)?;
+                        if let Some(msg) = first_invalid {
+                            self.warnings.push((self.line, msg));
+                        }
                         self.emit(tok);
                         pos = next;
                     } else {
@@ -421,7 +500,11 @@ impl Lexer {
                     }
                 }
                 Some('"') | Some('\'') => {
-                    let (tok, next) = lex_string(chars, pos, false)?;
+                    let mut first_invalid = None;
+                    let (tok, next) = lex_string(chars, pos, false, &mut first_invalid)?;
+                    if let Some(msg) = first_invalid {
+                        self.warnings.push((self.line, msg));
+                    }
                     self.emit(tok);
                     pos = next;
                 }

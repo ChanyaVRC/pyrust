@@ -24,6 +24,7 @@ fn lex_fstring(
     quote: char,
     raw: bool,
     line_start_pos: usize,
+    first_invalid: &mut Option<String>,
 ) -> Result<(Token, usize)> {
     let mut parts: Vec<FStringPart> = Vec::new();
     let mut literal = String::new();
@@ -83,7 +84,7 @@ fn lex_fstring(
             let line_offset = count_newlines(chars, content_start, pos);
             pos += 1; // skip '{'
             let (src, conversion, format_spec, debug_text, next) =
-                lex_fstring_expr(chars, pos, content_start, raw, 0)?;
+                lex_fstring_expr(chars, pos, content_start, raw, 0, first_invalid)?;
             // PEP 657 (#2582): record the `{...}` field columns relative to the
             // f-string's source line.  `next - 1` is the closing `}`.  Skip when
             // the field crosses a physical line (multi-line f-string) — the
@@ -144,7 +145,7 @@ fn lex_fstring(
                         pos += 1; // skip \n of CRLF
                     }
                 } else {
-                    let (s, next_pos) = parse_escape(chars, pos, content_start)?;
+                    let (s, next_pos) = parse_escape(chars, pos, content_start, first_invalid)?;
                     literal.push_str(&s);
                     pos = next_pos;
                 }
@@ -272,6 +273,7 @@ fn lex_fstring_expr(
     base: usize,
     raw: bool,
     spec_depth: usize,
+    first_invalid: &mut Option<String>,
 ) -> Result<FStringExpr> {
     let mut pos = start;
     let mut depth = 0usize; // brace depth (for nested dicts/sets in expr)
@@ -396,7 +398,14 @@ fn lex_fstring_expr(
                 // Optional format spec.
                 let format_spec = if chars.get(pos) == Some(&':') {
                     pos += 1;
-                    Some(lex_format_spec(chars, &mut pos, base, raw, spec_depth)?)
+                    Some(lex_format_spec(
+                        chars,
+                        &mut pos,
+                        base,
+                        raw,
+                        spec_depth,
+                        first_invalid,
+                    )?)
                 } else {
                     None
                 };
@@ -420,7 +429,14 @@ fn lex_fstring_expr(
                 // Now check for format spec or closing }
                 let format_spec = if chars.get(pos) == Some(&':') {
                     pos += 1;
-                    Some(lex_format_spec(chars, &mut pos, base, raw, spec_depth)?)
+                    Some(lex_format_spec(
+                        chars,
+                        &mut pos,
+                        base,
+                        raw,
+                        spec_depth,
+                        first_invalid,
+                    )?)
                 } else {
                     None
                 };
@@ -434,7 +450,7 @@ fn lex_fstring_expr(
             // Format spec: : — only at top level
             Some(':') if depth == 0 && paren_depth == 0 => {
                 pos += 1; // skip ':'
-                let spec = lex_format_spec(chars, &mut pos, base, raw, spec_depth)?;
+                let spec = lex_format_spec(chars, &mut pos, base, raw, spec_depth, first_invalid)?;
                 if chars.get(pos) != Some(&'}') {
                     return Err(PyError::lex(
                         "expected '}' to close f-string expression".to_string(),
@@ -476,6 +492,7 @@ fn lex_format_spec(
     base: usize,
     raw: bool,
     spec_depth: usize,
+    first_invalid: &mut Option<String>,
 ) -> Result<Vec<FStringPart>> {
     let mut parts: Vec<FStringPart> = Vec::new();
     let mut literal = String::new();
@@ -514,7 +531,7 @@ fn lex_format_spec(
                 let line_offset = count_newlines(chars, base, *pos);
                 *pos += 1; // skip '{'
                 let (src, conversion, format_spec, debug_text, next) =
-                    lex_fstring_expr(chars, *pos, base, raw, spec_depth + 1)?;
+                    lex_fstring_expr(chars, *pos, base, raw, spec_depth + 1, first_invalid)?;
                 *pos = next;
                 parts.push(FStringPart::Expr {
                     src,
@@ -554,7 +571,7 @@ fn lex_format_spec(
                         }
                     }
                     Some(_) => {
-                        let (s, next_pos) = parse_escape(chars, *pos, base)?;
+                        let (s, next_pos) = parse_escape(chars, *pos, base, first_invalid)?;
                         literal.push_str(&s);
                         *pos = next_pos;
                     }
