@@ -544,13 +544,6 @@ pub(super) fn path_with_stem(args: &[ExpandedCallArg], fn_name: &str) -> Result<
         return Err(empty_name_error(&inst, &path));
     };
     let suf = compute_suffix(cur_name).to_string();
-    if new_stem.is_empty() && !suf.is_empty() {
-        let class_name = inst.borrow().class.borrow().name.clone();
-        return Err(PyError::named(
-            "ValueError",
-            format!("{class_name}('{path}') has a non-empty suffix"),
-        ));
-    }
     let new_name = format!("{new_stem}{suf}");
     if is_invalid_name(&new_name, flavor) {
         return Err(PyError::named(

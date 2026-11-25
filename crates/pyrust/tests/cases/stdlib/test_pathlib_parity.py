@@ -143,8 +143,10 @@ assert PurePosixPath("/a/foo.tar.gz").with_stem("bar") == PurePosixPath("/a/bar.
 assert PurePosixPath("/a/foo").with_stem("bar") == PurePosixPath("/a/bar")
 assert PureWindowsPath(r"C:\a\foo.txt").with_stem("bar") == PureWindowsPath(r"C:\a\bar.txt")
 
+if sys.version_info < (3, 13):
+    assert PurePosixPath("a.txt").with_stem("") == PurePosixPath(".txt")
 try:
-    PurePosixPath("a.txt").with_stem("")
+    PurePosixPath("a").with_stem("")
     assert False
 except ValueError:
     pass
