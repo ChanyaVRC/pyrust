@@ -16,6 +16,11 @@ pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, 
         "itertools" => prepare_itertools_module(module),
         "io" => prepare_io_module(module),
         "warnings" => prepare_warnings_module(interpreter, module),
+        "reprlib" => reprlib::prepare_module(interpreter, module),
+        "pickletools" => pickletools::prepare_module(interpreter, module),
+        "optparse" => optparse::prepare_module(interpreter, module),
+        "this" => this::prepare_module(interpreter),
+        "antigravity" => antigravity::prepare_module(interpreter),
         _ => {}
     }
 }

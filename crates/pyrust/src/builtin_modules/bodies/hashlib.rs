@@ -134,6 +134,13 @@ pub(crate) fn hmac_oneshot_by_name(name: &str, key: &[u8], msg: &[u8]) -> Result
     Ok(Some(hmac_oneshot(&state, key, msg)))
 }
 
+/// Compute a one-shot lowercase hexadecimal MD5 digest in native Rust.
+pub(crate) fn md5_hexdigest(data: &[u8]) -> String {
+    let mut state = HashState::from_name("md5").expect("md5 hash algorithm must exist");
+    state.update(data);
+    hex_encode(&state.digest())
+}
+
 // ── Opaque native hash state ─────────────────────────────────────────────────
 
 struct HashStateOps;

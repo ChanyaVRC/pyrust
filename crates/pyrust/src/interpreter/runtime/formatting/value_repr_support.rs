@@ -127,14 +127,18 @@ pub(crate) fn render_instance_str(
     let inst_rc = Rc::clone(inst);
     let class = Rc::clone(&inst_rc.borrow().class);
     // For exception instances, fall back to built-in exception formatting only
-    // when the class has no user-defined __str__.  A user-defined __str__ is
-    // one whose resolved value is not a BuiltinFunction — i.e. it was declared
-    // in user code, not registered as a Rust built-in.
+    // when the class has no custom `__str__` override (either Python-defined or
+    // a native-Rust stdlib exception class override).
     if is_exception_class(&class) {
-        let has_user_str = lookup_class_attr(&class, "__str__")
-            .map(|v| !matches!(v.kind(), ValueKind::BuiltinFunction(_)))
+        let has_custom_str = lookup_class_attr(&class, "__str__")
+            .map(|v| {
+                !crate::interpreter::value_is_canonical_slot(
+                    &v,
+                    crate::interpreter::CanonicalSlot::ObjectStr,
+                )
+            })
             .unwrap_or(false);
-        if !has_user_str {
+        if !has_custom_str {
             return crate::interpreter::exception_str_with_dispatch(
                 interp, value, &inst_rc, &class,
             );

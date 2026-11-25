@@ -211,23 +211,26 @@ pub(crate) fn classify_exception_class(class: &Rc<RefCell<PyClass>>) -> ExcClass
     fn walk(class: &Rc<RefCell<PyClass>>, kinds: &mut ExcClassKinds) {
         let borrowed = class.borrow();
         kinds.merge_builtin_exception_name(borrowed.builtin_exception_name);
-        // Detect user-defined __new__/__init__ in the same walk so the caller
-        // can skip the dedicated MRO lookups for plain built-in exceptions.
-        if !kinds.has_user_new
-            && matches!(
-                borrowed.attrs.get("__new__").map(Value::kind),
-                Some(ValueKind::UserFunction(_))
-            )
-        {
-            kinds.has_user_new = true;
-        }
-        if !kinds.has_user_init
-            && matches!(
-                borrowed.attrs.get("__init__").map(Value::kind),
-                Some(ValueKind::UserFunction(_))
-            )
-        {
-            kinds.has_user_init = true;
+        // Detect user-defined or native-stdlib-defined __new__/__init__ in the
+        // same walk so plain built-in exceptions (`builtin_exception_name.is_some()`)
+        // keep skipping the dedicated MRO lookups.
+        if borrowed.builtin_exception_name.is_none() {
+            if !kinds.has_user_new
+                && matches!(
+                    borrowed.attrs.get("__new__").map(Value::kind),
+                    Some(ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_))
+                )
+            {
+                kinds.has_user_new = true;
+            }
+            if !kinds.has_user_init
+                && matches!(
+                    borrowed.attrs.get("__init__").map(Value::kind),
+                    Some(ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_))
+                )
+            {
+                kinds.has_user_init = true;
+            }
         }
         if let Some(base) = &borrowed.base {
             walk(base, kinds);
