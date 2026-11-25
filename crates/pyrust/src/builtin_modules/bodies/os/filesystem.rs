@@ -15,6 +15,15 @@ use crate::value::{Value, ValueKind};
 use super::arguments::{require_int, require_str, single_path_arg, value_is_truthy};
 use super::result_types::make_stat_result;
 
+/// Standard POSIX / Windows file-open flag constants exposed on `os`.
+pub(crate) const O_RDONLY: i64 = 0x0000;
+pub(crate) const O_WRONLY: i64 = 0x0001;
+pub(crate) const O_RDWR: i64 = 0x0002;
+pub(crate) const O_APPEND: i64 = 0x0008;
+pub(crate) const O_CREAT: i64 = 0x0100;
+pub(crate) const O_TRUNC: i64 = 0x0200;
+pub(crate) const O_EXCL: i64 = 0x0400;
+
 /// Process-local table of open OS file handles backing integer file descriptors
 /// returned by `tempfile.mkstemp()` and consumed by `os.read` / `os.write` /
 /// `os.close`.
@@ -272,6 +281,58 @@ pub(super) fn lstat(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
     Ok(make_stat_result(&metadata))
+}
+
+pub(super) fn open_path(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    if args.len() < 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() missing required positional arguments"),
+        ));
+    }
+    let path = require_str(fn_name, &args[0].value, "path")?;
+    let flags = require_int(fn_name, &args[1].value, "flags")?;
+    let mode = match args.get(2) {
+        Some(arg) => require_int(fn_name, &arg.value, "mode")?,
+        None => 0o777,
+    };
+    let access = flags & 0x3;
+    let mut opts = std::fs::OpenOptions::new();
+    match access {
+        O_WRONLY => {
+            opts.write(true);
+        }
+        O_RDWR => {
+            opts.read(true).write(true);
+        }
+        _ => {
+            opts.read(true);
+        }
+    }
+    if (flags & O_APPEND) != 0 {
+        opts.append(true);
+    }
+    if (flags & O_TRUNC) != 0 {
+        opts.truncate(true);
+    }
+    if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 {
+        opts.create_new(true);
+    } else if (flags & O_CREAT) != 0 {
+        opts.create(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode((mode & 0o7777) as u32);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+    }
+    let file = opts
+        .open(&path)
+        .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+    Ok(Value::int(register_fd(file)))
 }
 
 pub(super) fn close(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {

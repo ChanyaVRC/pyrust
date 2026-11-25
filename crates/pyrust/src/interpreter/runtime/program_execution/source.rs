@@ -19,8 +19,60 @@ impl Interpreter {
             .map_err(lex_parse_to_exc)
     }
 
+    /// Parse a Python source string into statements + line numbers while
+    /// emitting any lexer-collected `SyntaxWarning`s (e.g. invalid escape
+    /// sequences) through this interpreter's live `warnings` system.
+    pub(crate) fn parse_source_to_stmts_with_warnings(
+        &mut self,
+        source: &str,
+        filename: &str,
+    ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
+        let (tokens, line_nos, cols, cols_end, warnings) = crate::lexer::Lexer::new(source)
+            .map_err(lex_parse_to_exc)?
+            .into_tokens_with_pos_and_warnings();
+        for (lineno, msg) in warnings {
+            crate::interpreter::emit_syntax_warning_via_module(
+                self,
+                &msg,
+                filename,
+                lineno as i64,
+            )?;
+        }
+        let mut parser = crate::parser::Parser::new_with_pos(tokens, line_nos, cols, cols_end);
+        parser
+            .parse_program_with_linenos()
+            .map_err(lex_parse_to_exc)
+    }
+
+    /// Parse a Python source string as a single interactive statement for
+    /// `compile(..., 'single')`, emitting lexer `SyntaxWarning`s through the
+    /// live `warnings` system.
+    pub(crate) fn parse_single_source_to_stmts_with_warnings(
+        &mut self,
+        source: &str,
+        filename: &str,
+    ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
+        let (tokens, line_nos, cols, cols_end, warnings) = crate::lexer::Lexer::new(source)
+            .map_err(lex_parse_to_exc)?
+            .into_tokens_with_pos_and_warnings();
+        for (lineno, msg) in warnings {
+            crate::interpreter::emit_syntax_warning_via_module(
+                self,
+                &msg,
+                filename,
+                lineno as i64,
+            )?;
+        }
+        let mut parser = crate::parser::Parser::new_with_pos(tokens, line_nos, cols, cols_end);
+        let ends_with_newline = source.ends_with('\n') || source.ends_with('\r');
+        parser
+            .parse_single_with_linenos(ends_with_newline)
+            .map_err(lex_parse_to_exc)
+    }
+
     /// Parse a Python source string as a single interactive statement for
     /// `compile(..., 'single')`.
+    #[allow(dead_code)]
     pub(crate) fn parse_single_source_to_stmts_with_linenos(
         source: &str,
     ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
@@ -64,7 +116,7 @@ impl Interpreter {
         locals_dict: Option<Value>,
     ) -> Result<()> {
         let _int_max_str_digits_guard = IntMaxStrDigitsExecutionGuard::enter(self);
-        let (program, linenos) = Self::parse_source_to_stmts_with_linenos(source)?;
+        let (program, linenos) = self.parse_source_to_stmts_with_warnings(source, filename)?;
         match globals_dict {
             None => {
                 // No explicit namespace: compile and run in the current module
@@ -149,7 +201,7 @@ impl Interpreter {
         // Strip leading and trailing whitespace: CPython's `eval()` strips both.
         // `eval("  1 + 2  ")` and `eval("1 + 2\n")` both work in CPython.
         let trimmed = source.trim();
-        let (program, linenos) = Self::parse_source_to_stmts_with_linenos(trimmed)?;
+        let (program, linenos) = self.parse_source_to_stmts_with_warnings(trimmed, "<string>")?;
         let local_index: Rc<HashMap<String, crate::bytecode::Reg>> = Rc::new(HashMap::new());
         let code = {
             let c = crate::compiler::compile_eval_expr_with_linenos(

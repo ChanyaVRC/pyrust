@@ -166,6 +166,9 @@ impl Compiler {
                 self.free_temp(obj);
             }
             Stmt::Assert { test, msg } => {
+                if self.optimize >= 1 {
+                    return;
+                }
                 let cond = self.compile_expr(test);
                 let skip = self.emit(Insn::JumpIfTrue(cond, 0));
                 self.free_temp(cond);

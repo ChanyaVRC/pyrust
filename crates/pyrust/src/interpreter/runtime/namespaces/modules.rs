@@ -700,7 +700,8 @@ impl Interpreter {
             // `tb_lineno` and PEP 657 caret anchors (#2438); the import path
             // previously parsed without line info, so module frames printed no
             // line number / source line.
-            let (program, linenos) = Self::parse_source_to_stmts_with_linenos(&src)?;
+            let (program, linenos) =
+                self.parse_source_to_stmts_with_warnings(&src, &module_filename)?;
             // Subinterpreter shares the same module_cache so results are visible to parent
             let mut sub = Interpreter {
                 // Filesystem imports execute through a child object but

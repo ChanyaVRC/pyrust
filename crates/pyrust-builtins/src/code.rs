@@ -23,6 +23,14 @@ pub const CO_GENERATOR: i64 = 0x0020;
 pub const CO_COROUTINE: i64 = 0x0080;
 pub const CO_ITERABLE_COROUTINE: i64 = 0x0100;
 pub const CO_ASYNC_GENERATOR: i64 = 0x0200;
+pub const CO_FUTURE_ANNOTATIONS: i64 = 0x100_0000;
+
+/// Single `(start, end, lineno)` entry yielded by `code.co_lines()`.
+pub type CodeLineEntry = (i64, i64, Option<i64>);
+
+/// Single `(lineno, end_lineno, col_offset, end_col_offset)` entry yielded by
+/// `code.co_positions()`.
+pub type CodePositionEntry = (Option<i64>, Option<i64>, Option<i64>, Option<i64>);
 
 /// Backing state for a `code` object.
 pub struct CodeState {
@@ -69,9 +77,72 @@ pub struct CodeState {
     /// `co_cellvars` — a tuple of the cell-variable name strings (locals
     /// captured by a nested scope), in CPython's sorted order.
     pub cellvars: Value,
+    /// `co_code` — raw bytecode bytes (empty or replaced via `code.replace()`).
+    pub code_bytes: Vec<u8>,
+    /// `co_linetable` — encoded line-number table bytes (PEP 626 / 3.11+).
+    pub linetable: Vec<u8>,
+    /// `co_exceptiontable` — encoded exception-handler table bytes (3.11+).
+    pub exceptiontable: Vec<u8>,
+    /// Precomputed `(start, end, lineno)` triples for `code.co_lines()`.
+    pub lines: Vec<CodeLineEntry>,
+    /// Precomputed `(lineno, end_lineno, col_offset, end_col_offset)` 4-tuples
+    /// for `code.co_positions()`.
+    pub positions: Vec<CodePositionEntry>,
     /// Optional opaque handle to the underlying compiled `FnCode` (cold
-    /// introspection only; used by `dis` to read real bytecode instructions).
+    /// introspection only; used by `dis` and `exec`/`eval` to read real
+    /// bytecode instructions).
     pub raw_code: Option<Rc<dyn Any>>,
+    /// Optional opaque execution metadata for `compile()`-created code objects
+    /// (carrying `CodeMode` and `local_index`).
+    pub exec_meta: Option<Rc<dyn Any>>,
+}
+
+/// Encode legacy CPython `co_lnotab` `(byte_delta, line_delta)` pairs from
+/// `lines` and `firstlineno`.
+pub fn encode_lnotab(lines: &[CodeLineEntry], firstlineno: i64) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut prev_addr = 0i64;
+    let mut prev_line = firstlineno;
+    for &(start, _end, lineno_opt) in lines {
+        let Some(line) = lineno_opt else {
+            continue;
+        };
+        if line == prev_line && start == prev_addr {
+            continue;
+        }
+        let mut addr_delta = (start - prev_addr).max(0);
+        let mut line_delta = line - prev_line;
+        while addr_delta > 255 {
+            out.push(255);
+            out.push(0);
+            addr_delta -= 255;
+        }
+        while line_delta > 127 {
+            out.push(addr_delta as u8);
+            out.push(127);
+            addr_delta = 0;
+            line_delta -= 127;
+        }
+        while line_delta < -128 {
+            out.push(addr_delta as u8);
+            out.push((-128i8) as u8);
+            addr_delta = 0;
+            line_delta += 128;
+        }
+        if addr_delta != 0 || line_delta != 0 {
+            out.push(addr_delta as u8);
+            out.push((line_delta as i8) as u8);
+        }
+        prev_addr = start;
+        prev_line = line;
+    }
+    out
+}
+
+/// Encode a compact non-empty `co_linetable` byte sequence from `lines` and
+/// `firstlineno` (or empty when `lines` is empty).
+pub fn encode_linetable(lines: &[CodeLineEntry], firstlineno: i64) -> Vec<u8> {
+    encode_lnotab(lines, firstlineno)
 }
 
 pub struct CodeOps;
@@ -117,13 +188,16 @@ impl BuiltinTypeOps for CodeOps {
             "co_names" => Some(s.names.clone()),
             "co_freevars" => Some(s.freevars.clone()),
             "co_cellvars" => Some(s.cellvars.clone()),
-            // `co_code` is the raw bytecode bytes.  pyrust's register VM has no
-            // CPython-compatible bytecode to expose, so return an empty `bytes`
-            // object — the right TYPE for callers that only check `co_code`'s
-            // type (e.g. `type(co.co_code) is bytes`).
-            "co_code" => Some(Value::bytes(Vec::new())),
+            "co_code" => Some(Value::bytes(s.code_bytes.clone())),
+            "co_linetable" => Some(Value::bytes(s.linetable.clone())),
+            "co_lnotab" => Some(Value::bytes(encode_lnotab(&s.lines, s.firstlineno))),
+            "co_exceptiontable" => Some(Value::bytes(s.exceptiontable.clone())),
             _ => None,
         }
+    }
+
+    fn has_method(&self, name: &str) -> bool {
+        matches!(name, "co_lines" | "co_positions" | "replace")
     }
 }
 
@@ -145,7 +219,13 @@ pub struct CodeBuild {
     pub names: Vec<Value>,
     pub freevars: Vec<Value>,
     pub cellvars: Vec<Value>,
+    pub code_bytes: Vec<u8>,
+    pub linetable: Vec<u8>,
+    pub exceptiontable: Vec<u8>,
+    pub lines: Vec<CodeLineEntry>,
+    pub positions: Vec<CodePositionEntry>,
     pub raw_code: Option<Rc<dyn Any>>,
+    pub exec_meta: Option<Rc<dyn Any>>,
 }
 
 impl CodeBuild {
@@ -168,23 +248,47 @@ impl CodeBuild {
             names: Value::tuple(self.names),
             freevars: Value::tuple(self.freevars),
             cellvars: Value::tuple(self.cellvars),
+            code_bytes: self.code_bytes,
+            linetable: self.linetable,
+            exceptiontable: self.exceptiontable,
+            lines: self.lines,
+            positions: self.positions,
             raw_code: self.raw_code,
+            exec_meta: self.exec_meta,
         });
         Value::builtin_object(CODE_OPS, state)
     }
 }
 
-/// Inspect the opaque `raw_code` handle attached to a `code` object, if any.
-pub fn with_raw_code<R>(value: &Value, f: impl FnOnce(&Rc<dyn Any>) -> R) -> Option<R> {
+/// Returns `true` if `value` is a `code` object.
+#[inline]
+pub fn is_code(value: &Value) -> bool {
+    matches!(
+        value.kind(),
+        ValueKind::BuiltinObject { ops, .. } if builtin_ops_is::<CodeOps>(ops)
+    )
+}
+
+/// Inspect the `CodeState` of a `code` object.
+pub fn with_code_state_ref<R>(value: &Value, f: impl FnOnce(&CodeState) -> R) -> Option<R> {
     if let ValueKind::BuiltinObject { ops, state } = value.kind()
         && builtin_ops_is::<CodeOps>(ops)
     {
         let borrow = state.borrow();
         let cs = borrow.downcast_ref::<CodeState>()?;
-        let raw = cs.raw_code.as_ref()?;
-        return Some(f(raw));
+        return Some(f(cs));
     }
     None
+}
+
+/// Inspect the opaque `raw_code` handle attached to a `code` object, if any.
+pub fn with_raw_code<R>(value: &Value, f: impl FnOnce(&Rc<dyn Any>) -> R) -> Option<R> {
+    with_code_state_ref(value, |cs| cs.raw_code.as_ref().map(f)).flatten()
+}
+
+/// Inspect the opaque `exec_meta` handle attached to a `code` object, if any.
+pub fn with_exec_meta<R>(value: &Value, f: impl FnOnce(&Rc<dyn Any>) -> R) -> Option<R> {
+    with_code_state_ref(value, |cs| cs.exec_meta.as_ref().map(f)).flatten()
 }
 
 /// Construct a minimal `code` object value carrying only the name/argcount/
@@ -209,6 +313,9 @@ pub fn code_with_loc(
     firstlineno: i64,
 ) -> Value {
     let nlocals = varnames.len() as i64;
+    let ln_opt = (firstlineno > 0).then_some(firstlineno);
+    let lines = vec![(0, 2, ln_opt)];
+    let positions = vec![(ln_opt, ln_opt, None, None)];
     CodeBuild {
         qualname: name.clone(),
         name,
@@ -225,7 +332,13 @@ pub fn code_with_loc(
         names: Vec::new(),
         freevars: Vec::new(),
         cellvars: Vec::new(),
+        code_bytes: Vec::new(),
+        linetable: Vec::new(),
+        exceptiontable: Vec::new(),
+        lines,
+        positions,
         raw_code: None,
+        exec_meta: None,
     }
     .build()
 }

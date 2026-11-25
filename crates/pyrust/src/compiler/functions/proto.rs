@@ -145,6 +145,7 @@ impl Compiler {
         // generator (#2280); `return <value>` inside it is a SyntaxError.
         sub.is_async_generator_fn = is_async && stmts_contain_yield(body);
         sub.future_annotations = self.future_annotations;
+        sub.optimize = self.optimize;
         // A function compiled directly inside a class body is a class method
         // and gets access to zero-arg super().
         sub.is_class_method = self.is_class_body;
@@ -161,7 +162,17 @@ impl Compiler {
         }
         // `co_firstlineno`: the `def`/`lambda` line (issue #2185).
         sub.first_lineno = def_lineno;
-        sub.compile_block_with_linenos(body, body_linenos);
+        let (effective_body, effective_linenos) = if self.optimize >= 2 {
+            match body {
+                [Stmt::Expr(Expr::Str(_)), rest @ ..] => {
+                    (rest, body_linenos.get(1..).unwrap_or(&[]))
+                }
+                _ => (body, body_linenos),
+            }
+        } else {
+            (body, body_linenos)
+        };
+        sub.compile_block_with_linenos(effective_body, effective_linenos);
         sub.ensure_lexical_free_cells(body);
         let mut inner_code = match sub.finish() {
             Ok(c) => c,
@@ -202,10 +213,15 @@ impl Compiler {
             .chain(return_annotation.map(|_| Symbol::intern("return")))
             .collect();
         // Extract docstring: if the first statement in the body is a bare
-        // string literal, capture it as the function's __doc__ (CPython parity).
-        let fn_docstring = match body {
-            [Stmt::Expr(Expr::Str(s)), ..] => Some(s.clone()),
-            _ => None,
+        // string literal, capture it as the function's __doc__ (CPython parity),
+        // unless `optimize >= 2` strips docstrings.
+        let fn_docstring = if self.optimize >= 2 {
+            None
+        } else {
+            match body {
+                [Stmt::Expr(Expr::Str(s)), ..] => Some(s.clone()),
+                _ => None,
+            }
         };
         let param_spec = Rc::new(FnParamSpec {
             names: params.iter().map(|p| p.name).collect(),

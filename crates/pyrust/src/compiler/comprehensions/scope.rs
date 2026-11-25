@@ -273,6 +273,7 @@ impl Compiler {
         }
         sub.is_function_scope = true;
         sub.future_annotations = self.future_annotations;
+        sub.optimize = self.optimize;
         sub.is_async_function = cfg.is_async;
         sub.is_set_comp = cfg.is_set_comp;
         sub.is_list_comp = cfg.is_list_comp;

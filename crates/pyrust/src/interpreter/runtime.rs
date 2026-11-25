@@ -2,11 +2,11 @@
 
 mod program_execution {
     use super::{
-        CallDepthGuard, EnvRef, Environment, HashMap, IntMaxStrDigitsExecutionGuard, Interpreter,
-        PyDict, PyError, PyKey, Rc, RegSlice, RegsBuf, Result, Stmt, StrKey, Value, ValueKind,
-        VmFrameView, cached_builtins_module, exception_str_with_dispatch, format_exc_chain_prefix,
-        format_exception_group_traceback, intern_string, is_exception_group_value, module_env,
-        render_instance_repr, smallvec,
+        CallDepthGuard, CellSlice, CellsBuf, EnvRef, Environment, HashMap,
+        IntMaxStrDigitsExecutionGuard, Interpreter, PyDict, PyError, PyKey, Rc, RegSlice, RegsBuf,
+        Result, Stmt, StrKey, Value, ValueKind, VmFrameView, cached_builtins_module,
+        exception_str_with_dispatch, format_exc_chain_prefix, format_exception_group_traceback,
+        intern_string, is_exception_group_value, module_env, render_instance_repr, smallvec,
     };
     include!("runtime/program_execution.rs");
 }
@@ -117,7 +117,7 @@ mod classes {
         UserFunctionParam, Value, ValueKind, VmFrameView, Weak, class_is_subclass_of,
         class_mro_items, invoke_class_method, lookup_class_attr, make_slot_member_descriptor,
         metaclass_of, object_class_singleton, primitive_class_kind, smallvec, type_class_singleton,
-        value_type_name_str, vm_read,
+        value_class, value_type_name_str, vm_read,
     };
     include!("runtime/classes.rs");
 }
@@ -427,12 +427,13 @@ pub(crate) use generator_protocols::{
 mod introspection {
     use super::{
         FrameKind, GeneratorFrame, Interpreter, PyDict, PyError, PyKey, Rc, Result, UserFunction,
-        Value, ValueKind, VmFrameCache, VmFrameView, class_frame_identity,
+        Value, ValueKind, VmFrameCache, VmFrameView, cached_builtins_module, class_frame_identity,
         class_frame_locals_value, compiler_owned_frame_local_keys, lookup_enclosing_function_value,
         resolve_frame_source_line, snapshot_view_locals, value_class, values_are_identical,
     };
     include!("runtime/introspection.rs");
 }
+pub(crate) use introspection::build_code_lines_and_positions;
 
 #[cfg(test)]
 mod ownership_tests {

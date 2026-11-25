@@ -116,6 +116,23 @@ pub fn cell_with_value(contents: Value) -> Value {
     cell(CellSlot::new(contents))
 }
 
+/// Construct a standalone empty `cell` object (`types.CellType()`).
+pub fn cell_empty() -> Value {
+    cell(CellSlot::new_empty())
+}
+
+/// Extract the underlying shared [`CellSlot`] from a `cell` object.
+pub fn cell_slot(value: &Value) -> Option<CellSlot> {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return None;
+    };
+    if !pyrust_core::builtin_ops_is::<CellOps>(ops) {
+        return None;
+    }
+    let borrow = state.borrow();
+    borrow.downcast_ref::<CellState>().map(|s| s.slot.clone())
+}
+
 /// Return `true` if `value` is a `cell` object.
 #[inline]
 pub fn is_cell(value: &Value) -> bool {

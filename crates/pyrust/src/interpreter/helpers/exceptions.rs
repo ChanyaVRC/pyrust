@@ -642,9 +642,12 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         .subclasses
         .borrow_mut()
         .push(Rc::downgrade(&unsupported_operation));
-    // Python 3.3+: IOError and EnvironmentError are aliases for OSError.
+    // Python 3.3+: IOError and EnvironmentError (and WindowsError on Windows)
+    // are aliases for OSError.
     let io_error = Rc::clone(&os_error);
     let environment_error = Rc::clone(&os_error);
+    #[cfg(windows)]
+    let windows_error = Rc::clone(&os_error);
     let indentation_error = mk("IndentationError", Some(Rc::clone(&syntax_error)));
     let tab_error = mk("TabError", Some(Rc::clone(&indentation_error)));
     let warning = mk("Warning", Some(Rc::clone(&exception)));
@@ -754,6 +757,8 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         ("OSError", os_error),
         ("IOError", io_error),
         ("EnvironmentError", environment_error),
+        #[cfg(windows)]
+        ("WindowsError", windows_error),
         ("FileNotFoundError", file_not_found_error),
         ("FileExistsError", file_exists_error),
         ("BlockingIOError", blocking_io_error),

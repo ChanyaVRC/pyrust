@@ -18,6 +18,14 @@ use crate::error::PyError;
 use crate::interpreter::dispatch_numeric_binop;
 use crate::value::{PyBigInt, Value, ValueKind};
 
+/// Optional compilation flags passed from `compile()` (`optimize`,
+/// `PyCF_ALLOW_TOP_LEVEL_AWAIT`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompileOptions {
+    pub optimize: u8,
+    pub allow_top_level_await: bool,
+}
+
 /// Compile a top-level script / module body.  All script-level names are
 /// locals.
 ///
@@ -36,6 +44,25 @@ pub fn compile_script_with_linenos(
     linenos: &[u32],
     filename: &str,
 ) -> Result<FnCode, PyError> {
+    compile_script_with_options(
+        stmts,
+        local_index,
+        repl_mode,
+        linenos,
+        filename,
+        CompileOptions::default(),
+    )
+}
+
+/// Like [`compile_script_with_linenos`] with explicit [`CompileOptions`].
+pub fn compile_script_with_options(
+    stmts: &[Stmt],
+    local_index: Rc<HashMap<String, Reg>>,
+    repl_mode: bool,
+    linenos: &[u32],
+    filename: &str,
+    options: CompileOptions,
+) -> Result<FnCode, PyError> {
     // Validate global/nonlocal ordering at module scope.  CPython 3.12 raises
     // SyntaxError for `x = 1; global x` at module level too.
     if let Some(msg) = crate::interpreter::check_global_nonlocal_order(stmts) {
@@ -52,24 +79,27 @@ pub fn compile_script_with_linenos(
     // module_globals_dict live after globals() has been called.
     c.is_module_scope = true;
     c.print_exprs = repl_mode;
+    c.optimize = options.optimize;
+    c.allow_top_level_await = options.allow_top_level_await;
     c.module_namespace_may_be_exposed = module_namespace_may_be_exposed(stmts);
     // Issue #711: if the first statement is a bare string literal and we are
     // compiling a script file (not the REPL), it is the module docstring.
     // Emit a StoreGlobal for `__doc__` (CPython parity) before compiling the
-    // rest.  In REPL / `'single'` mode every string-expression is just a value
-    // expression passed to `sys.displayhook`; it is NOT a module docstring.
+    // rest — unless `optimize >= 2` strips docstrings.
     let (body, body_linenos): (&[Stmt], &[u32]) = if !repl_mode {
         match stmts {
             [Stmt::Expr(Expr::Str(s)), rest @ ..] => {
-                // Record lineno of the docstring statement if available.
-                if let Some(&ln) = linenos.first()
-                    && ln != 0
-                {
-                    c.set_lineno(ln);
+                if options.optimize < 2 {
+                    // Record lineno of the docstring statement if available.
+                    if let Some(&ln) = linenos.first()
+                        && ln != 0
+                    {
+                        c.set_lineno(ln);
+                    }
+                    let r = c.compile_literal(Value::string(s.clone()));
+                    c.compile_store_name("__doc__", r);
+                    c.free_temp(r);
                 }
-                let r = c.compile_literal(Value::string(s.clone()));
-                c.compile_store_name("__doc__", r);
-                c.free_temp(r);
                 (rest, linenos.get(1..).unwrap_or(&[]))
             }
             _ => (stmts, linenos),
@@ -113,6 +143,23 @@ pub fn compile_eval_expr_with_linenos(
     linenos: &[u32],
     filename: &str,
 ) -> Result<FnCode, PyError> {
+    compile_eval_expr_with_options(
+        stmts,
+        local_index,
+        linenos,
+        filename,
+        CompileOptions::default(),
+    )
+}
+
+/// Like [`compile_eval_expr_with_linenos`] with explicit [`CompileOptions`].
+pub fn compile_eval_expr_with_options(
+    stmts: &[Stmt],
+    local_index: Rc<HashMap<String, Reg>>,
+    linenos: &[u32],
+    filename: &str,
+    options: CompileOptions,
+) -> Result<FnCode, PyError> {
     let expr = match stmts {
         [Stmt::Expr(e)] => e,
         [] => {
@@ -132,6 +179,8 @@ pub fn compile_eval_expr_with_linenos(
     let mut c = Compiler::new(local_index, 0, cell_vars);
     // Threaded source file (#2438): the eval expression's `co_filename`.
     c.filename = std::sync::Arc::from(filename);
+    c.optimize = options.optimize;
+    c.allow_top_level_await = options.allow_top_level_await;
     if let Some(&ln) = linenos.first()
         && ln != 0
     {

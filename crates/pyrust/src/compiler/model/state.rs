@@ -286,4 +286,14 @@ struct Compiler {
     /// `async for` await drive) so exceptions from iterating the comprehension
     /// underline the comprehension expression in the enclosing frame (#2993).
     comp_outer_for_span: Option<crate::ast::CaretSpan>,
+    /// Optimization level (`0`, `1` omits `assert` and folds `__debug__` to
+    /// `False`, `2` also strips module/class/function docstrings).
+    optimize: u8,
+    /// True when `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` is active at module/eval/single
+    /// scope (not inherited by nested `def`/`class` scopes).
+    allow_top_level_await: bool,
+    /// Set to true when a top-level `await` / `async for` / `async with` was
+    /// compiled under `allow_top_level_await`, marking the resulting `FnCode`
+    /// with `is_coroutine = true`.
+    saw_top_level_await: bool,
 }

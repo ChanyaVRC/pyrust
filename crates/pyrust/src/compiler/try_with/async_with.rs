@@ -23,8 +23,12 @@ impl Compiler {
             return;
         }
         if !self.is_async_function {
-            self.set_syntax_error("'async with' outside async function");
-            return;
+            if !self.is_function_scope && self.allow_top_level_await {
+                self.saw_top_level_await = true;
+            } else {
+                self.set_syntax_error("'async with' outside async function");
+                return;
+            }
         }
         let (expr, alias) = &items[0];
         let rest = &items[1..];

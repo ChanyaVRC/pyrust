@@ -18,8 +18,12 @@ impl Compiler {
         else_linenos: &[u32],
     ) {
         if !self.is_async_function {
-            self.set_syntax_error("'async for' outside async function");
-            return;
+            if !self.is_function_scope && self.allow_top_level_await {
+                self.saw_top_level_await = true;
+            } else {
+                self.set_syntax_error("'async for' outside async function");
+                return;
+            }
         }
 
         let comp_for_span = if matches!(aiter_expr, Expr::Var(name, _) if name == ".0") {

@@ -156,6 +156,20 @@ impl Interpreter {
             }
             ValueKind::BuiltinFunction("module.__init__") => call_module_init(args),
             ValueKind::BuiltinFunction("module.__repr__") => call_module_repr(args),
+            ValueKind::BuiltinFunction("cell") => {
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!("cell() takes no keyword arguments"));
+                }
+                match args.len() {
+                    0 => Ok(pyrust_builtins::cell::cell_empty()),
+                    1 => Ok(pyrust_builtins::cell::cell_with_value(
+                        args[0].value.clone(),
+                    )),
+                    n => Err(pyrust_core::type_err!(
+                        "cell expected at most 1 argument, got {n}"
+                    )),
+                }
+            }
             // Issue #2276: the unbound type-qualified object-level dunders
             // (`str.__hash__` / `int.__repr__` / `str.__str__` /
             // `int.__format__` / …) synthesised by `get_attr_class` for the

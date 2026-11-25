@@ -1,4 +1,9 @@
-fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> {
+fn lex_string(
+    chars: &[char],
+    start: usize,
+    raw: bool,
+    first_invalid: &mut Option<String>,
+) -> Result<(Token, usize)> {
     let quote = chars[start];
 
     // Triple-quoted strings
@@ -53,7 +58,7 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                             pos += 1;
                         }
                     } else {
-                        let (s, next_pos) = parse_escape(chars, pos, content_start)?;
+                        let (s, next_pos) = parse_escape(chars, pos, content_start, first_invalid)?;
                         out.push_str(&s);
                         pos = next_pos;
                     }
@@ -115,7 +120,7 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                     pos += 1;
                 }
             } else {
-                let (s, next_pos) = parse_escape(chars, pos, content_start)?;
+                let (s, next_pos) = parse_escape(chars, pos, content_start, first_invalid)?;
                 out.push_str(&s);
                 pos = next_pos;
             }

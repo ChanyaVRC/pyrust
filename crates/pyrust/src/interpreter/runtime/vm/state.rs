@@ -407,6 +407,16 @@ impl TrampFrame {
     }
 
     #[inline]
+    pub(crate) fn saved_pc(&self) -> usize {
+        self.saved_pc
+    }
+
+    #[inline]
+    pub(crate) fn saved_code_ptr(&self) -> *const crate::bytecode::FnCode {
+        self.saved_code_ptr
+    }
+
+    #[inline]
     pub(crate) fn saved_cur_line(&self) -> u32 {
         // SAFETY: `saved_code_ptr` points at the caller's live `FnCode`
         // for the full lifetime of this `TrampFrame`.
@@ -462,6 +472,16 @@ impl GenDriveFrame {
     #[inline]
     pub(crate) fn saved_regs_ptr(&self) -> *mut Value {
         self.saved_regs.non_null_ptr().as_ptr()
+    }
+
+    #[inline]
+    pub(crate) fn saved_pc(&self) -> usize {
+        self.saved_pc
+    }
+
+    #[inline]
+    pub(crate) fn saved_code_ptr(&self) -> *const crate::bytecode::FnCode {
+        self.saved_code_ptr
     }
 
     #[inline]

@@ -38,9 +38,15 @@ fn codepoint_to_string_fragment(cp: u32) -> Option<String> {
 /// escapes (exactly two hex digits, producing U+0000–U+00FF).
 ///
 /// For unrecognized escape sequences (e.g. `\z`), CPython 3.12 emits a
-/// `DeprecationWarning` and preserves the two-character sequence `\<char>`
-/// verbatim.  pyrust matches that behaviour (without emitting the warning).
-fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(String, usize)> {
+/// `SyntaxWarning` and preserves the two-character sequence `\<char>`
+/// verbatim.  When `first_invalid` is `None`, the first invalid escape in a
+/// literal is recorded for emission through PyRust's `warnings` module.
+fn parse_escape(
+    chars: &[char],
+    pos: usize,
+    content_start: usize,
+    first_invalid: &mut Option<String>,
+) -> Result<(String, usize)> {
     let c = *chars
         .get(pos)
         .ok_or_else(|| PyError::lex("unterminated escape sequence".to_string()))?;
@@ -186,8 +192,13 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
             Ok((ch.to_string(), end + 1))
         }
         // Unrecognized escape: CPython 3.12 preserves the backslash + character
-        // verbatim and emits a DeprecationWarning.  pyrust accepts the sequence
-        // without emitting the warning (warning infrastructure not yet wired).
-        other => Ok((format!("\\{other}"), pos + 1)),
+        // verbatim and emits a SyntaxWarning for the first invalid escape in
+        // the literal.
+        other => {
+            if first_invalid.is_none() {
+                *first_invalid = Some(format!("invalid escape sequence '\\{other}'"));
+            }
+            Ok((format!("\\{other}"), pos + 1))
+        }
     }
 }

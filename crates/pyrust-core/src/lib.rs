@@ -84,9 +84,9 @@ pub use string_interning::{intern_string, intern_string_value};
 pub use symbol::Symbol;
 pub use traceback::{
     FrameGlobals, FrameInfo, captured_error_frames_len, clone_captured_error_frames,
-    format_traceback, get_current_vm_col_span, get_current_vm_line, record_traceback_frame,
-    reset_captured_error_frames, reset_current_vm_line, set_current_vm_col_span,
-    set_current_vm_line, take_captured_error_frames,
+    format_traceback, get_current_vm_col_span, get_current_vm_line, get_current_vm_pc,
+    record_traceback_frame, reset_captured_error_frames, reset_current_vm_line,
+    set_current_vm_col_span, set_current_vm_line, set_current_vm_pc, take_captured_error_frames,
 };
 
 #[cfg(test)]

@@ -131,7 +131,30 @@ impl Interpreter {
         globals_dict: Option<Value>,
         locals_dict: Option<Value>,
     ) -> Result<()> {
+        self.run_exec_code_with_closure(code, local_index, globals_dict, locals_dict, None)
+    }
+
+    /// Run a pre-compiled code object with optional Python 3.11+ `closure` cells
+    /// (`exec(code, globals, locals, closure=...)`).
+    pub(crate) fn run_exec_code_with_closure(
+        &mut self,
+        code: Rc<crate::bytecode::FnCode>,
+        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+        globals_dict: Option<Value>,
+        locals_dict: Option<Value>,
+        closure: Option<Vec<pyrust_core::CellSlot>>,
+    ) -> Result<()> {
         let _int_max_str_digits_guard = IntMaxStrDigitsExecutionGuard::enter(self);
+        let mut cells_buf = CellsBuf::with_capacity(
+            code.own_cell_count as usize + closure.as_ref().map_or(0, Vec::len),
+        );
+        for _ in 0..code.own_cell_count {
+            cells_buf.push(pyrust_core::CellSlot::new_empty());
+        }
+        if let Some(free_cells) = closure {
+            cells_buf.extend(free_cells);
+        }
+        let cells_slice = CellSlice::from_slice(&cells_buf);
         match globals_dict {
             None => {
                 // Run in current module scope.
@@ -148,7 +171,7 @@ impl Interpreter {
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let namespace_mirror_guard =
                     self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
-                let vm_result = self.run_bytecode(&code, regs_slice);
+                let vm_result = self.run_bytecode_with_cells(&code, regs_slice, cells_slice);
                 drop(namespace_mirror_guard);
                 self.detach_vm_frame_view();
                 record_exec_string_frame(self, &vm_result, &code.filename);
@@ -189,7 +212,7 @@ impl Interpreter {
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let namespace_mirror_guard =
                     self.register_script_namespace_mirror(regs_ptr, regs_len, &local_index);
-                let vm_result = self.run_bytecode(&code, regs_slice);
+                let vm_result = self.run_bytecode_with_cells(&code, regs_slice, cells_slice);
                 drop(namespace_mirror_guard);
                 self.detach_vm_frame_view();
                 record_exec_string_frame(self, &vm_result, &code.filename);

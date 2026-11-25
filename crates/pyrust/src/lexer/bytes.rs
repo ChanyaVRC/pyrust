@@ -1,4 +1,9 @@
-fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> {
+fn lex_bytes(
+    chars: &[char],
+    start: usize,
+    raw: bool,
+    first_invalid: &mut Option<String>,
+) -> Result<(Token, usize)> {
     let quote = chars[start];
 
     // Triple-quoted bytes literals: b"""...""" or b'''...'''
@@ -54,6 +59,7 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                         'f' => 0x0c,
                         'v' => 0x0b,
                         '0'..='7' => {
+                            let oct_start = pos;
                             let mut val = esc as u32 - '0' as u32;
                             if let Some(&d) = chars.get(pos + 1)
                                 && ('0'..='7').contains(&d)
@@ -67,8 +73,11 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                                     pos += 1;
                                 }
                             }
-                            // CPython 3.12: values > 0xFF emit SyntaxWarning and truncate
-                            // to the low byte. pyrust omits the warning for now.
+                            if val > 0xFF && first_invalid.is_none() {
+                                let seq: String = chars[oct_start..=pos].iter().collect();
+                                *first_invalid =
+                                    Some(format!("invalid octal escape sequence '\\{seq}'"));
+                            }
                             (val & 0xFF) as u8
                         }
                         'x' => {
@@ -99,11 +108,15 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                                 continue;
                             }
                             // Unrecognised escape: keep backslash + char verbatim
-                            // (matches CPython 3.12 which emits a SyntaxWarning).
+                            // and emit a SyntaxWarning (matching CPython 3.12).
                             if (other as u32) > 0x7f {
                                 return Err(PyError::lex(format!(
                                     "bytes can only contain ASCII literal characters (got {other:?})"
                                 )));
+                            }
+                            if first_invalid.is_none() {
+                                *first_invalid =
+                                    Some(format!("invalid escape sequence '\\{other}'"));
                             }
                             out.push(b'\\');
                             out.push(other as u8);
@@ -183,7 +196,8 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                 '0'..='7' => {
                     // \ooo — 1 to 3 octal digits; produces values 0x00–0xFF.
                     // CPython 3.12: values > 0xFF emit SyntaxWarning and truncate to
-                    // the low byte. pyrust omits the warning for now.
+                    // the low byte.
+                    let oct_start = pos;
                     let mut val = esc as u32 - '0' as u32;
                     if let Some(&d) = chars.get(pos + 1)
                         && ('0'..='7').contains(&d)
@@ -196,6 +210,10 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                             val = val * 8 + (d2 as u32 - '0' as u32);
                             pos += 1;
                         }
+                    }
+                    if val > 0xFF && first_invalid.is_none() {
+                        let seq: String = chars[oct_start..=pos].iter().collect();
+                        *first_invalid = Some(format!("invalid octal escape sequence '\\{seq}'"));
                     }
                     (val & 0xFF) as u8
                 }
@@ -230,12 +248,14 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                         continue;
                     }
                     // Unrecognised escape: CPython 3.12 keeps the backslash and
-                    // the character verbatim (emitting a SyntaxWarning which pyrust
-                    // omits for now).
+                    // the character verbatim and emits a SyntaxWarning.
                     if (other as u32) > 0x7f {
                         return Err(PyError::lex(format!(
                             "bytes can only contain ASCII literal characters (got {other:?})"
                         )));
+                    }
+                    if first_invalid.is_none() {
+                        *first_invalid = Some(format!("invalid escape sequence '\\{other}'"));
                     }
                     out.push(b'\\');
                     out.push(other as u8);

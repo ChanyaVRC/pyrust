@@ -27,7 +27,15 @@ impl Interpreter {
             let reg = (bases_base as usize + i) as crate::bytecode::Reg;
             raw.push(vm_read(regs, reg, num_locals)?);
         }
+        self.resolve_values_mro_entries(raw)
+    }
 
+    /// Resolve `__mro_entries__` on an already-materialized `Vec<Value>` of
+    /// class bases (shared by `class` statements and `builtins.__build_class__`).
+    pub(crate) fn resolve_values_mro_entries(
+        &mut self,
+        raw: Vec<Value>,
+    ) -> Result<(Vec<Value>, Option<Vec<Value>>)> {
         // Fast path: every entry is already a class.
         let needs_mro_entries = raw
             .iter()
@@ -260,5 +268,136 @@ impl Interpreter {
         let new_cls = Value::py_class(Rc::clone(class));
         invoke_class_method(self, method_val, new_cls, kwarg_args)?;
         Ok(())
+    }
+
+    /// CPython 3.12: `builtins.__build_class__(func, name, /, *bases, metaclass=None, **kwds)`.
+    pub(crate) fn builtin_build_class(&mut self, args: &[ExpandedCallArg]) -> Result<Value> {
+        let mut positional: Vec<Value> = Vec::new();
+        let mut explicit_metaclass: Option<Value> = None;
+        let mut kwds: ExpandedArgBuf = ExpandedArgBuf::new();
+        for arg in args {
+            match arg.name.as_deref() {
+                None => positional.push(arg.value.clone()),
+                Some("metaclass") => {
+                    if explicit_metaclass.is_some() {
+                        return Err(pyrust_core::type_err!(
+                            "__build_class__() got multiple values for keyword argument 'metaclass'"
+                        ));
+                    }
+                    explicit_metaclass = Some(arg.value.clone());
+                }
+                Some(k) => kwds.push(ExpandedCallArg {
+                    name: Some(k.to_string()),
+                    value: arg.value.clone(),
+                }),
+            }
+        }
+        if positional.len() < 2 {
+            return Err(pyrust_core::type_err!(
+                "__build_class__: not enough arguments"
+            ));
+        }
+        let func = positional[0].clone();
+        if !matches!(func.kind(), ValueKind::UserFunction(_)) {
+            return Err(pyrust_core::type_err!(
+                "__build_class__: func must be a function"
+            ));
+        }
+        let name = positional[1]
+            .as_str()
+            .ok_or_else(|| pyrust_core::type_err!("__build_class__: name is not a string"))?
+            .to_string();
+        let raw_bases = positional.split_off(2);
+        let (resolved_bases, orig_bases) = self.resolve_values_mro_entries(raw_bases)?;
+
+        // Compute winning metaclass per CPython's calculate_metaclass.
+        let metaclass: Value = match explicit_metaclass {
+            Some(meta) => {
+                if let ValueKind::PyClass(meta_cls) = meta.kind() {
+                    let mut winner = Rc::clone(meta_cls);
+                    for base_val in &resolved_bases {
+                        if let ValueKind::PyClass(base_cls) = base_val.kind() {
+                            let base_meta = metaclass_of(base_cls);
+                            if class_is_subclass_of(&base_meta, &winner) {
+                                winner = base_meta;
+                            } else if !class_is_subclass_of(&winner, &base_meta) {
+                                return Err(pyrust_core::type_err!(
+                                    "metaclass conflict: the metaclass of a derived class \
+                                     must be a (non-strict) subclass of the metaclasses of \
+                                     all its bases"
+                                ));
+                            }
+                        }
+                    }
+                    Value::py_class(winner)
+                } else {
+                    meta
+                }
+            }
+            None => {
+                if let Some(winner) = self.inherited_metaclass_winner(&resolved_bases)? {
+                    Value::py_class(winner)
+                } else if let Some(first) = resolved_bases.first()
+                    && !matches!(first.kind(), ValueKind::PyClass(_))
+                {
+                    value_class(first)
+                } else {
+                    Value::py_class(type_class_singleton())
+                }
+            }
+        };
+
+        let bases_tuple = Value::tuple(resolved_bases);
+        let namespace = match self.get_attr(&metaclass, "__prepare__") {
+            Ok(prepare_fn) => {
+                let mut prepare_args: ExpandedArgBuf = smallvec![
+                    ExpandedCallArg {
+                        name: None,
+                        value: Value::string(name.clone()),
+                    },
+                    ExpandedCallArg {
+                        name: None,
+                        value: bases_tuple.clone(),
+                    },
+                ];
+                prepare_args.extend(kwds.iter().cloned());
+                self.call_function_expanded(prepare_fn, &prepare_args)?
+            }
+            Err(ref e) if e.class_name_is("AttributeError") => Value::dict(PyDict::default()),
+            Err(e) => return Err(e),
+        };
+
+        // Run the class body function.  If it wraps a non-function-scope code
+        // object (e.g. from `types.FunctionType(compile(...), globals())`),
+        // execute it with `namespace` as locals; otherwise invoke it directly.
+        let body_ret = self.call_function_expanded(func, &[])?;
+
+        if let Some(orig) = orig_bases {
+            self.namespace_set_item(&namespace, "__orig_bases__", Value::tuple(orig))?;
+        }
+
+        let mut call_args: ExpandedArgBuf = smallvec![
+            ExpandedCallArg {
+                name: None,
+                value: Value::string(name),
+            },
+            ExpandedCallArg {
+                name: None,
+                value: bases_tuple,
+            },
+            ExpandedCallArg {
+                name: None,
+                value: namespace,
+            },
+        ];
+        call_args.extend(kwds);
+        let cls = self.call_function_expanded(metaclass, &call_args)?;
+
+        if matches!(body_ret.kind(), ValueKind::BuiltinObject { .. })
+            && matches!(cls.kind(), ValueKind::PyClass(_))
+        {
+            let _ = self.assign_attr(body_ret, "cell_contents", cls.clone());
+        }
+        Ok(cls)
     }
 }
