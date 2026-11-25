@@ -497,6 +497,240 @@ pub(crate) fn select_raw_handles(
     }
 }
 
+/// Cross-platform 3-set OS `select()` on raw socket handles/fds for the
+/// `select` stdlib module (`select.select(rlist, wlist, xlist[, timeout])`).
+pub(crate) fn select_raw_handles_3(
+    read_fds: &[i64],
+    write_fds: &[i64],
+    except_fds: &[i64],
+    timeout: Option<Duration>,
+) -> Result<(Vec<i64>, Vec<i64>, Vec<i64>)> {
+    #[cfg(unix)]
+    {
+        let fd_setsize = libc::FD_SETSIZE as i64;
+        for &fd in read_fds.iter().chain(write_fds).chain(except_fds) {
+            if fd < 0 {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!("file descriptor cannot be a negative integer ({fd})"),
+                ));
+            }
+            if fd >= fd_setsize {
+                return Err(PyError::named(
+                    "ValueError",
+                    "filedescriptor out of range in select()".to_string(),
+                ));
+            }
+        }
+
+        let deadline = timeout.map(|d| Instant::now() + d);
+        loop {
+            let mut rset: libc::fd_set = unsafe { std::mem::zeroed() };
+            let mut wset: libc::fd_set = unsafe { std::mem::zeroed() };
+            let mut xset: libc::fd_set = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::FD_ZERO(&mut rset);
+                libc::FD_ZERO(&mut wset);
+                libc::FD_ZERO(&mut xset);
+            }
+            let mut max_fd: libc::c_int = -1;
+            for &fd in read_fds {
+                let cfd = fd as libc::c_int;
+                unsafe { libc::FD_SET(cfd, &mut rset) };
+                if cfd > max_fd {
+                    max_fd = cfd;
+                }
+            }
+            for &fd in write_fds {
+                let cfd = fd as libc::c_int;
+                unsafe { libc::FD_SET(cfd, &mut wset) };
+                if cfd > max_fd {
+                    max_fd = cfd;
+                }
+            }
+            for &fd in except_fds {
+                let cfd = fd as libc::c_int;
+                unsafe { libc::FD_SET(cfd, &mut xset) };
+                if cfd > max_fd {
+                    max_fd = cfd;
+                }
+            }
+
+            let mut tv = match (timeout, deadline) {
+                (None, _) => None,
+                (Some(d), _) if d.is_zero() => Some(libc::timeval {
+                    tv_sec: 0,
+                    tv_usec: 0,
+                }),
+                (Some(_), Some(dl)) => {
+                    let rem = dl.saturating_duration_since(Instant::now());
+                    Some(libc::timeval {
+                        tv_sec: rem.as_secs() as libc::time_t,
+                        tv_usec: rem.subsec_micros() as libc::suseconds_t,
+                    })
+                }
+                _ => Some(libc::timeval {
+                    tv_sec: 0,
+                    tv_usec: 0,
+                }),
+            };
+            let tv_ptr = match tv.as_mut() {
+                Some(t) => t as *mut libc::timeval,
+                None => std::ptr::null_mut(),
+            };
+            let rptr = if read_fds.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                &mut rset as *mut libc::fd_set
+            };
+            let wptr = if write_fds.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                &mut wset as *mut libc::fd_set
+            };
+            let xptr = if except_fds.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                &mut xset as *mut libc::fd_set
+            };
+
+            let rc = unsafe { libc::select(max_fd + 1, rptr, wptr, xptr, tv_ptr) };
+            if rc < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == ErrorKind::Interrupted {
+                    if let Some(dl) = deadline
+                        && Instant::now() >= dl
+                    {
+                        return Ok((Vec::new(), Vec::new(), Vec::new()));
+                    }
+                    continue;
+                }
+                return Err(PyError::from_io_error(&err, None));
+            }
+            if rc == 0 {
+                return Ok((Vec::new(), Vec::new(), Vec::new()));
+            }
+            let ready_r = read_fds
+                .iter()
+                .copied()
+                .filter(|&fd| unsafe { libc::FD_ISSET(fd as libc::c_int, &rset) })
+                .collect();
+            let ready_w = write_fds
+                .iter()
+                .copied()
+                .filter(|&fd| unsafe { libc::FD_ISSET(fd as libc::c_int, &wset) })
+                .collect();
+            let ready_x = except_fds
+                .iter()
+                .copied()
+                .filter(|&fd| unsafe { libc::FD_ISSET(fd as libc::c_int, &xset) })
+                .collect();
+            return Ok((ready_r, ready_w, ready_x));
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let mut rset = win_ffi::WinFdSet::new_boxed();
+        let mut wset = win_ffi::WinFdSet::new_boxed();
+        let mut xset = win_ffi::WinFdSet::new_boxed();
+
+        for &fd in read_fds {
+            if fd < 0 {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!("file descriptor cannot be a negative integer ({fd})"),
+                ));
+            }
+            if !rset.push(fd as usize) {
+                return Err(PyError::named(
+                    "ValueError",
+                    "too many file descriptors in select()".to_string(),
+                ));
+            }
+        }
+        for &fd in write_fds {
+            if fd < 0 {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!("file descriptor cannot be a negative integer ({fd})"),
+                ));
+            }
+            if !wset.push(fd as usize) {
+                return Err(PyError::named(
+                    "ValueError",
+                    "too many file descriptors in select()".to_string(),
+                ));
+            }
+        }
+        for &fd in except_fds {
+            if fd < 0 {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!("file descriptor cannot be a negative integer ({fd})"),
+                ));
+            }
+            if !xset.push(fd as usize) {
+                return Err(PyError::named(
+                    "ValueError",
+                    "too many file descriptors in select()".to_string(),
+                ));
+            }
+        }
+
+        let tv = timeout.map(|d| win_ffi::Timeval {
+            tv_sec: d.as_secs().min(i32::MAX as u64) as i32,
+            tv_usec: d.subsec_micros() as i32,
+        });
+        let rptr = if rset.fd_count > 0 {
+            &mut *rset as *mut win_ffi::WinFdSet
+        } else {
+            std::ptr::null_mut()
+        };
+        let wptr = if wset.fd_count > 0 {
+            &mut *wset as *mut win_ffi::WinFdSet
+        } else {
+            std::ptr::null_mut()
+        };
+        let xptr = if xset.fd_count > 0 {
+            &mut *xset as *mut win_ffi::WinFdSet
+        } else {
+            std::ptr::null_mut()
+        };
+        let tvptr = match &tv {
+            Some(t) => t as *const win_ffi::Timeval,
+            None => std::ptr::null(),
+        };
+
+        let rc = unsafe { win_ffi::ws_select(0, rptr, wptr, xptr, tvptr) };
+        if rc < 0 {
+            let code = unsafe { win_ffi::wsa_get_last_error() };
+            let err = std::io::Error::from_raw_os_error(code);
+            return Err(PyError::from_io_error(&err, None));
+        }
+        if rc == 0 {
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
+        }
+
+        let ready_r = read_fds
+            .iter()
+            .copied()
+            .filter(|&fd| rset.contains(fd as usize))
+            .collect();
+        let ready_w = write_fds
+            .iter()
+            .copied()
+            .filter(|&fd| wset.contains(fd as usize))
+            .collect();
+        let ready_x = except_fds
+            .iter()
+            .copied()
+            .filter(|&fd| xset.contains(fd as usize))
+            .collect();
+        Ok((ready_r, ready_w, ready_x))
+    }
+}
+
 fn raw_setsockopt_int(raw: i64, level: i32, optname: i32, val: i32) -> std::io::Result<()> {
     #[cfg(unix)]
     {

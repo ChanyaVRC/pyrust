@@ -10,9 +10,11 @@
 // Reference: <https://docs.python.org/3/library/tempfile.html>
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 use indexmap::IndexMap;
 use pyrust_core::{BuiltinState, BuiltinTypeOps};
@@ -50,6 +52,54 @@ const TEMPFILE_PY_EXPORTS: [&str; 14] = [
 ];
 
 static NEXT_TEMP_FILENO: AtomicI64 = AtomicI64::new(1000);
+static TEMP_FD_HANDLES: LazyLock<Mutex<HashMap<i64, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn register_temp_fd_handle(fd: i64, file: &std::fs::File) {
+    #[cfg(unix)]
+    let raw = {
+        use std::os::unix::io::AsRawFd;
+        file.as_raw_fd() as usize
+    };
+    #[cfg(windows)]
+    let raw = {
+        use std::os::windows::io::AsRawHandle;
+        file.as_raw_handle() as usize
+    };
+    TEMP_FD_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(fd, raw);
+}
+
+fn unregister_temp_fd_handle(fd: i64) {
+    TEMP_FD_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&fd);
+}
+
+/// Duplicate an open `std::fs::File` belonging to a `tempfile` native stream.
+pub(crate) fn try_clone_temp_fd(fd: i64) -> Option<std::io::Result<std::fs::File>> {
+    let table = TEMP_FD_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+    let &raw = table.get(&fd)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::{BorrowedFd, RawFd};
+        // SAFETY: `TEMP_FD_HANDLES` only retains raw fds while their owning
+        // `TempFileState` keeps `file` open and unregisters before drop/close.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(raw as RawFd) };
+        Some(borrowed.try_clone_to_owned().map(std::fs::File::from))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{BorrowedHandle, RawHandle};
+        // SAFETY: `TEMP_FD_HANDLES` only retains raw handles while their owning
+        // `TempFileState` keeps `file` open and unregisters before drop/close.
+        let borrowed = unsafe { BorrowedHandle::borrow_raw(raw as RawHandle) };
+        Some(borrowed.try_clone_to_owned().map(std::fs::File::from))
+    }
+}
 
 /// Execute `TEMPFILE_PY_SOURCE` once, wire its wrappers to the native helpers,
 /// hide private helper names from `dir(tempfile)`, and export the public
@@ -402,6 +452,7 @@ fn open_native_temp_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Valu
     }
 
     let fd = NEXT_TEMP_FILENO.fetch_add(1, Ordering::Relaxed);
+    register_temp_fd_handle(fd, &file);
     let final_display_name = if unlink_immediately {
         Value::int(fd)
     } else {
@@ -664,12 +715,19 @@ fn temp_call_method(state: &BuiltinState, method: &str, args: &[Value]) -> Resul
     }
 }
 
+impl Drop for TempFileState {
+    fn drop(&mut self) {
+        unregister_temp_fd_handle(self.fd);
+    }
+}
+
 fn temp_close(state: &BuiltinState) -> Result<()> {
     let mut borrow = state.borrow_mut();
     let s = borrow
         .downcast_mut::<TempFileState>()
         .ok_or_else(|| PyError::runtime("internal: bad temp file state".to_string()))?;
     if !s.closed {
+        unregister_temp_fd_handle(s.fd);
         if let Some(mut file) = s.file.take() {
             let _ = file.flush();
             drop(file);
