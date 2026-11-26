@@ -12,7 +12,7 @@
 # Reference: <https://docs.python.org/3/library/enum.html>
 
 import sys as _sys
-from types import DynamicClassAttribute
+from types import DynamicClassAttribute, FunctionType as _FunctionType
 
 __all__ = [
     "EnumType",
@@ -141,8 +141,11 @@ def _is_sunder(name):
 
 
 def _is_descriptor(obj):
+    # User-defined functions are descriptors in CPython (`function.__get__`),
+    # but PyRust does not expose `__get__` on them, so check explicitly.
     return (
-        hasattr(obj, "__get__")
+        isinstance(obj, _FunctionType)
+        or hasattr(obj, "__get__")
         or hasattr(obj, "__set__")
         or hasattr(obj, "__delete__")
     )
