@@ -41,3 +41,39 @@ print("tok_name_nt:", token.tok_name[token.NT_OFFSET])
 print("ISEOF:", token.ISEOF(token.ENDMARKER), token.ISEOF(token.NAME))
 print("ISTERMINAL:", token.ISTERMINAL(token.NAME), token.ISTERMINAL(token.NT_OFFSET))
 print("ISNONTERMINAL:", token.ISNONTERMINAL(token.NAME), token.ISNONTERMINAL(token.NT_OFFSET))
+
+# --- Exact namespace / ordering parity (#3348) ---
+print("doc:", repr(token.__doc__))
+print("all_len:", len(token.__all__))
+print("all_head:", token.__all__[:8])
+print("all_tail:", token.__all__[-4:])
+public = [k for k in vars(token) if not k.startswith("__")]
+print("public_order_head:", public[:6])
+print("public_order_tail:", public[-8:])
+print("public_len:", len(public))
+print("tok_name_items_head:", list(token.tok_name.items())[:3])
+print("tok_name_items_tail:", list(token.tok_name.items())[-3:])
+print("exact_keys_head:", list(token.EXACT_TOKEN_TYPES)[:6])
+print("exact_keys_tail:", list(token.EXACT_TOKEN_TYPES)[-4:])
+print("tok_name_roundtrip:", all(getattr(token, n) == v for v, n in token.tok_name.items()))
+print("exact_values_in_range:", all(0 <= v < token.N_TOKENS for v in token.EXACT_TOKEN_TYPES.values()))
+print("all_names_exist:", all(hasattr(token, n) for n in token.__all__))
+print("star_import:", end=" ")
+ns = {}
+exec("from token import *", ns)
+print(sorted(k for k in ns if k != "__builtins__") == sorted(token.__all__))
+
+# Predicates: result types and duck-typed arguments
+for x in (0, 1, 255, 256, 257, -1, True, False, 255.5, 256.0):
+    print("pred:", repr(x), token.ISTERMINAL(x), token.ISNONTERMINAL(x), token.ISEOF(x))
+for bad in ("a", None, [1]):
+    for fn in (token.ISTERMINAL, token.ISNONTERMINAL):
+        try:
+            fn(bad)
+        except TypeError as e:
+            print("pred_error:", type(e).__name__)
+print("iseof_str:", token.ISEOF("a"), token.ISEOF(None))
+
+# Mutability of the public tables is per-module-instance, like CPython
+print("tok_name_is_dict:", type(token.tok_name) is dict, type(token.EXACT_TOKEN_TYPES) is dict)
+print("constants_are_int:", all(type(getattr(token, n)) is int for n in token.tok_name.values()))
