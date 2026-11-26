@@ -934,16 +934,16 @@ pyrust_builtin_modules! {
     pkgutil @inject,
     runpy @inject,
     sysconfig @inject,
-    // `colorsys` (issues #3230, #3329): 100% native Rust in `colorsys.rs`; no
-    // Python-source injection.
-    // `fileinput`, `filecmp`, `netrc`, `quopri`, and `getopt`
-    // (issue #3230): Python 3.12 compact standard library utility modules.
+    // `colorsys` (issues #3230, #3329) and `getopt` (issues #3230, #3330): 100%
+    // native Rust in `colorsys.rs` / `getopt.rs`; no Python-source injection.
+    // `fileinput`, `filecmp`, `netrc`, and `quopri` (issue #3230): Python 3.12
+    // compact standard library utility modules.
     colorsys,
     fileinput @inject,
     filecmp @inject,
     netrc @inject,
     quopri @inject,
-    getopt @inject,
+    getopt,
     // `keyword`, `reprlib`, `sched`, `pickletools`, `optparse`, `this`, and
     // `antigravity` (issue #3248): 100% native-Rust Python 3.12 compact stdlib
     // modules built with PyRust's expanded macro toolkit (no `@inject`).
