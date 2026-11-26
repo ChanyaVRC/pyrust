@@ -14,9 +14,7 @@ use std::rc::Rc;
 use pyrust_derive::pyrust_module;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::builtin_args::{
-    FromValue, PyBool, PyBytes, PyIndex, PyPath, PyValue, PyValueRef,
-};
+use crate::interpreter::builtin_args::{PyBool, PyBytes, PyIndex, PyPath, PyValue, PyValueRef};
 use crate::interpreter::{
     ExpandedCallArg, Interpreter, NativeIterFrame, lookup_exc_class, value_type_name_str,
 };
@@ -206,7 +204,12 @@ fn resolve_conf_name(
     }
 }
 
-fn require_env_bytes<'a>(val: &'a Value) -> Result<&'a [u8]> {
+#[allow(clippy::unnecessary_cast)]
+fn c_long_to_i64(val: libc::c_long) -> i64 {
+    val as i64
+}
+
+fn require_env_bytes(val: &Value) -> Result<&[u8]> {
     match val.kind() {
         ValueKind::Bytes(b) => Ok(b.as_slice()),
         _ => Err(PyError::named(
@@ -1053,7 +1056,7 @@ pyrust_module! {
                         ));
                     }
                 }
-                return Ok(Value::int(i64::from(val)));
+                return Ok(Value::int(c_long_to_i64(val)));
             }
             ValueKind::Bool(b) => {
                 let raw_fd = libc::c_int::from(b);
@@ -1068,7 +1071,7 @@ pyrust_module! {
                         ));
                     }
                 }
-                return Ok(Value::int(i64::from(val)));
+                return Ok(Value::int(c_long_to_i64(val)));
             }
             _ => {}
         }
@@ -1087,7 +1090,7 @@ pyrust_module! {
                 ));
             }
         }
-        Ok(Value::int(i64::from(val)))
+        Ok(Value::int(c_long_to_i64(val)))
     }
 
     /// Return the configuration limit `name` for the file descriptor `fd`.
@@ -1106,7 +1109,7 @@ pyrust_module! {
                 ));
             }
         }
-        Ok(Value::int(i64::from(val)))
+        Ok(Value::int(c_long_to_i64(val)))
     }
 
     /// Return an integer-valued system configuration value.
@@ -1124,7 +1127,7 @@ pyrust_module! {
                 ));
             }
         }
-        Ok(Value::int(i64::from(val)))
+        Ok(Value::int(c_long_to_i64(val)))
     }
 
     /// Return a string-valued system configuration value.

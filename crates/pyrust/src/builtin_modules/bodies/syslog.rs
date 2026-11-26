@@ -11,7 +11,7 @@ use pyrust_derive::pyrust_module;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{PyIndex, PyStr, PyValue};
-use crate::interpreter::{ExpandedCallArg, Interpreter, value_type_name_str};
+use crate::interpreter::{ExpandedCallArg, value_type_name_str};
 use crate::value::{Value, ValueKind};
 
 /// POSIX `openlog` retains the `ident` pointer without copying it, so we keep

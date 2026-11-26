@@ -39,6 +39,11 @@ type RlimitResource = libc::__rlimit_resource_t;
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 type RlimitResource = libc::c_int;
 
+#[allow(clippy::unnecessary_cast)]
+fn c_long_to_i64(val: libc::c_long) -> i64 {
+    val as i64
+}
+
 fn rlim_to_value(val: libc::rlim_t) -> Value {
     if val == libc::RLIM_INFINITY {
         Value::int(libc::RLIM_INFINITY as i64)
@@ -273,20 +278,20 @@ pyrust_module! {
         Ok(struct_rusage::make([
             Value::float(utime),
             Value::float(stime),
-            Value::int(i64::from(ru.ru_maxrss)),
-            Value::int(i64::from(ru.ru_ixrss)),
-            Value::int(i64::from(ru.ru_idrss)),
-            Value::int(i64::from(ru.ru_isrss)),
-            Value::int(i64::from(ru.ru_minflt)),
-            Value::int(i64::from(ru.ru_majflt)),
-            Value::int(i64::from(ru.ru_nswap)),
-            Value::int(i64::from(ru.ru_inblock)),
-            Value::int(i64::from(ru.ru_oublock)),
-            Value::int(i64::from(ru.ru_msgsnd)),
-            Value::int(i64::from(ru.ru_msgrcv)),
-            Value::int(i64::from(ru.ru_nsignals)),
-            Value::int(i64::from(ru.ru_nvcsw)),
-            Value::int(i64::from(ru.ru_nivcsw)),
+            Value::int(c_long_to_i64(ru.ru_maxrss)),
+            Value::int(c_long_to_i64(ru.ru_ixrss)),
+            Value::int(c_long_to_i64(ru.ru_idrss)),
+            Value::int(c_long_to_i64(ru.ru_isrss)),
+            Value::int(c_long_to_i64(ru.ru_minflt)),
+            Value::int(c_long_to_i64(ru.ru_majflt)),
+            Value::int(c_long_to_i64(ru.ru_nswap)),
+            Value::int(c_long_to_i64(ru.ru_inblock)),
+            Value::int(c_long_to_i64(ru.ru_oublock)),
+            Value::int(c_long_to_i64(ru.ru_msgsnd)),
+            Value::int(c_long_to_i64(ru.ru_msgrcv)),
+            Value::int(c_long_to_i64(ru.ru_nsignals)),
+            Value::int(c_long_to_i64(ru.ru_nvcsw)),
+            Value::int(c_long_to_i64(ru.ru_nivcsw)),
         ]))
     }
 
@@ -297,6 +302,6 @@ pyrust_module! {
         if pagesize <= 0 {
             return Ok(Value::int(4096));
         }
-        Ok(Value::int(i64::from(pagesize)))
+        Ok(Value::int(c_long_to_i64(pagesize)))
     }
 }

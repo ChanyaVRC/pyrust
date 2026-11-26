@@ -8,7 +8,7 @@
 use pyrust_derive::pyrust_module;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytesLike, PyIndex, PyValue};
+use crate::interpreter::builtin_args::{PyBool, PyBytesLike, PyIndex, PyValue};
 use crate::interpreter::{ExpandedCallArg, Interpreter, value_type_name_str};
 use crate::value::{Value, ValueKind};
 

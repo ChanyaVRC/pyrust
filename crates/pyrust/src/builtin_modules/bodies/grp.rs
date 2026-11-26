@@ -11,8 +11,8 @@ use std::sync::{LazyLock, Mutex};
 use pyrust_derive::pyrust_module;
 
 use crate::error::{PyError, Result};
+use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyIndex, PyStr};
-use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::value::Value;
 
 /// Serializes calls into POSIX non-reentrant `group` database functions
