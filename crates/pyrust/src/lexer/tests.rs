@@ -128,9 +128,10 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("expected depth-3 format spec to fail"),
         };
+        // Top-level lexer errors carry their location (#3402).
         assert_eq!(
             err.to_string(),
-            "Lex error: f-string: expressions nested too deeply"
+            "SyntaxError: f-string: expressions nested too deeply"
         );
     }
 

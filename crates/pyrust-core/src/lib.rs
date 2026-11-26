@@ -47,7 +47,9 @@ pub use environment::{
     NamespaceFastLocalCacheSource, NamespaceMirrorGuard, NamespaceStoreOutcome, NamespaceStoreSlot,
     namespace_name_interest_mask,
 };
-pub use errors::{PyError, PyErrorKind, Result};
+pub use errors::{
+    PyError, PyErrorKind, Result, SyntaxErrorInfo, SyntaxErrorPending, SyntaxTextRule,
+};
 pub use gil_tls::{
     GilLocalKey, GilTlsGuard, HotTlsOwner, HotTlsState, active_tls, home_tls_owner, try_active_tls,
 };

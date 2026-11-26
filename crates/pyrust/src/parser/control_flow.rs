@@ -370,16 +370,22 @@ impl Parser {
 
     fn parse_del(&mut self) -> Result<Stmt> {
         self.expect(&Token::Del)?;
+        let first_start = self.pos;
         let mut targets = vec![self.parse_expr()?];
+        // Token range of each target, so a rejected one is reported where
+        // CPython reports it (#3402).
+        let mut ranges = vec![(first_start, self.pos)];
         while self.is(&Token::Comma) {
             self.bump();
             if self.at_stmt_end() {
                 break;
             }
+            let start = self.pos;
             targets.push(self.parse_expr()?);
+            ranges.push((start, self.pos));
         }
-        for t in &targets {
-            validate_del_target(t)?;
+        for (t, &(start, end)) in targets.iter().zip(&ranges) {
+            validate_del_target(t).map_err(|e| self.locate_error_at(e, start, end))?;
         }
         Ok(Stmt::Delete(targets))
     }

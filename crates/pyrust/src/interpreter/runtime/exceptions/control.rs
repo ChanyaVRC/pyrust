@@ -68,8 +68,43 @@ impl Interpreter {
                 reason,
             } => self
                 .instantiate_unicode_encode_error_exception(encoding, object, start, end, reason)?,
+            pyrust_core::PyErrorKind::Syntax(info) => {
+                self.instantiate_syntax_error_exception(*info)?
+            }
             other => return Err(PyError::new(other)),
         })
+    }
+
+    /// Instantiate a compile-time `SyntaxError` / `IndentationError` /
+    /// `TabError` the way CPython 3.12's tokenizer and parser raise it:
+    /// `args == (msg, (filename, lineno, offset, text, end_lineno,
+    /// end_offset))`, which `SyntaxError.__init__` unpacks into the matching
+    /// attributes (#3402).  An error that never got a location keeps
+    /// `args == (msg,)`.
+    fn instantiate_syntax_error_exception(
+        &self,
+        info: pyrust_core::SyntaxErrorInfo,
+    ) -> Result<Value> {
+        let class = lookup_exc_class(info.class_name).ok_or_else(|| {
+            PyError::runtime(format!(
+                "built-in exception '{}' is not defined",
+                info.class_name
+            ))
+        })?;
+        let mut args = vec![Value::string(info.msg)];
+        if info.lineno.is_some() || info.filename.is_some() {
+            let int = |n: Option<i64>| n.map_or_else(Value::none, Value::int);
+            let string = |s: Option<String>| s.map_or_else(Value::none, Value::string);
+            args.push(Value::tuple(vec![
+                string(info.filename),
+                int(info.lineno),
+                int(info.offset),
+                string(info.text),
+                int(info.end_lineno),
+                int(info.end_offset),
+            ]));
+        }
+        Ok(instantiate_exception(class, args))
     }
 
     /// Attach implicit context before an uncaught error escapes a frame.

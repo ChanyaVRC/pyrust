@@ -1,3 +1,15 @@
+/// A number-literal tokenizer error at absolute char index `cur` (CPython
+/// `tok->cur`: the reported offset is the 0-based column of `cur`), #3402.
+#[cold]
+fn number_error(msg: impl Into<String>, cur: usize) -> PyError {
+    PyError::syntax(crate::error::SyntaxErrorInfo::at_chars(
+        msg,
+        cur,
+        cur,
+        crate::error::SyntaxTextRule::TokenizerLine,
+    ))
+}
+
 /// Validate underscore placement in a raw digit string (before stripping `_`).
 ///
 /// CPython rules (same across 3.11 / 3.12):
@@ -6,20 +18,17 @@
 /// - A leading underscore after the base prefix (e.g. `0x_FF`) is **valid**.
 ///
 /// `kind` is used only in the error message (e.g. `"decimal"`, `"hexadecimal"`).
-fn validate_underscores(raw: &[char], kind: &str) -> Result<()> {
-    let mut prev_was_under = false;
-    for &c in raw {
-        if c == '_' {
-            if prev_was_under {
-                return Err(PyError::lex(format!("invalid {kind} literal")));
-            }
-            prev_was_under = true;
-        } else {
-            prev_was_under = false;
+/// `raw_start` is the absolute char index of `raw[0]`: CPython's tokenizer
+/// stops just past the first `_` that is not followed by a digit, and reports
+/// that cursor.
+fn validate_underscores(raw: &[char], raw_start: usize, kind: &str) -> Result<()> {
+    for (i, &c) in raw.iter().enumerate() {
+        if c == '_' && matches!(raw.get(i + 1), None | Some('_')) {
+            return Err(number_error(
+                format!("invalid {kind} literal"),
+                raw_start + i + 1,
+            ));
         }
-    }
-    if prev_was_under {
-        return Err(PyError::lex(format!("invalid {kind} literal")));
     }
     Ok(())
 }
@@ -35,13 +44,20 @@ fn validate_underscores(raw: &[char], kind: &str) -> Result<()> {
 ///
 /// `raw` is the full literal slice (digits, `.`, `e`/`E`, `+`/`-`); the value
 /// is parsed only after stripping the `_`s.
-fn validate_decimal_underscores(raw: &[char]) -> Result<()> {
+///
+/// `raw_start` is the absolute char index of `raw[0]`.  CPython reports the
+/// cursor just past an `_` that is not followed by a digit, or at an `_` that
+/// does not follow one.
+fn validate_decimal_underscores(raw: &[char], raw_start: usize) -> Result<()> {
     for (i, &c) in raw.iter().enumerate() {
         if c == '_' {
             let prev_digit = i > 0 && raw[i - 1].is_ascii_digit();
             let next_digit = raw.get(i + 1).is_some_and(|n| n.is_ascii_digit());
-            if !prev_digit || !next_digit {
-                return Err(PyError::lex("invalid decimal literal".to_string()));
+            if !next_digit {
+                return Err(number_error("invalid decimal literal", raw_start + i + 1));
+            }
+            if !prev_digit {
+                return Err(number_error("invalid decimal literal", raw_start + i));
             }
         }
     }
@@ -54,13 +70,21 @@ fn validate_decimal_underscores(raw: &[char]) -> Result<()> {
 /// `e`, or `j`).  A literal that starts with `0` is only valid if every digit
 /// is `0` (`0`, `00`, `0_0`); any nonzero digit (`0123`, `09`, `0_1`) is a
 /// `SyntaxError`.  Underscore placement is assumed already validated.
-fn check_leading_zero(raw: &[char]) -> Result<()> {
-    if raw.first() == Some(&'0') && raw.iter().any(|&c| c.is_ascii_digit() && c != '0') {
-        return Err(PyError::lex(
+///
+/// `raw_start` is the absolute char index of `raw[0]`; CPython reports the
+/// range from just past the literal's first char to just past its first
+/// non-zero digit.
+fn check_leading_zero(raw: &[char], raw_start: usize) -> Result<()> {
+    if raw.first() == Some(&'0')
+        && let Some(nonzero) = raw.iter().position(|&c| c.is_ascii_digit() && c != '0')
+    {
+        return Err(PyError::syntax(crate::error::SyntaxErrorInfo::at_chars(
             "leading zeros in decimal integer literals are not permitted; \
-             use an 0o prefix for octal integers"
-                .to_string(),
-        ));
+             use an 0o prefix for octal integers",
+            raw_start + 1,
+            raw_start + nonzero + 1,
+            crate::error::SyntaxTextRule::TokenizerLine,
+        )));
     }
     Ok(())
 }
@@ -84,7 +108,7 @@ fn lex_leading_dot_float(chars: &[char], start: usize) -> Result<(Token, usize)>
         }
     }
     let raw = &chars[start..pos];
-    validate_decimal_underscores(raw)?;
+    validate_decimal_underscores(raw, start)?;
     let text: String = raw.iter().filter(|&&c| c != '_').collect();
     let val = text
         .parse::<f64>()
@@ -110,9 +134,11 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         }
         let raw_hex = &chars[hex_start..pos];
         if raw_hex.is_empty() || raw_hex.iter().all(|&c| c == '_') {
-            return Err(PyError::lex("invalid hexadecimal literal".to_string()));
+            // CPython stops right after the prefix, or after one `_`.
+            let cur = hex_start + usize::from(!raw_hex.is_empty());
+            return Err(number_error("invalid hexadecimal literal", cur));
         }
-        validate_underscores(raw_hex, "hexadecimal")?;
+        validate_underscores(raw_hex, hex_start, "hexadecimal")?;
         let text: String = raw_hex.iter().filter(|&&c| c != '_').collect();
         return match i64::from_str_radix(&text, 16) {
             Ok(val) => Ok((Token::Int(val), pos)),
@@ -133,9 +159,11 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         }
         let raw_oct = &chars[oct_start..pos];
         if raw_oct.is_empty() || raw_oct.iter().all(|&c| c == '_') {
-            return Err(PyError::lex("invalid octal literal".to_string()));
+            // CPython stops right after the prefix, or after one `_`.
+            let cur = oct_start + usize::from(!raw_oct.is_empty());
+            return Err(number_error("invalid octal literal", cur));
         }
-        validate_underscores(raw_oct, "octal")?;
+        validate_underscores(raw_oct, oct_start, "octal")?;
         let text: String = raw_oct.iter().filter(|&&c| c != '_').collect();
         return match i64::from_str_radix(&text, 8) {
             Ok(val) => Ok((Token::Int(val), pos)),
@@ -155,9 +183,11 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         }
         let raw_bin = &chars[bin_start..pos];
         if raw_bin.is_empty() || raw_bin.iter().all(|&c| c == '_') {
-            return Err(PyError::lex("invalid binary literal".to_string()));
+            // CPython stops right after the prefix, or after one `_`.
+            let cur = bin_start + usize::from(!raw_bin.is_empty());
+            return Err(number_error("invalid binary literal", cur));
         }
-        validate_underscores(raw_bin, "binary")?;
+        validate_underscores(raw_bin, bin_start, "binary")?;
         let text: String = raw_bin.iter().filter(|&&c| c != '_').collect();
         return match i64::from_str_radix(&text, 2) {
             Ok(val) => Ok((Token::Int(val), pos)),
@@ -204,7 +234,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
             }
         }
         let raw = &chars[start..pos];
-        validate_decimal_underscores(raw)?;
+        validate_decimal_underscores(raw, start)?;
         let text: String = raw.iter().filter(|&&c| c != '_').collect();
         let val = text
             .parse::<f64>()
@@ -228,7 +258,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
             }
             if pos > exp_start {
                 let raw = &chars[start..pos];
-                validate_decimal_underscores(raw)?;
+                validate_decimal_underscores(raw, start)?;
                 let text: String = raw.iter().filter(|&&c| c != '_').collect();
                 let val = text
                     .parse::<f64>()
@@ -243,7 +273,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         // (`01j` is a valid complex literal in CPython).
         if matches!(chars.get(pos), Some(&'j') | Some(&'J')) {
             let raw_imag = &chars[start..pos];
-            validate_decimal_underscores(raw_imag)?;
+            validate_decimal_underscores(raw_imag, start)?;
             let text: String = raw_imag.iter().filter(|&&c| c != '_').collect();
             let val = text
                 .parse::<f64>()
@@ -251,8 +281,8 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
             return Ok((Token::Imag(val), pos + 1));
         }
         let raw_dec = &chars[start..int_end];
-        validate_decimal_underscores(raw_dec)?;
-        check_leading_zero(raw_dec)?;
+        validate_decimal_underscores(raw_dec, start)?;
+        check_leading_zero(raw_dec, start)?;
         let text: String = raw_dec.iter().filter(|&&c| c != '_').collect();
         match text.parse::<i64>() {
             Ok(val) => Ok((Token::Int(val), pos)),
@@ -266,6 +296,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
                         crate::error::PyErrorKind::Named(_, message) => message,
                         other => other.to_string(),
                     };
+                    // Located by the scanner loop (`huge_literal_error`, #3402).
                     PyError::lex(format!(
                         "{message} - Consider hexadecimal for huge integer literals \
                          to avoid decimal conversion limits."

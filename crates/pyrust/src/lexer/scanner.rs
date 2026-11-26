@@ -182,15 +182,77 @@ impl Lexer {
     }
 
     fn lex_source_inner(&mut self, src: &str, suppress_newlines: bool) -> Result<()> {
+        // Work on the full source as a flat char array so that string literals
+        // (including triple-quoted ones) can span line boundaries naturally.
+        let chars: Vec<char> = src.chars().collect();
+        self.lex_chars(&chars, suppress_newlines)
+            .map_err(|error| self.locate_error(error, &chars, suppress_newlines))
+    }
+
+    /// Attach CPython's `SyntaxError` location to a lexing failure (#3402).
+    ///
+    /// Errors that already know their position ([`SyntaxErrorPending::Chars`]
+    /// from the scanners, or lines from the indentation pass) are converted to
+    /// lines; any other lexer error falls back to the start of the token being
+    /// scanned, which is where CPython's tokenizer reports unterminated
+    /// literals.  An f-string replacement-field sub-lexer
+    /// (`suppress_newlines`) lexes a detached snippet whose coordinates mean
+    /// nothing in the enclosing file, so it drops the location and lets the
+    /// parser anchor the error on the f-string token instead.
+    #[cold]
+    fn locate_error(&self, error: PyError, chars: &[char], suppress_newlines: bool) -> PyError {
+        if suppress_newlines {
+            return match error.into_kind() {
+                crate::error::PyErrorKind::Syntax(info) => PyError::lex(info.msg),
+                other => PyError::new(other),
+            };
+        }
+        match error.into_kind() {
+            crate::error::PyErrorKind::Syntax(mut info) => {
+                if let Some(crate::error::SyntaxErrorPending::Chars { cur, end_cur, rule }) =
+                    info.pending
+                {
+                    let (lineno, offset) = char_line_and_column(chars, cur);
+                    let (end_lineno, end_offset) = char_line_and_column(chars, end_cur);
+                    let rule = match rule {
+                        crate::error::SyntaxTextRule::TokenizerLine => rule,
+                        crate::error::SyntaxTextRule::ParserLine { .. } => {
+                            crate::error::SyntaxTextRule::ParserLine {
+                                tokenizer_lineno: lineno,
+                            }
+                        }
+                    };
+                    info.lineno = Some(i64::from(lineno));
+                    info.offset = Some(offset);
+                    info.end_lineno = Some(i64::from(end_lineno));
+                    info.end_offset = Some(end_offset);
+                    info.pending = Some(crate::error::SyntaxErrorPending::Text {
+                        rule,
+                        newline_token: false,
+                    });
+                }
+                PyError::new(crate::error::PyErrorKind::Syntax(info))
+            }
+            crate::error::PyErrorKind::Lex(msg) | crate::error::PyErrorKind::Parse(msg) => {
+                let offset = i64::from(self.cur_col) + 1;
+                PyError::syntax(crate::error::SyntaxErrorInfo::at_lines(
+                    msg,
+                    (self.line, offset),
+                    (self.line, offset),
+                    crate::error::SyntaxTextRule::TokenizerLine,
+                    false,
+                ))
+            }
+            other => PyError::new(other),
+        }
+    }
+
+    fn lex_chars(&mut self, chars: &[char], suppress_newlines: bool) -> Result<()> {
         // CPython 3.12 dual-column indentation stack: `(col, altcol)` where
         // `col` expands tabs to 8-column tab stops and `altcol` counts tabs as
         // 1 column for inconsistent tab/space mixing (`TabError`) detection.
         let mut indent_stack: Vec<(usize, usize)> = vec![(0, 0)];
         let mut paren_depth: usize = 0; // track ( [ { for implicit line continuation
-
-        // Work on the full source as a flat char array so that string literals
-        // (including triple-quoted ones) can span line boundaries naturally.
-        let chars: Vec<char> = src.chars().collect();
         let mut pos = 0;
 
         while pos <= chars.len() {
@@ -255,7 +317,14 @@ impl Lexer {
 
             // Non-blank line: handle indentation.
             if !suppress_newlines && paren_depth == 0 {
-                self.handle_indent((indent_col, indent_altcol), &mut indent_stack)?;
+                // INDENT / DEDENT sit just past the indentation, which is where
+                // CPython anchors `unexpected indent` (#3402).
+                self.cur_col = indent_chars as u32;
+                self.handle_indent(
+                    (indent_col, indent_altcol),
+                    &mut indent_stack,
+                    line_end - line_start,
+                )?;
             }
 
             // Lex tokens on this logical line.  `lex_line_tokens` advances
@@ -274,29 +343,88 @@ impl Lexer {
             self.emit(Token::Dedent);
         }
 
+        // CPython reports a failure at the end of input on the last line, at
+        // the tokenizer cursor just past that line's (CRLF-translated, or for
+        // `exec` input appended) newline (#3402).
+        if !suppress_newlines {
+            let end = chars.len();
+            let ends_with_newline = chars.last() == Some(&'\n');
+            let content_end = end - usize::from(ends_with_newline);
+            let line_start = chars[..content_end]
+                .iter()
+                .rposition(|&c| c == '\n')
+                .map_or(0, |i| i + 1);
+            let line_len = content_end
+                - line_start
+                - usize::from(chars[line_start..content_end].last() == Some(&'\r'));
+            if ends_with_newline {
+                self.line = self.line.saturating_sub(1).max(1);
+            }
+            self.cur_col = (line_len + 1) as u32;
+        }
         self.emit(Token::Eof);
         Ok(())
+    }
+
+    /// An indentation failure on the current line, located like CPython 3.12's
+    /// tokenizer-error path (`_Pypegen_tokenizer_error`): `TabError` and
+    /// `too many levels of indentation` at `(line, 1)` with `end_offset` 0;
+    /// `unindent does not match` one past the line's newline with
+    /// `end_offset` -1.  Either way `text` is the line with its newline.
+    /// CPython raises the `int_max_str_digits` limit error for a decimal
+    /// literal from the parser, on the literal's line but deliberately without
+    /// columns (`offset == end_offset == 0`: "avoid a wall of 1000s of '^'s"),
+    /// #3402.  Other number errors pass through.
+    #[cold]
+    fn huge_literal_error(&self, error: PyError) -> PyError {
+        match error.into_kind() {
+            crate::error::PyErrorKind::Lex(msg)
+                if msg.ends_with("to avoid decimal conversion limits.") =>
+            {
+                PyError::syntax(crate::error::SyntaxErrorInfo::at_lines(
+                    msg,
+                    (self.line, 0),
+                    (self.line, 0),
+                    crate::error::SyntaxTextRule::ParserLine {
+                        tokenizer_lineno: self.line,
+                    },
+                    false,
+                ))
+            }
+            other => PyError::new(other),
+        }
+    }
+
+    #[cold]
+    fn indentation_error(&self, msg: &str, offset: i64, end_offset: i64) -> PyError {
+        PyError::syntax(crate::error::SyntaxErrorInfo::at_lines(
+            msg,
+            (self.line, offset),
+            (self.line, end_offset),
+            crate::error::SyntaxTextRule::ParserLine {
+                tokenizer_lineno: self.line,
+            },
+            false,
+        ))
     }
 
     fn handle_indent(
         &mut self,
         (col, altcol): (usize, usize),
         stack: &mut Vec<(usize, usize)>,
+        line_len: usize,
     ) -> Result<()> {
+        const TAB_ERROR: &str = "inconsistent use of tabs and spaces in indentation";
         let (cur_col, cur_altcol) = *stack.last().expect("indent stack is never empty");
         if col == cur_col {
             if altcol != cur_altcol {
-                return Err(PyError::lex(
-                    "inconsistent use of tabs and spaces in indentation".to_string(),
-                ));
+                return Err(self.indentation_error(TAB_ERROR, 1, 0));
             }
             return Ok(());
         }
         if col > cur_col {
             if altcol <= cur_altcol {
-                return Err(PyError::lex(
-                    "inconsistent use of tabs and spaces in indentation".to_string(),
-                ));
+                return Err(self.indentation_error(TAB_ERROR, 1, 0));
             }
             // CPython's tokenizer caps indentation nesting at `MAXINDENT` (100)
             // levels, raising `IndentationError: too many levels of indentation`.
@@ -310,7 +438,7 @@ impl Lexer {
             // we already hold `MAX_INDENT_LEVELS` levels, matching CPython 3.12
             // which accepts 99 nested levels and rejects the 100th.
             if stack.len() >= MAX_INDENT_LEVELS {
-                return Err(PyError::lex("too many levels of indentation".to_string()));
+                return Err(self.indentation_error("too many levels of indentation", 1, 0));
             }
             stack.push((col, altcol));
             self.emit(Token::Indent);
@@ -323,14 +451,16 @@ impl Lexer {
         }
         let (after_col, after_altcol) = *stack.last().expect("indent stack is never empty");
         if col != after_col {
-            return Err(PyError::lex(
-                "unindent does not match any outer indentation level".to_string(),
+            // CPython reports the tokenizer cursor, which sits past the whole
+            // line including its (CRLF-translated) newline.
+            return Err(self.indentation_error(
+                "unindent does not match any outer indentation level",
+                line_len as i64 + 1,
+                -1,
             ));
         }
         if altcol != after_altcol {
-            return Err(PyError::lex(
-                "inconsistent use of tabs and spaces in indentation".to_string(),
-            ));
+            return Err(self.indentation_error(TAB_ERROR, 1, 0));
         }
         Ok(())
     }
@@ -392,6 +522,11 @@ impl Lexer {
                         continue;
                     }
                     if !suppress_newlines && paren_depth == 0 {
+                        // CPython translates CRLF to LF before tokenizing, so a
+                        // NEWLINE token starts at the `\r` (#3402).
+                        if pos > 0 && chars[pos - 1] == '\r' {
+                            self.cur_col = self.cur_col.saturating_sub(1);
+                        }
                         self.emit(Token::Newline);
                     }
                     // Advance past '\n' and return so that lex_source can
@@ -417,7 +552,8 @@ impl Lexer {
                     // '\n' will be handled on the next iteration.
                 }
                 Some('0'..='9') => {
-                    let (tok, next) = lex_number(chars, pos)?;
+                    let (tok, next) =
+                        lex_number(chars, pos).map_err(|e| self.huge_literal_error(e))?;
                     self.emit(tok);
                     pos = next;
                 }
@@ -467,7 +603,8 @@ impl Lexer {
                     {
                         // Bytes literal: b"..." or b'...'
                         let mut first_invalid = None;
-                        let (tok, next) = lex_bytes(chars, pos + 1, false, &mut first_invalid)?;
+                        let (tok, next) = lex_bytes(chars, pos + 1, false, &mut first_invalid)
+                            .map_err(|e| literal_content_error(e, chars, tok_start))?;
                         if let Some(msg) = first_invalid {
                             self.warnings.push((self.line, msg));
                         }
@@ -479,7 +616,8 @@ impl Lexer {
                     {
                         // Raw bytes literal: br"..." / bR"..." / BR"..." / Br"..."
                         let mut first_invalid = None;
-                        let (tok, next) = lex_bytes(chars, pos + 2, true, &mut first_invalid)?;
+                        let (tok, next) = lex_bytes(chars, pos + 2, true, &mut first_invalid)
+                            .map_err(|e| literal_content_error(e, chars, tok_start))?;
                         self.emit(tok);
                         pos = next;
                     } else if (c == 'r' || c == 'R')
@@ -487,7 +625,8 @@ impl Lexer {
                     {
                         // Raw string literal: r"..." / R"..."
                         let mut first_invalid = None;
-                        let (tok, next) = lex_string(chars, pos + 1, true, &mut first_invalid)?;
+                        let (tok, next) = lex_string(chars, pos + 1, true, &mut first_invalid)
+                            .map_err(|e| literal_content_error(e, chars, tok_start))?;
                         self.emit(tok);
                         pos = next;
                     } else if (c == 'r' || c == 'R')
@@ -496,7 +635,8 @@ impl Lexer {
                     {
                         // Raw bytes literal: rb"..." / rB"..." / RB"..." / Rb"..."
                         let mut first_invalid = None;
-                        let (tok, next) = lex_bytes(chars, pos + 2, true, &mut first_invalid)?;
+                        let (tok, next) = lex_bytes(chars, pos + 2, true, &mut first_invalid)
+                            .map_err(|e| literal_content_error(e, chars, tok_start))?;
                         self.emit(tok);
                         pos = next;
                     } else if (c == 'u' || c == 'U')
@@ -506,7 +646,8 @@ impl Lexer {
                         // In Python 3.3+, u"..." is identical to a plain string literal.
                         // Combinations like ur"", ub"" are not valid in Python 3.
                         let mut first_invalid = None;
-                        let (tok, next) = lex_string(chars, pos + 1, false, &mut first_invalid)?;
+                        let (tok, next) = lex_string(chars, pos + 1, false, &mut first_invalid)
+                            .map_err(|e| literal_content_error(e, chars, tok_start))?;
                         if let Some(msg) = first_invalid {
                             self.warnings.push((self.line, msg));
                         }
@@ -520,7 +661,8 @@ impl Lexer {
                 }
                 Some('"') | Some('\'') => {
                     let mut first_invalid = None;
-                    let (tok, next) = lex_string(chars, pos, false, &mut first_invalid)?;
+                    let (tok, next) = lex_string(chars, pos, false, &mut first_invalid)
+                        .map_err(|e| literal_content_error(e, chars, tok_start))?;
                     if let Some(msg) = first_invalid {
                         self.warnings.push((self.line, msg));
                     }
@@ -760,7 +902,18 @@ impl Lexer {
                     self.emit(tok);
                     pos = next;
                 }
-                Some(_) => return Err(PyError::lex("invalid syntax".to_string())),
+                // CPython tokenizes an unknown character as an error token and
+                // the parser reports `invalid syntax` on it (#3402).
+                Some(_) => {
+                    return Err(PyError::syntax(crate::error::SyntaxErrorInfo::at_chars(
+                        "invalid syntax",
+                        pos + 1,
+                        pos + 2,
+                        crate::error::SyntaxTextRule::ParserLine {
+                            tokenizer_lineno: 0,
+                        },
+                    )));
+                }
             }
             // Fill in the end column of the token emitted this iteration
             // (issue #2411).  `pos` now sits one past the token's last char, so
@@ -784,4 +937,75 @@ impl Lexer {
             }
         }
     }
+}
+
+/// 1-based line and CPython `tok->cur`-style offset (the 0-based column of
+/// `cur`) of the absolute char index `cur` (#3402).  The line is the one that
+/// holds the char just before `cur`, so a cursor sitting right after the last
+/// char of a line still reports that line.
+#[cold]
+fn char_line_and_column(chars: &[char], cur: usize) -> (u32, i64) {
+    // `cur` may sit one past the end (an error on the input's last char).
+    let before = &chars[..cur.saturating_sub(1).min(chars.len())];
+    let line = 1 + before.iter().filter(|&&c| c == '\n').count() as u32;
+    let line_start = before.iter().rposition(|&c| c == '\n').map_or(0, |i| i + 1);
+    (line, (cur - line_start) as i64)
+}
+
+/// Locate a string/bytes literal scanning error (#3402).  CPython decodes
+/// literals in the parser, so a content error (bad escape, non-ASCII byte)
+/// spans the whole literal token, while an unterminated literal is a tokenizer
+/// error at its first char — the lexer's default location, so those pass
+/// through untouched.
+#[cold]
+fn literal_content_error(error: PyError, chars: &[char], tok_start: usize) -> PyError {
+    match error.kind() {
+        crate::error::PyErrorKind::Lex(msg)
+            if !(msg.starts_with("unterminated") || msg.starts_with("EOL while scanning")) =>
+        {
+            let end = literal_token_end(chars, tok_start);
+            PyError::syntax(crate::error::SyntaxErrorInfo::at_chars(
+                msg.clone(),
+                tok_start + 1,
+                end + 1,
+                crate::error::SyntaxTextRule::ParserLine {
+                    tokenizer_lineno: 0,
+                },
+            ))
+        }
+        _ => error,
+    }
+}
+
+/// One past the closing quote of the string/bytes literal that starts (prefix
+/// letters included) at `start`, or the end of input when it never closes.
+/// Only sizes a literal-content error, so it does not validate escapes.
+#[cold]
+fn literal_token_end(chars: &[char], start: usize) -> usize {
+    let mut pos = start;
+    while chars.get(pos).is_some_and(char::is_ascii_alphabetic) {
+        pos += 1;
+    }
+    let Some(&quote) = chars.get(pos) else {
+        return chars.len();
+    };
+    let triple = chars.get(pos + 1) == Some(&quote) && chars.get(pos + 2) == Some(&quote);
+    pos += if triple { 3 } else { 1 };
+    while pos < chars.len() {
+        match chars[pos] {
+            '\\' => pos += 2,
+            c if c == quote => {
+                if !triple {
+                    return pos + 1;
+                }
+                if chars.get(pos + 1) == Some(&quote) && chars.get(pos + 2) == Some(&quote) {
+                    return pos + 3;
+                }
+                pos += 1;
+            }
+            '\n' if !triple => return pos,
+            _ => pos += 1,
+        }
+    }
+    chars.len()
 }

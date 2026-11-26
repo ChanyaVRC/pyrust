@@ -5,6 +5,123 @@ enum ScriptErrorMode {
     PropagateImport,
 }
 
+/// The location block CPython 3.12's uncaught-exception printer emits for a
+/// `SyntaxError` (`print_exception_file_and_line`, #3402):
+///
+/// ```text
+///   File "<string>", line 1
+///     1 +
+///        ^
+/// SyntaxError: invalid syntax
+/// ```
+struct SyntaxErrorLocation {
+    filename: String,
+    lineno: i64,
+    offset: i64,
+    end_lineno: i64,
+    end_offset: i64,
+    text: Option<String>,
+}
+
+impl SyntaxErrorLocation {
+    /// Read the location from a `SyntaxError` instance, returning it with the
+    /// `msg` the printer shows.  `None` when the instance is not a
+    /// `SyntaxError` or its `lineno` / `offset` are not integers, in which
+    /// case CPython falls back to printing `str(exc)`.
+    fn from_instance(
+        inst: &Rc<std::cell::RefCell<crate::value::PyInstance>>,
+    ) -> Option<(Self, String)> {
+        let inst = inst.borrow();
+        let class = &inst.class;
+        if !pyrust_core::class_chain_contains_builtin_exception(class, "SyntaxError") {
+            return None;
+        }
+        let attr = |name: &str| inst.attrs.get_cloned_or_slot(name);
+        attr("print_file_and_line")?;
+        let msg = attr("msg")?.to_py_str();
+        let filename = match attr("filename")? {
+            v if v.is_none() => "<string>".to_string(),
+            v => v.to_py_str(),
+        };
+        let lineno = attr("lineno")?.as_int()?;
+        let int_or = |value: Value, default: i64| {
+            if value.is_none() {
+                Some(default)
+            } else {
+                value.as_int()
+            }
+        };
+        let offset = int_or(attr("offset")?, -1)?;
+        // Only an exact `SyntaxError` reports an end position; subclasses
+        // underline one char.
+        let (end_lineno, end_offset) = if class.borrow().name == "SyntaxError" {
+            (
+                int_or(attr("end_lineno").unwrap_or_else(Value::none), lineno)?,
+                int_or(attr("end_offset").unwrap_or_else(Value::none), -1)?,
+            )
+        } else {
+            (lineno, -1)
+        };
+        let text = attr("text").filter(|v| !v.is_none()).map(|v| v.to_py_str());
+        Some((
+            Self {
+                filename,
+                lineno,
+                offset,
+                end_lineno,
+                end_offset,
+                text,
+            },
+            msg,
+        ))
+    }
+
+    /// Prefix `line` (the `Class: msg` line) with the `File` header and the
+    /// echoed source line plus caret (CPython's `print_error_text`).
+    fn render_before(&self, line: &str) -> String {
+        let mut out = format!("  File \"{}\", line {}\n", self.filename, self.lineno);
+        if let Some(text) = &self.text {
+            let line_size = text.chars().count() as i64;
+            let mut end_offset = self.end_offset;
+            if self.end_lineno > self.lineno {
+                end_offset = line_size;
+            }
+            end_offset = end_offset.min(line_size + 1);
+            let carets = if end_offset > 0 && end_offset > self.offset {
+                end_offset - self.offset
+            } else {
+                1
+            };
+            // 0-based caret column within the text with its leading
+            // whitespace stripped, clipped to the text's length.
+            let mut rest = text.trim_start_matches([' ', '\t', '\x0c']);
+            let stripped = (text.chars().count() - rest.chars().count()) as i64;
+            let len = rest.chars().count() as i64 - i64::from(rest.ends_with('\n'));
+            let mut offset = (self.offset - 1 - stripped).min(len);
+            // Skip past newlines embedded in the text before the caret.
+            while let Some(nl) = rest.find('\n') {
+                let inl = rest[..nl].chars().count() as i64;
+                if inl >= offset {
+                    break;
+                }
+                rest = &rest[nl + 1..];
+                offset -= inl + 1;
+            }
+            out.push_str("    ");
+            out.push_str(rest.trim_end_matches('\n'));
+            out.push('\n');
+            if offset >= 0 {
+                out.push_str("    ");
+                out.push_str(&" ".repeat(offset as usize));
+                out.push_str(&"^".repeat(carets.max(1) as usize));
+                out.push('\n');
+            }
+        }
+        out.push_str(line);
+        out
+    }
+}
+
 enum ModuleNamespaceStorage {
     /// Ordinary scripts keep their bounded set of module names in registers.
     FastLocals(Rc<HashMap<String, crate::bytecode::Reg>>),
@@ -765,23 +882,47 @@ impl Interpreter {
                     pyrust_core::format_unicode_encode_str(encoding, object, *start, *end, reason);
                 format!("UnicodeEncodeError: {msg}")
             }
+            pyrust_core::PyErrorKind::Syntax(info) => {
+                let location = info.lineno.map(|lineno| SyntaxErrorLocation {
+                    filename: info.filename.clone().unwrap_or_else(|| "<string>".into()),
+                    lineno,
+                    offset: info.offset.unwrap_or(-1),
+                    end_lineno: info.end_lineno.unwrap_or(lineno),
+                    end_offset: info.end_offset.unwrap_or(-1),
+                    text: info.text.clone(),
+                });
+                let line = format!("{}: {}", info.class_name, info.msg);
+                match location {
+                    Some(location) => location.render_before(&line),
+                    None => line,
+                }
+            }
             pyrust_core::PyErrorKind::Raised(value) => match value.kind() {
                 ValueKind::PyInstance(inst) => {
                     let class_name = inst.borrow().class.borrow().name.clone();
+                    let inst_rc = Rc::clone(inst);
+                    let cls = Rc::clone(&inst_rc.borrow().class);
+                    // CPython prints a located SyntaxError as a `File …, line N`
+                    // block plus the bare `msg` instead of `str(exc)` (#3402).
+                    let syntax_location = SyntaxErrorLocation::from_instance(&inst_rc);
                     // exception_str_with_dispatch handles KeyError (repr of
                     // single arg) and multi-arg exceptions (tuple notation),
                     // dispatching arg __repr__/__str__ overrides like CPython's
                     // traceback printer; a raising dunder falls back to the
                     // data-only core renderer.
-                    let inst_rc = Rc::clone(inst);
-                    let cls = Rc::clone(&inst_rc.borrow().class);
-                    let msg = exception_str_with_dispatch(self, value, &inst_rc, &cls)
-                        .unwrap_or_else(|_| value.to_py_str());
+                    let msg = match &syntax_location {
+                        Some((_, msg)) => msg.clone(),
+                        None => exception_str_with_dispatch(self, value, &inst_rc, &cls)
+                            .unwrap_or_else(|_| value.to_py_str()),
+                    };
                     let mut line = if msg.is_empty() {
                         class_name
                     } else {
                         format!("{class_name}: {msg}")
                     };
+                    if let Some((location, _)) = &syntax_location {
+                        line = location.render_before(&line);
+                    }
                     // PEP 678: append each note from `__notes__` after the
                     // error message, matching CPython's traceback printer
                     // (`add_note` / `__set_name__` notes). CPython iterates

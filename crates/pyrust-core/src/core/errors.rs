@@ -144,7 +144,117 @@ pub enum PyErrorKind {
         name: Option<String>,
         obj: Option<Value>,
     },
+    /// A compile-time `SyntaxError` (or its `IndentationError` / `TabError`
+    /// subclasses) raised by the lexer or parser with the source location
+    /// CPython 3.12 stores in `SyntaxError.args[1]` (issue #3402).  Boxed so
+    /// the extra location fields do not grow every other variant.
+    Syntax(Box<SyntaxErrorInfo>),
     Raised(Value),
+}
+
+/// How the `text` attribute of a lexer/parser syntax error is derived from the
+/// source once it is known.  CPython 3.12 builds it differently for tokenizer
+/// errors (`_syntaxerror_range`) and parser errors
+/// (`_PyPegen_raise_error_known_location`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyntaxTextRule {
+    /// Tokenizer error: the error line without its trailing newline.
+    TokenizerLine,
+    /// Parser error: the error line, keeping its trailing newline only when the
+    /// tokenizer had not read past it.  `tokenizer_lineno` is the line the
+    /// tokenizer stood on when the error was raised; `0` means it had reached
+    /// the end of the input (unclosed-bracket errors).
+    ParserLine { tokenizer_lineno: u32 },
+}
+
+/// Location data a lexer/parser syntax error carries before it is resolved
+/// against its source text and filename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyntaxErrorPending {
+    /// Absolute char indices into the source being lexed, in CPython's
+    /// `tok->cur` convention: `offset` is the 0-based column of `cur` within
+    /// its line and `end_offset` the 0-based column of `end_cur`.  The lexer
+    /// converts this to lines/offsets before the error leaves it.
+    Chars {
+        cur: usize,
+        end_cur: usize,
+        rule: SyntaxTextRule,
+    },
+    /// `lineno` / `offset` / `end_lineno` / `end_offset` are set; only `text`
+    /// remains to be derived with `rule`.  `newline_token` marks an error
+    /// anchored on a NEWLINE token: when that is the implicit newline at the
+    /// end of `eval`/`single` input (no `'\n'` in the source), CPython reports
+    /// `offset == end_offset == 0`.
+    Text {
+        rule: SyntaxTextRule,
+        newline_token: bool,
+    },
+}
+
+/// Structured payload of [`PyErrorKind::Syntax`]: the exception class plus the
+/// `(filename, lineno, offset, text, end_lineno, end_offset)` fields CPython
+/// 3.12 stores on compile-time syntax errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxErrorInfo {
+    /// `"SyntaxError"`, `"IndentationError"` or `"TabError"`.
+    pub class_name: &'static str,
+    pub msg: String,
+    pub filename: Option<String>,
+    pub lineno: Option<i64>,
+    pub offset: Option<i64>,
+    pub text: Option<String>,
+    pub end_lineno: Option<i64>,
+    pub end_offset: Option<i64>,
+    /// `Some` while the error still needs its source text / filename.
+    pub pending: Option<SyntaxErrorPending>,
+}
+
+impl SyntaxErrorInfo {
+    /// A `SyntaxError` positioned by absolute char indices into the source
+    /// being lexed (see [`SyntaxErrorPending::Chars`]).
+    pub fn at_chars(
+        msg: impl Into<String>,
+        cur: usize,
+        end_cur: usize,
+        rule: SyntaxTextRule,
+    ) -> Self {
+        Self {
+            class_name: "SyntaxError",
+            msg: msg.into(),
+            filename: None,
+            lineno: None,
+            offset: None,
+            text: None,
+            end_lineno: None,
+            end_offset: None,
+            pending: Some(SyntaxErrorPending::Chars { cur, end_cur, rule }),
+        }
+    }
+
+    /// A `SyntaxError` at a known 1-based line and CPython-style offsets whose
+    /// `text` is still to be derived from the source with `rule`.
+    pub fn at_lines(
+        msg: impl Into<String>,
+        (lineno, offset): (u32, i64),
+        (end_lineno, end_offset): (u32, i64),
+        rule: SyntaxTextRule,
+        newline_token: bool,
+    ) -> Self {
+        Self {
+            class_name: "SyntaxError",
+            msg: msg.into(),
+            filename: None,
+            lineno: Some(i64::from(lineno)),
+            offset: Some(offset),
+            text: None,
+            end_lineno: Some(i64::from(end_lineno)),
+            end_offset: Some(end_offset),
+            pending: Some(SyntaxErrorPending::Text {
+                rule,
+                newline_token,
+            }),
+        }
+    }
 }
 
 /// Compact boxed error type (`8 B`) used across the workspace `Result<T>`.
@@ -334,6 +444,22 @@ impl PyError {
         })
     }
 
+    /// Constructor for a located compile-time syntax error (issue #3402).
+    #[cold]
+    pub fn syntax(info: SyntaxErrorInfo) -> Self {
+        Self::new(PyErrorKind::Syntax(Box::new(info)))
+    }
+
+    /// The message of a lexer / parser / located syntax error, or `None` for
+    /// every other error kind.
+    pub fn syntax_message(&self) -> Option<&str> {
+        match self.kind() {
+            PyErrorKind::Lex(msg) | PyErrorKind::Parse(msg) => Some(msg),
+            PyErrorKind::Syntax(info) => Some(&info.msg),
+            _ => None,
+        }
+    }
+
     /// Constructor for an already-materialised Python exception value.
     #[cold]
     #[inline]
@@ -463,6 +589,12 @@ impl PyError {
                 // AttributeError is a subclass of Exception → BaseException.
                 matches!(name, "AttributeError" | "Exception" | "BaseException")
             }
+            PyErrorKind::Syntax(info) => {
+                // TabError < IndentationError < SyntaxError < Exception.
+                name == info.class_name
+                    || matches!(name, "SyntaxError" | "Exception" | "BaseException")
+                    || (name == "IndentationError" && info.class_name == "TabError")
+            }
             PyErrorKind::Raised(exc) => match exc.kind() {
                 ValueKind::PyInstance(inst) => {
                     class_chain_contains_builtin_exception(&inst.borrow().class, name)
@@ -534,6 +666,7 @@ impl fmt::Display for PyErrorKind {
             PyErrorKind::AttributeError { message, .. } => {
                 write!(f, "AttributeError: {message}")
             }
+            PyErrorKind::Syntax(info) => write!(f, "{}: {}", info.class_name, info.msg),
             PyErrorKind::Raised(value) => write!(f, "Uncaught exception: {}", value.repr_raw()),
         }
     }

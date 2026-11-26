@@ -34,7 +34,23 @@ impl Parser {
                     // *nested* f-string (`f"{f'''…{x}…'''}"`) anchors its own
                     // inner fields on their absolute source lines, not the
                     // outer field's line (issue #2587).
-                    let expr = parse_expr_str(&src, line)?;
+                    let expr = parse_expr_str(&src, line).map_err(|e| {
+                        // CPython reports an empty field on its closing `}`
+                        // (#3402).
+                        match field_cols {
+                            Some((_, close))
+                                if line != 0
+                                    && close > 0
+                                    && e.syntax_message()
+                                        == Some(
+                                            "f-string: valid expression required before '}'",
+                                        ) =>
+                            {
+                                located_parse_error(e, (line, close - 1), (line, close), line)
+                            }
+                            _ => e,
+                        }
+                    })?;
                     // Recursively parse any nested expressions inside the
                     // format spec — they need to be visible to every AST
                     // recursor (scope-pass, closure-capture analyser, etc.).

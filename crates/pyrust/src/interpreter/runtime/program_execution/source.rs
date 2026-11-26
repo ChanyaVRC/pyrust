@@ -22,26 +22,64 @@ impl Interpreter {
     /// Parse a Python source string into statements + line numbers while
     /// emitting any lexer-collected `SyntaxWarning`s (e.g. invalid escape
     /// sequences) through this interpreter's live `warnings` system.
+    ///
+    /// The source is parsed in `exec` mode; a syntax error carries its
+    /// CPython location within `source` and `filename` (#3402).
     pub(crate) fn parse_source_to_stmts_with_warnings(
         &mut self,
         source: &str,
         filename: &str,
     ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
-        let (tokens, line_nos, cols, cols_end, warnings) = crate::lexer::Lexer::new(source)
-            .map_err(lex_parse_to_exc)?
+        let origin = SyntaxErrorSource {
+            source,
+            filename,
+            mode: SourceMode::Exec,
+            parsed_prefix: "",
+        };
+        self.parse_program_source_with_warnings(source, origin)
+    }
+
+    /// Parse an expression source for `eval()` / `compile(..., 'eval')`.
+    ///
+    /// Surrounding whitespace is trimmed before parsing; a syntax error is
+    /// still located within the untrimmed `source` (#3402), which is the text
+    /// CPython's tokenizer sees (`eval()` itself strips leading spaces and
+    /// tabs before calling here, as CPython's `builtin_eval` does).
+    pub(crate) fn parse_eval_source_to_stmts_with_warnings(
+        &mut self,
+        source: &str,
+        filename: &str,
+    ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
+        let trimmed = source.trim();
+        let origin = SyntaxErrorSource {
+            source,
+            filename,
+            mode: SourceMode::Eval,
+            parsed_prefix: &source[..source.len() - source.trim_start().len()],
+        };
+        self.parse_program_source_with_warnings(trimmed, origin)
+    }
+
+    fn parse_program_source_with_warnings(
+        &mut self,
+        parsed: &str,
+        origin: SyntaxErrorSource<'_>,
+    ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
+        let (tokens, line_nos, cols, cols_end, warnings) = crate::lexer::Lexer::new(parsed)
+            .map_err(|e| resolve_syntax_error(e, origin))?
             .into_tokens_with_pos_and_warnings();
         for (lineno, msg) in warnings {
             crate::interpreter::emit_syntax_warning_via_module(
                 self,
                 &msg,
-                filename,
+                origin.filename,
                 lineno as i64,
             )?;
         }
         let mut parser = crate::parser::Parser::new_with_pos(tokens, line_nos, cols, cols_end);
         parser
             .parse_program_with_linenos()
-            .map_err(lex_parse_to_exc)
+            .map_err(|e| resolve_syntax_error(e, origin))
     }
 
     /// Parse a Python source string as a single interactive statement for
@@ -52,8 +90,14 @@ impl Interpreter {
         source: &str,
         filename: &str,
     ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
+        let origin = SyntaxErrorSource {
+            source,
+            filename,
+            mode: SourceMode::Single,
+            parsed_prefix: "",
+        };
         let (tokens, line_nos, cols, cols_end, warnings) = crate::lexer::Lexer::new(source)
-            .map_err(lex_parse_to_exc)?
+            .map_err(|e| resolve_syntax_error(e, origin))?
             .into_tokens_with_pos_and_warnings();
         for (lineno, msg) in warnings {
             crate::interpreter::emit_syntax_warning_via_module(
@@ -67,7 +111,7 @@ impl Interpreter {
         let ends_with_newline = source.ends_with('\n') || source.ends_with('\r');
         parser
             .parse_single_with_linenos(ends_with_newline)
-            .map_err(lex_parse_to_exc)
+            .map_err(|e| resolve_syntax_error(e, origin))
     }
 
     /// Parse a Python source string as a single interactive statement for
@@ -203,10 +247,13 @@ impl Interpreter {
         locals_dict: Option<Value>,
     ) -> Result<Value> {
         let _int_max_str_digits_guard = IntMaxStrDigitsExecutionGuard::enter(self);
-        // Strip leading and trailing whitespace: CPython's `eval()` strips both.
-        // `eval("  1 + 2  ")` and `eval("1 + 2\n")` both work in CPython.
-        let trimmed = source.trim();
-        let (program, linenos) = self.parse_source_to_stmts_with_warnings(trimmed, "<string>")?;
+        // CPython's `builtin_eval` strips leading spaces and tabs before
+        // compiling, so syntax-error columns are relative to the stripped text
+        // (#3402); the parse itself trims all surrounding whitespace, so
+        // `eval("  1 + 2  ")` and `eval("1 + 2\n")` both work.
+        let source = source.trim_start_matches([' ', '\t']);
+        let (program, linenos) =
+            self.parse_eval_source_to_stmts_with_warnings(source, "<string>")?;
         let local_index = Self::eval_expression_local_index(&program);
         let code = {
             let c = crate::compiler::compile_eval_expr_with_options(

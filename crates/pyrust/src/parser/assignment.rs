@@ -106,8 +106,8 @@ fn lhs_to_assign_stmt(target: &Expr, rhs: Expr) -> Result<Stmt> {
 /// a comma-separated list of expressions (already classified for starred-ness)
 /// plus a flag for whether a trailing comma was seen.
 fn group_to_assign_stmt(
-    items: Vec<Expr>,
-    starred_flags: Vec<bool>,
+    items: &[Expr],
+    starred_flags: &[bool],
     had_comma: bool,
     value: Expr,
 ) -> Result<Stmt> {
@@ -115,7 +115,7 @@ fn group_to_assign_stmt(
         return lhs_to_assign_stmt(&items[0], value);
     }
     // Multi-target or starred tuple unpack: a, b = ...   or   *a, b = ...
-    let assign_targets = exprs_to_assign_targets(&items, &starred_flags)?;
+    let assign_targets = exprs_to_assign_targets(items, starred_flags)?;
     Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets), value))
 }
 
@@ -126,11 +126,10 @@ fn group_to_assign_stmt(
 /// each group is assigned from that temporary in left-to-right order so
 /// side-effects on the targets (e.g. `obj.x = obj.y = expr`) match
 /// CPython's semantics.
-fn build_assign_stmts(groups: Vec<(Vec<Expr>, Vec<bool>, bool)>, rhs: Expr) -> Result<Vec<Stmt>> {
+fn build_assign_stmts(groups: &[(Vec<Expr>, Vec<bool>, bool)], rhs: Expr) -> Result<Vec<Stmt>> {
     debug_assert!(!groups.is_empty());
-    if groups.len() == 1 {
-        let (items, flags, had_comma) = groups.into_iter().next().unwrap();
-        return Ok(vec![group_to_assign_stmt(items, flags, had_comma, rhs)?]);
+    if let [(items, flags, had_comma)] = groups {
+        return Ok(vec![group_to_assign_stmt(items, flags, *had_comma, rhs)?]);
     }
     // Chained: evaluate rhs into a unique hidden temporary, then assign
     // from that temporary to each target group left-to-right.
@@ -149,11 +148,51 @@ fn build_assign_stmts(groups: Vec<(Vec<Expr>, Vec<bool>, bool)>, rhs: Expr) -> R
         out.push(group_to_assign_stmt(
             items,
             flags,
-            had_comma,
+            *had_comma,
             Expr::Var(tmp_name, None),
         )?);
     }
     Ok(out)
+}
+
+impl Parser {
+    /// Re-locate an invalid-target error from [`build_assign_stmts`] on the
+    /// target that caused it, as CPython does (#3402).  `ranges` holds each
+    /// target group's token range.  Only runs after building failed: it
+    /// re-checks each top-level target until one reproduces the error.
+    #[cold]
+    fn locate_target_error(
+        &self,
+        error: PyError,
+        groups: &[(Vec<Expr>, Vec<bool>, bool)],
+        ranges: &[(usize, usize)],
+    ) -> PyError {
+        let Some(msg) = error.syntax_message().map(str::to_owned) else {
+            return error;
+        };
+        for ((items, flags, had_comma), &(start, end)) in groups.iter().zip(ranges) {
+            let single = items.len() == 1 && !flags[0] && !had_comma;
+            let item_ranges = if single {
+                vec![(start, end)]
+            } else {
+                self.top_level_item_ranges(start, end)
+            };
+            if item_ranges.len() != items.len() {
+                continue;
+            }
+            for (item, &(item_start, item_end)) in items.iter().zip(&item_ranges) {
+                let probe = if single {
+                    lhs_to_assign_stmt(item, Expr::None).err()
+                } else {
+                    expr_to_assign_target(item).err()
+                };
+                if probe.as_ref().and_then(PyError::syntax_message) == Some(msg.as_str()) {
+                    return self.locate_error_at(error, item_start, item_end);
+                }
+            }
+        }
+        error
+    }
 }
 
 fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
