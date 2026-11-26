@@ -195,7 +195,7 @@ pub(crate) fn c3_linearize_classes(class: &Rc<RefCell<PyClass>>) -> Vec<Rc<RefCe
 //     thread share the immutable built-in type objects (and track the latest
 //     weak `itertools.chain` import generation); separate threads build
 //     independent type singletons with zero synchronization.
-thread_local! {
+pyrust_core::gil_local! {
     static OBJECT_CLASS: Rc<RefCell<PyClass>> = {
         // Issue #1047: object.__init_subclass__ is a no-op classmethod in
         // CPython.  Register the builtin sentinel so that

@@ -168,7 +168,7 @@ impl CanonicalSlot {
 // (b) Multi-interpreter / multi-threaded impact: Values are immutable builtin
 //     descriptors shared across interpreters on the same thread; separate
 //     threads initialize their own slot table once.
-thread_local! {
+pyrust_core::gil_local! {
     /// Canonical values resolved from owner dictionaries once per interpreter
     /// thread.  Canonical classes are immutable, so hot repr/hash/comparison
     /// checks need only a TLS access plus `Value` identity comparison instead

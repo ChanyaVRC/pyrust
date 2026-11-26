@@ -17,7 +17,7 @@ use pyrust_core::{CollectionMutationState, PyClass, PyError, Value};
 // (b) Multi-interpreter / multi-threaded impact: Weak class entries and
 //     object-id-keyed clear marks isolate distinct instances across
 //     interpreters on the same thread; separate threads are fully isolated.
-thread_local! {
+pyrust_core::gil_local! {
     static CLASSES: RefCell<Vec<Weak<RefCell<PyClass>>>> =
         const { RefCell::new(Vec::new()) };
     static CLEAR_SEQUENCE: Cell<u64> = const { Cell::new(1) };

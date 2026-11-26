@@ -357,15 +357,15 @@ type PtrCacheEntry = (Weak<RefCell<PyClass>>, Rc<RefCell<PyClass>>);
 type ArrCacheEntry = ((Weak<RefCell<PyClass>>, usize), Rc<RefCell<PyClass>>);
 type SwapCacheEntry = (Weak<RefCell<PyClass>>, Rc<RefCell<PyClass>>);
 
-thread_local! {
-    static CTYPE_REGISTRY: RefCell<Vec<TypeEntry>> = const { RefCell::new(Vec::new()) };
-    static POINTER_CACHE: RefCell<Vec<PtrCacheEntry>> = const { RefCell::new(Vec::new()) };
-    static ARRAY_CACHE: RefCell<Vec<ArrCacheEntry>> = const { RefCell::new(Vec::new()) };
-    static SWAPPED_CACHE: RefCell<Vec<SwapCacheEntry>> = const { RefCell::new(Vec::new()) };
+pyrust_core::gil_local! {
+    static CTYPE_REGISTRY: RefCell<Vec<TypeEntry>> = RefCell::new(Vec::new());
+    static POINTER_CACHE: RefCell<Vec<PtrCacheEntry>> = RefCell::new(Vec::new());
+    static ARRAY_CACHE: RefCell<Vec<ArrCacheEntry>> = RefCell::new(Vec::new());
+    static SWAPPED_CACHE: RefCell<Vec<SwapCacheEntry>> = RefCell::new(Vec::new());
     static PYOBJECT_HANDLES: RefCell<(usize, IndexMap<usize, Value>)> =
         RefCell::new((0x1000, IndexMap::new()));
     /// Core `_ctypes` base classes cached for fast subtype checks and dynamic type creation.
-    static CORE_CLASSES: RefCell<Option<CoreCtypesClasses>> = const { RefCell::new(None) };
+    static CORE_CLASSES: RefCell<Option<CoreCtypesClasses>> = RefCell::new(None);
 }
 
 #[derive(Clone)]

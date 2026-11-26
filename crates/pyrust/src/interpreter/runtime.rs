@@ -81,6 +81,19 @@ pub(crate) use call_state::{
     set_recursion_limit,
 };
 
+fn enter_int_max_str_digits_guard(
+    interpreter: &Interpreter,
+) -> call_state::IntMaxStrDigitsExecutionGuard {
+    IntMaxStrDigitsExecutionGuard::enter(interpreter)
+}
+
+#[path = "runtime/threading_rt.rs"]
+pub(crate) mod threading_rt;
+pub(crate) use threading_rt::{
+    GilState, NativeLock, ThreadJoinState, current_os_native_id, current_os_thread_ident,
+    current_thread_is_daemon_worker,
+};
+
 mod calls {
     use super::classes::{PrimitiveLayout, classify_primitive_layout, primitive_layout_for_class};
     use super::execution::{VM_HOOK_PROFILE, VM_HOOK_TRACE, VM_HOOK_WEAKREF};

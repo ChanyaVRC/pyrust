@@ -412,6 +412,11 @@ pub(crate) struct InterpreterColdState {
     pub(crate) cli_startup_managed: bool,
     /// True once `initialize_cli_startup` has run for this interpreter.
     pub(crate) cli_startup_initialized: bool,
+    /// Cooperative GIL and OS-thread lifecycle state shared across this root
+    /// interpreter, its filesystem-import children, and all spawned Python threads.
+    pub(crate) gil_state: Arc<GilState>,
+    /// True only on the root interpreter that owns the GIL group lifetime.
+    pub(crate) is_gil_root: bool,
 }
 
 /// Startup configuration populated from CPython 3.12 CLI flags and `PYTHON*`
@@ -488,8 +493,8 @@ impl Default for RuntimeConfig {
     }
 }
 
-impl Default for InterpreterColdState {
-    fn default() -> Self {
+impl InterpreterColdState {
+    pub(crate) fn new_with_gil(gil_state: Arc<GilState>, is_gil_root: bool) -> Self {
         Self {
             script_dir: None,
             script_filename: None,
@@ -526,9 +531,19 @@ impl Default for InterpreterColdState {
             runtime_config: Rc::new(RuntimeConfig::default()),
             cli_startup_managed: false,
             cli_startup_initialized: false,
+            gil_state,
+            is_gil_root,
         }
     }
 }
+
+impl Default for InterpreterColdState {
+    fn default() -> Self {
+        Self::new_with_gil(GilState::new_for_current_thread(), true)
+    }
+}
+
+pub(crate) type SharedWarningsState = Rc<crate::builtin_modules::warnings::WarningsState>;
 
 pub struct Interpreter {
     pub(crate) env: EnvRef,
@@ -974,6 +989,46 @@ fn iter_values_for_registry(value: &Value) -> Result<Vec<Value>> {
 /// BigInt, nested List, etc.  See issue #428.
 fn compare_values_for_registry(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     compare_values(a, b)
+}
+
+impl Interpreter {
+    pub(crate) fn new_worker(
+        env: EnvRef,
+        warnings_state: Rc<crate::builtin_modules::warnings::WarningsState>,
+        sys_state: Rc<RefCell<SysRuntimeState>>,
+        int_max_str_digits: usize,
+        recursion_limit: usize,
+        cold: Box<InterpreterColdState>,
+    ) -> Self {
+        Self {
+            env,
+            active_exception: None,
+            handled_exc_stack: Vec::new(),
+            exc_saved_active: Vec::new(),
+            vm_frame_views: Vec::new(),
+            tramp_arena: Vec::new(),
+            tramp_stack: Vec::new(),
+            gen_drive_stack: Vec::new(),
+            call_arg_buf: Vec::new(),
+            bound_method_pos_buf: Vec::new(),
+            vm_frame_caches: None,
+            int_max_str_digits,
+            recursion_limit,
+            warnings_state,
+            sys_state,
+            cold,
+            reraise_is_bare: false,
+            vm_hooks_flags: 0,
+        }
+    }
+}
+
+impl Drop for Interpreter {
+    fn drop(&mut self) {
+        if self.cold.is_gil_root && self.cold.gil_state.is_multi_threaded() {
+            self.shutdown_threads();
+        }
+    }
 }
 
 impl Default for Interpreter {

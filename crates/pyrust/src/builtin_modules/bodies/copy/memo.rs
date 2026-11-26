@@ -17,7 +17,7 @@ use indexmap::IndexMap;
 //     isolate distinct import generations across interpreters on the same
 //     thread; `DEEPCOPY_DEPTH` guards total native stack depth across nested
 //     calls on one thread while separate threads are completely independent.
-thread_local! {
+pyrust_core::gil_local! {
     /// `copy` is a Python module in CPython, so each fresh import generation
     /// owns a distinct Error class. Weak storage keeps old classes alive only
     /// while an old module/class/instance still references them.

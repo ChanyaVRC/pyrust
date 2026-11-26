@@ -28,7 +28,7 @@ struct MarkerEntry {
 // (b) Multi-interpreter / multi-threaded impact: Weak entries are pruned on
 //     re-import and keyed by live `Rc` address, so multiple interpreters on one
 //     thread do not collide; separate threads are fully isolated.
-thread_local! {
+pyrust_core::gil_local! {
     static MARKERS: RefCell<HashMap<*const RefCell<PyClass>, MarkerEntry>> =
         RefCell::new(HashMap::new());
 }

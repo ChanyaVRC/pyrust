@@ -57,6 +57,10 @@ import asyncio.timeouts
 import asyncio.transports
 import asyncio.trsock
 import collections.abc
+import concurrent.futures
+import concurrent.futures._base
+import concurrent.futures.process
+import concurrent.futures.thread
 import ctypes._endian
 import ctypes.util
 import ctypes.wintypes
@@ -175,7 +179,7 @@ names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_
          "_socket", "_sqlite3", "_sre", "_ssl", "_stat", "_statistics", "_string", "_strptime", "_struct", "_symtable", "_thread",
          "_threading_local", "_tokenize", "_tracemalloc", "_typing", "_uuid", "_warnings", "_weakref", "_weakrefset", "_zoneinfo",
          "abc", "antigravity", "argparse", "ast", "asyncio", "atexit", "base64", "bdb", "binascii", "bisect", "builtins",
-         "bz2", "cProfile", "calendar", "cmath", "cmd", "code", "codecs", "codeop", "collections", "colorsys", "compileall", "configparser", "contextlib", "contextvars",
+         "bz2", "cProfile", "calendar", "cmath", "cmd", "code", "codecs", "codeop", "collections", "colorsys", "compileall", "concurrent", "configparser", "contextlib", "contextvars",
          "copy", "copyreg", "csv", "ctypes", "dataclasses", "dbm", "decimal", "difflib", "dis", "doctest", "email", "encodings", "enum", "errno", "faulthandler",
          "filecmp", "fileinput", "fnmatch", "fractions", "ftplib", "functools", "gc", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "imaplib", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword",
@@ -215,6 +219,10 @@ for name, module in [("os.path", os.path),
                      ("asyncio.transports", asyncio.transports),
                      ("asyncio.trsock", asyncio.trsock),
                      ("collections.abc", collections.abc),
+                     ("concurrent.futures", concurrent.futures),
+                     ("concurrent.futures._base", concurrent.futures._base),
+                     ("concurrent.futures.process", concurrent.futures.process),
+                     ("concurrent.futures.thread", concurrent.futures.thread),
                      ("ctypes._endian", ctypes._endian),
                      ("ctypes.util", ctypes.util),
                      ("ctypes.wintypes", ctypes.wintypes),

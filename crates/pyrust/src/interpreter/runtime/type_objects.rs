@@ -12,7 +12,7 @@ include!("type_objects/member_descriptors.rs");
 // (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
 //     thread share these built-in runtime type singletons; separate threads
 //     initialize independent class singletons.
-thread_local! {
+pyrust_core::gil_local! {
     /// Class singleton for `TypeAliasType` objects created by `type X = ...`.
     static TYPE_ALIAS_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs: IndexMap<String, Value> = IndexMap::new();

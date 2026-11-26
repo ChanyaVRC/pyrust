@@ -42,13 +42,16 @@ pub(crate) fn monotonic_secs() -> f64 {
 }
 
 thread_local! {
-    /// Currently running event loop on this thread.
+    /// Currently running event loop on this OS thread (CPython per-thread semantics).
     static RUNNING_LOOP: RefCell<Option<Value>> = const { RefCell::new(None) };
-    /// Active event loop policy on this thread.
+}
+
+pyrust_core::gil_local! {
+    /// Active event loop policy for this interpreter group.
     static EVENT_LOOP_POLICY: RefCell<Option<Value>> = const { RefCell::new(None) };
     /// Monotonic counter for default `Task-N` names.
     static TASK_NAME_COUNTER: Cell<u64> = const { Cell::new(0) };
-    /// Active (not-yet-finished) Tasks across loops on this thread (insertion order).
+    /// Active (not-yet-finished) Tasks across loops (insertion order).
     static SCHEDULED_TASKS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     /// Currently executing Task per loop identity (`loop_id -> Task`).
     static CURRENT_TASKS: RefCell<Vec<(usize, Value)>> = const { RefCell::new(Vec::new()) };

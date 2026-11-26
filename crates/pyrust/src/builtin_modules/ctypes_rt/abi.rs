@@ -912,8 +912,8 @@ impl CallbackRegistry {
     }
 }
 
-thread_local! {
-    static CALLBACK_REGISTRY: RefCell<CallbackRegistry> = const { RefCell::new(CallbackRegistry::new()) };
+pyrust_core::gil_local! {
+    static CALLBACK_REGISTRY: RefCell<CallbackRegistry> = RefCell::new(CallbackRegistry::new());
 }
 
 /// RAII handle owning a callback trampoline slot; frees the slot on drop.

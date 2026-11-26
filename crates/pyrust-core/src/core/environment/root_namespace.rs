@@ -5,16 +5,16 @@
 // (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
 //     thread share monotonic namespace ids and an address-keyed weak alias map
 //     (no cross-interpreter state bleed); separate threads are fully isolated.
-thread_local! {
-    /// Stable identities for root/global namespaces on this interpreter
-    /// thread. `u64::MAX` is a saturated, uncacheable sentinel.
+crate::gil_local! {
+    /// Stable identities for root/global namespaces on this GIL group.
+    /// `u64::MAX` is a saturated, uncacheable sentinel.
     static NEXT_ROOT_NAMESPACE_ID: Cell<u64> = const { Cell::new(1) };
     /// Weak owners of Python-visible namespace dictionaries, keyed by the
     /// identity of their shared `Rc<RefCell<PyDict>>` backing.
     static NAMESPACE_ALIAS_OWNERS: RefCell<HashMap<usize, Vec<Weak<RootNamespaceState>>>> =
         RefCell::new(HashMap::new());
     /// Ordinary dictionaries pay only this branch until a namespace mapping
-    /// has actually escaped on the current interpreter thread.
+    /// has actually escaped on the current GIL group.
     static HAS_NAMESPACE_ALIASES: Cell<bool> = const { Cell::new(false) };
 }
 

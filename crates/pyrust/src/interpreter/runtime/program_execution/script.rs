@@ -415,7 +415,9 @@ impl Interpreter {
         if let Err(err) = &result {
             self.exit_if_system_exit(err);
         } else if !repl_mode {
+            self.join_non_daemon_threads();
             self.run_atexit_callbacks();
+            self.join_non_daemon_threads();
         }
         result
     }

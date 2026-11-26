@@ -1,5 +1,3 @@
-use std::cell::Cell;
-
 // Global class-mutation epoch counter.  Bumped on every PyClass attribute write
 // or delete, regardless of which class was mutated.  Inline attribute caches
 // store the epoch at fill time and re-validate it on each hit; a mismatch means
@@ -18,19 +16,17 @@ use std::cell::Cell;
 //     thread share the monotonic counter (at worst causing conservative cache
 //     misses after another interpreter mutates a class); separate threads run
 //     independently with zero synchronization.
-thread_local! {
-    static CLASS_MUTATION_EPOCH: Cell<u64> = const { Cell::new(0) };
-}
-
 /// Bump the global class-mutation epoch.  Call this whenever any `PyClass`
 /// attribute is written or deleted so that all attribute caches are invalidated.
 pub fn bump_class_epoch() {
-    CLASS_MUTATION_EPOCH.with(|c| c.set(c.get().saturating_add(1)));
+    let c = &crate::active_tls().class_mutation_epoch;
+    c.set(c.get().saturating_add(1));
 }
 
 /// Return the current global class-mutation epoch.
+#[inline(always)]
 pub fn class_epoch() -> u64 {
-    CLASS_MUTATION_EPOCH.with(|c| c.get())
+    crate::active_tls().class_mutation_epoch.get()
 }
 
 /// Produce a cacheable `(class version, global epoch)` stamp.
@@ -61,20 +57,19 @@ pub fn class_cache_stamp_matches(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CLASS_MUTATION_EPOCH, bump_class_epoch, class_cache_stamp, class_cache_stamp_matches,
-        class_epoch,
-    };
+    use super::{bump_class_epoch, class_cache_stamp, class_cache_stamp_matches, class_epoch};
 
     #[test]
     fn saturated_epoch_never_wraps_or_validates_a_cache_stamp() {
-        let original = CLASS_MUTATION_EPOCH.with(|epoch| epoch.replace(u64::MAX - 1));
+        let original = crate::active_tls()
+            .class_mutation_epoch
+            .replace(u64::MAX - 1);
         bump_class_epoch();
         assert_eq!(class_epoch(), u64::MAX);
         bump_class_epoch();
         assert_eq!(class_epoch(), u64::MAX);
         assert_eq!(class_cache_stamp(7), None);
         assert!(!class_cache_stamp_matches(7, 7, u64::MAX));
-        CLASS_MUTATION_EPOCH.with(|epoch| epoch.set(original));
+        crate::active_tls().class_mutation_epoch.set(original);
     }
 }
