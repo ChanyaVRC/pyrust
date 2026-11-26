@@ -49,10 +49,15 @@ pub enum CanonicalClassTag {
     MappingProxy,
     NoneType,
     NotImplementedType,
+    ParamSpec,
+    ParamSpecArgs,
+    ParamSpecKwargs,
     Set,
     Str,
     Tuple,
+    TypeAliasType,
     TypeVar,
+    TypeVarTuple,
 }
 
 impl CanonicalClassTag {
@@ -82,7 +87,25 @@ impl CanonicalClassTag {
     }
 
     pub const fn is_primitive(self) -> bool {
-        !matches!(self, Self::Object | Self::GenericAlias | Self::TypeVar)
+        matches!(
+            self,
+            Self::Bool
+                | Self::Bytearray
+                | Self::Bytes
+                | Self::Complex
+                | Self::Dict
+                | Self::Ellipsis
+                | Self::Float
+                | Self::Frozenset
+                | Self::Int
+                | Self::List
+                | Self::MappingProxy
+                | Self::NoneType
+                | Self::NotImplementedType
+                | Self::Set
+                | Self::Str
+                | Self::Tuple
+        )
     }
 
     pub const fn canonical_name(self) -> &'static str {
@@ -102,10 +125,15 @@ impl CanonicalClassTag {
             Self::MappingProxy => "mappingproxy",
             Self::NoneType => "NoneType",
             Self::NotImplementedType => "NotImplementedType",
+            Self::ParamSpec => "ParamSpec",
+            Self::ParamSpecArgs => "ParamSpecArgs",
+            Self::ParamSpecKwargs => "ParamSpecKwargs",
             Self::Set => "set",
             Self::Str => "str",
             Self::Tuple => "tuple",
+            Self::TypeAliasType => "TypeAliasType",
             Self::TypeVar => "TypeVar",
+            Self::TypeVarTuple => "TypeVarTuple",
         }
     }
 }

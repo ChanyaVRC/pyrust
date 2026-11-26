@@ -16,7 +16,14 @@ pub(crate) fn function_type_singleton() -> Rc<RefCell<PyClass>> {
 /// Returns the singleton `module` class (`types.ModuleType` / `type(sys)` —
 /// issue #2970).
 pub(crate) fn module_type_singleton() -> Rc<RefCell<PyClass>> {
-    MODULE_TYPE.with(Rc::clone)
+    MODULE_TYPE.with(|cell| Rc::clone(cell.get_or_init(build_module_type)))
+}
+
+/// Non-initializing check for whether `class` is the `module` singleton.
+#[inline]
+fn is_module_type_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    let ptr = Rc::as_ptr(class);
+    MODULE_TYPE.with(|cell| cell.get().is_some_and(|module| ptr == Rc::as_ptr(module)))
 }
 
 /// Returns the singleton `range` class.  In CPython, `range` is a proper
@@ -62,9 +69,9 @@ pub(crate) fn dict_view_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>
 pub(crate) fn is_untagged_builtin_type_class(class: &Rc<RefCell<PyClass>>) -> bool {
     let ptr = Rc::as_ptr(class);
     RANGE_CLASS.with(|range| ptr == Rc::as_ptr(range))
-        || MODULE_TYPE.with(|module| ptr == Rc::as_ptr(module))
+        || is_module_type_class(class)
         || BUILTIN_TYPE_CLASSES.with(|classes| classes.iter().any(|entry| ptr == Rc::as_ptr(entry)))
-        || DICT_VIEW_CLASSES.with(|classes| classes.iter().any(|entry| ptr == Rc::as_ptr(entry)))
+        || DictViewClass::from_class(class).is_some()
         || NativeIteratorClass::from_class(class) == Some(NativeIteratorClass::Bytearray)
 }
 
@@ -109,12 +116,29 @@ pub(crate) fn primitive_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>
 /// Python-visible class or builtin-function names. This also includes
 /// `object`, which [`primitive_class_kind`] intentionally excludes.
 pub(crate) fn canonical_class_by_tag(tag: pyrust_core::CanonicalClassTag) -> Rc<RefCell<PyClass>> {
-    if tag == pyrust_core::CanonicalClassTag::Object {
-        return object_class_singleton();
+    match tag {
+        pyrust_core::CanonicalClassTag::Object => return object_class_singleton(),
+        pyrust_core::CanonicalClassTag::GenericAlias => return generic_alias_class_singleton(),
+        pyrust_core::CanonicalClassTag::TypeAliasType => return type_alias_class_singleton(),
+        pyrust_core::CanonicalClassTag::TypeVar => return typevar_class_singleton(),
+        pyrust_core::CanonicalClassTag::ParamSpec => return paramspec_class_singleton(),
+        pyrust_core::CanonicalClassTag::ParamSpecArgs => return paramspec_args_class_singleton(),
+        pyrust_core::CanonicalClassTag::ParamSpecKwargs => {
+            return paramspec_kwargs_class_singleton();
+        }
+        pyrust_core::CanonicalClassTag::TypeVarTuple => return typevartuple_class_singleton(),
+        _ => {}
     }
     PRIMITIVE_CLASSES.with(|classes| {
         Rc::clone(match tag {
-            pyrust_core::CanonicalClassTag::Object => unreachable!("handled above"),
+            pyrust_core::CanonicalClassTag::Object
+            | pyrust_core::CanonicalClassTag::GenericAlias
+            | pyrust_core::CanonicalClassTag::TypeAliasType
+            | pyrust_core::CanonicalClassTag::TypeVar
+            | pyrust_core::CanonicalClassTag::ParamSpec
+            | pyrust_core::CanonicalClassTag::ParamSpecArgs
+            | pyrust_core::CanonicalClassTag::ParamSpecKwargs
+            | pyrust_core::CanonicalClassTag::TypeVarTuple => unreachable!("handled above"),
             pyrust_core::CanonicalClassTag::Bool => &classes.bool_class,
             pyrust_core::CanonicalClassTag::Bytearray => &classes.bytearray_class,
             pyrust_core::CanonicalClassTag::Bytes => &classes.bytes_class,
@@ -123,9 +147,6 @@ pub(crate) fn canonical_class_by_tag(tag: pyrust_core::CanonicalClassTag) -> Rc<
             pyrust_core::CanonicalClassTag::Ellipsis => &classes.ellipsis_class,
             pyrust_core::CanonicalClassTag::Float => &classes.float_class,
             pyrust_core::CanonicalClassTag::Frozenset => &classes.frozenset_class,
-            pyrust_core::CanonicalClassTag::GenericAlias => {
-                return generic_alias_class_singleton();
-            }
             pyrust_core::CanonicalClassTag::Int => &classes.int_class,
             pyrust_core::CanonicalClassTag::List => &classes.list_class,
             pyrust_core::CanonicalClassTag::MappingProxy => &classes.mappingproxy_class,
@@ -134,9 +155,6 @@ pub(crate) fn canonical_class_by_tag(tag: pyrust_core::CanonicalClassTag) -> Rc<
             pyrust_core::CanonicalClassTag::Set => &classes.set_class,
             pyrust_core::CanonicalClassTag::Str => &classes.str_class,
             pyrust_core::CanonicalClassTag::Tuple => &classes.tuple_class,
-            pyrust_core::CanonicalClassTag::TypeVar => {
-                return typevar_class_singleton();
-            }
         })
     })
 }
