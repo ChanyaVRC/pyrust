@@ -32,6 +32,20 @@ pub(crate) fn intern_const_pool(consts: &mut [Value]) {
     }
 }
 
+/// The entries of a `FnCode::consts` pool that belong in the code object's
+/// Python-visible `co_consts`.
+///
+/// Besides source literals the compiler pools canonical builtin callables for
+/// its own use — the identity guard of an inlined `sum(<genexpr>)` reduction
+/// (#3384), the PEP 695 implicit generic-base helper.  CPython's `co_consts`
+/// never holds such objects and `marshal` cannot serialise them, so every
+/// consumer that presents the pool to Python goes through this filter.
+pub(crate) fn python_visible_consts(consts: &[Value]) -> impl Iterator<Item = &Value> {
+    consts
+        .iter()
+        .filter(|value| !matches!(value.kind(), pyrust_core::ValueKind::BuiltinFunction(_)))
+}
+
 /// Run-length-encoded source line table for a [`FnCode`].
 ///
 /// Stores ascending `(start_pc, line)` runs in a tight boxed slice: `line`

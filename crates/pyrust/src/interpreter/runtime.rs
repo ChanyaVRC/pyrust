@@ -256,8 +256,8 @@ mod expressions {
 }
 use expressions::bigint_to_float_or_overflow;
 pub(crate) use expressions::{
-    bigint_divmod_floor, binary_op_to_numeric_cmp, dispatch_numeric_binop, eval_builtin_unary,
-    value_from_bigint, value_to_bigint,
+    SumAccumulator, bigint_divmod_floor, binary_op_to_numeric_cmp, dispatch_numeric_binop,
+    eval_builtin_unary, value_from_bigint, value_to_bigint,
 };
 
 mod attributes {

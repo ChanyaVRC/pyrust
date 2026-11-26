@@ -1211,7 +1211,9 @@ impl Interpreter {
                         flags: 0,
                         filename: co_filename,
                         firstlineno,
-                        consts: fncode.consts.clone(),
+                        consts: crate::bytecode::python_visible_consts(&fncode.consts)
+                            .cloned()
+                            .collect(),
                         names: fncode
                             .names
                             .iter()

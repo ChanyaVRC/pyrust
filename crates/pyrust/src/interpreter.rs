@@ -549,6 +549,17 @@ pub(crate) struct InterpreterColdState {
     /// explicit frame trampoline enforce the Python recursion limit without
     /// growing the native Rust stack.
     memo_in_flight: std::collections::HashSet<MemoKey>,
+    /// The exception most recently re-raised by an explicit `raise e` while it
+    /// already carried a traceback; consumed by the next catch site.
+    ///
+    /// CPython always adds a node for the frame executing such a `raise`, even
+    /// when the exception is caught again in that same frame.  The catch
+    /// site's "this frame already built this chain" reuse check cannot tell
+    /// that apart from a carried chain of matching length, so a catch of this
+    /// very exception skips the check (#3384).  Held weakly and compared by
+    /// identity, so a re-raise that never reaches a handler (swallowed by an
+    /// `__exit__`) cannot affect a later, unrelated exception.
+    pub(crate) reraised_with_traceback: Option<Weak<RefCell<PyInstance>>>,
     /// Reusable argument buffer for `invoke_class_method`'s `BuiltinFunction`
     /// path — avoids a per-invocation heap allocation on the dunder
     /// dispatch path (`__add__`, `__iter__`, `__next__`, `__len__`, …).
@@ -750,6 +761,7 @@ impl InterpreterColdState {
             memo_cache: std::collections::HashMap::new(),
             memo_stats: std::collections::HashMap::new(),
             memo_in_flight: std::collections::HashSet::new(),
+            reraised_with_traceback: None,
             invoke_arg_buf: ExpandedArgBuf::new(),
             class_store_order: Vec::new(),
             class_annotation_scopes: Vec::new(),
@@ -1585,7 +1597,9 @@ pub(crate) fn value_code_object_with_flags(
         flags,
         filename: code.filename.to_string(),
         firstlineno,
-        consts: code.consts.clone(),
+        consts: crate::bytecode::python_visible_consts(&code.consts)
+            .cloned()
+            .collect(),
         names,
         freevars,
         cellvars,

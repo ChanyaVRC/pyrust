@@ -248,6 +248,7 @@ macro_rules! dispatch_insn_operands {
             | CmpJumpIfTrue(a, _, b, _)
             | RaiseFrom(a, b)
             | SetAdd(a, b)
+            | SumStep(a, b)
             | ListAppend(a, b)
             | ListExtend(a, b)
             | DictUpdate(a, b)

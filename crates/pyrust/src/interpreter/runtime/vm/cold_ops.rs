@@ -196,6 +196,11 @@ impl Interpreter {
             Insn::SetAdd(set_reg, val_reg) => {
                 self.exec_set_add(regs, *set_reg, *val_reg, num_locals)?;
             }
+            Insn::SumStep(cell_reg, val_reg) => {
+                let cell = vm_read(regs, *cell_reg, num_locals)?;
+                let val = vm_read(regs, *val_reg, num_locals)?;
+                self.sum_cell_step(&cell, val)?;
+            }
             Insn::ListExtend(list_reg, src_reg) => {
                 self.exec_list_extend(regs, *list_reg, *src_reg, num_locals)?;
             }

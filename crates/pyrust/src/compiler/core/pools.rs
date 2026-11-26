@@ -71,6 +71,7 @@ impl Compiler {
             has_dead_yield: false,
             is_set_comp: false,
             is_list_comp: false,
+            is_sum_reduction: false,
             list_comp_presize: false,
             is_inlined_comp: false,
             comp_enclosing_locals: None,

@@ -3,3 +3,4 @@
 include!("comprehensions/scope.rs");
 include!("comprehensions/inlined.rs");
 include!("comprehensions/genexpr.rs");
+include!("comprehensions/reduction.rs");

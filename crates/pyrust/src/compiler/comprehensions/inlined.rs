@@ -21,6 +21,7 @@ impl Compiler {
         let display = format!("<{comp_name}>");
         self.compile_comprehension_fn(CompFnConfig {
             iter_reg,
+            extra_arg: None,
             fn_body: &fn_body,
             body_linenos: &[],
             display_name: &display,
@@ -34,6 +35,7 @@ impl Compiler {
             is_set_comp: comp_name == "setcomp",
             // List comprehensions lower `.acc.append(elt)` to Insn::ListAppend (#1862).
             is_list_comp: comp_name == "listcomp",
+            is_sum_reduction: false,
             // Only a single-clause, unconditional, non-async list comp reaches
             // here with presize_acc — see compile_list_comp.
             list_comp_presize: presize_acc,

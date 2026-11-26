@@ -12,3 +12,4 @@ include!("expr/slicing_fast.rs");
 include!("expr/slicing_membership.rs");
 include!("expr/complex_union.rs");
 include!("expr/item_ops.rs");
+include!("expr/sum_fold.rs");

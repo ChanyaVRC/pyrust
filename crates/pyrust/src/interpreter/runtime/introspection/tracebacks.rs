@@ -328,7 +328,8 @@ impl Interpreter {
     /// prefix from frames captured *after* this point — so the stale frames of
     /// the original raise must be cleared here, otherwise they would be counted
     /// twice (once in the carried tail, once in the freshly-rebuilt prefix).
-    pub(crate) fn reset_captured_frames_if_reraise(&self, exc: &Value) {
+    pub(crate) fn reset_captured_frames_if_reraise(&mut self, exc: &Value) {
+        self.cold.reraised_with_traceback = None;
         let ValueKind::PyInstance(inst) = exc.kind() else {
             return;
         };
@@ -341,6 +342,7 @@ impl Interpreter {
             .is_some_and(|tb| !tb.is_none());
         if has_tb {
             pyrust_core::reset_captured_error_frames();
+            self.cold.reraised_with_traceback = Some(Rc::downgrade(inst));
             return;
         }
         // Issue #2407: a *fresh* exception (no carried `__traceback__`) raised
@@ -396,6 +398,7 @@ impl Interpreter {
         existing: &Value,
         catch_lineno: i64,
         is_bare_reraise: bool,
+        reraise_carries_traceback: bool,
     ) -> Option<Value> {
         // Fresh exception (slot still the pre-initialised `None`): plain build,
         // except when a bare `raise` re-raised a freshly-synthesised `except*`
@@ -449,7 +452,14 @@ impl Interpreter {
         // very frame; keep it so the object an inner `with`/`except` saw is
         // identical to the one this `except` reads.  Re-deferring or prepending
         // would mint a distinct head and break that contract.
+        //
+        // An explicit `raise e` of an exception that already carried a chain
+        // is never that case: CPython adds a node for the raising frame even
+        // when the exception is caught again right there, so a carried chain
+        // that merely happens to have the matching length must still get the
+        // prepend below.
         if is_real
+            && !reraise_carries_traceback
             && pyrust_builtins::traceback::chain_len(existing)
                 == pyrust_core::captured_error_frames_len() + 1
         {

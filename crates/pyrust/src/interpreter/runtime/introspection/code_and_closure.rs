@@ -241,7 +241,11 @@ impl Interpreter {
             // slot 0 for the docstring, are not reproduced — pyrust does not yet
             // extract docstrings into the const pool.)
             consts.push(Value::none());
-            consts.extend(fncode.consts.iter().filter(|c| !c.is_none()).cloned());
+            consts.extend(
+                crate::bytecode::python_visible_consts(&fncode.consts)
+                    .filter(|c| !c.is_none())
+                    .cloned(),
+            );
             names = fncode
                 .names
                 .iter()

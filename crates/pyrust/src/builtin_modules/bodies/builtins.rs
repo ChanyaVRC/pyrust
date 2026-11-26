@@ -23,8 +23,8 @@ use crate::interpreter::builtin_args::{
 };
 use crate::interpreter::{
     BuiltinTypeClass, CallableIter, ConsumerIterator, EnumerateIter, FilterIter, Interpreter,
-    IterSrcBuf, MapIter, NativeIteratorClass, ZipIter, apply_format_spec, apply_format_spec_named,
-    ascii_repr_interp, bigint_divmod_floor, builtin_data_backing,
+    IterSrcBuf, MapIter, NativeIteratorClass, SumAccumulator, ZipIter, apply_format_spec,
+    apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor, builtin_data_backing,
     builtin_type_class_isinstance_fast, class_has_native_builtin_type_ancestor,
     class_is_subclass_of, class_suppresses_instance_dict, classify_exception_class, coerce_numeric,
     coerce_subclass_backing, compare_values, compare_values_with_op, current_locals_value,
@@ -84,8 +84,8 @@ mod numeric_functions {
 
 mod aggregation {
     use super::{
-        BinaryOp, ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError,
-        PyValue, PyValueRef, Result, Value, ValueKind,
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError, PyValue,
+        PyValueRef, Result, SumAccumulator, Value, ValueKind,
     };
     include!("builtins/aggregation.rs");
 }
