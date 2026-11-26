@@ -307,6 +307,7 @@ macro_rules! pyrust_builtin_modules {
                 "os" => return os::post_load_init(interp, module),
                 "numbers" => return numbers::post_load_init(interp, module),
                 "array" => return array::post_load_init(interp, module),
+                "string" => return string::post_load_init(interp, module),
                 #[cfg(unix)]
                 "posix" => return posix::post_load_init(interp, module),
                 "importlib.abc" => return importlib_abc::post_load_init(interp, module),
@@ -524,10 +525,11 @@ pyrust_builtin_modules! {
     // `bodies/copy/reconstruct.rs`, with no Python-source injection.
     copy,
     pathlib,
-    // `string`: ASCII character-class constants are native; `capwords`,
-    // `Template`, and `Formatter` are injected from `string_py.py` by the
-    // `@inject` post-load hook (issue #2515).
-    string @inject,
+    // `string` (issues #2515, #3401): 100% native Rust in `bodies/string.rs`;
+    // `Template.flags` / `Template.pattern` and the `_string` / `_re` /
+    // `_ChainMap` imports are wired by its `post_load_init` hook, with no
+    // Python-source injection.
+    string,
     // `contextlib`: implemented 100% natively in Rust (issue #3388) — the ABCs,
     // decorators, `ExitStack` / `AsyncExitStack`, and every context manager.
     contextlib,

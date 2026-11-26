@@ -73,3 +73,48 @@ class DeepLeaf(Leaf):
     pass
 
 print(log)
+
+# --- multiple inheritance: the hook is looked up on the new class's MRO ---
+# (`super(cls, cls).__init_subclass__`), not just on the primary base chain.
+mro_log = []
+
+
+class HookAncestor:
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        mro_log.append(("HookAncestor", cls.__name__))
+
+
+class PlainLeft(HookAncestor):
+    pass
+
+
+class HookRight(HookAncestor):
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        mro_log.append(("HookRight", cls.__name__))
+
+
+class Diamond(PlainLeft, HookRight):
+    pass
+
+
+class NoHook:
+    pass
+
+
+class SecondBaseHook(NoHook, HookRight):
+    pass
+
+
+print(mro_log)
+
+
+class KwHook:
+    def __init_subclass__(cls, flag=None, **kwargs):
+        super().__init_subclass__(**kwargs)
+        print("KwHook", cls.__name__, flag)
+
+
+class KwViaSecond(NoHook, KwHook, flag=7):
+    pass
