@@ -117,10 +117,30 @@ pub struct CallMethodKwDesc {
 /// Out-of-line descriptor for [`Insn::MatchClassPositional`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MatchClassPositionalDesc {
+    /// First register of the result window: `n` positional values, then `nkw`
+    /// keyword-attribute values, then one trailing boolean "all attributes
+    /// found" flag (`false` means the class pattern fails to match).
     pub dst_base: Reg,
     pub subj: Reg,
     pub cls: Reg,
     pub n: u32,
+    /// Number of keyword attribute names in `consts[kwnames_idx]`.
+    pub nkw: u32,
+    pub kwnames_idx: u16,
+}
+
+impl MatchClassPositionalDesc {
+    /// Total registers written starting at `dst_base` (values + found flag).
+    #[inline]
+    pub fn window_len(&self) -> u32 {
+        self.n + self.nkw + 1
+    }
+
+    /// Register receiving the "all attributes found" flag.
+    #[inline]
+    pub fn found_reg(&self) -> Reg {
+        self.dst_base + self.n + self.nkw
+    }
 }
 
 /// Out-of-line descriptor for [`Insn::MakeFunction`].

@@ -4,12 +4,46 @@
 // `__match_args__`, match-self builtin classification, and Python diagnostics.
 
 impl Interpreter {
-    pub(crate) fn match_class_positional_values(
+    /// Fetch the attribute values a class pattern's sub-patterns match against:
+    /// `count` positional ones (via `__match_args__`) followed by the keyword
+    /// attributes `kw_names`.
+    ///
+    /// Like CPython's `MATCH_CLASS`, an attribute that is missing
+    /// (`AttributeError`, from a builtin, native or user type alike) makes the
+    /// whole class pattern fail to match (`Ok(None)`); any other exception
+    /// raised while looking an attribute up propagates.
+    pub(crate) fn match_class_attribute_values(
         &mut self,
         subject: &Value,
         class_value: &Value,
         count: usize,
-    ) -> Result<Vec<Value>> {
+        kw_names: &[String],
+    ) -> Result<Option<Vec<Value>>> {
+        let mut values = Vec::with_capacity(count + kw_names.len());
+        if count > 0 {
+            let Some(positional) =
+                self.match_class_positional_values(subject, class_value, count)?
+            else {
+                return Ok(None);
+            };
+            values = positional;
+        }
+        for name in kw_names {
+            match self.get_attr(subject, name) {
+                Ok(value) => values.push(value),
+                Err(error) if error.class_name_is("AttributeError") => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Some(values))
+    }
+
+    fn match_class_positional_values(
+        &mut self,
+        subject: &Value,
+        class_value: &Value,
+        count: usize,
+    ) -> Result<Option<Vec<Value>>> {
         let class_name = match class_value.kind() {
             ValueKind::PyClass(class) => class.borrow().name.clone(),
             _ => "<class>".to_string(),
@@ -24,11 +58,11 @@ impl Interpreter {
                             "{class_name}() accepts 1 positional sub-pattern ({count} given)"
                         ));
                     }
-                    return Ok(if count == 1 {
+                    return Ok(Some(if count == 1 {
                         vec![subject.clone()]
                     } else {
                         Vec::new()
-                    });
+                    }));
                 }
                 return Err(pyrust_core::type_err!(
                     "{class_name}() accepts 0 positional sub-patterns ({count} given)"
@@ -65,9 +99,13 @@ impl Interpreter {
                     pyrust_core::type_err!("__match_args__ elements must be strings (got {actual})")
                 })?
             };
-            values.push(self.get_attr(subject, &attribute)?);
+            match self.get_attr(subject, &attribute) {
+                Ok(value) => values.push(value),
+                Err(error) if error.class_name_is("AttributeError") => return Ok(None),
+                Err(error) => return Err(error),
+            }
         }
-        Ok(values)
+        Ok(Some(values))
     }
 
     fn class_matches_itself(class_value: &Value) -> bool {

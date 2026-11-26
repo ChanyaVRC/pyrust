@@ -291,7 +291,7 @@ fn pass_copy_prop(insns: Vec<Insn>, descs: &mut Vec<InsnDesc>, num_locals: u32) 
         if let Insn::MatchClassPositional(desc_idx) = &insn {
             let desc = descs[*desc_idx as usize].as_match_class_positional();
             let lo = desc.dst_base;
-            let hi = desc.dst_base + desc.n;
+            let hi = desc.dst_base + desc.window_len();
             copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
         }
         // Move(dst, src): kill stale aliases THEN record the new copy.

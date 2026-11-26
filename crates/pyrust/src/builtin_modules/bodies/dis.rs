@@ -902,7 +902,10 @@ fn decode_insn(fncode: &FnCode, pc: usize, insn: &Insn) -> DecodedInsn {
                 opcode: 74,
                 arg: Some(i64::from(d.n)),
                 argval: Value::int(i64::from(d.n)),
-                argrepr: format!("r{} as r{} ({} pos) -> r{}", d.subj, d.cls, d.n, d.dst_base),
+                argrepr: format!(
+                    "r{} as r{} ({} pos, {} kw) -> r{}",
+                    d.subj, d.cls, d.n, d.nkw, d.dst_base
+                ),
             }
         }
         Insn::MakeFunction(desc_idx) => {

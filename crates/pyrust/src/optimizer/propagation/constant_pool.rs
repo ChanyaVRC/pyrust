@@ -76,6 +76,7 @@ fn pass_compact_consts(
         match desc {
             InsnDesc::CallMethodKw(d) => mark(&mut used, d.kwnames_idx),
             InsnDesc::CallExArgs(d) if d.nkw > 0 => mark(&mut used, d.kwnames_idx),
+            InsnDesc::MatchClassPositional(d) if d.nkw > 0 => mark(&mut used, d.kwnames_idx),
             _ => {}
         }
     }
@@ -129,6 +130,7 @@ fn pass_compact_consts(
         match desc {
             InsnDesc::CallMethodKw(d) => d.kwnames_idx = remap(d.kwnames_idx),
             InsnDesc::CallExArgs(d) if d.nkw > 0 => d.kwnames_idx = remap(d.kwnames_idx),
+            InsnDesc::MatchClassPositional(d) if d.nkw > 0 => d.kwnames_idx = remap(d.kwnames_idx),
             _ => {}
         }
     }

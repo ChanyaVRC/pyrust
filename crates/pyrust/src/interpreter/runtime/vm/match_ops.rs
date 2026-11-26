@@ -22,14 +22,7 @@ impl Interpreter {
             }
             Insn::MatchClassPositional(desc_idx) => {
                 let desc = code.descs[*desc_idx as usize].as_match_class_positional();
-                self.exec_match_class_positional(
-                    regs,
-                    desc.dst_base,
-                    desc.subj,
-                    desc.cls,
-                    desc.n,
-                    num_locals,
-                )?;
+                self.exec_match_class_positional(regs, code, desc, num_locals)?;
                 Ok(true)
             }
             Insn::Unpack(base, src, n) => {
@@ -77,18 +70,37 @@ impl Interpreter {
     fn exec_match_class_positional(
         &mut self,
         regs: &mut RegSlice,
-        dst_base: crate::bytecode::Reg,
-        subj: crate::bytecode::Reg,
-        cls: crate::bytecode::Reg,
-        n: u32,
+        code: &crate::bytecode::FnCode,
+        desc: &crate::bytecode::MatchClassPositionalDesc,
         num_locals: crate::bytecode::Reg,
     ) -> Result<()> {
-        let class = vm_read(regs, cls, num_locals)?;
-        let subject = vm_read(regs, subj, num_locals)?;
-        let values = self.match_class_positional_values(&subject, &class, n as usize)?;
-        for (offset, value) in values.into_iter().enumerate() {
-            regs[dst_base as usize + offset] = value;
+        let class = vm_read(regs, desc.cls, num_locals)?;
+        let subject = vm_read(regs, desc.subj, num_locals)?;
+        let kw_names: Vec<String> = if desc.nkw == 0 {
+            Vec::new()
+        } else {
+            let names = code
+                .consts
+                .get(desc.kwnames_idx as usize)
+                .and_then(|value| value.as_tuple())
+                .ok_or_else(|| {
+                    pyrust_core::type_err!("bytecode error: MatchClass kwnames is not a tuple")
+                })?;
+            names
+                .iter()
+                .map(|name| name.as_str().map(str::to_owned))
+                .collect::<Option<_>>()
+                .ok_or_else(|| {
+                    pyrust_core::type_err!("bytecode error: MatchClass kwnames must be strings")
+                })?
+        };
+        let values =
+            self.match_class_attribute_values(&subject, &class, desc.n as usize, &kw_names)?;
+        let found = values.is_some();
+        for (offset, value) in values.into_iter().flatten().enumerate() {
+            regs[desc.dst_base as usize + offset] = value;
         }
+        regs[desc.found_reg() as usize] = Value::bool_(found);
         Ok(())
     }
 
