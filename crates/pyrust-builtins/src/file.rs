@@ -6,10 +6,11 @@
 //! `BuiltinObject` whose `BuiltinTypeOps` impl dispatches through this module.
 
 use std::any::Any;
+use std::cell::RefCell;
 #[cfg(windows)]
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 #[cfg(windows)]
 use std::sync::atomic::{AtomicI64, Ordering};
 #[cfg(windows)]
@@ -523,8 +524,7 @@ pub fn open_with_options(path: &str, opts: FileOpenOptions<'_>) -> Result<Value>
         newline: validated.newline,
         observed_newlines: ObservedNewlines::default(),
     };
-    let state: Box<dyn Any> = Box::new(state);
-    Ok(Value::builtin_object(FILE_OPS, state))
+    Ok(into_file_value(state))
 }
 
 /// Implements `open(fd, mode='r', buffering=-1, encoding=None, errors=None,
@@ -564,8 +564,60 @@ pub fn open_fd(
         newline: validated.newline,
         observed_newlines: ObservedNewlines::default(),
     };
-    let state: Box<dyn Any> = Box::new(state);
-    Ok(Value::builtin_object(FILE_OPS, state))
+    Ok(into_file_value(state))
+}
+
+pyrust_core::gil_local! {
+    /// Weak handles to writable files, so [`flush_open_files_at_exit`] can
+    /// reach files that are still open at shutdown. Weak handles never extend
+    /// a file's lifetime, so `Drop` still flushes it as soon as the last
+    /// reference goes away (#3318).
+    static WRITABLE_FILES: RefCell<Vec<Weak<RefCell<Box<dyn Any>>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Wrap `state` in a file object. Writable files are also recorded for the
+/// shutdown flush; read-only files have nothing to flush and skip it.
+fn into_file_value(state: FileState) -> Value {
+    let writable = state.is_writable_mode;
+    let boxed: Box<dyn Any> = Box::new(state);
+    let shared: BuiltinState = Rc::new(RefCell::new(boxed));
+    if writable {
+        let _ = WRITABLE_FILES.try_with(|files| {
+            let mut files = files.borrow_mut();
+            // Drop dead handles before the Vec would grow, so the registry
+            // stays proportional to the number of live files (amortized O(1)).
+            if files.len() == files.capacity() {
+                files.retain(|file| file.strong_count() > 0);
+            }
+            files.push(Rc::downgrade(&shared));
+        });
+    }
+    Value::builtin_object_shared(FILE_OPS, shared)
+}
+
+/// Write the buffered data of every file that is still open, as CPython's
+/// shutdown does when it finalizes leaked file objects (#3318). Errors are
+/// ignored, as in CPython. Handles stay open: the process is about to exit,
+/// and leaving them open means no fd (e.g. a wrapped stderr) is closed
+/// before the caller prints a pending traceback.
+pub fn flush_open_files_at_exit() {
+    let _ = WRITABLE_FILES.try_with(|files| {
+        for file in files.borrow().iter() {
+            let Some(state) = file.upgrade() else {
+                continue;
+            };
+            let Ok(mut borrow) = state.try_borrow_mut() else {
+                continue;
+            };
+            if let Some(s) = borrow.downcast_mut::<FileState>()
+                && !s.closed
+                && !s.write_buf_bytes.is_empty()
+            {
+                let _ = write_pending_bytes(s);
+            }
+        }
+    });
 }
 
 /// Decode raw file bytes to a `String` using the given encoding and error handler.
@@ -734,18 +786,23 @@ fn advance_cesu8_chars(bytes: &[u8], start: usize, max_chars: usize) -> usize {
     idx
 }
 
+/// Write pending buffered bytes to the OS handle. Pure `std::io` (no
+/// `PyError` construction) so `Drop` can call it during unwind or thread
+/// teardown. On failure the buffer is left intact.
+fn write_pending_bytes(s: &mut FileState) -> std::io::Result<()> {
+    if let Some(ref mut f) = s.os_file {
+        f.write_all(&s.write_buf_bytes)?;
+        f.flush()?;
+    }
+    s.write_buf_bytes.clear();
+    Ok(())
+}
+
 fn flush_write_buf(s: &mut FileState) -> Result<()> {
     if s.write_buf_bytes.is_empty() {
         return Ok(());
     }
-    let err_path = s.error_path().map(str::to_owned);
-    if let Some(ref mut f) = s.os_file {
-        f.write_all(&s.write_buf_bytes)
-            .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))?;
-        f.flush()
-            .map_err(|e| PyError::from_io_error(&e, err_path.as_deref()))?;
-    }
-    s.write_buf_bytes.clear();
+    write_pending_bytes(s).map_err(|e| PyError::from_io_error(&e, s.error_path()))?;
     // After writing, any cached read buffer is stale.
     s.read_loaded = false;
     s.content.clear();
@@ -973,10 +1030,32 @@ fn unregister_win_fd(s: &mut FileState) {
     }
 }
 
+/// Drop the OS handle, mark the file closed, and close the wrapped fd when
+/// `closefd` is set. Shared by `close()` and `Drop` so neither can close twice.
+fn release_os_resources(s: &mut FileState) {
+    #[cfg(windows)]
+    unregister_win_fd(s);
+    s.os_file = None;
+    s.closed = true;
+    s.write_buf_bytes.clear();
+    if s.closefd
+        && let (Some(fd), Some(close_fn)) = (s.fd_num, s.close_fd_fn)
+    {
+        let _ = close_fn(fd);
+    }
+}
+
 impl Drop for FileState {
+    /// CPython's `iobase_finalize`: a file still open when its last reference
+    /// drops is flushed and closed, with errors silently discarded (#3318).
     fn drop(&mut self) {
-        #[cfg(windows)]
-        unregister_win_fd(self);
+        if self.closed {
+            return;
+        }
+        if !self.write_buf_bytes.is_empty() {
+            let _ = write_pending_bytes(self);
+        }
+        release_os_resources(self);
     }
 }
 
@@ -1574,16 +1653,7 @@ fn close_file(state: &BuiltinState) -> Result<()> {
     } else {
         Ok(())
     };
-    #[cfg(windows)]
-    unregister_win_fd(s);
-    s.os_file = None;
-    s.closed = true;
-    s.write_buf_bytes.clear();
-    if s.closefd
-        && let (Some(fd), Some(close_fn)) = (s.fd_num, s.close_fd_fn)
-    {
-        let _ = close_fn(fd);
-    }
+    release_os_resources(s);
     flush_result
 }
 
@@ -1611,4 +1681,106 @@ pub fn has_method(name: &str) -> bool {
             | "write"
             | "writelines"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("pyrust_file_drop_{tag}_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn open_mode(path: &std::path::Path, mode: &str) -> Value {
+        open(path.to_str().expect("utf-8 temp path"), mode, None, true).expect("open")
+    }
+
+    fn write(file: &Value, text: &str) {
+        let ValueKind::BuiltinObject { state, .. } = file.kind() else {
+            panic!("open() must return a builtin file object");
+        };
+        file_write(state, &[Value::string(text)]).expect("write");
+    }
+
+    fn live_registered_files() -> (usize, usize) {
+        WRITABLE_FILES.with(|files| {
+            let files = files.borrow();
+            let live = files.iter().filter(|f| f.strong_count() > 0).count();
+            (live, files.len())
+        })
+    }
+
+    #[test]
+    fn dropping_the_last_reference_flushes_and_closes_3318() {
+        let dir = TempDir::new("flush");
+        let path = dir.0.join("out.txt");
+        let file = open_mode(&path, "w");
+        write(&file, "buffered");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        #[cfg(windows)]
+        assert!(
+            open_exclusive(&path).is_err(),
+            "handle must be open before drop"
+        );
+        drop(file);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "buffered");
+        #[cfg(windows)]
+        open_exclusive(&path).expect("drop must release the OS handle");
+        std::fs::remove_file(&path).expect("remove after drop");
+    }
+
+    /// An open that shares nothing, so it fails while any other handle is open.
+    #[cfg(windows)]
+    fn open_exclusive(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+    }
+
+    #[test]
+    fn shutdown_flush_reaches_files_that_are_still_open_3318() {
+        let dir = TempDir::new("exit");
+        let path = dir.0.join("out.txt");
+        let file = open_mode(&path, "w");
+        write(&file, "at-exit");
+        flush_open_files_at_exit();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "at-exit");
+        // Still usable afterwards; a later drop has nothing left to write.
+        write(&file, "+more");
+        drop(file);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "at-exit+more");
+    }
+
+    #[test]
+    fn registry_tracks_only_writable_files_and_stays_bounded() {
+        let dir = TempDir::new("registry");
+        let path = dir.0.join("out.txt");
+        let (live_before, _) = live_registered_files();
+        for _ in 0..1000 {
+            drop(open_mode(&path, "w"));
+        }
+        let reader = open_mode(&path, "r");
+        let (live, len) = live_registered_files();
+        assert_eq!(live, live_before, "read-only files must not be registered");
+        assert!(
+            len <= 2 * live_before + 64,
+            "dead handles must be pruned, len={len}"
+        );
+        drop(reader);
+    }
 }

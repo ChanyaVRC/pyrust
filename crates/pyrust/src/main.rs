@@ -796,6 +796,7 @@ fn finish_cli_interpreter(
         }
         run_repl_loop(interp)?;
         interp.run_atexit_callbacks();
+        pyrust_builtins::file::flush_open_files_at_exit();
         return Ok(());
     }
     if let Err(err) = result {
@@ -806,12 +807,15 @@ fn finish_cli_interpreter(
             }
             let _ = std::io::Write::flush(&mut std::io::stderr());
             interp.run_atexit_callbacks();
+            pyrust_builtins::file::flush_open_files_at_exit();
             let _ = std::io::Write::flush(&mut std::io::stdout());
             let _ = std::io::Write::flush(&mut std::io::stderr());
             std::process::exit(1);
         }
+        pyrust_builtins::file::flush_open_files_at_exit();
         return Err(err);
     }
+    pyrust_builtins::file::flush_open_files_at_exit();
     Ok(())
 }
 
@@ -1006,6 +1010,7 @@ fn run_repl(config: RuntimeConfig) -> Result<()> {
         interpreter.initialize_cli_startup()?;
         run_repl_loop(&mut interpreter)?;
         interpreter.run_atexit_callbacks();
+        pyrust_builtins::file::flush_open_files_at_exit();
         Ok(())
     })
 }

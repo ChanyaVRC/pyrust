@@ -279,6 +279,7 @@ pyrust_module! {
         let boot_fn = _interp.get_attr(&proc_obj, "_bootstrap")?;
         let code_val = call_pos(_interp, boot_fn, &[])?;
         let code = code_val.as_int().unwrap_or(0) as i32;
+        pyrust_builtins::file::flush_open_files_at_exit();
         std::process::exit(code);
     }
 
