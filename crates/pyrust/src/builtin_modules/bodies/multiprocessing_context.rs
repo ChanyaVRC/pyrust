@@ -15,10 +15,8 @@ use crate::builtin_modules::mp_rt::{
     platform_all_start_methods, set_start_method_impl,
 };
 use crate::error::{PyError, Result};
+use crate::interpreter::builtin_args::{OptValueRef, OptionalArg, PyBool, PyStr, PyValueRef};
 use crate::interpreter::{ExpandedCallArg, Interpreter};
-use crate::interpreter::builtin_args::{
-    OptValueRef, OptionalArg, PyBool, PyStr, PyValueRef,
-};
 use crate::value::{PyModule, Value, ValueKind};
 
 pub(crate) fn post_load_init(
@@ -81,8 +79,9 @@ fn call_mod_ctor(
 fn get_context_instance(interp: &mut Interpreter, method: Option<&str>) -> Result<Value> {
     let m_name = match method {
         Some(s) => s.to_string(),
-        None => get_start_method_impl(false)
-            .unwrap_or_else(|| crate::builtin_modules::mp_rt::platform_default_start_method().to_string()),
+        None => get_start_method_impl(false).unwrap_or_else(|| {
+            crate::builtin_modules::mp_rt::platform_default_start_method().to_string()
+        }),
     };
     let ctx_mod = interp.load_module("multiprocessing.context")?;
     let cls_name = match m_name.as_str() {

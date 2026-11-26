@@ -16,10 +16,10 @@ use crate::builtin_modules::mp_rt::sync::{
 };
 use crate::builtin_modules::mp_rt::{call_pos, parse_timeout};
 use crate::error::{PyError, Result};
-use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::interpreter::builtin_args::{
     OptValueRef, OptionalArg, PyBool, PyBytesLike, PyIndex, PyStr, PyValueRef,
 };
+use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::value::{InstanceAttrs, PyInstance, PyModule, Value, ValueKind};
 
 struct SemWrapState {
@@ -44,15 +44,14 @@ struct BarrierState {
     default_timeout: Option<std::time::Duration>,
 }
 
-fn new_instance_of(
-    interp: &mut Interpreter,
-    mod_name: &str,
-    cls_name: &str,
-) -> Result<Value> {
+fn new_instance_of(interp: &mut Interpreter, mod_name: &str, cls_name: &str) -> Result<Value> {
     let m = interp.load_module(mod_name)?;
     let cls = interp.get_attr(&m, cls_name)?;
     let ValueKind::PyClass(cls_rc) = cls.kind() else {
-        return Err(PyError::named("TypeError", format!("{cls_name} is not a class")));
+        return Err(PyError::named(
+            "TypeError",
+            format!("{cls_name} is not a class"),
+        ));
     };
     Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
         class: Rc::clone(cls_rc),
@@ -64,7 +63,11 @@ fn raise_broken_barrier(interp: &mut Interpreter) -> PyError {
     match (|| -> Result<Value> {
         let th = interp.load_module("threading")?;
         let cls = interp.get_attr(&th, "BrokenBarrierError")?;
-        call_pos(interp, cls, &[Value::string("Barrier aborted or timed out")])
+        call_pos(
+            interp,
+            cls,
+            &[Value::string("Barrier aborted or timed out")],
+        )
     })() {
         Ok(inst) => PyError::raised(inst),
         Err(e) => e,

@@ -10,10 +10,8 @@ use pyrust_derive::pyrust_module;
 
 use crate::builtin_modules::mp_rt::call_pos;
 use crate::error::{PyError, Result};
+use crate::interpreter::builtin_args::{OptValueRef, OptionalArg, PyBool, PyIndex, PyValueRef};
 use crate::interpreter::{ExpandedCallArg, Interpreter};
-use crate::interpreter::builtin_args::{
-    OptValueRef, OptionalArg, PyBool, PyIndex, PyValueRef,
-};
 use crate::value::{PyModule, Value};
 
 pub(crate) fn post_load_init(

@@ -9,7 +9,9 @@ use pyrust_derive::pyrust_module;
 use crate::builtin_modules::macros::native_state::set_native_state;
 use crate::builtin_modules::mp_rt::call_pos;
 use crate::error::{PyError, Result};
-use crate::interpreter::builtin_args::{OptValueRef, OptionalArg, PyBool, PyIndex, PyValue, PyValueRef};
+use crate::interpreter::builtin_args::{
+    OptValueRef, OptionalArg, PyBool, PyIndex, PyValue, PyValueRef,
+};
 use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::value::{InstanceAttrs, PyInstance, Value, ValueKind};
 

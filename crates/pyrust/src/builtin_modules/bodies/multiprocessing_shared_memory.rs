@@ -183,8 +183,9 @@ fn sl_read_item(shm: &OsSharedMem, offset: usize) -> Result<Value> {
             ])))
         }
         TAG_STR => {
-            let s = String::from_utf8(data)
-                .map_err(|_| PyError::named("UnicodeDecodeError", "invalid utf-8 in ShareableList"))?;
+            let s = String::from_utf8(data).map_err(|_| {
+                PyError::named("UnicodeDecodeError", "invalid utf-8 in ShareableList")
+            })?;
             Ok(Value::string(&s))
         }
         TAG_BYTES => Ok(Value::bytes(data)),

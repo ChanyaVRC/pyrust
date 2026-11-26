@@ -201,7 +201,10 @@ fn client_rpc_call(
         return Err(PyError::named("RuntimeError", "invalid manager reply"));
     };
     if items.len() != 2 {
-        return Err(PyError::named("RuntimeError", "invalid manager reply tuple"));
+        return Err(PyError::named(
+            "RuntimeError",
+            "invalid manager reply tuple",
+        ));
     }
     let ok = interp.truthy_value(&items[0])?;
     if ok {
@@ -523,7 +526,14 @@ fn manager_create_proxy(
         .as_str()
         .ok_or_else(|| PyError::named("RuntimeError", "manager did not return object id"))?
         .to_string();
-    make_proxy_instance(interp, proxy_cls_name, typeid.to_string(), addr, id, authkey)
+    make_proxy_instance(
+        interp,
+        proxy_cls_name,
+        typeid.to_string(),
+        addr,
+        id,
+        authkey,
+    )
 }
 
 pub(crate) fn post_load_init(

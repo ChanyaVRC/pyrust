@@ -12,10 +12,10 @@ use crate::builtin_modules::mp_rt::broker::BrokerEndpoint;
 use crate::builtin_modules::mp_rt::queue::{QueueHandle, QueueOpError};
 use crate::builtin_modules::mp_rt::{parse_timeout, pickle_dumps, pickle_loads, raise_queue_error};
 use crate::error::{PyError, Result};
-use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::interpreter::builtin_args::{
     OptValueRef, OptionalArg, PyBool, PyBytesLike, PyIndex, PyStr, PyValueRef,
 };
+use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::value::{InstanceAttrs, PyInstance, PyModule, Value, ValueKind};
 
 struct QueueState {

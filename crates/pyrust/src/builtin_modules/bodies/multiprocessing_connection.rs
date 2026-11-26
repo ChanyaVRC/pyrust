@@ -11,9 +11,7 @@ use std::time::{Duration, Instant};
 
 use pyrust_derive::pyrust_module;
 
-use crate::builtin_modules::macros::native_state::{
-    set_native_state, with_native_state,
-};
+use crate::builtin_modules::macros::native_state::{set_native_state, with_native_state};
 use crate::builtin_modules::mp_rt::broker::BrokerEndpoint;
 use crate::builtin_modules::mp_rt::ipc::{
     ConnectionCore, ListenerAddress, ListenerCore, address_type_str, answer_challenge_core,
@@ -98,7 +96,10 @@ fn parse_authkey(val: Option<&Value>) -> Result<Option<Vec<u8>>> {
                 {
                     return Ok(Some(b.as_slice().to_vec()));
                 }
-                Err(PyError::named("TypeError", "authkey should be a byte string"))
+                Err(PyError::named(
+                    "TypeError",
+                    "authkey should be a byte string",
+                ))
             }
         },
     }

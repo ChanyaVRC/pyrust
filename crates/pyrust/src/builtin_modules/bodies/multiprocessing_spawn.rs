@@ -15,10 +15,10 @@ use crate::builtin_modules::mp_rt::{
     set_start_method_impl,
 };
 use crate::error::{PyError, Result};
-use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::interpreter::builtin_args::{
     OptValueRef, OptionalArg, PyBool, PyBytesLike, PyIndex, PyPath, PyStr, PyValueRef,
 };
+use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::value::{PyDict, PyKey, PyModule, Value, ValueKind};
 
 /// Python-level unpickler snippet mapping `__main__` -> `__mp_main__` inside

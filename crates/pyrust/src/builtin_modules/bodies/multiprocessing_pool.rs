@@ -163,17 +163,10 @@ fn new_async_result(
     Ok(inst)
 }
 
-fn settle_async_result(
-    interp: &mut Interpreter,
-    res_obj: &Value,
-    ok: bool,
-    val: Value,
-) {
-    let Ok((waiter, py)) =
-        with_native_state::<AsyncResultState, _>(res_obj, "ApplyResult", |st| {
-            Ok((Arc::clone(&st.waiter), Rc::clone(&st.py)))
-        })
-    else {
+fn settle_async_result(interp: &mut Interpreter, res_obj: &Value, ok: bool, val: Value) {
+    let Ok((waiter, py)) = with_native_state::<AsyncResultState, _>(res_obj, "ApplyResult", |st| {
+        Ok((Arc::clone(&st.waiter), Rc::clone(&st.py)))
+    }) else {
         return;
     };
     let cb_to_run = {
@@ -444,7 +437,10 @@ fn run_pool_io_worker(shared: Arc<MpPoolShared>) {
                 }
                 push_pool_done(
                     &shared,
-                    MpDoneMsg::Error(task.task_id, "pool worker process terminated abruptly".into()),
+                    MpDoneMsg::Error(
+                        task.task_id,
+                        "pool worker process terminated abruptly".into(),
+                    ),
                 );
             }
         }
@@ -677,12 +673,7 @@ fn submit_pool_task(
         p.next_id += 1;
         p.next_id
     };
-    let req = Value::tuple(vec![
-        Value::int(tid as i64),
-        func,
-        Value::tuple(args),
-        kwds,
-    ]);
+    let req = Value::tuple(vec![Value::int(tid as i64), func, Value::tuple(args), kwds]);
     let payload = match pickle_dumps(interp, req) {
         Ok(b) => b,
         Err(err) => {

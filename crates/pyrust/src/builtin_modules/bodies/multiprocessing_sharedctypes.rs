@@ -23,21 +23,21 @@ use crate::value::{InstanceAttrs, PyDict, PyInstance, PyKey, PyModule, Value, Va
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SharedElemType {
-    Char,     // 'c' / c_char (1B bytes)
-    WChar,    // 'u' / c_wchar (4B UTF-32 code point)
-    Bool,     // '?' / c_bool (1B)
-    Int8,     // 'b' / c_byte
-    UInt8,    // 'B' / c_ubyte
-    Int16,    // 'h' / c_short
-    UInt16,   // 'H' / c_ushort
-    Int32,    // 'i' / c_int
-    UInt32,   // 'I' / c_uint
-    CLong,    // 'l' / c_long (i64 on LP64, i32 on Windows LLP64)
-    CULong,   // 'L' / c_ulong
-    Int64,    // 'q' / c_longlong
-    UInt64,   // 'Q' / c_ulonglong
-    Float32,  // 'f' / c_float
-    Float64,  // 'd' / c_double
+    Char,    // 'c' / c_char (1B bytes)
+    WChar,   // 'u' / c_wchar (4B UTF-32 code point)
+    Bool,    // '?' / c_bool (1B)
+    Int8,    // 'b' / c_byte
+    UInt8,   // 'B' / c_ubyte
+    Int16,   // 'h' / c_short
+    UInt16,  // 'H' / c_ushort
+    Int32,   // 'i' / c_int
+    UInt32,  // 'I' / c_uint
+    CLong,   // 'l' / c_long (i64 on LP64, i32 on Windows LLP64)
+    CULong,  // 'L' / c_ulong
+    Int64,   // 'q' / c_longlong
+    UInt64,  // 'Q' / c_ulonglong
+    Float32, // 'f' / c_float
+    Float64, // 'd' / c_double
 }
 
 impl SharedElemType {
@@ -145,7 +145,13 @@ impl SharedElemType {
         })
     }
 
-    fn write_to(self, interp: &mut Interpreter, shm: &OsSharedMem, idx: usize, val: &Value) -> Result<()> {
+    fn write_to(
+        self,
+        interp: &mut Interpreter,
+        shm: &OsSharedMem,
+        idx: usize,
+        val: &Value,
+    ) -> Result<()> {
         let off = idx * self.itemsize();
         match self {
             Self::Char => {
@@ -166,7 +172,12 @@ impl SharedElemType {
                     ValueKind::Str(s) if s.chars().count() == 1 => {
                         s.chars().next().unwrap_or('\0') as u32
                     }
-                    _ => return Err(PyError::named("TypeError", "a unicode character is required")),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "a unicode character is required",
+                        ));
+                    }
                 };
                 shm.write_bytes(off, &cp.to_ne_bytes())
             }
@@ -210,7 +221,10 @@ fn val_as_i64(val: &Value) -> Result<i64> {
         ValueKind::Bool(b) => Ok(i64::from(b)),
         _ => Err(PyError::named(
             "TypeError",
-            format!("an integer is required (got type {})", value_type_name_str(val)),
+            format!(
+                "an integer is required (got type {})",
+                value_type_name_str(val)
+            ),
         )),
     }
 }
@@ -225,7 +239,10 @@ fn val_as_u64(val: &Value) -> Result<u64> {
         }
         _ => Err(PyError::named(
             "TypeError",
-            format!("an integer is required (got type {})", value_type_name_str(val)),
+            format!(
+                "an integer is required (got type {})",
+                value_type_name_str(val)
+            ),
         )),
     }
 }
@@ -237,7 +254,10 @@ fn val_as_f64(val: &Value) -> Result<f64> {
         ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
         _ => Err(PyError::named(
             "TypeError",
-            format!("a float is required (got type {})", value_type_name_str(val)),
+            format!(
+                "a float is required (got type {})",
+                value_type_name_str(val)
+            ),
         )),
     }
 }
@@ -277,7 +297,10 @@ fn make_instance(interp: &mut Interpreter, cls_name: &str) -> Result<Value> {
     let m = interp.load_module("multiprocessing.sharedctypes")?;
     let cls = interp.get_attr(&m, cls_name)?;
     let ValueKind::PyClass(cls_rc) = cls.kind() else {
-        return Err(PyError::named("RuntimeError", format!("{cls_name} invalid")));
+        return Err(PyError::named(
+            "RuntimeError",
+            format!("{cls_name} invalid"),
+        ));
     };
     Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
         class: Rc::clone(cls_rc),

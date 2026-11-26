@@ -18,10 +18,10 @@ use crate::builtin_modules::mp_rt::{
     parse_timeout, set_current_authkey,
 };
 use crate::error::{PyError, Result};
-use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::interpreter::builtin_args::{
     OptValueRef, OptionalArg, PyBool, PyBytesLike, PyIndex, PyStr, PyValueRef,
 };
+use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::value::{InstanceAttrs, PyDict, PyInstance, PyKey, PyModule, Value, ValueKind};
 
 static NEXT_SENTINEL: AtomicI64 = AtomicI64::new(100_000);
@@ -138,7 +138,10 @@ pub(crate) fn get_or_init_current_process(interp: &mut Interpreter) -> Result<Va
 
 /// Create a lightweight parent-process handle for `parent_process()` inside a
 /// spawned child process.
-pub(crate) fn make_parent_process_proxy(interp: &mut Interpreter, parent_pid: i64) -> Result<Value> {
+pub(crate) fn make_parent_process_proxy(
+    interp: &mut Interpreter,
+    parent_pid: i64,
+) -> Result<Value> {
     let m = interp.load_module("multiprocessing.process")?;
     let cls = interp.get_attr(&m, "_ParentProcess")?;
     let ValueKind::PyClass(cls_rc) = cls.kind() else {
@@ -197,9 +200,11 @@ pub(crate) fn cleanup_and_active_children() -> Vec<Value> {
     MP_STATE.with(|s| {
         let mut st = s.borrow_mut();
         st.active_children.retain(|ch| {
-            with_native_state::<ProcessState, _>(ch, "BaseProcess", |ps| {
-                Ok(ps.effective_is_alive())
-            })
+            with_native_state::<ProcessState, _>(
+                ch,
+                "BaseProcess",
+                |ps| Ok(ps.effective_is_alive()),
+            )
             .unwrap_or(false)
         });
         st.active_children.clone()

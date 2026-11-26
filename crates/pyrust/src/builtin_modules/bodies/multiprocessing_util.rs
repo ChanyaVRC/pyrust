@@ -11,8 +11,8 @@ use pyrust_derive::pyrust_module;
 
 use crate::builtin_modules::mp_rt::{MP_STATE, call_pos, call_pos_kw, random_hex};
 use crate::error::Result;
-use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::interpreter::builtin_args::{OptValueRef, OptionalArg, PyIndex, PyStr, PyValueRef};
+use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::value::{PyModule, Value};
 
 const NOTSET: i64 = 0;
@@ -56,9 +56,7 @@ pub(crate) fn post_load_init(
         Value::string("SUBDEBUG"),
         Value::string("SUBWARNING"),
     ]);
-    module
-        .borrow_mut()
-        .insert_attr("__all__".to_string(), all);
+    module.borrow_mut().insert_attr("__all__".to_string(), all);
     Ok(())
 }
 
