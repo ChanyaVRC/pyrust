@@ -34,7 +34,9 @@ print("version", csv.__version__, _csv.__version__)
 print("quotes", csv.QUOTE_MINIMAL, csv.QUOTE_ALL, csv.QUOTE_NONNUMERIC,
       csv.QUOTE_NONE, csv.QUOTE_STRINGS, csv.QUOTE_NOTNULL)
 print("doc", csv.__doc__ == _csv.__doc__, csv.__doc__.splitlines()[0])
-print("vars-_csv", list(vars(_csv)))
+# Linux/macOS CPython ships `_csv` as a shared library whose loader sets
+# `__file__`; Windows builds it in.  pyrust's built-in never has one.
+print("vars-_csv", [k for k in vars(_csv) if k != "__file__"])
 print("csv-tail", [k for k in vars(csv) if not k.startswith("__") or k in ("__version__", "__all__")])
 print("identity", csv.Error is _csv.Error, csv._Dialect is _csv.Dialect,
       csv.reader is _csv.reader, csv.StringIO is io.StringIO, csv.re.__name__, csv.types.__name__)
