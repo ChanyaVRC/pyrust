@@ -113,8 +113,8 @@ mod reflection {
         current_locals_value, dir_names, extract_ast_linenos, extract_compile_filename,
         extract_source_text, inject_builtins_into_globals, instance_is_ast_subclass,
         invoke_class_method, is_ast_node, isinstance_check, issubclass_check, lookup_class_attr,
-        reject_keyword_args_expanded, sync_module_env_to_globals_dict, value_class,
-        value_type_name_str,
+        reject_keyword_args_expanded, resolve_default_exec_namespaces,
+        sync_module_env_to_globals_dict, value_class, value_type_name_str,
     };
     include!("builtins/reflection.rs");
 }

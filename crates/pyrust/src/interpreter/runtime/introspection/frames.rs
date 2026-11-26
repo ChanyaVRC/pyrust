@@ -732,6 +732,112 @@ impl Interpreter {
             .len()
             .checked_sub(1)
             .expect("implicit function exec requires an active frame");
+        self.retain_function_locals_at(view_index)
+    }
+
+    /// Return the kind of the innermost frame Python code can observe, skipping
+    /// PEP 709 inlined-comprehension views (which CPython 3.12 runs inside the
+    /// enclosing frame). `None` when no VM frame is active.
+    pub(crate) fn innermost_visible_frame_kind(&self) -> Option<FrameKind> {
+        self.vm_frame_views
+            .iter()
+            .rev()
+            .find(|view| !is_inlined_comprehension_view(view))
+            .map(VmFrameView::kind)
+    }
+
+    /// True when the innermost VM frame is a list / set / dict comprehension
+    /// body that CPython 3.12 inlines into its enclosing frame (PEP 709).
+    pub(crate) fn innermost_view_is_inlined_comprehension(&self) -> bool {
+        self.vm_frame_views
+            .last()
+            .is_some_and(is_inlined_comprehension_view)
+    }
+
+    /// `locals()` mapping for an inlined list / set / dict comprehension
+    /// (PEP 709, CPython 3.12 `_PyFrame_GetLocals(frame, include_hidden=1)`).
+    ///
+    /// CPython runs the comprehension inside its enclosing frame, so the
+    /// mapping is that frame's namespace plus the comprehension's own
+    /// bindings; the synthetic `.0` iterator / accumulator temporaries stay
+    /// hidden. Inside a function the result is the function's persistent
+    /// `f_locals` (the comprehension variables are fast locals there and
+    /// vanish from it once the comprehension finishes); at module or class
+    /// scope it is a fresh copy of that namespace, as in CPython.
+    pub(crate) fn inlined_comprehension_locals(&mut self) -> Value {
+        let mut overlay = PyDict::default();
+        let mut enclosing = None;
+        for (view_index, view) in self.vm_frame_views.iter().enumerate().rev() {
+            if !is_inlined_comprehension_view(view) {
+                enclosing = Some(view_index);
+                break;
+            }
+            // Inner comprehensions shadow outer ones: keep the first binding.
+            for (key, value) in snapshot_view_locals(self, view) {
+                let hidden = matches!(&key, PyKey::Str(name) if name.as_str().is_some_and(|n| n.starts_with('.')));
+                if !hidden && !overlay.contains_key(&key) {
+                    overlay.insert(key, value);
+                }
+            }
+        }
+        let Some(enclosing) = enclosing else {
+            return Value::dict(overlay);
+        };
+        match self.vm_frame_views[enclosing].kind() {
+            FrameKind::Function => {
+                let locals = self.retain_function_locals_at(enclosing);
+                let overlay_names: Vec<PyKey> = overlay.keys().cloned().collect();
+                with_frame_cache_mut(self, enclosing, |slot| {
+                    let cache = slot
+                        .as_deref_mut()
+                        .expect("retained function locals install a frame cache");
+                    for key in overlay_names {
+                        if !cache.function_local_names.contains(&key) {
+                            cache.function_local_names.push(key);
+                        }
+                    }
+                });
+                locals
+                    .dict_extend(overlay.into_iter().collect())
+                    .expect("function frame locals must be a dict");
+                locals
+            }
+            FrameKind::Class => {
+                let namespace = class_frame_locals_value(self, &self.vm_frame_views[enclosing]);
+                let mut dict = namespace
+                    .dict_with(PyDict::clone)
+                    .expect("live class namespace is a dict");
+                dict.extend(overlay);
+                Value::dict(dict)
+            }
+            FrameKind::Script => {
+                let view = &self.vm_frame_views[enclosing];
+                let env = view.env().unwrap_or(&self.env);
+                // Explicit exec/eval code reports its locals mapping (with its
+                // still-unflushed script registers); an ordinary module its
+                // full namespace.
+                let explicit = self
+                    .explicit_locals_for_environment(env)
+                    .and_then(|locals| locals.dict_with(PyDict::clone));
+                let mut dict = match explicit {
+                    Some(mut dict) => {
+                        let fastlocals = module_env(env).borrow().namespace_fastlocals_snapshot();
+                        for (name, value) in fastlocals {
+                            dict.insert(PyKey::str_from(&name), value);
+                        }
+                        dict
+                    }
+                    None => snapshot_view_locals(self, view),
+                };
+                dict.extend(overlay);
+                Value::dict(dict)
+            }
+        }
+    }
+
+    /// Persistent `f_locals` mapping for the function frame at `view_index`
+    /// (see [`Self::retain_current_function_locals`]).
+    fn retain_function_locals_at(&mut self, view_index: usize) -> Value {
         debug_assert_eq!(self.vm_frame_views[view_index].kind(), FrameKind::Function);
 
         if let Some(locals) = cached_function_locals(self, view_index) {

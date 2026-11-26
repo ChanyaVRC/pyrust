@@ -14,6 +14,49 @@ fn inject_builtins_into_globals(globals: &Value) {
     }
 }
 
+/// Resolve the namespaces an `eval()` / `exec()` call uses when `globals` is
+/// omitted or `None` (CPython 3.12 `builtin_eval_impl` / `builtin_exec_impl`):
+///
+/// - `globals=None` takes the calling frame's globals.
+/// - `globals=None, locals=None` additionally takes the calling frame's locals
+///   mapping: the live class namespace in a class body, or the function's
+///   `f_locals` (fast locals plus cell / free variables, issue #3317) — merged
+///   with PEP 709 inlined-comprehension variables when called from inside a
+///   list / set / dict comprehension.
+/// - An explicit `globals` with `locals=None` is left alone; the dict-namespace
+///   runners already use `globals` as both mappings.
+///
+/// At module scope with both omitted the result stays `(None, None)` so the
+/// direct module-namespace runner keeps its existing fast path.
+fn resolve_default_exec_namespaces(
+    interp: &mut Interpreter,
+    globals: &mut Option<Value>,
+    locals: &mut Option<Value>,
+) {
+    use crate::interpreter::FrameKind;
+    if globals.is_some() {
+        return;
+    }
+    let at_module_scope = interp
+        .vm_frame_views
+        .last()
+        .is_none_or(|view| view.kind() == FrameKind::Script);
+    if at_module_scope {
+        if locals.is_some() {
+            // `exec(src, None, mapping)` at module scope: the caller's module
+            // globals plus the explicit locals (same dict `globals()` returns).
+            sync_module_env_to_globals_dict(interp);
+            *globals = Some(interp.active_globals_dict());
+        }
+        return;
+    }
+    let active_env = Rc::clone(&interp.env);
+    *globals = Some(interp.globals_for_environment(&active_env));
+    if locals.is_none() {
+        *locals = Some(current_locals_value(interp));
+    }
+}
+
 /// Scan the first two lines of `bytes` for a PEP 263 coding declaration:
 /// `^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)`
 fn detect_pep263_encoding(bytes: &[u8]) -> Option<String> {
