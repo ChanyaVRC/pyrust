@@ -704,7 +704,23 @@ where
 }
 
 fn parse_cli_args(args: &[String]) -> std::result::Result<ParsedCli, CliUsageError> {
-    parse_cli_args_with_env(args, |key| std::env::var(key).ok())
+    let mut parsed = parse_cli_args_with_env(args, |key| std::env::var(key).ok())?;
+    // PEP 405 virtual environment startup detection: when `PYTHONHOME` is not
+    // explicitly overriding prefixes, check the executable's directory and its
+    // parent directory for `pyvenv.cfg`.
+    if parsed.config.prefix_override.is_none()
+        && let Some(venv_info) =
+            builtin_modules::sys::detect_pyvenv_startup(args.first().map(String::as_str))
+    {
+        parsed.config.venv_prefix = Some(venv_info.prefix);
+        parsed.config.venv_base_prefix = Some(venv_info.base_prefix);
+        parsed.config.venv_executable = Some(venv_info.executable);
+        parsed.config.venv_base_executable = Some(venv_info.base_executable);
+        parsed.config.venv_home = venv_info.home;
+        parsed.config.venv_include_system_site_packages =
+            Some(venv_info.include_system_site_packages);
+    }
+    Ok(parsed)
 }
 
 fn parse_source(src: &str) -> Result<Vec<ast::Stmt>> {

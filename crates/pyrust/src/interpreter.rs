@@ -454,6 +454,12 @@ pub struct RuntimeConfig {
     pub python_path: Vec<String>,
     pub prefix_override: Option<String>,
     pub exec_prefix_override: Option<String>,
+    pub venv_prefix: Option<String>,
+    pub venv_base_prefix: Option<String>,
+    pub venv_executable: Option<String>,
+    pub venv_base_executable: Option<String>,
+    pub venv_home: Option<String>,
+    pub venv_include_system_site_packages: Option<bool>,
     pub orig_argv: Vec<String>,
 }
 
@@ -488,6 +494,12 @@ impl Default for RuntimeConfig {
             python_path: Vec::new(),
             prefix_override: None,
             exec_prefix_override: None,
+            venv_prefix: None,
+            venv_base_prefix: None,
+            venv_executable: None,
+            venv_base_executable: None,
+            venv_home: None,
+            venv_include_system_site_packages: None,
             orig_argv: Vec::new(),
         }
     }

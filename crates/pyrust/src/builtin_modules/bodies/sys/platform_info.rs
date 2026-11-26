@@ -55,13 +55,10 @@ pub(super) fn sys_executable() -> String {
         .unwrap_or_default()
 }
 
-/// Default installation prefix derived from `sys.executable` (matching CPython's
-/// fallback layout: parent of `bin/` on Unix when installed in `bin/`, else
-/// executable's parent directory).
-pub(crate) fn default_sys_prefix() -> String {
-    let Ok(exe) = std::env::current_exe() else {
-        return String::new();
-    };
+/// Default installation prefix derived from an executable path (matching
+/// CPython's fallback layout: parent of `bin/` on Unix when installed in
+/// `bin/`, else executable's parent directory).
+pub(crate) fn default_sys_prefix_for_exe(exe: &std::path::Path) -> String {
     let Some(exe_dir) = exe.parent() else {
         return String::new();
     };
@@ -75,6 +72,210 @@ pub(crate) fn default_sys_prefix() -> String {
         return parent.to_string_lossy().into_owned();
     }
     exe_dir.to_string_lossy().into_owned()
+}
+
+/// Default installation prefix derived from `sys.executable`.
+pub(crate) fn default_sys_prefix() -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return String::new();
+    };
+    default_sys_prefix_for_exe(&exe)
+}
+
+/// Startup metadata parsed from PEP 405 `pyvenv.cfg` when the executable lives
+/// inside a virtual environment (either alongside `pyvenv.cfg` or in a child
+/// directory such as `bin/` or `Scripts/`).
+#[derive(Debug, Clone)]
+pub(crate) struct VenvStartupInfo {
+    pub prefix: String,
+    pub base_prefix: String,
+    pub executable: String,
+    pub base_executable: String,
+    pub home: Option<String>,
+    pub include_system_site_packages: bool,
+}
+
+/// Normalize `.` and `..` components lexically without following symlinks, so
+/// `<venv>/bin/python -> /path/to/pyrust` keeps its `<venv>/bin/python` path.
+fn clean_lexical_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !matches!(
+                    out.components().next_back(),
+                    None | Some(Component::RootDir | Component::Prefix(_))
+                ) {
+                    out.pop();
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Resolve the invoked executable path from `argv[0]` without following the
+/// final symlink (critical on Unix where `<venv>/bin/python` is typically a
+/// symlink to the base `pyrust` binary and `std::env::current_exe()` follows
+/// symlinks via `/proc/self/exe`).
+fn resolve_invoked_executable(arg0: Option<&str>) -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+
+    if let Some(raw) = arg0
+        && !raw.is_empty()
+    {
+        let p = Path::new(raw);
+        let has_sep =
+            raw.contains('/') || (cfg!(windows) && (raw.contains('\\') || raw.contains(':')));
+        if has_sep {
+            let abs = if p.is_absolute() {
+                clean_lexical_path(p)
+            } else if let Ok(cwd) = std::env::current_dir() {
+                clean_lexical_path(&cwd.join(p))
+            } else {
+                p.to_path_buf()
+            };
+            if std::fs::symlink_metadata(&abs).is_ok() {
+                return Some(abs);
+            }
+            #[cfg(windows)]
+            if abs.extension().is_none() {
+                let with_exe = abs.with_extension("exe");
+                if std::fs::symlink_metadata(&with_exe).is_ok() {
+                    return Some(with_exe);
+                }
+            }
+        } else if let Some(path_var) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path_var) {
+                let candidate = clean_lexical_path(&dir.join(p));
+                if std::fs::symlink_metadata(&candidate).is_ok() && candidate.is_file() {
+                    return Some(candidate);
+                }
+                #[cfg(windows)]
+                if candidate.extension().is_none() {
+                    let with_exe = candidate.with_extension("exe");
+                    if std::fs::symlink_metadata(&with_exe).is_ok() && with_exe.is_file() {
+                        return Some(with_exe);
+                    }
+                }
+            }
+        }
+    }
+
+    std::env::current_exe().ok().map(|p| PathBuf::from(&p))
+}
+
+/// Parse key/value pairs from a PEP 405 `pyvenv.cfg` file.
+pub(crate) fn parse_pyvenv_cfg(content: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for line in content.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            let key = k.trim().to_ascii_lowercase();
+            let val = v.trim().to_string();
+            if !key.is_empty() {
+                map.insert(key, val);
+            }
+        }
+    }
+    map
+}
+
+/// Check the executable's directory and its parent directory for `pyvenv.cfg`
+/// (PEP 405) and return virtual-environment startup metadata when present.
+pub(crate) fn detect_pyvenv_startup(arg0: Option<&str>) -> Option<VenvStartupInfo> {
+    use std::path::Path;
+
+    let invoked_exe = resolve_invoked_executable(arg0)?;
+    let exe_dir = invoked_exe.parent()?;
+    let (venv_dir, cfg_path) = {
+        let same_dir = exe_dir.join("pyvenv.cfg");
+        if same_dir.is_file() {
+            (exe_dir.to_path_buf(), same_dir)
+        } else {
+            let parent_dir = exe_dir.parent()?;
+            let parent_cfg = parent_dir.join("pyvenv.cfg");
+            if parent_cfg.is_file() {
+                (parent_dir.to_path_buf(), parent_cfg)
+            } else {
+                return None;
+            }
+        }
+    };
+
+    let raw_bytes = std::fs::read(&cfg_path).ok()?;
+    let content = String::from_utf8_lossy(&raw_bytes);
+    let kv = parse_pyvenv_cfg(&content);
+
+    let home = kv.get("home").cloned().filter(|s| !s.is_empty());
+    // CPython's `site.venv()` defaults `include-system-site-packages` to true
+    // when omitted; `venv.EnvBuilder` always writes `true` or `false`.
+    let include_system_site_packages = kv
+        .get("include-system-site-packages")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+
+    let real_exe = std::env::current_exe().unwrap_or_else(|_| invoked_exe.clone());
+    let base_prefix = if let Some(bp) = kv.get("base-prefix").filter(|s| !s.is_empty()) {
+        bp.clone()
+    } else if let Some(ref home_dir) = home {
+        let home_path = Path::new(home_dir);
+        #[cfg(not(windows))]
+        if home_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n == "bin")
+            && let Some(parent) = home_path.parent()
+        {
+            parent.to_string_lossy().into_owned()
+        } else {
+            home_dir.clone()
+        }
+        #[cfg(windows)]
+        {
+            let _ = home_path;
+            home_dir.clone()
+        }
+    } else {
+        default_sys_prefix_for_exe(&real_exe)
+    };
+
+    let base_executable = if let Some(be) = kv.get("base-executable").filter(|s| !s.is_empty()) {
+        be.clone()
+    } else if let Some(ref home_dir) = home {
+        let candidate = invoked_exe
+            .file_name()
+            .map(|name| Path::new(home_dir).join(name));
+        if let Some(c) = candidate
+            && c.is_file()
+        {
+            c.to_string_lossy().into_owned()
+        } else if let Some(exe_cfg) = kv.get("executable").filter(|s| !s.is_empty())
+            && Path::new(exe_cfg).is_file()
+        {
+            exe_cfg.clone()
+        } else if real_exe != invoked_exe {
+            real_exe.to_string_lossy().into_owned()
+        } else {
+            kv.get("executable")
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| invoked_exe.to_string_lossy().into_owned())
+        }
+    } else {
+        real_exe.to_string_lossy().into_owned()
+    };
+
+    Some(VenvStartupInfo {
+        prefix: venv_dir.to_string_lossy().into_owned(),
+        base_prefix,
+        executable: invoked_exe.to_string_lossy().into_owned(),
+        base_executable,
+        home,
+        include_system_site_packages,
+    })
 }
 
 /// Build a simple named-attribute PyInstance under a fresh anonymous
