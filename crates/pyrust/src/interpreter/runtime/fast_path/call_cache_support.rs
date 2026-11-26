@@ -27,22 +27,34 @@ pub(super) type BuiltinVectorcallDispatch = crate::builtin_registry::BuiltinFast
 #[derive(Clone, Copy)]
 pub(super) enum BuiltinCallCacheMiss {
     Registry,
+    /// A class reached a site that already cached some other callee. Such a
+    /// polymorphic site keeps the generic construction tail: resolving a
+    /// plain-class plan per distinct class would cost more than it saves.
     Class,
+    /// The first class observed at a still-empty site; the only miss that may
+    /// install a plain-class construction plan (issue #3383).
+    FirstClass,
 }
 
 /// Execution-free result of the single call-site cache probe.
-#[derive(Clone, Copy)]
+///
+/// Not `Copy`: a plain-class token shares ownership of its plan so the
+/// consumer never reads the call-site cache a second time.
+#[derive(Clone)]
 pub(super) enum BuiltinCallProbe {
     Uncacheable,
     Vector(BuiltinVectorcallDispatch),
     Expanded(crate::builtin_registry::BuiltinDispatchFn),
     ClassAfterPrimitiveMiss,
+    /// The callee is the plain class this site cached a construction plan
+    /// for. The consumer validates the plan's stamp immediately before use.
+    PlainClass(Rc<super::calls::PlainClassPlan>),
     EligibleMiss(BuiltinCallCacheMiss),
 }
 
 /// Plain `Call` carries an already-probed token. `CallMemo` bypasses have not
 /// visited this independent cache and request exactly one internal probe.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum PositionalCallCacheProbe {
     Probed(BuiltinCallProbe),
     Unprobed,
@@ -266,16 +278,38 @@ impl Interpreter {
                             vector_arguments,
                         )
                     }
+                    Some(CallBuiltinCacheEntry::PlainClass(plan)) if plan.is_for_class(class) => {
+                        BuiltinCallProbe::PlainClass(Rc::clone(plan))
+                    }
                     Some(CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(cached_class))
                         if cached_class.as_ptr() == std::rc::Rc::as_ptr(class) =>
                     {
                         BuiltinCallProbe::ClassAfterPrimitiveMiss
+                    }
+                    None | Some(CallBuiltinCacheEntry::Empty) => {
+                        BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::FirstClass)
                     }
                     _ => BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::Class),
                 }
             }
             _ => BuiltinCallProbe::Uncacheable,
         }
+    }
+
+    /// Overwrite this call site's entry with a class entry (cold paths only).
+    #[inline]
+    fn store_call_builtin_cache_entry(
+        code: &crate::bytecode::FnCode,
+        call_site: usize,
+        entry: CallBuiltinCacheEntry,
+    ) {
+        code.call_builtin_cache.borrow_mut().set_or_init(
+            &code.insns,
+            call_site,
+            crate::bytecode::is_call_builtin_cache_site,
+            || CallBuiltinCacheEntry::Empty,
+            entry,
+        );
     }
 
     /// Consume one execution-free probe token, populating a cacheable miss
@@ -306,6 +340,38 @@ impl Interpreter {
                 };
                 self.call_class_after_primitive_miss(std::rc::Rc::clone(class), arguments)
             }
+            BuiltinCallProbe::PlainClass(plan) => {
+                let ValueKind::PyClass(class) = function.kind() else {
+                    unreachable!("a plain-class token must retain its class callee")
+                };
+                if plan.is_current(class) {
+                    return self.construct_plain_class(class, &plan, arguments);
+                }
+                // Some class was mutated since the plan was resolved.
+                let Some(fresh) = self.resolve_plain_class_plan(class) else {
+                    // No longer plain (metaclass `__call__`, `__new__`,
+                    // abstract methods, a descriptor `__init__`, ...): demote
+                    // the site to the generic construction tail.
+                    let class = Rc::clone(class);
+                    Self::store_call_builtin_cache_entry(
+                        code,
+                        call_site,
+                        CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(Rc::downgrade(&class)),
+                    );
+                    return self.call_class_after_primitive_miss(class, arguments);
+                };
+                if plan.refresh_from(&fresh) {
+                    // An unrelated mutation: same facts under a new stamp.
+                    return self.construct_plain_class(class, &plan, arguments);
+                }
+                let fresh = Rc::new(fresh);
+                Self::store_call_builtin_cache_entry(
+                    code,
+                    call_site,
+                    CallBuiltinCacheEntry::PlainClass(Rc::clone(&fresh)),
+                );
+                self.construct_plain_class(class, &fresh, arguments)
+            }
             BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::Registry) => {
                 let ValueKind::BuiltinFunction(name) = function.kind() else {
                     unreachable!("a registry miss token must retain its registry callee")
@@ -335,7 +401,9 @@ impl Interpreter {
                     (registration.dispatch)(self, arguments)
                 }
             }
-            BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::Class) => {
+            BuiltinCallProbe::EligibleMiss(
+                miss @ (BuiltinCallCacheMiss::Class | BuiltinCallCacheMiss::FirstClass),
+            ) => {
                 let ValueKind::PyClass(class) = function.kind() else {
                     unreachable!("a class miss token must retain its class callee")
                 };
@@ -343,11 +411,22 @@ impl Interpreter {
 
                 // This is the sole primitive-map probe on a cold class miss.
                 let Some(dispatch) = super::primitive_class_dispatch(&class) else {
-                    code.call_builtin_cache.borrow_mut().set_or_init(
-                        &code.insns,
+                    // Only the first class seen at a site may install a
+                    // construction plan; see `BuiltinCallCacheMiss::Class`.
+                    if matches!(miss, BuiltinCallCacheMiss::FirstClass)
+                        && let Some(plan) = self.resolve_plain_class_plan(&class)
+                    {
+                        let plan = Rc::new(plan);
+                        Self::store_call_builtin_cache_entry(
+                            code,
+                            call_site,
+                            CallBuiltinCacheEntry::PlainClass(Rc::clone(&plan)),
+                        );
+                        return self.construct_plain_class(&class, &plan, arguments);
+                    }
+                    Self::store_call_builtin_cache_entry(
+                        code,
                         call_site,
-                        crate::bytecode::is_call_builtin_cache_site,
-                        || CallBuiltinCacheEntry::Empty,
                         CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(std::rc::Rc::downgrade(
                             &class,
                         )),
@@ -410,6 +489,18 @@ impl Interpreter {
         call_site: usize,
         probe: PositionalCallCacheProbe,
     ) -> Result<Value> {
+        // `C()` on a plain class whose `__init__` is `object.__init__` only
+        // allocates: no Python code runs, so the argument buffer and the
+        // caller-line bookkeeping below are skipped entirely (issue #3383).
+        if argument_count == 0
+            && let PositionalCallCacheProbe::Probed(BuiltinCallProbe::PlainClass(plan)) = &probe
+            && plan.is_allocation_only()
+            && let ValueKind::PyClass(class) = function.kind()
+            && plan.is_current(class)
+        {
+            return self.construct_plain_class(class, plan, &[]);
+        }
+
         let argument_base = (function_register + 1) as usize;
         let argument_end = argument_base + argument_count as usize;
         let lend_by_move = should_lend_builtin_call_arguments(

@@ -166,6 +166,13 @@ pub(crate) enum CallBuiltinCacheEntry {
         /// Weak identity prevents both ownership extension and allocator ABA.
         std::rc::Weak<std::cell::RefCell<pyrust_core::PyClass>>,
     ),
+    /// A plain user class together with its validated construction plan
+    /// (issue #3383). A warm hit whose stamp is still current skips the
+    /// typing/adapter/metaclass/abstract/exception re-derivation and goes
+    /// straight to allocation plus `__init__`. Shared (`Rc`) so the probe can
+    /// hand the plan to its consumer without a second cache read; the plan
+    /// itself holds the class and `__init__` only weakly.
+    PlainClass(std::rc::Rc<super::calls::PlainClassPlan>),
 }
 
 /// Apply a (usually constant) f-string format spec to `value`, consulting a
