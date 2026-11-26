@@ -44,11 +44,9 @@ const S_IROTH: u64 = 0o0004;
 const S_IWOTH: u64 = 0o0002;
 const S_IXOTH: u64 = 0o0001;
 
-/// Largest value that fits the platform's C `unsigned long`.
+/// Largest value that fits Windows' 32-bit C `unsigned long`.
 #[cfg(windows)]
 const ULONG_MAX: u64 = u32::MAX as u64;
-#[cfg(not(windows))]
-const ULONG_MAX: u64 = u64::MAX;
 
 /// Largest value that fits the platform's C `mode_t`.
 #[cfg(windows)]
@@ -102,6 +100,8 @@ fn mode_arg(arg: &Value) -> Result<u64> {
         }
         _ => unreachable!(),
     };
+    // `unsigned long` is 64 bits wide elsewhere, so every `u64` already fits.
+    #[cfg(windows)]
     if n > ULONG_MAX {
         return Err(overflow(
             "Python int too large to convert to C unsigned long",
@@ -281,8 +281,12 @@ pyrust_module! {
         "FILE_ATTRIBUTE_TEMPORARY" => Value::int(256),
         "FILE_ATTRIBUTE_VIRTUAL" => Value::int(65536),
 
+        // Only defined by CPython's `_stat` on Windows.
+        #[cfg(windows)]
         "IO_REPARSE_TAG_SYMLINK" => Value::int(0xA000_000C),
+        #[cfg(windows)]
         "IO_REPARSE_TAG_MOUNT_POINT" => Value::int(0xA000_0003),
+        #[cfg(windows)]
         "IO_REPARSE_TAG_APPEXECLINK" => Value::int(0x8000_001B),
     }
 
