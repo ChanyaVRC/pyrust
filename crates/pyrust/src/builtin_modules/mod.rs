@@ -581,10 +581,10 @@ pyrust_builtin_modules! {
     // `TextWrapper`, `wrap`, `fill`, `shorten`, `dedent`, `indent` — injected
     // by the `@inject` post-load hook; the native body is empty.
     textwrap @inject,
-    // `bisect` (issue #2784): array-bisection algorithms — a pure-Python
-    // module (`bisect_py.py`) injected by the `@inject` post-load hook; the
-    // native body is empty.
-    bisect @inject,
+    // `bisect` (issues #2784, #3310): 100% native array-bisection algorithms
+    // (`bisect_left` / `bisect_right` / `insort_left` / `insort_right` plus the
+    // `bisect` / `insort` aliases) in `bisect.rs`; no Python-source injection.
+    bisect,
     // `heapq` (issue #2784): heap-queue (priority-queue) algorithms — a
     // pure-Python module (`heapq_py.py`) injected by the `@inject` post-load
     // hook; the native body is empty.
