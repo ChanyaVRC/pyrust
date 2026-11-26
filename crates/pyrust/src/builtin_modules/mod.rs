@@ -526,12 +526,9 @@ pyrust_builtin_modules! {
     // `Template`, and `Formatter` are injected from `string_py.py` by the
     // `@inject` post-load hook (issue #2515).
     string @inject,
-    // `contextlib`: `suppress`, `contextmanager`, `closing`, `nullcontext`,
-    // `redirect_stdout/stderr`, and `ExitStack` are native; the ABCs,
-    // `ContextDecorator`, `asynccontextmanager`, `aclosing`, and
-    // `AsyncExitStack` are injected from `contextlib_py.py` by the `@inject`
-    // post-load hook (issue #2795).
-    contextlib @inject,
+    // `contextlib`: implemented 100% natively in Rust (issue #3388) — the ABCs,
+    // decorators, `ExitStack` / `AsyncExitStack`, and every context manager.
+    contextlib,
     "__future__" as future,
     warnings,
     // `json` is a pure-Python module (issue #2620): an empty native
