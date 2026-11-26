@@ -39,7 +39,7 @@ const ITERTOOLS_ERROR_NAMES: [(&str, &str); 19] = [
 // (b) Multi-interpreter / multi-threaded impact: Weak generation tracking
 //     isolates distinct `itertools` imports across interpreters on one thread
 //     and avoids leaking old modules; separate threads are isolated.
-thread_local! {
+pyrust_core::gil_local! {
     /// Every still-live imported `groupby` → `_grouper` class generation.
     ///
     /// Weak storage allows `del sys.modules["itertools"]` followed by a fresh

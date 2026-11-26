@@ -47,16 +47,17 @@ TIMEOUT_MAX = _PLATFORM_TIMEOUT_MAX
 ThreadError = RuntimeError
 
 _MAIN_THREAD_IDENT = _native_get_ident()
+_MAIN_THREAD_NATIVE_ID = _native_get_native_id()
 
 
 def get_ident():
     """Return the 'thread identifier' of the current thread."""
-    return _MAIN_THREAD_IDENT
+    return _native_get_ident()
 
 
 def get_native_id():
     """Return the native integral Thread ID of the current thread."""
-    return _MAIN_THREAD_IDENT
+    return _native_get_native_id()
 
 
 def _validate_lock_timeout(blocking, timeout):
@@ -80,44 +81,30 @@ def _validate_lock_timeout(blocking, timeout):
 
 
 class _Lock:
-    """Single-interpreter-safe non-reentrant lock."""
+    """Real OS-thread-safe, GIL-releasing non-reentrant lock."""
 
     def __init__(self):
-        self._locked = False
+        self._handle = _native_lock_new()
 
     def acquire(self, blocking=True, timeout=-1):
         blocking = bool(blocking)
         t = _validate_lock_timeout(blocking, timeout)
-        if not self._locked:
-            self._locked = True
-            return True
-        if not blocking:
-            return False
-        if t >= 0.0:
-            if t > 0.0:
-                _sleep(t)
-            return False
-        raise RuntimeError(
-            "cannot acquire already-locked Lock without timeout in "
-            "single-threaded interpreter"
-        )
+        return _native_lock_acquire(self._handle, blocking, t)
 
     acquire_lock = acquire
 
     def release(self):
-        if not self._locked:
-            raise RuntimeError("release unlocked lock")
-        self._locked = False
+        _native_lock_release(self._handle)
 
     release_lock = release
 
     def locked(self):
-        return self._locked
+        return _native_lock_locked(self._handle)
 
     locked_lock = locked
 
     def _at_fork_reinit(self):
-        self._locked = False
+        _native_lock_reinit(self._handle)
 
     def __enter__(self):
         self.acquire()
@@ -127,7 +114,7 @@ class _Lock:
         self.release()
 
     def __repr__(self):
-        status = "locked" if self._locked else "unlocked"
+        status = "locked" if self.locked() else "unlocked"
         return f"<{status} threading.Lock object at {id(self):#x}>"
 
 
@@ -152,8 +139,10 @@ class _RLock:
 
     def __repr__(self):
         owner = self._owner
-        if owner == _MAIN_THREAD_IDENT and _main_thread is not None:
-            owner = _main_thread.name
+        if owner is not None:
+            th = _active.get(owner)
+            if th is not None:
+                owner = th.name
         return "<%s %s.%s object owner=%r count=%d at %s>" % (
             "locked" if self._block.locked() else "unlocked",
             self.__class__.__module__,
@@ -790,11 +779,13 @@ class Thread:
         if daemon is not None:
             self._daemonic = bool(daemon)
         else:
-            self._daemonic = _main_thread.daemon if _main_thread is not None else False
+            cur = current_thread() if _main_thread is not None else None
+            self._daemonic = cur.daemon if cur is not None else False
         self._ident = None
         self._native_id = None
         self._started = Event()
         self._is_stopped = False
+        self._tstate_handle = None
         self._initialized = True
 
     def __repr__(self):
@@ -802,6 +793,7 @@ class Thread:
         status = "initial"
         if self._started.is_set():
             status = "started"
+        self.is_alive()
         if self._is_stopped:
             status = "stopped"
         if self._daemonic:
@@ -815,9 +807,66 @@ class Thread:
             raise RuntimeError("thread.__init__() not called")
         if self._started.is_set():
             raise RuntimeError("threads can only be started once")
-        raise RuntimeError(
-            "can't start new thread in single-threaded interpreter"
-        )
+        with _active_limbo_lock:
+            _limbo[self] = self
+        try:
+            self._tstate_handle = _native_start_thread(
+                self._bootstrap, self._daemonic, _stack_size
+            )
+        except Exception:
+            with _active_limbo_lock:
+                _limbo.pop(self, None)
+            raise
+        self._started.wait()
+
+    def _bootstrap(self):
+        try:
+            self._bootstrap_inner()
+        except SystemExit:
+            pass
+
+    def _bootstrap_inner(self):
+        try:
+            self._ident = get_ident()
+            self._native_id = get_native_id()
+            with _active_limbo_lock:
+                _active[self._ident] = self
+                _limbo.pop(self, None)
+            self._started.set()
+            if _trace_hook is not None and hasattr(_sys, "settrace"):
+                _sys.settrace(_trace_hook)
+            if _profile_hook is not None and hasattr(_sys, "setprofile"):
+                _sys.setprofile(_profile_hook)
+            try:
+                self.run()
+            except BaseException as exc:
+                if not _native_is_shutting_down():
+                    self._invoke_excepthook(exc)
+        finally:
+            self._is_stopped = True
+            with _active_limbo_lock:
+                if self._ident is not None:
+                    _active.pop(self._ident, None)
+                _limbo.pop(self, None)
+
+    def _invoke_excepthook(self, exc):
+        mod = _sys.modules.get("threading")
+        hook = getattr(mod, "excepthook", excepthook) if mod is not None else excepthook
+        if hook is None:
+            hook = __excepthook__
+        args = ExceptHookArgs((type(exc), exc, getattr(exc, "__traceback__", None), self))
+        try:
+            hook(args)
+        except BaseException as hook_exc:
+            _sys.stderr.write("Exception in threading.excepthook:\n")
+            import traceback
+
+            traceback.print_exception(
+                type(hook_exc),
+                hook_exc,
+                getattr(hook_exc, "__traceback__", None),
+                file=_sys.stderr,
+            )
 
     def run(self):
         """Method representing the thread's activity."""
@@ -834,6 +883,18 @@ class Thread:
             raise RuntimeError("cannot join thread before it is started")
         if self is current_thread():
             raise RuntimeError("cannot join current thread")
+        if timeout is not None:
+            if isinstance(timeout, bool):
+                timeout = float(timeout)
+            elif not isinstance(timeout, (int, float)):
+                raise TypeError(
+                    f"must be real number, not {type(timeout).__name__}"
+                )
+            timeout = float(timeout)
+        handle = self._tstate_handle
+        if handle is not None:
+            if _native_join_thread(handle, timeout):
+                self._is_stopped = True
         return None
 
     @property
@@ -858,7 +919,13 @@ class Thread:
 
     def is_alive(self):
         assert self._initialized, "Thread.__init__() not called"
-        return self._started.is_set() and not self._is_stopped
+        if self._is_stopped or not self._started.is_set():
+            return False
+        handle = self._tstate_handle
+        if handle is not None and _native_thread_is_done(handle):
+            self._is_stopped = True
+            return False
+        return True
 
     @property
     def daemon(self):
@@ -913,11 +980,16 @@ class _MainThread(Thread):
         Thread.__init__(self, name="MainThread", daemon=False)
         self._started.set()
         self._ident = _MAIN_THREAD_IDENT
-        self._native_id = _MAIN_THREAD_IDENT
+        self._native_id = _MAIN_THREAD_NATIVE_ID
 
+
+_active_limbo_lock = _allocate_lock()
+_active = {}
+_limbo = {}
 
 _main_thread = None
 _main_thread = _MainThread()
+_active[_MAIN_THREAD_IDENT] = _main_thread
 
 
 def main_thread():
@@ -927,7 +999,10 @@ def main_thread():
 
 def current_thread():
     """Return the current Thread object, corresponding to the caller's thread of control."""
-    return _main_thread
+    try:
+        return _active[get_ident()]
+    except KeyError:
+        return _main_thread
 
 
 currentThread = current_thread
@@ -935,7 +1010,8 @@ currentThread = current_thread
 
 def active_count():
     """Return the number of Thread objects currently alive."""
-    return 1
+    with _active_limbo_lock:
+        return len(_active) + len(_limbo)
 
 
 activeCount = active_count
@@ -943,4 +1019,5 @@ activeCount = active_count
 
 def enumerate():
     """Return a list of all Thread objects currently alive."""
-    return [_main_thread]
+    with _active_limbo_lock:
+        return list(_active.values()) + list(_limbo.values())

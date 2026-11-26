@@ -6,8 +6,8 @@
 //     thread share the cached `builtins` module attrs map unless a script
 //     replaces `__builtins__`; separate threads own independent `builtins`
 //     modules.
-thread_local! {
-    /// Per-thread cache of the `builtins` module value.
+pyrust_core::gil_local! {
+    /// Per-GIL-group cache of the `builtins` module value.
     /// `seed_module_dunders` clones this `Value` (one `Rc` increment) instead
     /// of rebuilding the module's ~136-entry `ModuleAttrs` map from scratch on
     /// every script invocation.

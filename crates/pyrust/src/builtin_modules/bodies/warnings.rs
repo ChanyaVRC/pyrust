@@ -193,7 +193,7 @@ struct WarningClassGeneration {
 // (b) Multi-interpreter / multi-threaded impact: Weak `catch_warnings` keys
 //     isolate distinct `warnings` imports across interpreters on one thread
 //     and prune dead generations; separate threads are isolated.
-thread_local! {
+pyrust_core::gil_local! {
     static WARNING_CLASS_GENERATIONS: RefCell<Vec<WarningClassGeneration>> =
         const { RefCell::new(Vec::new()) };
 }

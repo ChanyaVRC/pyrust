@@ -150,7 +150,7 @@ impl PathClassGeneration {
 // (b) Multi-interpreter / multi-threaded impact: Weak per-import entries keep
 //     re-imported `pathlib` modules isolated across interpreters on one thread
 //     and prune collected generations; separate threads are isolated.
-thread_local! {
+pyrust_core::gil_local! {
     static PATH_CLASS_GENERATIONS: RefCell<Vec<PathClassGeneration>> =
         const { RefCell::new(Vec::new()) };
     static PENDING_GENERATION: RefCell<Option<LiveGeneration>> =

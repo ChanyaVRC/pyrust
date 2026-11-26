@@ -198,12 +198,7 @@ pub(super) fn clear_type_cache(args: &[ExpandedCallArg], fn_name: &str) -> Resul
 /// Return a stable positive integer thread identifier matching
 /// `threading.get_ident()`.
 fn current_thread_ident() -> i64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    std::thread::current().id().hash(&mut hasher);
-    let raw = (hasher.finish() & 0x7fff_ffff_ffff_ffff) as i64;
-    if raw == 0 { 1 } else { raw }
+    crate::interpreter::current_os_thread_ident()
 }
 
 pub(super) fn getrefcount(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {

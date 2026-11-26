@@ -30,7 +30,7 @@ pyrust_struct_seq! {
 // (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
 //     thread share the immutable `os` result-type class singletons; separate
 //     threads build independent singletons.
-thread_local! {
+pyrust_core::gil_local! {
     static TERMINAL_SIZE_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs = indexmap::IndexMap::new();
         attrs.insert("__module__".to_string(), Value::string("os"));

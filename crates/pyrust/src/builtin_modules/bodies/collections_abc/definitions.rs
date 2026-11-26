@@ -31,7 +31,7 @@ macro_rules! abc_class {
 // (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
 //     thread share the `collections.abc` class objects (e.g. `ABC_SEQUENCE`);
 //     separate threads construct independent class singletons.
-thread_local! {
+pyrust_core::gil_local! {
     static ABC_CONTAINER:        Rc<RefCell<PyClass>> = abc_class!("Container");
     static ABC_HASHABLE:         Rc<RefCell<PyClass>> = abc_class!("Hashable");
     static ABC_ITERABLE:         Rc<RefCell<PyClass>> = abc_class!("Iterable");
@@ -273,7 +273,7 @@ pub(super) fn canonical_structural_abc_name(class: &Rc<RefCell<PyClass>>) -> Opt
 /// CPython registers the dictionary-view families with the collections ABCs
 /// virtually. Ordered views share their corresponding plain view's ABC shape.
 pub(super) fn dict_view_is_virtual_abc(kind: DictViewClass, abc: &Rc<RefCell<PyClass>>) -> bool {
-    let is = |candidate: &'static std::thread::LocalKey<Rc<RefCell<PyClass>>>| {
+    let is = |candidate: &'static pyrust_core::GilLocalKey<Rc<RefCell<PyClass>>>| {
         candidate.with(|class| Rc::ptr_eq(class, abc))
     };
     let common = is(&ABC_MAPPING_VIEW)

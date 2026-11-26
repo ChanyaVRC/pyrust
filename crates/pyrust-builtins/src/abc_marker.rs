@@ -26,7 +26,7 @@ struct AbcEntry {
 // (b) Multi-interpreter / multi-threaded impact: Weak entries prune dead
 //     generations automatically; multiple interpreters on one thread share the
 //     weak registry keyed by `Rc::ptr_eq`, while separate threads are isolated.
-thread_local! {
+pyrust_core::gil_local! {
     static ABC_CLASSES: RefCell<Vec<AbcEntry>> = const { RefCell::new(Vec::new()) };
 }
 

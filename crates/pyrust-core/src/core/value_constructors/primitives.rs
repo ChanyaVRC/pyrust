@@ -6,7 +6,7 @@
 //     thread share the immutable `()` singleton and interned builtin function
 //     stubs (note: mutating attributes on an interned builtin stub is visible
 //     on the same thread); separate threads own independent singletons.
-thread_local! {
+crate::gil_local! {
     /// Immutable empty-tuple singleton so `() is ()` is True and empty `*args`
     /// collection avoids heap allocation.
     static EMPTY_TUPLE: Value = {
@@ -17,7 +17,7 @@ thread_local! {
         unsafe { Value::tuple_from_rc(inner) }
     };
 
-    /// Per-thread intern cache mapping static builtin function names to their
+    /// Per-GIL-group intern cache mapping static builtin function names to their
     /// shared `Rc<UserFunction>` stub.
     static BUILTIN_FN_CACHE: RefCell<HashMap<&'static str, Rc<UserFunction>>> =
         RefCell::new(HashMap::new());

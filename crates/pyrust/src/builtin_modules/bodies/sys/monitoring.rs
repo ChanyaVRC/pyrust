@@ -76,7 +76,7 @@ const EVENT_TABLE: &[(&str, i64)] = &[
 // (b) Multi-interpreter / multi-threaded impact: `MISSING` and `DISABLE` are
 //     immutable identity sentinels safe to share across interpreters on the
 //     same thread; mutable tool/event state lives in `InterpreterColdState`.
-thread_local! {
+pyrust_core::gil_local! {
     static MISSING_SENTINEL: Value = make_sentinel();
     static DISABLE_SENTINEL: Value = make_sentinel();
 }

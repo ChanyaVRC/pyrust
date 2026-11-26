@@ -1412,41 +1412,35 @@ impl Interpreter {
             let (program, linenos) =
                 self.parse_source_to_stmts_with_warnings(&src, &module_filename)?;
             // Subinterpreter shares the same module_cache so results are visible to parent
-            let mut sub = Interpreter {
-                // Filesystem imports execute through a child object but
-                // remain inside the parent's Python interpreter. Sharing
-                // warnings state mirrors the singleton `warnings` module
-                // already shared through `module_cache`/`sys.modules`.
-                warnings_state: Rc::clone(&self.warnings_state),
-                sys_state: Rc::clone(&self.sys_state),
-                vm_hooks_flags: self.vm_hooks_flags,
-                // This child is an implementation detail of importing a
-                // module into the same Python interpreter. Start with the
-                // parent's integer conversion policy; changes are copied
-                // back below even if module execution raises.
-                int_max_str_digits: get_int_max_str_digits(self),
-                // Imported Python modules execute in a child Interpreter
-                // but share the parent's recursion policy.
-                recursion_limit: self.recursion_limit,
-                cold: Box::new(InterpreterColdState {
-                    script_dir: self.cold.script_dir.clone(),
-                    script_filename: Some(std::sync::Arc::from(module_filename.as_str())),
-                    // Imported modules run in the top-level script's process
-                    // context, so a later `import sys` must see the original
-                    // command-line arguments rather than an empty vector.
-                    script_argv: self.cold.script_argv.clone(),
-                    module_cache: Rc::clone(&self.cold.module_cache),
-                    bootstrap_module_registry: self.cold.bootstrap_module_registry.clone(),
-                    atexit_state: Rc::clone(&self.cold.atexit_state),
-                    runtime_config: Rc::clone(&self.cold.runtime_config),
-                    gc_state: Rc::clone(&self.cold.gc_state),
-                    tracemalloc_state: Rc::clone(&self.cold.tracemalloc_state),
-                    faulthandler_state: Rc::clone(&self.cold.faulthandler_state),
-                    monitoring_state: Rc::clone(&self.cold.monitoring_state),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
+            let sub_cold = Box::new(InterpreterColdState {
+                script_dir: self.cold.script_dir.clone(),
+                script_filename: Some(std::sync::Arc::from(module_filename.as_str())),
+                // Imported modules run in the top-level script's process
+                // context, so a later `import sys` must see the original
+                // command-line arguments rather than an empty vector.
+                script_argv: self.cold.script_argv.clone(),
+                module_cache: Rc::clone(&self.cold.module_cache),
+                bootstrap_module_registry: self.cold.bootstrap_module_registry.clone(),
+                atexit_state: Rc::clone(&self.cold.atexit_state),
+                runtime_config: Rc::clone(&self.cold.runtime_config),
+                gc_state: Rc::clone(&self.cold.gc_state),
+                tracemalloc_state: Rc::clone(&self.cold.tracemalloc_state),
+                faulthandler_state: Rc::clone(&self.cold.faulthandler_state),
+                monitoring_state: Rc::clone(&self.cold.monitoring_state),
+                ..InterpreterColdState::new_with_gil(
+                    std::sync::Arc::clone(&self.cold.gil_state),
+                    false,
+                )
+            });
+            let mut sub = Interpreter::new_worker(
+                Environment::new(None),
+                Rc::clone(&self.warnings_state),
+                Rc::clone(&self.sys_state),
+                get_int_max_str_digits(self),
+                self.recursion_limit,
+                sub_cold,
+            );
+            sub.vm_hooks_flags = self.vm_hooks_flags;
             if self.cold.runtime_config.verbose > 0 {
                 eprintln!("import '{name}' # from '{module_filename}'");
             }

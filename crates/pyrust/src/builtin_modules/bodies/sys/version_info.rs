@@ -238,7 +238,7 @@ pyrust_struct_seq! {
 // (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
 //     thread share the `sys.version_info` class object (each module gets fresh
 //     `PyInstance` objects); separate threads build independent class objects.
-thread_local! {
+pyrust_core::gil_local! {
     static VERSION_INFO_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
         attrs.insert("__module__".to_string(), Value::string("sys"));

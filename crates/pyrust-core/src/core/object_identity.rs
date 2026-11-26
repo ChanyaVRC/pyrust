@@ -13,14 +13,8 @@ use rustc_hash::FxBuildHasher;
 //     thread draw disjoint ids from the same monotonic counter and share
 //     synthetic id mappings for identical raw values; separate threads maintain
 //     independent id spaces with zero contention.
-thread_local! {
-    /// Monotonic identity shared by container/method representations that do
-    /// not carry a backing allocation address.  `None` is the exhausted state:
-    /// the last `u64` id is returned once, and the next allocation fails loudly
-    /// instead of wrapping to a live object's id.
-    static OBJ_ID_COUNTER: Cell<Option<u64>> = const { Cell::new(Some(1)) };
-
-    /// Append-only per-thread assignment of typed identities to bounded odd
+crate::gil_local! {
+    /// Append-only per-GIL-group assignment of typed identities to bounded odd
     /// inline `id()` integers.
     static BOUNDED_OBJECT_IDS: RefCell<BoundedObjectIds> =
         RefCell::new(BoundedObjectIds::new());
@@ -34,8 +28,9 @@ fn take_next_obj_id(counter: &Cell<Option<u64>>) -> u64 {
     id
 }
 
+#[inline(always)]
 pub(crate) fn next_obj_id() -> u64 {
-    OBJ_ID_COUNTER.with(take_next_obj_id)
+    take_next_obj_id(&crate::active_tls().next_obj_id)
 }
 
 /// Exact internal identity before it is exposed as Python's numeric `id()`.

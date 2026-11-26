@@ -41,36 +41,16 @@ const NAN_IDENTITY_MASK: u64 = NAN_IDENTITY_BIT - 1;
 // (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
 //     thread draw disjoint 47-bit payloads from the same monotonic counter;
 //     separate threads maintain independent counters without cross-thread sync.
-thread_local! {
-    /// Per-thread source of NaN object identities (#2911).  Values are
-    /// thread-confined, so a non-atomic `Cell` matches the ownership model.
-    static NAN_IDENTITY_COUNTER: Cell<u64> = const { Cell::new(0) };
-}
-
-/// Mint a fresh NaN bit pattern carrying a distinct object identity.
-///
-/// CPython gives every `float('nan')` its own object, and that is observable:
-/// two distinct NaNs occupy two dict slots, `b in {a}` is `False`, and
-/// `[a] == [b]` is `False` while `[a] == [a]` is `True`.  pyrust's floats are
-/// NaN-boxed immediates with no heap allocation to hang an identity off, so the
-/// identity is carried in the otherwise-unused NaN payload.  "Same object" then
-/// becomes exactly "same bits" — which is precisely what `is_identical_nan` and
-/// `values_are_identical` already test, so those call sites gain CPython
-/// semantics without changing.
-///
-/// The counter wraps after 2^47 mintings and identities are then reused; that
-/// is the same practical caveat CPython carries when a freed object's address
-/// is recycled.
 #[cold]
 #[inline(never)]
 fn mint_nan_identity() -> u64 {
     // A `Value` may be constructed while thread-locals are being torn down
     // (drop glue running after this key's destructor).  Fall back to the bare
     // identity pattern rather than panicking; it stays a valid, in-family NaN.
-    let payload = NAN_IDENTITY_COUNTER
-        .try_with(|counter| {
-            let next = counter.get().wrapping_add(1) & NAN_IDENTITY_MASK;
-            counter.set(next);
+    let payload = crate::try_active_tls()
+        .map(|tls| {
+            let next = tls.nan_identity_counter.get().wrapping_add(1) & NAN_IDENTITY_MASK;
+            tls.nan_identity_counter.set(next);
             next
         })
         .unwrap_or(0);

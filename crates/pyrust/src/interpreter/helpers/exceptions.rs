@@ -804,8 +804,8 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
 //     thread share the built-in exception class objects (mutations on a
 //     built-in exception class would be visible on the same thread); separate
 //     threads own independent hierarchies.
-thread_local! {
-    /// Per-thread cache of all built-in exception class `Rc`s.
+pyrust_core::gil_local! {
+    /// Per-GIL-group cache of all built-in exception class `Rc`s.
     /// Built once per thread; each `Interpreter::default()` call clones the
     /// `Rc`s (O(1) reference-count bumps) instead of allocating fresh
     /// `Rc<RefCell<PyClass>>` objects for the full hierarchy.
