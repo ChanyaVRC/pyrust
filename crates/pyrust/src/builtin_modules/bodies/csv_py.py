@@ -146,7 +146,33 @@ def _make_dialect(dialect, fmtparams):
 # --- reader -----------------------------------------------------------------
 
 
+# Parser states, named after CPython's ``_csv.c`` ``ParserState`` enum.
+(
+    _START_RECORD,
+    _START_FIELD,
+    _ESCAPED_CHAR,
+    _IN_FIELD,
+    _IN_QUOTED_FIELD,
+    _ESCAPE_IN_QUOTED_FIELD,
+    _QUOTE_IN_QUOTED_FIELD,
+    _EAT_CRNL,
+    _AFTER_ESCAPED_CRNL,
+) = range(9)
+
+# End-of-line marker fed to the state machine after the last character of a
+# physical line.  The empty string never equals a one-character dialect
+# attribute (nor ``None``), so it cannot be mistaken for real input.
+_EOL = ""
+
+
 class _reader:
+    """CSV parser mirroring the reader in CPython's ``_csv.c``.
+
+    The state machine is carried across the physical lines pulled from the
+    input iterable, so a quoted field or an escaped newline can span several
+    lines.  ``line_num`` counts the physical lines consumed.
+    """
+
     def __init__(self, iterable, dialect):
         self._input = iter(iterable)
         self.dialect = dialect
@@ -156,11 +182,6 @@ class _reader:
         return self
 
     def __next__(self):
-        line = next(self._input)
-        self.line_num += 1
-        return self._parse(line)
-
-    def _parse(self, line):
         d = self.dialect
         delimiter = d.delimiter
         quotechar = d.quotechar
@@ -169,97 +190,154 @@ class _reader:
         skipinitialspace = d.skipinitialspace
         quoting = d.quoting
         strict = d.strict
-
-        # Strip a single trailing line terminator (CPython feeds the reader
-        # lines that may carry their newline).
-        if line.endswith("\r\n"):
-            line = line[:-2]
-        elif line.endswith("\n") or line.endswith("\r"):
-            line = line[:-1]
-
-        # A wholly empty record yields an empty list (CPython parity), rather
-        # than a single empty field.
-        if line == "":
-            return []
+        quote_on = quoting != QUOTE_NONE
+        nonnumeric = quoting == QUOTE_NONNUMERIC
 
         fields = []
         field = []
-        field_was_quoted = False
-        # States: 0 = start of field, 1 = unquoted, 2 = in quotes,
-        #         3 = after closing quote, 4 = escaped char pending.
-        state = 0
-        prev_state = 1
-        i = 0
-        n = len(line)
-        while i < n:
-            ch = line[i]
-            if state == 0:
-                if skipinitialspace and ch == " ":
-                    i += 1
-                    continue
-                if quoting != QUOTE_NONE and quotechar is not None and ch == quotechar:
-                    state = 2
-                    field_was_quoted = True
-                elif escapechar is not None and ch == escapechar:
-                    prev_state = 1
-                    state = 4
-                elif ch == delimiter:
-                    fields.append(self._coerce("".join(field), field_was_quoted))
-                    field = []
-                    field_was_quoted = False
-                    state = 0
-                else:
-                    field.append(ch)
-                    state = 1
-            elif state == 1:
-                if escapechar is not None and ch == escapechar:
-                    prev_state = 1
-                    state = 4
-                elif ch == delimiter:
-                    fields.append(self._coerce("".join(field), field_was_quoted))
-                    field = []
-                    field_was_quoted = False
-                    state = 0
-                else:
-                    field.append(ch)
-            elif state == 2:
-                if escapechar is not None and ch == escapechar:
-                    prev_state = 2
-                    state = 4
-                elif ch == quotechar:
-                    if doublequote and i + 1 < n and line[i + 1] == quotechar:
-                        field.append(quotechar)
-                        i += 1
-                    else:
-                        state = 3
-                else:
-                    field.append(ch)
-            elif state == 3:
-                if ch == delimiter:
-                    fields.append(self._coerce("".join(field), field_was_quoted))
-                    field = []
-                    field_was_quoted = False
-                    state = 0
-                elif ch == quotechar and not doublequote:
-                    field.append(ch)
-                    state = 2
-                else:
+        numeric = False
+        state = _START_RECORD
+
+        while True:
+            try:
+                line = next(self._input)
+            except StopIteration:
+                # End of input inside a record: CPython reports it under
+                # ``strict`` and otherwise yields the partial record.
+                if field or state == _IN_QUOTED_FIELD:
                     if strict:
+                        raise Error("unexpected end of data")
+                    fields.append(self._finish(field, numeric))
+                    return fields
+                raise
+            if not isinstance(line, str):
+                raise Error(
+                    "iterator should return strings, not %s "
+                    "(the file should be opened in text mode)"
+                    % type(line).__name__
+                )
+            self.line_num += 1
+
+            n = len(line)
+            pos = 0
+            while pos <= n:
+                c = line[pos] if pos < n else _EOL
+                pos += 1
+
+                if state == _START_RECORD:
+                    if c == _EOL:
+                        continue  # empty line -> []
+                    if c == "\n" or c == "\r":
+                        state = _EAT_CRNL
+                        continue
+                    state = _START_FIELD
+                    # fall through to START_FIELD handling
+
+                if state == _START_FIELD:
+                    if c == "\n" or c == "\r" or c == _EOL:
+                        fields.append(self._finish(field, numeric))
+                        field = []
+                        numeric = False
+                        state = _START_RECORD if c == _EOL else _EAT_CRNL
+                    elif quote_on and c == quotechar:
+                        state = _IN_QUOTED_FIELD
+                    elif c == escapechar:
+                        state = _ESCAPED_CHAR
+                    elif c == " " and skipinitialspace:
+                        pass
+                    elif c == delimiter:
+                        fields.append(self._finish(field, numeric))
+                        field = []
+                        numeric = False
+                    else:
+                        if nonnumeric:
+                            numeric = True
+                        field.append(c)
+                        state = _IN_FIELD
+
+                elif state == _ESCAPED_CHAR:
+                    if c == "\n" or c == "\r":
+                        field.append(c)
+                        state = _AFTER_ESCAPED_CRNL
+                    else:
+                        field.append("\n" if c == _EOL else c)
+                        state = _IN_FIELD
+
+                elif state == _IN_FIELD or (
+                    state == _AFTER_ESCAPED_CRNL and c != _EOL
+                ):
+                    if c == "\n" or c == "\r" or c == _EOL:
+                        fields.append(self._finish(field, numeric))
+                        field = []
+                        numeric = False
+                        state = _START_RECORD if c == _EOL else _EAT_CRNL
+                    elif c == escapechar:
+                        state = _ESCAPED_CHAR
+                    elif c == delimiter:
+                        fields.append(self._finish(field, numeric))
+                        field = []
+                        numeric = False
+                        state = _START_FIELD
+                    else:
+                        field.append(c)
+
+                elif state == _AFTER_ESCAPED_CRNL:
+                    pass  # c is EOL: keep waiting for the next line
+
+                elif state == _IN_QUOTED_FIELD:
+                    if c == _EOL:
+                        pass
+                    elif c == escapechar:
+                        state = _ESCAPE_IN_QUOTED_FIELD
+                    elif quote_on and c == quotechar:
+                        state = _QUOTE_IN_QUOTED_FIELD if doublequote else _IN_FIELD
+                    else:
+                        field.append(c)
+
+                elif state == _ESCAPE_IN_QUOTED_FIELD:
+                    field.append("\n" if c == _EOL else c)
+                    state = _IN_QUOTED_FIELD
+
+                elif state == _QUOTE_IN_QUOTED_FIELD:
+                    if quote_on and c == quotechar:
+                        field.append(c)
+                        state = _IN_QUOTED_FIELD
+                    elif c == delimiter:
+                        fields.append(self._finish(field, numeric))
+                        field = []
+                        numeric = False
+                        state = _START_FIELD
+                    elif c == "\n" or c == "\r" or c == _EOL:
+                        fields.append(self._finish(field, numeric))
+                        field = []
+                        numeric = False
+                        state = _START_RECORD if c == _EOL else _EAT_CRNL
+                    elif not strict:
+                        field.append(c)
+                        state = _IN_FIELD
+                    else:
                         raise Error(
                             "'%s' expected after '%s'" % (delimiter, quotechar)
                         )
-                    field.append(ch)
-                    state = 1
-            elif state == 4:
-                field.append(ch)
-                state = prev_state
-            i += 1
 
-        fields.append(self._coerce("".join(field), field_was_quoted))
-        return fields
+                else:  # _EAT_CRNL
+                    if c == "\n" or c == "\r":
+                        pass
+                    elif c == _EOL:
+                        state = _START_RECORD
+                    else:
+                        raise Error(
+                            "new-line character seen in unquoted field - do "
+                            "you need to open the file with newline=''?"
+                        )
 
-    def _coerce(self, value, was_quoted):
-        if self.dialect.quoting == QUOTE_NONNUMERIC and not was_quoted:
+            if state == _START_RECORD:
+                return fields
+
+    @staticmethod
+    def _finish(field, numeric):
+        value = "".join(field)
+        if numeric:
             return float(value)
         return value
 
