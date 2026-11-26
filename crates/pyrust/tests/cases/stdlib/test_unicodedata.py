@@ -209,3 +209,120 @@ try:
     ud.lookup(123)
 except TypeError as e:
     print("lookup TypeError:", str(e))
+
+
+# 7. UCD / ucd_3_2_0 (native class; previously `unicodedata_py.py`, issue #3323)
+def show(fn, *args, **kwargs):
+    try:
+        print(repr(fn(*args, **kwargs)))
+    except Exception as e:
+        print(type(e).__name__, e)
+
+
+ucd = ud.ucd_3_2_0
+print("ucd identity:", type(ucd) is ud.UCD, isinstance(ucd, ud.UCD), ud.ucd_3_2_0 is ucd)
+print("ucd names:", ud.UCD.__name__, ud.UCD.__qualname__, ud.UCD.__module__, ud.UCD.__doc__)
+print("ucd versions:", ucd.unidata_version, ud.unidata_version)
+print("module doc:", type(ud.__doc__).__name__, ud.__doc__.splitlines()[0])
+print("module attrs:", sorted(n for n in dir(ud) if not n.startswith("_") and n != "ucd_3_2_0"))
+
+# UCD cannot be instantiated or have attributes assigned/deleted.
+show(ud.UCD)
+show(ud.UCD, "3.2.0")
+show(ud.UCD, version="3.2.0")
+show(setattr, ucd, "unidata_version", "x")
+show(delattr, ucd, "unidata_version")
+show(setattr, ucd, "extra", 1)
+show(delattr, ucd, "extra")
+show(__import__("copy").copy, ucd)
+show(__import__("pickle").dumps, ucd)
+
+# UCD methods delegate to the same implementations as the module functions
+# on characters assigned in both databases.
+for ch in ["A", "\u00e9", "5", "\u0665", "\u00bd", "\u0301", "(", "\u4e00", "\uac00", "\ufb01"]:
+    print(
+        "ucd U+%04X:" % ord(ch),
+        ucd.category(ch),
+        ucd.bidirectional(ch),
+        ucd.combining(ch),
+        ucd.east_asian_width(ch),
+        ucd.mirrored(ch),
+        repr(ucd.decomposition(ch)),
+        ucd.decimal(ch, -1),
+        ucd.digit(ch, -1),
+        ucd.numeric(ch, -1),
+        ucd.name(ch, "-"),
+    )
+show(ucd.decimal, "A")
+show(ucd.digit, "A")
+show(ucd.numeric, "A")
+show(ucd.name, "\x00")
+show(ucd.name, "\x00", None)
+show(ucd.lookup, "LATIN SMALL LETTER A")
+show(ucd.lookup, b"LATIN SMALL LETTER A")
+show(ucd.lookup, "NO SUCH NAME")
+show(ucd.normalize, "NFKC", "\ufb01")
+show(ucd.normalize, "NFD", "\u00e9")
+show(ucd.is_normalized, "NFC", "a\u0301")
+show(ucd.is_normalized, "NFC", "\u00e9")
+show(ucd.normalize, "bad", "a")
+
+# Bound methods and descriptor access.
+show(lambda: ucd.category.__self__ is ucd)
+show(ud.UCD.category, ucd, "a")
+show(ud.UCD.category, "x", "a")
+show(ud.UCD.category)
+show(sorted, [n for n in vars(ud.UCD) if not n.startswith("__")])
+
+# 8. Exact argument-count / keyword / type wording (module functions and methods)
+for owner_name, owner in (("module", ud), ("ucd", ucd)):
+    for fn_name in (
+        "category", "bidirectional", "combining", "east_asian_width", "mirrored",
+        "decomposition", "decimal", "digit", "numeric", "name", "lookup",
+        "normalize", "is_normalized",
+    ):
+        fn = getattr(owner, fn_name)
+        print("--", owner_name, fn_name)
+        show(fn)
+        show(fn, "a", "b", "c")
+        show(fn, "a", x=1)
+        show(fn, x=1)
+        show(fn, 1)
+        show(fn, None)
+        show(fn, b"a")
+        show(fn, "ab")
+        show(fn, "")
+        show(fn, "a", "b")
+
+# `lookup` accepts str and bytes only; other buffers use a different message.
+import array
+
+for bad in (None, 1.5, [1], bytearray(b"A"), memoryview(b"A"), array.array("B", [65])):
+    show(ud.lookup, bad)
+show(ud.lookup, "a\ud800")
+show(ud.lookup, "a\ud800\udc00b")
+show(ud.lookup, "NO\x00SUCH")
+show(ud.lookup, b"NO\x00SUCH")
+show(ud.lookup, b"\xc3\xa9")
+show(ud.lookup, b"\xff")
+show(ud.lookup, "LATIN SMALL LETTER \u00e9")
+
+
+class MyStr(str):
+    pass
+
+
+class MyBytes(bytes):
+    pass
+
+
+show(ud.category, MyStr("a"))
+show(ud.lookup, MyStr("LATIN SMALL LETTER A"))
+show(ud.lookup, MyBytes(b"LATIN SMALL LETTER A"))
+show(ud.normalize, MyStr("NFC"), MyStr("e\u0301"))
+show(ud.is_normalized, MyStr("NFD"), MyStr("e\u0301"))
+show(ud.name, MyStr("a"), None)
+show(ud.normalize, None, "a")
+show(ud.normalize, "NFC", None)
+show(ud.is_normalized, b"NFC", "a")
+show(ud.normalize, "NFC", "a", form="NFC")
