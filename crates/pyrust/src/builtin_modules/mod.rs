@@ -662,9 +662,9 @@ pyrust_builtin_modules! {
     // `restore`, `diff_bytes`, `get_close_matches`, `HtmlDiff`, `Match`)
     // injected from `difflib_py.py`.
     difflib @inject,
-    // `shlex` (issue #3147): pure-Python shell-like lexical analyzer (`shlex`,
-    // `split`, `join`, `quote`) injected from `shlex_py.py`.
-    shlex @inject,
+    // `shlex` (issues #3147, #3356): shell-like lexical analyzer (`shlex`,
+    // `split`, `join`, `quote`) implemented 100% natively in Rust.
+    shlex,
     // `fnmatch` (issue #3148): pure-Python Unix shell-style filename pattern
     // matching (`fnmatch`, `fnmatchcase`, `filter`, `translate`) injected from
     // `fnmatch_py.py` by the `@inject` post-load hook.
