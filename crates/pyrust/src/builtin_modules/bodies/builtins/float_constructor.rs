@@ -45,10 +45,12 @@ pyrust_module! {
                         format!("could not convert string to float: {}", arg.repr_raw()),
                     ));
                 }
+                // CPython formats the argument with `%R`, so quotes and
+                // control characters are escaped exactly as `repr()` does.
                 let err = || {
                     PyError::named(
                         "ValueError",
-                        format!("could not convert string to float: '{s}'"),
+                        format!("could not convert string to float: {}", arg.repr_raw()),
                     )
                 };
                 // PEP 515: strip valid underscores, reject invalid placement.

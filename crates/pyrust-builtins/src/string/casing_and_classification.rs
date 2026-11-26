@@ -411,7 +411,7 @@ fn skip_py_spaces_back(b: &[u8], mut end: usize) -> usize {
 /// (`isalpha`), or has Numeric_Type Decimal (`isdecimal`), Digit (`isdigit`), or
 /// Numeric (`isnumeric`). Symbol categories such as circled letters (So) are
 /// none of these and are correctly excluded.
-fn is_python_alnum(c: char) -> bool {
+pub fn is_python_alnum(c: char) -> bool {
     is_python_alpha(c) || is_python_digit(c) || unicode_data::is_numeric(c)
 }
 
