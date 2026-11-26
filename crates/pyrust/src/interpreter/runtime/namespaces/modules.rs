@@ -312,6 +312,22 @@ impl Interpreter {
             let exec_prefix = cfg.exec_prefix_override.as_deref().unwrap_or(prefix);
             sys.insert_attr("exec_prefix".to_string(), Value::string(exec_prefix));
             sys.insert_attr("base_exec_prefix".to_string(), Value::string(exec_prefix));
+        } else if let Some(ref venv_prefix) = cfg.venv_prefix {
+            sys.insert_attr("prefix".to_string(), Value::string(venv_prefix));
+            sys.insert_attr("exec_prefix".to_string(), Value::string(venv_prefix));
+            if let Some(ref base_prefix) = cfg.venv_base_prefix {
+                sys.insert_attr("base_prefix".to_string(), Value::string(base_prefix));
+                sys.insert_attr("base_exec_prefix".to_string(), Value::string(base_prefix));
+            }
+            if let Some(ref venv_exe) = cfg.venv_executable {
+                sys.insert_attr("executable".to_string(), Value::string(venv_exe));
+            }
+            if let Some(ref base_exe) = cfg.venv_base_executable {
+                sys.insert_attr("_base_executable".to_string(), Value::string(base_exe));
+            }
+            if let Some(ref home) = cfg.venv_home {
+                sys.insert_attr("_home".to_string(), Value::string(home));
+            }
         }
         // Fresh per-interpreter mutable sys containers and aliases (#2970).
         let orig_argv_src = if !cfg.orig_argv.is_empty() {
@@ -1566,20 +1582,29 @@ impl Interpreter {
                 "No module named {module_name}"
             )));
         }
-        if crate::builtin_modules::is_builtin_module(module_name) {
-            if let Some(source) = match module_name {
-                "timeit" => Some("import sys, timeit\nsys.exit(timeit.main())\n"),
-                "dis" => Some("import dis\ndis.main()\n"),
-                "site" => Some("import site\nsite._script()\n"),
-                "pydoc" => Some("import pydoc\npydoc.cli()\n"),
-                "json.tool" => Some("import json.tool\njson.tool.main()\n"),
-                _ => None,
-            } {
-                return Ok(MainModuleTarget::Builtin {
-                    virtual_path: format!("<frozen {module_name}>"),
-                    source,
-                });
+        if let Some(source) = match module_name {
+            "timeit" => Some("import sys, timeit\nsys.exit(timeit.main())\n"),
+            "dis" => Some("import dis\ndis.main()\n"),
+            "site" => Some("import site\nsite._script()\n"),
+            "pydoc" => Some("import pydoc\npydoc.cli()\n"),
+            "json.tool" => Some("import json.tool\njson.tool.main()\n"),
+            "venv" | "venv.__main__" => Some(
+                "import sys, venv\nrc = 1\ntry:\n    venv.main()\n    rc = 0\nexcept Exception as e:\n    print('Error: %s' % e, file=sys.stderr)\nsys.exit(rc)\n",
+            ),
+            "ensurepip" | "ensurepip.__main__" => {
+                Some("import sys, ensurepip\nsys.exit(ensurepip._main())\n")
             }
+            "ensurepip._uninstall" => {
+                Some("import sys, ensurepip._uninstall\nsys.exit(ensurepip._uninstall._main())\n")
+            }
+            _ => None,
+        } {
+            return Ok(MainModuleTarget::Builtin {
+                virtual_path: format!("<frozen {module_name}>"),
+                source,
+            });
+        }
+        if crate::builtin_modules::is_builtin_module(module_name) {
             return Err(MainModuleResolveError::Message(format!(
                 "No code object available for {module_name}"
             )));

@@ -709,6 +709,86 @@ fn addsitepackages_impl(
     Ok(known_paths)
 }
 
+fn venv_impl(interp: &mut Interpreter, known_paths: Value) -> Result<Value> {
+    let sys_mod = interp.load_module("sys")?;
+    #[allow(unused_mut)]
+    let mut executable = interp
+        .get_attr(&sys_mod, "executable")
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+
+    #[cfg(target_os = "macos")]
+    if let Ok(launcher) = std::env::var("__PYVENV_LAUNCHER__")
+        && !launcher.is_empty()
+    {
+        executable = launcher.clone();
+        let _ = interp.assign_attr(sys_mod.clone(), "_base_executable", Value::string(launcher));
+    }
+
+    if executable.is_empty() {
+        return Ok(known_paths);
+    }
+
+    let abs_exe_val = os_path_call(interp, "abspath", &[Value::string(&executable)])?;
+    let exe_dir_val = os_path_call(interp, "dirname", &[abs_exe_val])?;
+    let site_prefix_val = os_path_call(interp, "dirname", std::slice::from_ref(&exe_dir_val))?;
+    let exe_dir = render_instance_str(interp, &exe_dir_val)?;
+    let site_prefix = render_instance_str(interp, &site_prefix_val)?;
+
+    let _ = interp.assign_attr(sys_mod.clone(), "_home", Value::none());
+
+    let same_dir_cfg = Path::new(&exe_dir).join("pyvenv.cfg");
+    let parent_dir_cfg = Path::new(&site_prefix).join("pyvenv.cfg");
+    let found = if same_dir_cfg.is_file() {
+        Some((exe_dir, same_dir_cfg))
+    } else if parent_dir_cfg.is_file() {
+        Some((site_prefix, parent_dir_cfg))
+    } else {
+        None
+    };
+
+    if let Some((venv_dir, cfg_path)) = found {
+        let mut system_site = true;
+        if let Ok(raw_bytes) = std::fs::read(&cfg_path) {
+            let content = String::from_utf8_lossy(&raw_bytes);
+            let kv = super::sys::parse_pyvenv_cfg(&content);
+            if let Some(val) = kv.get("include-system-site-packages") {
+                system_site = val.eq_ignore_ascii_case("true");
+            }
+            if let Some(home) = kv.get("home") {
+                let _ = interp.assign_attr(sys_mod.clone(), "_home", Value::string(home));
+            }
+        }
+
+        let venv_prefix_val = Value::string(&venv_dir);
+        let _ = interp.assign_attr(sys_mod.clone(), "prefix", venv_prefix_val.clone());
+        let _ = interp.assign_attr(sys_mod, "exec_prefix", venv_prefix_val.clone());
+
+        // Add the venv's own site-packages before user-site and global site-packages.
+        addsitepackages_impl(
+            interp,
+            known_paths.clone(),
+            Value::list(vec![venv_prefix_val.clone()]),
+        )?;
+
+        if system_site {
+            if let Some(prefixes) = get_site_attr(interp, "PREFIXES") {
+                prefixes.list_with_mut(|items| {
+                    items.insert(0, venv_prefix_val);
+                });
+            } else {
+                set_site_attr(interp, "PREFIXES", Value::list(vec![venv_prefix_val]));
+            }
+        } else {
+            set_site_attr(interp, "PREFIXES", Value::list(vec![venv_prefix_val]));
+            set_site_attr(interp, "ENABLE_USER_SITE", Value::bool_(false));
+        }
+    }
+
+    Ok(known_paths)
+}
+
 fn main_impl(interp: &mut Interpreter) -> Result<()> {
     let sys_path = sys_path_value(interp)?;
     let orig_path = interp.collect_iterable(&sys_path)?;
@@ -722,6 +802,8 @@ fn main_impl(interp: &mut Interpreter) -> Result<()> {
     {
         abs_paths_impl(interp)?;
     }
+
+    let known_paths = venv_impl(interp, known_paths)?;
 
     let current_enable = get_site_attr(interp, "ENABLE_USER_SITE");
     if current_enable.is_none() || current_enable.as_ref().is_some_and(Value::is_none) {
@@ -748,18 +830,40 @@ fn main_impl(interp: &mut Interpreter) -> Result<()> {
 /// in CPython's `Lib/site.py`, without any `@inject` or `site_py.py`).
 pub(crate) fn post_load_init(interp: &mut Interpreter, module: &Value) -> Result<()> {
     let sys_mod = interp.load_module("sys")?;
+    let flags = interp.get_attr(&sys_mod, "flags")?;
+    let no_site = interp
+        .get_attr(&flags, "no_site")
+        .ok()
+        .and_then(|v| v.as_int())
+        .unwrap_or(0);
+
     let prefix = interp
         .get_attr(&sys_mod, "prefix")
         .unwrap_or_else(|_| Value::string(""));
     let exec_prefix = interp
         .get_attr(&sys_mod, "exec_prefix")
         .unwrap_or_else(|_| Value::string(""));
+    let base_prefix = interp
+        .get_attr(&sys_mod, "base_prefix")
+        .unwrap_or_else(|_| prefix.clone());
+    let base_exec_prefix = interp
+        .get_attr(&sys_mod, "base_exec_prefix")
+        .unwrap_or_else(|_| exec_prefix.clone());
+
+    // When startup already detected `pyvenv.cfg`, seed `PREFIXES` with the base
+    // prefixes before `main_impl()` -> `venv_impl()` runs, so that:
+    // - `include-system-site-packages = true` prepends `sys.prefix` and keeps
+    //   base prefixes available;
+    // - `include-system-site-packages = false` replaces `PREFIXES` with `[sys.prefix]`.
+    let initial_prefixes = if no_site == 0 && prefix.as_str() != base_prefix.as_str() {
+        vec![base_prefix, base_exec_prefix]
+    } else {
+        vec![prefix, exec_prefix]
+    };
+
     if let ValueKind::PyModule(m) = module.kind() {
         let mut borrowed = m.borrow_mut();
-        borrowed.insert_attr(
-            "PREFIXES".to_string(),
-            Value::list(vec![prefix, exec_prefix]),
-        );
+        borrowed.insert_attr("PREFIXES".to_string(), Value::list(initial_prefixes));
         borrowed.insert_attr("ENABLE_USER_SITE".to_string(), Value::none());
         borrowed.insert_attr("USER_SITE".to_string(), Value::none());
         borrowed.insert_attr("USER_BASE".to_string(), Value::none());
@@ -768,12 +872,6 @@ pub(crate) fn post_load_init(interp: &mut Interpreter, module: &Value) -> Result
     // Mirror CPython `site.py`:
     //   if not sys.flags.no_site:
     //       main()
-    let flags = interp.get_attr(&sys_mod, "flags")?;
-    let no_site = interp
-        .get_attr(&flags, "no_site")
-        .ok()
-        .and_then(|v| v.as_int())
-        .unwrap_or(0);
     if no_site == 0 {
         main_impl(interp)?;
     }
@@ -886,6 +984,10 @@ pyrust_module! {
     fn execusercustomize() -> Result<Value> {
         exec_customize_module(_interp, "usercustomize");
         Ok(Value::none())
+    }
+
+    fn venv(known_paths: PyValue) -> Result<Value> {
+        venv_impl(_interp, known_paths.0)
     }
 
     fn main() -> Result<Value> {

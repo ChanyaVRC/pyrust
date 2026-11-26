@@ -254,6 +254,7 @@ macro_rules! pyrust_builtin_modules {
                     | "tomllib"
                     | "unittest"
                     | "urllib"
+                    | "venv"
                     | "wsgiref"
                     | "xmlrpc"
                     | "zipfile"
@@ -406,6 +407,7 @@ macro_rules! pyrust_builtin_modules {
                 "concurrent.futures" => {
                     return concurrent_futures::post_load_init(interp, module);
                 }
+                "venv" => return venv::post_load_init(interp, module),
                 _ => {}
             }
             if asyncio_submodules::post_load_init(name, interp, module)? {
@@ -1052,6 +1054,12 @@ pyrust_builtin_modules! {
     "concurrent.futures.process" as concurrent_futures_process,
     "concurrent.futures" as concurrent_futures,
     concurrent,
+    // `venv` and `ensurepip` (issue #3267): 100% native-Rust Python 3.12
+    // virtual environment creation and pip bootstrapping modules (no `@inject`).
+    venv,
+    "ensurepip.__main__" as ensurepip_main,
+    "ensurepip._uninstall" as ensurepip_uninstall,
+    ensurepip,
 }
 
 pub(crate) use concurrent_futures_base as bodies_helpers_cf_base;

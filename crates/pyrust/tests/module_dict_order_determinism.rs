@@ -110,6 +110,8 @@ import encodings.utf_32
 import encodings.utf_32_be
 import encodings.utf_32_le
 import encodings.zlib_codec
+import ensurepip.__main__
+import ensurepip._uninstall
 import html.entities
 import html.parser
 import http.client
@@ -180,14 +182,14 @@ names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_
          "_threading_local", "_tokenize", "_tracemalloc", "_typing", "_uuid", "_warnings", "_weakref", "_weakrefset", "_zoneinfo",
          "abc", "antigravity", "argparse", "ast", "asyncio", "atexit", "base64", "bdb", "binascii", "bisect", "builtins",
          "bz2", "cProfile", "calendar", "cmath", "cmd", "code", "codecs", "codeop", "collections", "colorsys", "compileall", "concurrent", "configparser", "contextlib", "contextvars",
-         "copy", "copyreg", "csv", "ctypes", "dataclasses", "dbm", "decimal", "difflib", "dis", "doctest", "email", "encodings", "enum", "errno", "faulthandler",
+         "copy", "copyreg", "csv", "ctypes", "dataclasses", "dbm", "decimal", "difflib", "dis", "doctest", "email", "encodings", "ensurepip", "enum", "errno", "faulthandler",
          "filecmp", "fileinput", "fnmatch", "fractions", "ftplib", "functools", "gc", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "imaplib", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword",
          "linecache", "locale", "logging", "lzma", "mailbox", "marshal", "math", "mimetypes", "mmap", "modulefinder", "netrc", "ntpath", "nturl2path", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle",
          "pickletools", "pkgutil", "platform", "plistlib", "poplib", "posixpath", "pprint", "profile", "pstats", "py_compile", "pyclbr", "pydoc", "pydoc_data", "pyexpat", "queue", "quopri", "random", "re", "reprlib", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shelve", "shlex", "shutil",
          "signal", "site", "smtplib", "socket", "socketserver", "sqlite3", "ssl", "stat", "statistics", "string", "stringprep", "subprocess", "symtable", "sys", "sysconfig", "tabnanny", "tarfile",
          "tempfile", "textwrap", "this", "threading", "time", "timeit", "token", "tokenize", "tomllib", "trace", "traceback", "tracemalloc",
-         "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings", "wave", "weakref", "webbrowser", "wsgiref",
+         "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "venv", "warnings", "wave", "weakref", "webbrowser", "wsgiref",
          "xml", "xmlrpc", "zipapp", "zipfile", "zipimport", "zlib", "zoneinfo"]
 for name in names:
     print(name, list(vars(__import__(name))))
@@ -272,6 +274,8 @@ for name, module in [("os.path", os.path),
                      ("encodings.utf_32_be", encodings.utf_32_be),
                      ("encodings.utf_32_le", encodings.utf_32_le),
                      ("encodings.zlib_codec", encodings.zlib_codec),
+                     ("ensurepip.__main__", ensurepip.__main__),
+                     ("ensurepip._uninstall", ensurepip._uninstall),
                      ("html.entities", html.entities),
                      ("html.parser", html.parser),
                      ("http.client", http.client),

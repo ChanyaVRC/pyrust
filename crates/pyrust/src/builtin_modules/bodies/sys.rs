@@ -32,6 +32,7 @@ mod runtime_limits;
 #[path = "sys/version_info.rs"]
 mod version_info;
 
+pub(crate) use platform_info::{detect_pyvenv_startup, parse_pyvenv_cfg};
 pub(crate) use version_info::make_flags_from_config;
 
 const PYRUST_COPYRIGHT: &str = "Copyright (c) 2001-2023 Python Software Foundation.\nAll Rights Reserved.\n\nPyRust 0.2 (Python 3.12 compatible runtime).";
@@ -51,6 +52,8 @@ pyrust_module! {
         // Interpreter's authoritative registry before import-cache insertion.
         "modules"              => Value::dict(crate::value::PyDict::default()),
         "executable"           => Value::string(platform_info::sys_executable()),
+        "_base_executable"     => Value::string(platform_info::sys_executable()),
+        "_home"                => Value::none(),
         "byteorder"            => Value::string(platform_info::sys_byteorder()),
         "prefix"               => Value::string(platform_info::default_sys_prefix()),
         "exec_prefix"          => Value::string(platform_info::default_sys_prefix()),
