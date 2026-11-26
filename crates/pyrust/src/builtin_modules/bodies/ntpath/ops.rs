@@ -478,10 +478,7 @@ pub(crate) fn nt_expanduser_str(path: &str) -> String {
         .find(|(_, c)| matches!(c, '\\' | '/'))
         .map(|(idx, _)| idx)
         .unwrap_or(path.len());
-    if i != 1 {
-        return path.to_string();
-    }
-    let userhome = if let Some(up) = std::env::var_os("USERPROFILE") {
+    let mut userhome = if let Some(up) = std::env::var_os("USERPROFILE") {
         up.to_string_lossy().into_owned()
     } else if let Some(hp) = std::env::var_os("HOMEPATH") {
         let drive = std::env::var_os("HOMEDRIVE")
@@ -491,6 +488,20 @@ pub(crate) fn nt_expanduser_str(path: &str) -> String {
     } else {
         return path.to_string();
     };
+    if i != 1 {
+        // `~user`: CPython guesses a sibling of the current user's profile
+        // directory, bailing out when the profile is not named after
+        // `%USERNAME%`.
+        let target_user = &path[1..i];
+        let current_user = std::env::var_os("USERNAME").map(|u| u.to_string_lossy().into_owned());
+        if current_user.as_deref() != Some(target_user) {
+            let (parent, base) = nt_split_str(&userhome);
+            if current_user.as_deref() != Some(base.as_str()) {
+                return path.to_string();
+            }
+            userhome = nt_join_str(&[parent, target_user.to_string()]);
+        }
+    }
     format!("{userhome}{}", &path[i..])
 }
 

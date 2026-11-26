@@ -66,6 +66,20 @@ unsafe fn passwd_to_value(pw: *const libc::passwd) -> Value {
     ])
 }
 
+/// `pwd.getpwuid(uid).pw_name`, used by `pathlib.Path.owner()`.
+pub(crate) fn user_name_for_uid(uid: libc::uid_t) -> Result<Value> {
+    let _guard = PWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: serialized by `PWD_LOCK`; the entry is copied before the lock is released.
+    let ptr = unsafe { libc::getpwuid(uid) };
+    if ptr.is_null() {
+        return Err(PyError::key_error(Value::string(format!(
+            "getpwuid(): uid not found: {uid}"
+        ))));
+    }
+    // SAFETY: `ptr` is non-null and valid while `PWD_LOCK` is held.
+    Ok(Value::string(unsafe { c_ptr_to_string((*ptr).pw_name) }))
+}
+
 pyrust_module! {
     constants {
         "struct_passwd" => struct_passwd::class(),

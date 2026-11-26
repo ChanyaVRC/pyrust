@@ -27,6 +27,14 @@ impl ParsedPath {
         format!("{}{}", self.drive, self.root)
     }
 
+    /// `PurePath.is_absolute()`: a root, plus a drive for the Windows flavor.
+    pub fn is_absolute(&self, flavor: PathFlavor) -> bool {
+        match flavor {
+            PathFlavor::Posix => !self.root.is_empty(),
+            PathFlavor::Windows => !self.drive.is_empty() && !self.root.is_empty(),
+        }
+    }
+
     pub fn format(&self, flavor: PathFlavor) -> String {
         let sep = match flavor {
             PathFlavor::Posix => "/",
@@ -438,11 +446,7 @@ pub(super) fn path_is_absolute(args: &[ExpandedCallArg], fn_name: &str) -> Resul
     let inst = expect_self(args, fn_name)?;
     let flavor = flavor_for_instance(&inst);
     let parsed = parse_path(&get_path(&inst, fn_name)?, flavor);
-    let is_abs = match flavor {
-        PathFlavor::Posix => !parsed.root.is_empty(),
-        PathFlavor::Windows => !parsed.drive.is_empty() && !parsed.root.is_empty(),
-    };
-    Ok(Value::bool_(is_abs))
+    Ok(Value::bool_(parsed.is_absolute(flavor)))
 }
 
 fn is_invalid_name(name: &str, flavor: PathFlavor) -> bool {

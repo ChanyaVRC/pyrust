@@ -39,6 +39,7 @@ pub(crate) use fd_ops::{
 };
 #[path = "os/filesystem.rs"]
 mod filesystem;
+pub(crate) use filesystem::{chmod_path, hard_link_path, symlink_path};
 #[path = "os/path_protocol.rs"]
 mod path_protocol;
 #[path = "os/process.rs"]

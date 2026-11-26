@@ -289,13 +289,45 @@ pub(super) fn replace(src: PyPath, dst: PyPath) -> Result<Value> {
 }
 
 pub(super) fn link(src: PyPath, dst: PyPath) -> Result<Value> {
-    let s = src.as_path();
-    let d = dst.as_path();
-    let s_disp = s.to_string_lossy();
-    let d_disp = d.to_string_lossy();
-    std::fs::hard_link(s, d)
-        .map_err(|error| PyError::from_io_error2(&error, Some(&s_disp), Some(&d_disp)))?;
+    hard_link_path(src.as_path(), dst.as_path())?;
     Ok(Value::none())
+}
+
+/// `os.link(src, dst)` core (default `follow_symlinks=True`), shared with
+/// `pathlib.Path.hardlink_to`. CPython calls `link(2)` on POSIX — unlike
+/// `std::fs::hard_link`'s flag-less `linkat` — and `CreateHardLinkW` on
+/// Windows.
+pub(crate) fn hard_link_path(src: &Path, dst: &Path) -> Result<()> {
+    let link_error = |error: &std::io::Error| {
+        PyError::from_io_error2(
+            error,
+            Some(&src.to_string_lossy()),
+            Some(&dst.to_string_lossy()),
+        )
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let embedded_nul = |arg: &str| {
+            PyError::named(
+                "ValueError",
+                format!("link: embedded null character in {arg}"),
+            )
+        };
+        let csrc =
+            std::ffi::CString::new(src.as_os_str().as_bytes()).map_err(|_| embedded_nul("src"))?;
+        let cdst =
+            std::ffi::CString::new(dst.as_os_str().as_bytes()).map_err(|_| embedded_nul("dst"))?;
+        // SAFETY: both strings are NUL-terminated and live across the call.
+        if unsafe { libc::link(csrc.as_ptr(), cdst.as_ptr()) } != 0 {
+            return Err(link_error(&std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::hard_link(src, dst).map_err(|error| link_error(&error))
+    }
 }
 
 fn host_split(path: &str) -> (String, String) {
@@ -690,24 +722,109 @@ pub(super) fn chmod(
             }
         }
     }
-    let _ = follow_symlinks;
+    chmod_path(&path, mode, follow_symlinks)?;
+    Ok(Value::none())
+}
+
+/// CPython's `follow_symlinks_specified()` error for an unsupported
+/// `follow_symlinks=False` request.
+fn follow_symlinks_unavailable(func: &str) -> PyError {
+    PyError::named(
+        "NotImplementedError",
+        format!("{func}: follow_symlinks unavailable on this platform"),
+    )
+}
+
+/// `os.chmod(path, mode, follow_symlinks=...)` core, shared with
+/// `pathlib.Path.chmod` / `Path.lchmod`.
+///
+/// Matches CPython 3.12.3 per platform:
+/// - Linux: `chmod(2)`, or `fchmodat(AT_SYMLINK_NOFOLLOW)` whose
+///   `ENOTSUP`/`EOPNOTSUPP` (a symlink) becomes `NotImplementedError`;
+/// - macOS/BSD: `fchmodat(AT_SYMLINK_NOFOLLOW)` changes the link itself;
+/// - Windows: only the read-only attribute follows `mode & 0o200`, and
+///   `follow_symlinks=False` is always `NotImplementedError`.
+pub(crate) fn chmod_path(path: &str, mode: i64, follow_symlinks: bool) -> Result<()> {
+    let embedded_nul = || {
+        PyError::named(
+            "ValueError",
+            "chmod: embedded null character in path".to_string(),
+        )
+    };
+    if path.contains('\0') {
+        return Err(embedded_nul());
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode((mode & 0o7777) as u32);
-        std::fs::set_permissions(&path, perms)
-            .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+        let cpath = std::ffi::CString::new(path).map_err(|_| embedded_nul())?;
+        let raw_mode = (mode & 0o7777) as libc::mode_t;
+        // SAFETY: `cpath` is a valid NUL-terminated string for the duration of the call.
+        let rc = unsafe {
+            if follow_symlinks {
+                libc::chmod(cpath.as_ptr(), raw_mode)
+            } else {
+                libc::fchmodat(
+                    libc::AT_FDCWD,
+                    cpath.as_ptr(),
+                    raw_mode,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            }
+        };
+        if rc != 0 {
+            let error = std::io::Error::last_os_error();
+            let code = error.raw_os_error();
+            if !follow_symlinks && (code == Some(libc::ENOTSUP) || code == Some(libc::EOPNOTSUPP)) {
+                return Err(follow_symlinks_unavailable("chmod"));
+            }
+            return Err(PyError::from_io_error(&error, Some(path)));
+        }
+        Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let meta = std::fs::metadata(&path)
-            .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_READONLY, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+            SetFileAttributesW,
+        };
+        if !follow_symlinks {
+            return Err(follow_symlinks_unavailable("chmod"));
+        }
+        let wide: Vec<u16> = std::ffi::OsStr::new(path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` is NUL-terminated and outlives both calls.
+        let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
+        if attrs == INVALID_FILE_ATTRIBUTES {
+            let error = std::io::Error::last_os_error();
+            return Err(PyError::from_io_error(&error, Some(path)));
+        }
+        let updated = if mode & 0o200 != 0 {
+            attrs & !FILE_ATTRIBUTE_READONLY
+        } else {
+            attrs | FILE_ATTRIBUTE_READONLY
+        };
+        // SAFETY: `wide` is NUL-terminated and outlives the call.
+        if unsafe { SetFileAttributesW(wide.as_ptr(), updated) } == 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(PyError::from_io_error(&error, Some(path)));
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        if !follow_symlinks {
+            return Err(follow_symlinks_unavailable("chmod"));
+        }
+        let meta =
+            std::fs::metadata(path).map_err(|error| PyError::from_io_error(&error, Some(path)))?;
         let mut perms = meta.permissions();
         perms.set_readonly((mode & 0o200) == 0);
-        std::fs::set_permissions(&path, perms)
-            .map_err(|error| PyError::from_io_error(&error, Some(&path)))?;
+        std::fs::set_permissions(path, perms)
+            .map_err(|error| PyError::from_io_error(&error, Some(path)))
     }
-    Ok(Value::none())
 }
 
 pub(super) fn symlink(
@@ -745,41 +862,49 @@ pub(super) fn symlink(
             }
         }
     }
+    symlink_path(&src, &dst, target_is_directory)?;
+    Ok(Value::none())
+}
+
+/// `os.symlink(src, dst, target_is_directory)` core, shared with
+/// `pathlib.Path.symlink_to`. On Windows a directory symlink is created when
+/// requested or when `src` (resolved against `dst`'s parent) is a directory,
+/// like CPython's `_check_dirW`.
+pub(crate) fn symlink_path(src: &str, dst: &str, target_is_directory: bool) -> Result<()> {
     #[cfg(unix)]
     {
         let _ = target_is_directory;
-        std::os::unix::fs::symlink(&src, &dst)
-            .map_err(|error| PyError::from_io_error2(&error, Some(&src), Some(&dst)))?;
+        std::os::unix::fs::symlink(src, dst)
+            .map_err(|error| PyError::from_io_error2(&error, Some(src), Some(dst)))
     }
     #[cfg(windows)]
     {
         let is_dir = target_is_directory || {
-            let candidate = if Path::new(&src).is_absolute() {
-                std::path::PathBuf::from(&src)
+            let candidate = if Path::new(src).is_absolute() {
+                std::path::PathBuf::from(src)
             } else {
-                Path::new(&dst)
+                Path::new(dst)
                     .parent()
                     .unwrap_or_else(|| Path::new("."))
-                    .join(&src)
+                    .join(src)
             };
             candidate.is_dir()
         };
         let res = if is_dir {
-            std::os::windows::fs::symlink_dir(&src, &dst)
+            std::os::windows::fs::symlink_dir(src, dst)
         } else {
-            std::os::windows::fs::symlink_file(&src, &dst)
+            std::os::windows::fs::symlink_file(src, dst)
         };
-        res.map_err(|error| PyError::from_io_error2(&error, Some(&src), Some(&dst)))?;
+        res.map_err(|error| PyError::from_io_error2(&error, Some(src), Some(dst)))
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = (src, dst, target_is_directory);
-        return Err(PyError::named(
+        Err(PyError::named(
             "NotImplementedError",
             "symlink is not supported on this platform".to_string(),
-        ));
+        ))
     }
-    Ok(Value::none())
 }
 
 pub(super) fn readlink(

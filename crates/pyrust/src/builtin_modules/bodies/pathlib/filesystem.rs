@@ -5,15 +5,17 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
+use crate::interpreter::builtin_args::{FromValue, PyIndex};
 use crate::interpreter::{ExpandedCallArg, Interpreter, NativeIterFrame};
 use crate::value::{PyClass, Value, ValueKind};
 
 use super::class_registry::{
-    PathFlavor, expect_self, flavor_for_instance, get_path, make_path_classmethod_result,
-    make_path_instance_for_class, make_path_result,
+    PathFlavor, expect_self, flavor_for_class, flavor_for_instance, get_path,
+    make_path_classmethod_result, make_path_instance_for_class, make_path_result,
 };
 use super::lexical::{
-    extract_path_segment, glob_component_matches, glob_parts_match_refs, normalize_for_flavor,
+    extract_path_segment, glob_component_matches, glob_parts_match_refs, join_segments,
+    normalize_for_flavor, parse_path,
 };
 
 fn clean_canonical(p: &Path) -> String {
@@ -541,16 +543,645 @@ pub(super) fn path_cwd(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Re
     make_path_classmethod_result(interp, args, path.into_owned())
 }
 
+/// `Path.home()` is `cls("~").expanduser()` in CPython 3.12, so it follows the
+/// flavor's `expanduser` rules (`HOME` on POSIX; `USERPROFILE` or
+/// `HOMEDRIVE`+`HOMEPATH` on Windows, where `HOME` is ignored).
 pub(super) fn path_home(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| {
-            PyError::named(
-                "RuntimeError",
-                "Could not determine home directory".to_string(),
-            )
-        })?;
+    let flavor = match args.first().map(|arg| arg.value.kind()) {
+        Some(ValueKind::PyClass(class)) => flavor_for_class(class),
+        _ => PathFlavor::host(),
+    };
+    let home = expand_user_component("~", flavor)?;
     make_path_classmethod_result(interp, args, home)
+}
+
+/// Expand a leading `~` / `~user` path component with the flavor's
+/// `os.path.expanduser`, raising CPython's `RuntimeError` when no home
+/// directory can be determined.
+fn expand_user_component(component: &str, flavor: PathFlavor) -> Result<String> {
+    let homedir = match flavor {
+        PathFlavor::Posix => {
+            crate::builtin_modules::posixpath::ops::posix_expanduser_str(component)
+        }
+        PathFlavor::Windows => crate::builtin_modules::ntpath::ops::nt_expanduser_str(component),
+    };
+    if homedir.starts_with('~') {
+        return Err(PyError::named(
+            "RuntimeError",
+            "Could not determine home directory.".to_string(),
+        ));
+    }
+    Ok(homedir)
+}
+
+// ── Python-level signatures (CPython-exact argument errors) ─────────────────
+
+/// A Python-level method signature `def m(self, <positional>, *, <keyword_only>)`.
+pub(super) struct MethodSig<'a> {
+    /// `Path.method` — the function `__qualname__` used in error messages.
+    pub(super) qualname: &'a str,
+    /// Positional-or-keyword parameters after `self`.
+    pub(super) positional: &'a [&'a str],
+    /// How many leading `positional` parameters have no default.
+    pub(super) required: usize,
+    /// Keyword-only parameters (all with defaults).
+    pub(super) keyword_only: &'a [&'a str],
+}
+
+/// `Path.method` for a registry name such as `pathlib.Path.method`.
+pub(super) fn method_qualname(fn_name: &str) -> &str {
+    fn_name.strip_prefix("pathlib.").unwrap_or(fn_name)
+}
+
+fn type_error(message: String) -> PyError {
+    PyError::named("TypeError", message)
+}
+
+/// Bind the arguments after `self` to `sig` the way CPython binds a Python
+/// function call: positional arguments first, then keywords, then the
+/// too-many-positional and missing-argument checks. Returns one slot per
+/// `positional` parameter followed by one per `keyword_only` parameter.
+pub(super) fn bind_method_args<'v>(
+    args: &'v [ExpandedCallArg],
+    sig: &MethodSig<'_>,
+) -> Result<Vec<Option<&'v Value>>> {
+    let n_params = sig.positional.len() + sig.keyword_only.len();
+    let mut slots: Vec<Option<&Value>> = vec![None; n_params];
+    let mut given = 0usize;
+    for arg in args.iter().skip(1).filter(|arg| arg.name.is_none()) {
+        if given < sig.positional.len() {
+            slots[given] = Some(&arg.value);
+        }
+        given += 1;
+    }
+    for arg in args.iter().skip(1) {
+        let Some(name) = arg.name.as_deref() else {
+            continue;
+        };
+        let Some(index) = sig
+            .positional
+            .iter()
+            .chain(sig.keyword_only)
+            .position(|param| *param == name)
+        else {
+            return Err(type_error(format!(
+                "{}() got an unexpected keyword argument '{name}'",
+                sig.qualname
+            )));
+        };
+        if slots[index].is_some() {
+            return Err(type_error(format!(
+                "{}() got multiple values for argument '{name}'",
+                sig.qualname
+            )));
+        }
+        slots[index] = Some(&arg.value);
+    }
+    if given > sig.positional.len() {
+        // Counts include `self`, exactly like CPython's `too_many_positional`.
+        let argcount = sig.positional.len() + 1;
+        let defaults = sig.positional.len() - sig.required;
+        let (takes, plural) = if defaults > 0 {
+            (format!("from {} to {argcount}", argcount - defaults), true)
+        } else {
+            (argcount.to_string(), argcount != 1)
+        };
+        let kwonly_given = slots[sig.positional.len()..]
+            .iter()
+            .filter(|slot| slot.is_some())
+            .count();
+        let given_total = given + 1;
+        let kwonly_note = if kwonly_given > 0 {
+            format!(
+                " positional argument{} (and {kwonly_given} keyword-only argument{})",
+                if given_total != 1 { "s" } else { "" },
+                if kwonly_given != 1 { "s" } else { "" },
+            )
+        } else {
+            String::new()
+        };
+        return Err(type_error(format!(
+            "{}() takes {takes} positional argument{} but {given_total}{kwonly_note} {} given",
+            sig.qualname,
+            if plural { "s" } else { "" },
+            if given_total == 1 && kwonly_given == 0 {
+                "was"
+            } else {
+                "were"
+            },
+        )));
+    }
+    let missing: Vec<&str> = (0..sig.required)
+        .filter(|&index| slots[index].is_none())
+        .map(|index| sig.positional[index])
+        .collect();
+    if !missing.is_empty() {
+        let quoted: Vec<String> = missing.iter().map(|name| format!("'{name}'")).collect();
+        let names = match quoted.as_slice() {
+            [only] => only.clone(),
+            [first, second] => format!("{first} and {second}"),
+            [init @ .., last] => format!("{}, and {last}", init.join(", ")),
+            [] => String::new(),
+        };
+        return Err(type_error(format!(
+            "{}() missing {} required positional argument{}: {names}",
+            sig.qualname,
+            missing.len(),
+            if missing.len() == 1 { "" } else { "s" },
+        )));
+    }
+    Ok(slots)
+}
+
+/// Reject any argument after `self` for a `def m(self)` method.
+fn bind_no_args(args: &[ExpandedCallArg], fn_name: &str) -> Result<()> {
+    bind_method_args(
+        args,
+        &MethodSig {
+            qualname: method_qualname(fn_name),
+            positional: &[],
+            required: 0,
+            keyword_only: &[],
+        },
+    )
+    .map(|_| ())
+}
+
+/// Convert a path-like call argument for an `os` function the way CPython's
+/// `path_converter` does, with its exact `TypeError` wording.
+fn os_path_arg(interp: &mut Interpreter, value: &Value, func: &str, arg: &str) -> Result<String> {
+    match crate::builtin_modules::genericpath::ops::fspath_resolve(interp, value) {
+        Ok(resolved) => Ok(resolved.to_lossy_string()),
+        // Not path-like at all (a bad `__fspath__` result keeps its own error).
+        Err(error)
+            if error.class_name_is("TypeError")
+                && interp.get_attr(value, "__fspath__").is_err() =>
+        {
+            Err(type_error(format!(
+                "{func}: {arg} should be string, bytes or os.PathLike, not {}",
+                pyrust_core::builtin_type_name(value),
+            )))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+// ── Path.absolute / Path.expanduser ──────────────────────────────────────────
+
+/// `Path.absolute()`: prepend the current directory without normalising or
+/// resolving symlinks (unlike `resolve()`); absolute paths return `self`.
+pub(super) fn path_absolute(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    bind_no_args(args, fn_name)?;
+    let path = get_path(&inst, fn_name)?;
+    let flavor = flavor_for_instance(&inst);
+    let parsed = parse_path(&path, flavor);
+    if parsed.is_absolute(flavor) {
+        return Ok(args[0].value.clone());
+    }
+    let cwd = if parsed.drive.is_empty() {
+        let cwd = std::env::current_dir().map_err(|error| PyError::from_io_error(&error, None))?;
+        let cwd = cwd.to_string_lossy().into_owned();
+        // `Path()`, `Path('.')` and `Path('')` become the cwd string itself.
+        if parsed.root.is_empty() && parsed.tail.is_empty() {
+            return Ok(make_path_result(&inst, &cwd));
+        }
+        cwd
+    } else {
+        // There is a current directory on each Windows drive (`C:foo`).
+        drive_cwd(&parsed.drive)?
+    };
+    Ok(make_path_result(
+        &inst,
+        &join_segments(&[cwd, path], flavor),
+    ))
+}
+
+/// `ntpath.abspath(drive)`: the per-drive current directory.
+fn drive_cwd(drive: &str) -> Result<String> {
+    #[cfg(windows)]
+    {
+        match std::path::absolute(drive) {
+            Ok(resolved) => Ok(resolved.to_string_lossy().into_owned()),
+            Err(_) => crate::builtin_modules::ntpath::ops::nt_abspath_str(drive),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        crate::builtin_modules::ntpath::ops::nt_abspath_str(drive)
+    }
+}
+
+/// `Path.expanduser()`: expand a leading `~` / `~user` component; other
+/// paths return `self`.
+pub(super) fn path_expanduser(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    bind_no_args(args, fn_name)?;
+    let path = get_path(&inst, fn_name)?;
+    let flavor = flavor_for_instance(&inst);
+    let parsed = parse_path(&path, flavor);
+    let Some(first) = parsed.tail.first() else {
+        return Ok(args[0].value.clone());
+    };
+    if !parsed.drive.is_empty() || !parsed.root.is_empty() || !first.starts_with('~') {
+        return Ok(args[0].value.clone());
+    }
+    let homedir = expand_user_component(first, flavor)?;
+    let mut expanded = parse_path(&homedir, flavor);
+    expanded.tail.extend(parsed.tail.into_iter().skip(1));
+    Ok(make_path_result(&inst, &expanded.format(flavor)))
+}
+
+// ── Path.chmod / Path.lchmod ─────────────────────────────────────────────────
+
+/// `mode` as CPython's `os.chmod` parses it (an `__index__`-able C `int`).
+fn chmod_mode_arg(interp: &mut Interpreter, value: &Value, qualname: &str) -> Result<i64> {
+    let index = PyIndex::try_from_value_with_interp(interp, value, qualname, "mode")?;
+    index
+        .as_i64()
+        .and_then(|mode| i32::try_from(mode).ok())
+        .map(i64::from)
+        .ok_or_else(|| {
+            PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C int".to_string(),
+            )
+        })
+}
+
+/// `Path.chmod(mode, *, follow_symlinks=True)` → `os.chmod`.
+pub(super) fn path_chmod(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    let qualname = method_qualname(fn_name);
+    let bound = bind_method_args(
+        args,
+        &MethodSig {
+            qualname,
+            positional: &["mode"],
+            required: 1,
+            keyword_only: &["follow_symlinks"],
+        },
+    )?;
+    let path = get_path(&inst, fn_name)?;
+    let mode_value = bound[0].expect("required argument is bound");
+    let mode = chmod_mode_arg(interp, mode_value, qualname)?;
+    let follow_symlinks = match bound[1] {
+        Some(value) => interp.truthy_value(value)?,
+        None => true,
+    };
+    crate::builtin_modules::os::chmod_path(&path, mode, follow_symlinks)?;
+    Ok(Value::none())
+}
+
+/// `Path.lchmod(mode)` → `self.chmod(mode, follow_symlinks=False)`.
+pub(super) fn path_lchmod(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    let qualname = method_qualname(fn_name);
+    let bound = bind_method_args(
+        args,
+        &MethodSig {
+            qualname,
+            positional: &["mode"],
+            required: 1,
+            keyword_only: &[],
+        },
+    )?;
+    let path = get_path(&inst, fn_name)?;
+    let mode_value = bound[0].expect("required argument is bound");
+    let mode = chmod_mode_arg(interp, mode_value, qualname)?;
+    crate::builtin_modules::os::chmod_path(&path, mode, false)?;
+    Ok(Value::none())
+}
+
+// ── Path.symlink_to / Path.hardlink_to ───────────────────────────────────────
+
+/// `Path.symlink_to(target, target_is_directory=False)` →
+/// `os.symlink(target, self, target_is_directory)`.
+pub(super) fn path_symlink_to(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    let bound = bind_method_args(
+        args,
+        &MethodSig {
+            qualname: method_qualname(fn_name),
+            positional: &["target", "target_is_directory"],
+            required: 1,
+            keyword_only: &[],
+        },
+    )?;
+    let target_value = bound[0].expect("required argument is bound");
+    let target = os_path_arg(interp, target_value, "symlink", "src")?;
+    let link = get_path(&inst, fn_name)?;
+    let target_is_directory = match bound[1] {
+        Some(value) => interp.truthy_value(value)?,
+        None => false,
+    };
+    crate::builtin_modules::os::symlink_path(&target, &link, target_is_directory)?;
+    Ok(Value::none())
+}
+
+/// `Path.hardlink_to(target)` → `os.link(target, self)`.
+pub(super) fn path_hardlink_to(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    let bound = bind_method_args(
+        args,
+        &MethodSig {
+            qualname: method_qualname(fn_name),
+            positional: &["target"],
+            required: 1,
+            keyword_only: &[],
+        },
+    )?;
+    let target_value = bound[0].expect("required argument is bound");
+    let target = os_path_arg(interp, target_value, "link", "src")?;
+    let link = get_path(&inst, fn_name)?;
+    crate::builtin_modules::os::hard_link_path(Path::new(&target), Path::new(&link))?;
+    Ok(Value::none())
+}
+
+// ── Path.is_mount / Path.is_junction ─────────────────────────────────────────
+
+/// `Path.is_mount()` → the flavor's `os.path.ismount(self)`.
+pub(super) fn path_is_mount(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    bind_no_args(args, fn_name)?;
+    let path = Value::string(get_path(&inst, fn_name)?);
+    match flavor_for_instance(&inst) {
+        PathFlavor::Posix => crate::builtin_modules::posixpath::ops::ismount(interp, &path),
+        PathFlavor::Windows => crate::builtin_modules::ntpath::ops::ismount(interp, &path),
+    }
+}
+
+/// `Path.is_junction()` → the flavor's `os.path.isjunction(self)`; always
+/// `False` for POSIX paths.
+pub(super) fn path_is_junction(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    bind_no_args(args, fn_name)?;
+    let path = get_path(&inst, fn_name)?;
+    match flavor_for_instance(&inst) {
+        PathFlavor::Posix => Ok(Value::bool_(false)),
+        PathFlavor::Windows => {
+            crate::builtin_modules::ntpath::ops::isjunction(interp, &Value::string(path))
+        }
+    }
+}
+
+// ── Path.is_fifo / is_socket / is_block_device / is_char_device ──────────────
+
+/// The `S_IFMT` file kinds probed by the `Path.is_*` stat predicates.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SpecialFileKind {
+    Fifo,
+    Socket,
+    BlockDevice,
+    CharDevice,
+}
+
+/// CPython's `pathlib._ignore_error`: missing paths, non-directories, bad
+/// descriptors, and symlink loops (plus Windows not-ready / invalid-name /
+/// unresolvable-link codes) make a stat predicate `False`; any other
+/// `OSError` propagates.
+fn is_ignored_stat_error(error: &std::io::Error) -> bool {
+    let Some(code) = error.raw_os_error() else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        matches!(
+            code,
+            libc::ENOENT | libc::ENOTDIR | libc::EBADF | libc::ELOOP
+        )
+    }
+    #[cfg(windows)]
+    {
+        // Windows codes that `winerror_to_errno` maps to ENOENT, EBADF or
+        // ENOTDIR, plus ERROR_NOT_READY, ERROR_INVALID_NAME and
+        // ERROR_CANT_RESOLVE_FILENAME.
+        matches!(
+            code,
+            2 | 3 | 15 | 18 | 53 | 67 | 161 | 206 | 6 | 114 | 130 | 267 | 21 | 123 | 1921
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = code;
+        false
+    }
+}
+
+/// `S_IS*(self.stat().st_mode)` with `_ignore_error` / `ValueError` → `False`.
+pub(super) fn path_is_special_kind(
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+    kind: SpecialFileKind,
+) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    bind_no_args(args, fn_name)?;
+    let path = get_path(&inst, fn_name)?;
+    if path.contains('\0') {
+        // os.stat raises ValueError for an embedded NUL; pathlib swallows it.
+        return Ok(Value::bool_(false));
+    }
+    match stat_special_kind(&path) {
+        Ok(found) => Ok(Value::bool_(found == Some(kind))),
+        Err(error) if is_ignored_stat_error(&error) => Ok(Value::bool_(false)),
+        Err(error) => Err(PyError::from_io_error(&error, Some(&path))),
+    }
+}
+
+/// Follow symlinks and report which special file kind `path` is, if any.
+#[cfg(unix)]
+fn stat_special_kind(path: &str) -> std::io::Result<Option<SpecialFileKind>> {
+    use std::os::unix::fs::FileTypeExt;
+    let file_type = std::fs::metadata(path)?.file_type();
+    Ok(if file_type.is_fifo() {
+        Some(SpecialFileKind::Fifo)
+    } else if file_type.is_socket() {
+        Some(SpecialFileKind::Socket)
+    } else if file_type.is_block_device() {
+        Some(SpecialFileKind::BlockDevice)
+    } else if file_type.is_char_device() {
+        Some(SpecialFileKind::CharDevice)
+    } else {
+        None
+    })
+}
+
+/// Windows `os.stat` reports `S_IFCHR` / `S_IFIFO` for non-disk handles
+/// (`NUL`, `CON`, `\\.\pipe\name`), mirroring CPython's
+/// `win32_xstat_slow_impl`; on-disk files are never special.
+#[cfg(windows)]
+fn stat_special_kind(path: &str) -> std::io::Result<Option<SpecialFileKind>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE, FILE_TYPE_UNKNOWN, GetFileAttributesW,
+        GetFileType, INVALID_FILE_ATTRIBUTES, OPEN_EXISTING,
+    };
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    const ERROR_CANT_ACCESS_FILE: i32 = 1920;
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let open = |access: u32, share: u32, flags: u32| {
+        // SAFETY: `wide` is NUL-terminated and outlives the call; null
+        // security attributes and template handle are permitted.
+        unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                access,
+                share,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                flags,
+                std::ptr::null_mut(),
+            )
+        }
+    };
+    let mut handle = open(FILE_READ_ATTRIBUTES, 0, FILE_FLAG_BACKUP_SEMANTICS);
+    if handle == INVALID_HANDLE_VALUE {
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            // CPython then reads the parent directory's entry: an on-disk file.
+            Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION) => {
+                return std::fs::metadata(path).map(|_| None);
+            }
+            // `\\.\con` needs read or write access.
+            Some(ERROR_INVALID_PARAMETER) => {
+                handle = open(
+                    FILE_READ_ATTRIBUTES | GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                );
+            }
+            // An unhandled reparse point is opened as itself.
+            Some(ERROR_CANT_ACCESS_FILE) => {
+                handle = open(
+                    FILE_READ_ATTRIBUTES,
+                    0,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                );
+            }
+            _ => return Err(error),
+        }
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(error);
+        }
+    }
+    // SAFETY: `handle` is a valid open handle, closed exactly once below.
+    let file_type = unsafe { GetFileType(handle) };
+    let query_error = std::io::Error::last_os_error();
+    // SAFETY: as above.
+    unsafe { CloseHandle(handle) };
+    if file_type == FILE_TYPE_DISK {
+        return Ok(None);
+    }
+    if file_type == FILE_TYPE_UNKNOWN && query_error.raw_os_error().is_some_and(|code| code != 0) {
+        return Err(query_error);
+    }
+    // SAFETY: `wide` is NUL-terminated.
+    let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    if attrs != INVALID_FILE_ATTRIBUTES && attrs & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        // `\\.\pipe\` and `\\.\mailslot\` are directories.
+        return Ok(None);
+    }
+    Ok(match file_type {
+        FILE_TYPE_CHAR => Some(SpecialFileKind::CharDevice),
+        FILE_TYPE_PIPE => Some(SpecialFileKind::Fifo),
+        _ => None,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stat_special_kind(path: &str) -> std::io::Result<Option<SpecialFileKind>> {
+    std::fs::metadata(path).map(|_| None)
+}
+
+// ── Path.owner / Path.group ──────────────────────────────────────────────────
+
+/// `self.stat()` with `os.stat`'s embedded-NUL `ValueError`.
+#[cfg(unix)]
+fn stat_following(path: &str) -> Result<std::fs::Metadata> {
+    if path.contains('\0') {
+        return Err(PyError::named(
+            "ValueError",
+            "stat: embedded null character in path".to_string(),
+        ));
+    }
+    std::fs::metadata(path).map_err(|error| PyError::from_io_error(&error, Some(path)))
+}
+
+/// `Path.owner()` → `pwd.getpwuid(self.stat().st_uid).pw_name`; without
+/// `pwd` (Windows) CPython 3.12 raises `NotImplementedError`.
+pub(super) fn path_owner(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    bind_no_args(args, fn_name)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let path = get_path(&inst, fn_name)?;
+        let uid = stat_following(&path)?.uid();
+        crate::builtin_modules::pwd::user_name_for_uid(uid)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = inst;
+        Err(PyError::named(
+            "NotImplementedError",
+            "Path.owner() is unsupported on this system".to_string(),
+        ))
+    }
+}
+
+/// `Path.group()` → `grp.getgrgid(self.stat().st_gid).gr_name`; without
+/// `grp` (Windows) CPython 3.12 raises `NotImplementedError`.
+pub(super) fn path_group(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    bind_no_args(args, fn_name)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let path = get_path(&inst, fn_name)?;
+        let gid = stat_following(&path)?.gid();
+        crate::builtin_modules::grp::group_name_for_gid(gid)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = inst;
+        Err(PyError::named(
+            "NotImplementedError",
+            "Path.group() is unsupported on this system".to_string(),
+        ))
+    }
 }
 
 pub(super) fn path_resolve(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {

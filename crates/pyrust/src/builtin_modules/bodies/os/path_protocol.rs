@@ -161,10 +161,12 @@ pub(super) fn post_load_os_module(
         }
     }
     let mut follow_set = PySet::default();
+    // Windows `os.chmod` rejects `follow_symlinks=False` (CPython 3.12 has no
+    // `lchmod`/`fchmodat` there), so it is not advertised.
     let follow_names: &[&str] = if cfg!(unix) {
         &["stat", "utime", "chmod", "chown"]
     } else {
-        &["stat", "utime", "chmod"]
+        &["stat", "utime"]
     };
     for &fn_name in follow_names {
         if let Some(f) = mod_rc.borrow().attrs.get(fn_name).cloned()

@@ -6,8 +6,10 @@
 //
 // - `class_registry`: generation-aware 6-class hierarchy identity and factory;
 // - `lexical`: POSIX/Windows parsing, normalization, components, match, and parents;
-// - `filesystem`: host I/O, stat/lstat, directory traversal, glob/rglob, cwd, home;
-// - `presentation`: repr/str, equality/ordering, hashing, and `__fspath__`.
+// - `filesystem`: host I/O, stat/lstat and file-kind predicates, permissions,
+//   links, ownership, glob/rglob, absolute/expanduser, cwd, home;
+// - `presentation`: repr/str, equality/ordering, hashing, and `__fspath__`;
+// - `walk`: the lazy `Path.walk()` directory-tree generator.
 //
 // Reference: <https://docs.python.org/3/library/pathlib.html>
 
@@ -24,6 +26,8 @@ mod filesystem;
 mod lexical;
 #[path = "pathlib/presentation.rs"]
 mod presentation;
+#[path = "pathlib/walk.rs"]
+mod walk;
 
 pyrust_module! {
     constants {
@@ -341,6 +345,81 @@ pyrust_module! {
         filesystem::path_resolve(args, FN_NAME)
     }
 
+    #[py_name = "Path.absolute"]
+    fn path_absolute(args) -> Result<Value> {
+        filesystem::path_absolute(args, FN_NAME)
+    }
+
+    #[py_name = "Path.expanduser"]
+    fn path_expanduser(args) -> Result<Value> {
+        filesystem::path_expanduser(args, FN_NAME)
+    }
+
+    #[py_name = "Path.chmod"]
+    fn path_chmod(args) -> Result<Value> {
+        filesystem::path_chmod(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "Path.lchmod"]
+    fn path_lchmod(args) -> Result<Value> {
+        filesystem::path_lchmod(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "Path.symlink_to"]
+    fn path_symlink_to(args) -> Result<Value> {
+        filesystem::path_symlink_to(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "Path.hardlink_to"]
+    fn path_hardlink_to(args) -> Result<Value> {
+        filesystem::path_hardlink_to(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "Path.walk"]
+    fn path_walk(args) -> Result<Value> {
+        walk::path_walk(args, FN_NAME)
+    }
+
+    #[py_name = "Path.is_mount"]
+    fn path_is_mount(args) -> Result<Value> {
+        filesystem::path_is_mount(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "Path.is_junction"]
+    fn path_is_junction(args) -> Result<Value> {
+        filesystem::path_is_junction(_interp, args, FN_NAME)
+    }
+
+    #[py_name = "Path.is_block_device"]
+    fn path_is_block_device(args) -> Result<Value> {
+        filesystem::path_is_special_kind(args, FN_NAME, filesystem::SpecialFileKind::BlockDevice)
+    }
+
+    #[py_name = "Path.is_char_device"]
+    fn path_is_char_device(args) -> Result<Value> {
+        filesystem::path_is_special_kind(args, FN_NAME, filesystem::SpecialFileKind::CharDevice)
+    }
+
+    #[py_name = "Path.is_fifo"]
+    fn path_is_fifo(args) -> Result<Value> {
+        filesystem::path_is_special_kind(args, FN_NAME, filesystem::SpecialFileKind::Fifo)
+    }
+
+    #[py_name = "Path.is_socket"]
+    fn path_is_socket(args) -> Result<Value> {
+        filesystem::path_is_special_kind(args, FN_NAME, filesystem::SpecialFileKind::Socket)
+    }
+
+    #[py_name = "Path.owner"]
+    fn path_owner(args) -> Result<Value> {
+        filesystem::path_owner(args, FN_NAME)
+    }
+
+    #[py_name = "Path.group"]
+    fn path_group(args) -> Result<Value> {
+        filesystem::path_group(args, FN_NAME)
+    }
+
     #[py_name = "Path.cwd"]
     fn path_cwd(args) -> Result<Value> {
         filesystem::path_cwd(_interp, args)
@@ -359,11 +438,13 @@ mod boundary_tests {
     const FILESYSTEM: &str = include_str!("pathlib/filesystem.rs");
     const LEXICAL: &str = include_str!("pathlib/lexical.rs");
     const PRESENTATION: &str = include_str!("pathlib/presentation.rs");
+    const WALK: &str = include_str!("pathlib/walk.rs");
     const IMPLEMENTATIONS: &str = concat!(
         include_str!("pathlib/class_registry.rs"),
         include_str!("pathlib/filesystem.rs"),
         include_str!("pathlib/lexical.rs"),
         include_str!("pathlib/presentation.rs"),
+        include_str!("pathlib/walk.rs"),
     );
 
     #[test]
@@ -401,6 +482,7 @@ mod boundary_tests {
         assert!(LEXICAL.contains("fn normalize_path"));
         assert!(FILESYSTEM.contains("std::fs::"));
         assert!(PRESENTATION.contains("fn fnv1a_hash"));
+        assert!(WALK.contains("ProviderIterator::new"));
 
         for (name, source) in [
             ("class_registry", CLASS_REGISTRY),
@@ -421,6 +503,20 @@ mod boundary_tests {
         let path_reg = concat!("#[py_", "name = \"Path.");
         assert_eq!(OWNER.matches(pure_reg).count(), 32);
         assert_eq!(OWNER.matches(parents_reg).count(), 5);
-        assert_eq!(OWNER.matches(path_reg).count(), 25);
+        assert_eq!(OWNER.matches(path_reg).count(), 40);
+    }
+
+    #[test]
+    fn every_path_registration_is_installed_on_the_class() {
+        let path_reg = concat!("#[py_", "name = \"Path.");
+        let mut installed: Vec<&str> = super::class_registry::installed_path_method_names();
+        installed.sort_unstable();
+        let mut registered: Vec<&str> = OWNER
+            .split(path_reg)
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        registered.sort_unstable();
+        assert_eq!(installed, registered);
     }
 }
