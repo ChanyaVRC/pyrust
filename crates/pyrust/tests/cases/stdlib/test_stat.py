@@ -1,4 +1,4 @@
-# CPython 3.12 parity tests for the `stat` module (issue #3209).
+# CPython 3.12 parity tests for the `stat` module (issues #3209, #3355).
 
 import os
 import stat
@@ -181,3 +181,62 @@ with tempfile.TemporaryDirectory() as tmpdir:
         st_file[stat.ST_SIZE],
         stat.filemode(st_file.st_mode)[0],
     )
+
+# ── Module surface (#3355) ───────────────────────────────────────────────────
+public = sorted(n for n in dir(stat) if not n.startswith("__"))
+print(len(public), public[:5], public[-5:])
+print(hasattr(stat, "__all__"), stat.__name__)
+print(stat.__doc__.splitlines()[0])
+print(stat.IO_REPARSE_TAG_SYMLINK, stat.IO_REPARSE_TAG_MOUNT_POINT, stat.IO_REPARSE_TAG_APPEXECLINK)
+print(stat._filemode_table)
+print(type(stat._filemode_table), len(stat._filemode_table))
+print(stat.S_ENFMT == stat.S_ISGID, stat.S_IREAD == stat.S_IRUSR, stat.S_IEXEC == stat.S_IXUSR)
+
+# Every callable is a builtin function.
+for fn in (
+    stat.S_IMODE, stat.S_IFMT, stat.S_ISDIR, stat.S_ISCHR, stat.S_ISBLK,
+    stat.S_ISREG, stat.S_ISFIFO, stat.S_ISLNK, stat.S_ISSOCK, stat.S_ISDOOR,
+    stat.S_ISPORT, stat.S_ISWHT, stat.filemode,
+):
+    print(fn.__name__, type(fn).__name__)
+
+# ── Argument validation (matches Modules/_stat.c) ────────────────────────────
+class Idx:
+    def __index__(self):
+        return 5
+
+class Sub(int):
+    pass
+
+fns = (
+    stat.S_IMODE, stat.S_IFMT, stat.S_ISDIR, stat.S_ISREG, stat.S_ISDOOR,
+    stat.S_ISPORT, stat.S_ISWHT, stat.filemode,
+)
+bad_values = [
+    "x", 1.5, None, b"1", [1], Idx(), 1j, -1, -(1 << 70), 1 << 70,
+    1 << 64, (1 << 64) - 1, 1 << 40, 1 << 32, (1 << 32) - 1, 1 << 16,
+    0xFFFF, True, False, Sub(0o40755),
+]
+for fn in fns:
+    for v in bad_values:
+        try:
+            r = fn(v)
+        except (TypeError, OverflowError) as e:
+            print(fn.__name__, type(v).__name__, type(e).__name__, e)
+        else:
+            print(fn.__name__, type(v).__name__, repr(r))
+
+for call in (
+    lambda: stat.S_IFMT(),
+    lambda: stat.S_IFMT(1, 2),
+    lambda: stat.filemode(),
+    lambda: stat.S_ISDIR(),
+):
+    try:
+        call()
+    except TypeError:
+        print("TypeError")
+
+# Bits beyond the type/permission fields.
+for m in (0o7777, 0o177777, 0o170000, 0o160000, 0o030000, 0o070000, 0o110000, 0o130000, 0o150000):
+    print(oct(m), oct(stat.S_IFMT(m)), oct(stat.S_IMODE(m)), stat.filemode(m))
