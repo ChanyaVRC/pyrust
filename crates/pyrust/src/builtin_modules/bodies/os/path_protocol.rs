@@ -161,9 +161,11 @@ pub(super) fn post_load_os_module(
         }
     }
     let mut follow_set = PySet::default();
-    // Windows `os.chmod` rejects `follow_symlinks=False` (CPython 3.12 has no
-    // `lchmod`/`fchmodat` there), so it is not advertised.
-    let follow_names: &[&str] = if cfg!(unix) {
+    // CPython's `os.py` lists `chmod` only with `HAVE_LCHMOD`, deliberately
+    // ignoring `fchmodat`: so macOS/BSD advertise it, Linux and Windows don't.
+    let follow_names: &[&str] = if cfg!(any(target_os = "linux", target_os = "android")) {
+        &["stat", "utime", "chown"]
+    } else if cfg!(unix) {
         &["stat", "utime", "chmod", "chown"]
     } else {
         &["stat", "utime"]
