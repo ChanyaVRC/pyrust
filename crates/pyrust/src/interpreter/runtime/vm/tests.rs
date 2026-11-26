@@ -569,9 +569,12 @@ mod vm_tests {
         for class in classes {
             let name = class.borrow().name.clone();
             let expected_tag = class.borrow().builtin_type_tag;
-            let expected_fast = expected_tag.and_then(|tag| {
-                let registration_name =
-                    crate::interpreter::BuiltinTypeClass::from_tag(tag).class_name();
+            let is_range =
+                std::rc::Rc::ptr_eq(&class, &crate::interpreter::range_class_singleton());
+            let expected_registration_name = expected_tag
+                .map(|tag| crate::interpreter::BuiltinTypeClass::from_tag(tag).class_name())
+                .or(is_range.then_some("range"));
+            let expected_fast = expected_registration_name.and_then(|registration_name| {
                 crate::builtin_registry::lookup_registration(registration_name).and_then(
                     |registration| {
                         registration
