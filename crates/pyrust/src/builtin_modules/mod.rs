@@ -19,6 +19,8 @@ pub(crate) mod macros;
 pub(crate) mod asyncio_rt;
 pub(crate) mod asyncio_submodules;
 pub(crate) mod ctypes_rt;
+#[cfg(any(unix, test))]
+pub(crate) mod curses_engine;
 pub(crate) mod encodings_codecs;
 pub(crate) mod internal_shims;
 pub(crate) mod ssl_engine;
@@ -408,6 +410,12 @@ macro_rules! pyrust_builtin_modules {
                     return concurrent_futures::post_load_init(interp, module);
                 }
                 "venv" => return venv::post_load_init(interp, module),
+                #[cfg(unix)]
+                "curses" => return curses::post_load_init(interp, module),
+                #[cfg(unix)]
+                "curses.has_key" => return curses_has_key::post_load_init(interp, module),
+                #[cfg(unix)]
+                "curses.panel" => return curses_panel::post_load_init(interp, module),
                 _ => {}
             }
             if asyncio_submodules::post_load_init(name, interp, module)? {
@@ -1060,6 +1068,24 @@ pyrust_builtin_modules! {
     "ensurepip.__main__" as ensurepip_main,
     "ensurepip._uninstall" as ensurepip_uninstall,
     ensurepip,
+    // `readline` and `curses` ecosystem (issue #3266): 100% native-Rust
+    // Unix-only Python 3.12 stdlib modules (zero `libncurses` C linkage).
+    #[cfg(unix)]
+    readline,
+    #[cfg(unix)]
+    _curses,
+    #[cfg(unix)]
+    _curses_panel,
+    #[cfg(unix)]
+    curses,
+    #[cfg(unix)]
+    "curses.ascii" as curses_ascii,
+    #[cfg(unix)]
+    "curses.has_key" as curses_has_key,
+    #[cfg(unix)]
+    "curses.panel" as curses_panel,
+    #[cfg(unix)]
+    "curses.textpad" as curses_textpad,
 }
 
 pub(crate) use concurrent_futures_base as bodies_helpers_cf_base;
@@ -1130,8 +1156,12 @@ mod lazy_facade_tests {
                 if trimmed.starts_with("//") {
                     continue;
                 }
+                let has_eager_submod = line
+                    .split("super::")
+                    .skip(1)
+                    .any(|rest| rest.contains("::module()"));
                 assert!(
-                    !(line.contains("super::") && line.contains("::module()")),
+                    !has_eager_submod,
                     "{}:{} eagerly constructs a submodule via super::*::module(); \
                      load submodules lazily or via interp.load_module(...) in post_load_init: {line}",
                     path.display(),
