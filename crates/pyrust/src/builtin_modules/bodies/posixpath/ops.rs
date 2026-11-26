@@ -358,6 +358,22 @@ fn lookup_user_home_unix(username: &str) -> Option<String> {
     }
 }
 
+/// `pwd.getpwuid(os.getuid()).pw_dir`, the `expanduser` fallback when `HOME`
+/// is unset.
+#[cfg(unix)]
+fn lookup_current_user_home_unix() -> Option<String> {
+    use std::ffi::CStr;
+    // SAFETY: `getpwuid` returns either null or a pointer to a static passwd
+    // struct; we copy `pw_dir` immediately before returning.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr((*pw).pw_dir).to_string_lossy().into_owned())
+    }
+}
+
 pub(crate) fn posix_expanduser_str(path: &str) -> String {
     if !path.starts_with('~') {
         return path.to_string();
@@ -367,6 +383,12 @@ pub(crate) fn posix_expanduser_str(path: &str) -> String {
     let home = if user_part.is_empty() {
         match std::env::var_os("HOME") {
             Some(h) => h.to_string_lossy().into_owned(),
+            #[cfg(unix)]
+            None => match lookup_current_user_home_unix() {
+                Some(h) => h,
+                None => return path.to_string(),
+            },
+            #[cfg(not(unix))]
             None => return path.to_string(),
         }
     } else {

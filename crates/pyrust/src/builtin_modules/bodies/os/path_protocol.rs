@@ -161,10 +161,14 @@ pub(super) fn post_load_os_module(
         }
     }
     let mut follow_set = PySet::default();
-    let follow_names: &[&str] = if cfg!(unix) {
+    // CPython's `os.py` lists `chmod` only with `HAVE_LCHMOD`, deliberately
+    // ignoring `fchmodat`: so macOS/BSD advertise it, Linux and Windows don't.
+    let follow_names: &[&str] = if cfg!(any(target_os = "linux", target_os = "android")) {
+        &["stat", "utime", "chown"]
+    } else if cfg!(unix) {
         &["stat", "utime", "chmod", "chown"]
     } else {
-        &["stat", "utime", "chmod"]
+        &["stat", "utime"]
     };
     for &fn_name in follow_names {
         if let Some(f) = mod_rc.borrow().attrs.get(fn_name).cloned()

@@ -71,6 +71,20 @@ unsafe fn group_to_value(gr: *const libc::group) -> Value {
     ])
 }
 
+/// `grp.getgrgid(gid).gr_name`, used by `pathlib.Path.group()`.
+pub(crate) fn group_name_for_gid(gid: libc::gid_t) -> Result<Value> {
+    let _guard = GRP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: serialized by `GRP_LOCK`; the entry is copied before the lock is released.
+    let ptr = unsafe { libc::getgrgid(gid) };
+    if ptr.is_null() {
+        return Err(PyError::key_error(Value::string(format!(
+            "getgrgid(): gid not found: {gid}"
+        ))));
+    }
+    // SAFETY: `ptr` is non-null and valid while `GRP_LOCK` is held.
+    Ok(Value::string(unsafe { c_ptr_to_string((*ptr).gr_name) }))
+}
+
 pyrust_module! {
     constants {
         "struct_group" => struct_group::class(),

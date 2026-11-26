@@ -95,11 +95,36 @@ const PATH_METHODS: &[(&str, &str)] = &[
     ("lstat", "pathlib.Path.lstat"),
     ("samefile", "pathlib.Path.samefile"),
     ("readlink", "pathlib.Path.readlink"),
+    ("absolute", "pathlib.Path.absolute"),
+    ("expanduser", "pathlib.Path.expanduser"),
+    ("chmod", "pathlib.Path.chmod"),
+    ("lchmod", "pathlib.Path.lchmod"),
+    ("symlink_to", "pathlib.Path.symlink_to"),
+    ("hardlink_to", "pathlib.Path.hardlink_to"),
+    ("walk", "pathlib.Path.walk"),
+    ("is_mount", "pathlib.Path.is_mount"),
+    ("is_junction", "pathlib.Path.is_junction"),
+    ("is_block_device", "pathlib.Path.is_block_device"),
+    ("is_char_device", "pathlib.Path.is_char_device"),
+    ("is_fifo", "pathlib.Path.is_fifo"),
+    ("is_socket", "pathlib.Path.is_socket"),
+    ("owner", "pathlib.Path.owner"),
+    ("group", "pathlib.Path.group"),
 ];
 
 /// Class methods installed on `Path`.
 const PATH_CLASS_METHODS: &[(&str, &str)] =
     &[("cwd", "pathlib.Path.cwd"), ("home", "pathlib.Path.home")];
+
+/// Short names of every method and class method installed on `Path`.
+#[cfg(test)]
+pub(super) fn installed_path_method_names() -> Vec<&'static str> {
+    PATH_METHODS
+        .iter()
+        .chain(PATH_CLASS_METHODS)
+        .map(|(short, _)| *short)
+        .collect()
+}
 
 /// Methods installed on `_PathParents`.
 const PATH_PARENTS_METHODS: &[(&str, &str)] = &[
