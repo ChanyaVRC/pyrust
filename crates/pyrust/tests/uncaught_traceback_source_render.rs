@@ -1864,9 +1864,12 @@ fn asyncio_bundled_frames_report_frozen_filename_and_keep_run_anchor() {
         ),
         "missing module frame or asyncio.run caret:\n{stderr}"
     );
+    // Native-Rust `asyncio` (issue #3254) has no bundled Python shim frames:
+    // the traceback flows directly from the user's `asyncio.run(co())` anchor
+    // into `co()` without emitting `<frozen asyncio>` frames or `# pad` lines.
     assert!(
-        stderr.contains("  File \"<frozen asyncio>\", line "),
-        "expected <frozen asyncio> frames:\n{stderr}"
+        !stderr.contains("  File \"<frozen asyncio>\", line "),
+        "native asyncio should not emit bundled Python frames:\n{stderr}"
     );
     assert!(
         !stderr.contains("# pad"),

@@ -30,6 +30,32 @@ use std::process::Command;
 const PROBE: &str = r#"
 import math
 import os.path
+import asyncio.base_events
+import asyncio.base_futures
+import asyncio.base_subprocess
+import asyncio.base_tasks
+import asyncio.constants
+import asyncio.coroutines
+import asyncio.events
+import asyncio.exceptions
+import asyncio.format_helpers
+import asyncio.futures
+import asyncio.locks
+import asyncio.log
+import asyncio.mixins
+import asyncio.protocols
+import asyncio.queues
+import asyncio.runners
+import asyncio.selector_events
+import asyncio.staggered
+import asyncio.streams
+import asyncio.subprocess
+import asyncio.taskgroups
+import asyncio.tasks
+import asyncio.threads
+import asyncio.timeouts
+import asyncio.transports
+import asyncio.trsock
 import collections.abc
 import dbm.dumb
 import email.base64mime
@@ -159,6 +185,32 @@ names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_
 for name in names:
     print(name, list(vars(__import__(name))))
 for name, module in [("os.path", os.path),
+                     ("asyncio.base_events", asyncio.base_events),
+                     ("asyncio.base_futures", asyncio.base_futures),
+                     ("asyncio.base_subprocess", asyncio.base_subprocess),
+                     ("asyncio.base_tasks", asyncio.base_tasks),
+                     ("asyncio.constants", asyncio.constants),
+                     ("asyncio.coroutines", asyncio.coroutines),
+                     ("asyncio.events", asyncio.events),
+                     ("asyncio.exceptions", asyncio.exceptions),
+                     ("asyncio.format_helpers", asyncio.format_helpers),
+                     ("asyncio.futures", asyncio.futures),
+                     ("asyncio.locks", asyncio.locks),
+                     ("asyncio.log", asyncio.log),
+                     ("asyncio.mixins", asyncio.mixins),
+                     ("asyncio.protocols", asyncio.protocols),
+                     ("asyncio.queues", asyncio.queues),
+                     ("asyncio.runners", asyncio.runners),
+                     ("asyncio.selector_events", asyncio.selector_events),
+                     ("asyncio.staggered", asyncio.staggered),
+                     ("asyncio.streams", asyncio.streams),
+                     ("asyncio.subprocess", asyncio.subprocess),
+                     ("asyncio.taskgroups", asyncio.taskgroups),
+                     ("asyncio.tasks", asyncio.tasks),
+                     ("asyncio.threads", asyncio.threads),
+                     ("asyncio.timeouts", asyncio.timeouts),
+                     ("asyncio.transports", asyncio.transports),
+                     ("asyncio.trsock", asyncio.trsock),
                      ("collections.abc", collections.abc),
                      ("dbm.dumb", dbm.dumb),
                      ("email.base64mime", email.base64mime),
