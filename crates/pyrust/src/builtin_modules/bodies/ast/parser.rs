@@ -2692,7 +2692,10 @@ impl<'a> AstParser<'a> {
         let args = self.parse_parameters(false)?;
         self.expect_exact(TOK_COLON, "':'")?;
         let body = self.parse_expr()?;
-        let sp = start.merge(body.span);
+        // The lambda ends at the last consumed token, which is the closing `)`
+        // when the body is parenthesised (`lambda: (yield)`), not at the
+        // parenthesised expression's inner span.
+        let sp = start.merge(body.span).merge(Span::from_tok(self.prev()));
         Ok(ParsedExpr {
             node: self
                 .classes

@@ -191,6 +191,19 @@ impl Parser {
                     self.expect(&Token::RParen)?;
                     return Ok(Expr::Tuple(items));
                 }
+                // `( yield_expr )`: CPython's `group` rule accepts a yield
+                // expression only as the sole content of the parentheses, so
+                // `(yield)`, `(yield x)` and `(yield from x)` (including a bare
+                // `yield` ended by the `)`) are valid but `(yield, 1)` and
+                // `(yield for ...)` are not.
+                if self.is(&Token::Yield) {
+                    let value = self.parse_yield_expr(true)?;
+                    if !self.is(&Token::RParen) {
+                        return Err(PyError::parse("invalid syntax".to_string()));
+                    }
+                    self.bump();
+                    return Ok(value);
+                }
                 let elt_lineno = self.current_lineno();
                 let first = self.parse_expr()?;
                 if self.is(&Token::For) || self.is_async_for() {
