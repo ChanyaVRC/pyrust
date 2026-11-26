@@ -819,9 +819,10 @@ pyrust_builtin_modules! {
     graphlib @inject,
     threading @inject,
     queue @inject,
-    // `stat`, `platform`, `atexit`, and `signal` (issue #3209): Python 3.12
+    // `stat` (issues #3209, #3355: 100% native Rust in `stat.rs`), `platform`,
+    // `atexit`, and `signal` (issue #3209): Python 3.12
     // OS/system utility stdlib modules.
-    stat @inject,
+    stat,
     platform @inject,
     atexit,
     signal @inject,
