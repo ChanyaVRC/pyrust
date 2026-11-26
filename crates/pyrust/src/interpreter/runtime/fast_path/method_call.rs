@@ -21,7 +21,39 @@ impl Interpreter {
                 ))
             })?
             .as_str();
+        // Per-site typed built-in method cache (#3379): a warm site skips
+        // name-based routing, registry resolution, and receiver rebinding.
+        let fillable =
+            match Self::probe_builtin_method_cache(&regs[obj as usize], method, code, call_site_pc)
+            {
+                BuiltinMethodSiteHit::Container(handle) => {
+                    return self.exec_builtin_container_site_hit(
+                        regs, num_locals, obj, args_base, nargs, handle,
+                    );
+                }
+                BuiltinMethodSiteHit::Native(handle) => {
+                    return self.exec_builtin_native_site_hit(
+                        regs,
+                        num_locals,
+                        obj,
+                        args_base,
+                        nargs,
+                        handle,
+                        code,
+                        call_site_pc,
+                    );
+                }
+                BuiltinMethodSiteHit::Miss { fillable } => fillable,
+            };
         let obj_kind = BuiltinContainerKind::classify(regs[obj as usize].as_some());
+        if fillable && obj_kind.is_some() {
+            Self::fill_builtin_container_method_cache(
+                &regs[obj as usize],
+                method,
+                code,
+                call_site_pc,
+            );
+        }
         if nargs == 1
             && let Some(kind) = obj_kind
             && kind.supports_direct_method(method)
@@ -304,5 +336,81 @@ impl Interpreter {
             self.call_arg_buf = buf;
             r
         }
+    }
+}
+
+impl Interpreter {
+    /// Warm per-site hit on an exact built-in container receiver (#3379).
+    /// Kept out of line so `exec_call_method`'s generic body is unchanged.
+    #[inline(never)]
+    fn exec_builtin_container_site_hit(
+        &mut self,
+        regs: &mut RegSlice,
+        num_locals: crate::bytecode::Reg,
+        obj: crate::bytecode::Reg,
+        args_base: crate::bytecode::Reg,
+        nargs: u8,
+        handle: crate::interpreter::DirectContainerMethod,
+    ) -> Result<Value> {
+        let receiver = regs[obj as usize].clone();
+        if nargs == 1 {
+            let arg = vm_read(regs, args_base, num_locals)?;
+            return match Self::try_call_direct_container_method_1arg(handle, &receiver, arg)? {
+                Ok(result) => Ok(result),
+                Err(arg) => {
+                    self.call_direct_container_method(handle, receiver, smallvec::smallvec![arg])
+                }
+            };
+        }
+        let args = Self::read_call_method_args(regs, args_base, nargs, num_locals)?;
+        self.call_direct_container_method(handle, receiver, args)
+    }
+
+    /// Warm per-site hit on a native-class instance method (#3379).
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn exec_builtin_native_site_hit(
+        &mut self,
+        regs: &mut RegSlice,
+        num_locals: crate::bytecode::Reg,
+        obj: crate::bytecode::Reg,
+        args_base: crate::bytecode::Reg,
+        nargs: u8,
+        handle: crate::interpreter::DirectNativeMethod,
+        code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
+    ) -> Result<Value> {
+        let args = Self::read_call_method_args(regs, args_base, nargs, num_locals)?;
+        let receiver = regs[obj as usize].clone();
+        // Native methods may run Python code (`deque.extend(gen)`, `__eq__`
+        // in `deque.count`); publish the call-site line for frames created
+        // underneath, as the generic cached path does.
+        let cur_line = code.line_at(call_site_pc);
+        if cur_line != 0 {
+            self.cold
+                .call_site_lines
+                .push((regs.non_null_ptr().as_ptr(), cur_line));
+        }
+        let result = self.call_direct_native_method(handle, receiver, args);
+        if cur_line != 0 {
+            self.cold.call_site_lines.pop();
+        }
+        result
+    }
+
+    /// Read a fused `CallMethod`'s positional argument registers.
+    #[inline]
+    fn read_call_method_args(
+        regs: &RegSlice,
+        args_base: crate::bytecode::Reg,
+        nargs: u8,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<smallvec::SmallVec<[Value; 4]>> {
+        let mut args: smallvec::SmallVec<[Value; 4]> =
+            smallvec::SmallVec::with_capacity(nargs as usize);
+        for i in 0..crate::bytecode::Reg::from(nargs) {
+            args.push(vm_read(regs, args_base + i, num_locals)?);
+        }
+        Ok(args)
     }
 }

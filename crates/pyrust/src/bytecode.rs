@@ -17,8 +17,9 @@ pub use cache::{
     NativeClassMethodCacheEntry, SlotAttrCacheEntry,
 };
 pub(crate) use cache::{
-    BINOP_SPEC_THRESHOLD, BinOpCacheEntry, BinopTypeTag, GlobalCacheEntry, SiteCache,
-    SparsePcCache, global_cache_interest_mask, is_attr_cache_site, is_call_builtin_cache_site,
+    BINOP_SPEC_THRESHOLD, BinOpCacheEntry, BinopTypeTag, BuiltinMethodCacheEntry, GlobalCacheEntry,
+    NativeMethodCacheEntry, SiteCache, SparsePcCache, global_cache_interest_mask,
+    is_attr_cache_site, is_builtin_method_cache_site, is_call_builtin_cache_site,
 };
 pub use code::FnCode;
 pub(crate) use code::{ColTable, EXC_NO_HANDLER, LinenoTable, MAX_FRAME_REGS, intern_const_pool};

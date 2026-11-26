@@ -3,7 +3,7 @@
 /// Keeping this as a type prevents the VM/call boundary from passing magic
 /// numeric tags and makes adding a new fast-path receiver an exhaustive-match
 /// change.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BuiltinContainerKind {
     List,
     Dict,

@@ -5,12 +5,25 @@ impl Interpreter {
         &mut self,
         receiver: Value,
         method: &str,
-        mut pos: Vec<Value>,
+        pos: Vec<Value>,
         kw: &PyDict,
     ) -> Result<Value> {
         let Some(spec) = pyrust_builtins::list::method_spec(method) else {
             return pyrust_builtins::list::call(method, &receiver, pos, kw);
         };
+        self.dispatch_list_container_spec(receiver, spec, pos, kw)
+    }
+
+    /// `list` method body after the name has been resolved to its typed spec.
+    /// Shared by the name-routed dispatcher above and the per-site
+    /// `CallMethod` cache (#3379), which resolves `spec` once per site.
+    fn dispatch_list_container_spec(
+        &mut self,
+        receiver: Value,
+        spec: pyrust_builtins::list::MethodSpec,
+        mut pos: Vec<Value>,
+        kw: &PyDict,
+    ) -> Result<Value> {
         spec.validate_keywords(!kw.is_empty())?;
         spec.validate_positional_arity(pos.len())?;
         // `list.insert(i, x)` / `list.pop([i])` accept any `__index__`

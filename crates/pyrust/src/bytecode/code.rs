@@ -384,6 +384,12 @@ pub struct FnCode {
     /// skipping the `call_function_expanded` cascade and registry binary
     /// search. See [`crate::interpreter::CallBuiltinCacheEntry`].
     pub(crate) call_builtin_cache: RefCell<SiteCache<crate::interpreter::CallBuiltinCacheEntry>>,
+    /// Lazily-allocated, site-indexed cache of the typed dispatch target a
+    /// `CallMethod` site resolved for a built-in container or native-class
+    /// receiver (#3379). Allocates 0 heap bytes until a built-in receiver
+    /// method call populates an entry. See
+    /// [`crate::bytecode::BuiltinMethodCacheEntry`].
+    pub(crate) builtin_method_cache: RefCell<SiteCache<crate::bytecode::BuiltinMethodCacheEntry>>,
     /// Weakly cached `types.CodeType` object for this compiled body so
     /// repeated `f.__code__`, `g.gi_code`, and `frame.f_code` reads share one
     /// Python object identity without introducing strong ownership cycles.

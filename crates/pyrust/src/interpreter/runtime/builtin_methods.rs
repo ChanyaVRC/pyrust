@@ -44,6 +44,7 @@ include!("builtin_methods/bound_instances.rs");
 include!("builtin_methods/bound_classes.rs");
 include!("builtin_methods/bound_ranges.rs");
 include!("builtin_methods/container_dispatch.rs");
+include!("builtin_methods/direct_method_sites.rs");
 include!("builtin_methods/callable_presentation.rs");
 include!("builtin_methods/attribute_adapters.rs");
 include!("builtin_methods/typing.rs");

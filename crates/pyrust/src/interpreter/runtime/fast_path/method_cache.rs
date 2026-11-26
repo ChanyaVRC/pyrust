@@ -69,6 +69,14 @@ impl Interpreter {
                     else {
                         return;
                     };
+                    Self::fill_builtin_native_method_cache(
+                        &inst.class,
+                        class_version,
+                        epoch,
+                        &unbound_value,
+                        code,
+                        call_site_pc,
+                    );
                     AttrCacheEntry::class_attr(&inst.class, class_version, epoch, &unbound_value)
                 }
                 ReadMethodCachePlan::NativeClassMethod(plan) => {
@@ -287,5 +295,149 @@ impl Interpreter {
         let recv = Rc::clone(inst_rc);
         drop(inst);
         Some((f, recv))
+    }
+}
+
+/// Typed dispatch target recovered from a warm per-site built-in method cache
+/// entry (#3379).  The handles are opaque `builtin_methods` decisions; the
+/// fast path only validates that the receiver still has the cached shape.
+enum BuiltinMethodSiteHit {
+    Container(crate::interpreter::DirectContainerMethod),
+    Native(crate::interpreter::DirectNativeMethod),
+    /// No usable entry.  `fillable` is true while the site is still `Empty`,
+    /// so the caller may record a target without re-borrowing the cache.
+    Miss {
+        fillable: bool,
+    },
+}
+
+impl Interpreter {
+    /// Probe `code.builtin_method_cache` for `receiver` at `call_site_pc`.
+    ///
+    /// Container entries require an exact container of the cached kind.
+    /// Native-method entries apply the same guards as a `ClassAttr` method
+    /// entry: receiver class identity, class mutation version, global class
+    /// epoch, and no instance-dict shadow of `method`.  A different receiver
+    /// shape demotes the site to `Megamorphic`; a stale stamp or shadow on the
+    /// same class resets it to `Empty` so the generic path may refill it.
+    #[inline]
+    fn probe_builtin_method_cache(
+        receiver: &Value,
+        method: &str,
+        code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
+    ) -> BuiltinMethodSiteHit {
+        use crate::bytecode::BuiltinMethodCacheEntry;
+
+        let demoted = {
+            let cache = code.builtin_method_cache.borrow();
+            match cache.get(call_site_pc) {
+                None | Some(BuiltinMethodCacheEntry::Empty) => {
+                    return BuiltinMethodSiteHit::Miss { fillable: true };
+                }
+                Some(BuiltinMethodCacheEntry::Megamorphic) => {
+                    return BuiltinMethodSiteHit::Miss { fillable: false };
+                }
+                Some(BuiltinMethodCacheEntry::Container(handle)) => {
+                    if handle.receiver_matches(receiver.as_some()) {
+                        return BuiltinMethodSiteHit::Container(*handle);
+                    }
+                    BuiltinMethodCacheEntry::Megamorphic
+                }
+                Some(BuiltinMethodCacheEntry::NativeMethod(entry)) => {
+                    match receiver.as_py_instance_rc() {
+                        Some(inst_rc) => {
+                            let inst = inst_rc.borrow();
+                            if Rc::as_ptr(&inst.class) != entry.class_ptr.as_ptr() {
+                                BuiltinMethodCacheEntry::Megamorphic
+                            } else if pyrust_core::class_cache_stamp_matches(
+                                inst.class.borrow().mutation_version.get(),
+                                entry.class_version,
+                                entry.epoch,
+                            ) && !inst.attrs.contains_key(method)
+                            {
+                                return BuiltinMethodSiteHit::Native(entry.method);
+                            } else {
+                                BuiltinMethodCacheEntry::Empty
+                            }
+                        }
+                        None => BuiltinMethodCacheEntry::Megamorphic,
+                    }
+                }
+            }
+        };
+        let fillable = matches!(demoted, BuiltinMethodCacheEntry::Empty);
+        Self::store_builtin_method_cache(code, call_site_pc, demoted);
+        BuiltinMethodSiteHit::Miss { fillable }
+    }
+
+    /// Record the typed container route for an exact-container receiver at a
+    /// site the probe reported as still `Empty`.  Receivers or names without a
+    /// typed route (dunders, name-routed text/tuple methods, unknown names)
+    /// mark the site `Megamorphic` so it is never re-resolved.
+    #[cold]
+    #[inline(never)]
+    fn fill_builtin_container_method_cache(
+        receiver: &Value,
+        method: &str,
+        code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
+    ) {
+        use crate::bytecode::BuiltinMethodCacheEntry;
+
+        let entry = match crate::interpreter::DirectContainerMethod::resolve(receiver, method) {
+            Some(handle) => BuiltinMethodCacheEntry::Container(handle),
+            None => BuiltinMethodCacheEntry::Megamorphic,
+        };
+        Self::store_builtin_method_cache(code, call_site_pc, entry);
+    }
+
+    /// Record a native-class method target alongside a fresh `ClassAttr`
+    /// method fill.  `unbound` is the class attribute the attribute domain's
+    /// method cache plan approved; `builtin_methods` decides whether it has a
+    /// direct dispatch target.
+    fn fill_builtin_native_method_cache(
+        class: &Rc<std::cell::RefCell<pyrust_core::PyClass>>,
+        class_version: u64,
+        epoch: u64,
+        unbound: &Value,
+        code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
+    ) {
+        use crate::bytecode::{BuiltinMethodCacheEntry, NativeMethodCacheEntry};
+
+        let fillable = matches!(
+            code.builtin_method_cache.borrow().get(call_site_pc),
+            None | Some(BuiltinMethodCacheEntry::Empty)
+        );
+        if !fillable {
+            return;
+        }
+        let Some(method) = crate::interpreter::DirectNativeMethod::resolve(unbound) else {
+            return;
+        };
+        let entry = BuiltinMethodCacheEntry::NativeMethod(Box::new(NativeMethodCacheEntry {
+            class_ptr: Rc::downgrade(class),
+            class_version,
+            epoch,
+            method,
+        }));
+        Self::store_builtin_method_cache(code, call_site_pc, entry);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn store_builtin_method_cache(
+        code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
+        entry: crate::bytecode::BuiltinMethodCacheEntry,
+    ) {
+        code.builtin_method_cache.borrow_mut().set_or_init(
+            &code.insns,
+            call_site_pc,
+            crate::bytecode::is_builtin_method_cache_site,
+            || crate::bytecode::BuiltinMethodCacheEntry::Empty,
+            entry,
+        );
     }
 }
