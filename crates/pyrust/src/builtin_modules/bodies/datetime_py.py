@@ -41,6 +41,60 @@ def _require_int(val, name):
         raise TypeError("'" + type(val).__name__ + "' object cannot be interpreted as an integer")
 
 
+_UNSET = object()
+
+_DATE_INTERNAL = frozenset(("_year", "_month", "_day"))
+_TIME_INTERNAL = frozenset(("_hour", "_minute", "_second", "_microsecond", "_tzinfo", "_fold"))
+_DATETIME_INTERNAL = _DATE_INTERNAL | _TIME_INTERNAL
+_TIMEDELTA_INTERNAL = frozenset(("_days", "_seconds", "_microseconds"))
+_TIMEZONE_INTERNAL = frozenset(("_offset", "_name"))
+
+
+def _user_state(obj, internal):
+    # Mirror ``object.__getstate__``: only user-visible instance attributes
+    # (e.g. those a subclass adds), never the backing fields.
+    state = {k: v for k, v in obj.__dict__.items() if k not in internal}
+    return state or None
+
+
+def _missing_arg(name, pos):
+    return TypeError("function missing required argument '" + name + "' (pos " + str(pos) + ")")
+
+
+def _raise_missing_ymd(year, month):
+    # Arguments are converted in order before the first missing one is
+    # reported (``date(b"bad")`` fails on the bytes year first).
+    _require_int(year, "year")
+    if month is _UNSET:
+        raise _missing_arg("month", 2)
+    _require_int(month, "month")
+    raise _missing_arg("day", 3)
+
+
+def _pickled_state(state, size, idx, mask, lo, hi, kind):
+    """Return the packed ``bytes`` payload when ``state`` is a pickled
+    ``date``/``datetime``/``time`` state (CPython's compact format), else None.
+
+    Only the length and a month/hour sanity check are applied, exactly like
+    CPython; the remaining fields are taken verbatim.
+    """
+    if isinstance(state, bytes):
+        if len(state) == size and lo <= (state[idx] & mask) <= hi:
+            return state
+        return None
+    if isinstance(state, str):
+        if len(state) == size and lo <= (ord(state[idx]) & mask) <= hi:
+            try:
+                return state.encode("latin1")
+            except UnicodeEncodeError:
+                raise ValueError(
+                    "Failed to encode latin1 string when unpickling a "
+                    + kind
+                    + " object. pickle.load(data, encoding='latin1') is assumed."
+                )
+    return None
+
+
 def _require_tzinfo(tz):
     if tz is not None and not isinstance(tz, tzinfo):
         raise TypeError("tzinfo argument must be None or of a tzinfo subclass, not type '" + type(tz).__name__ + "'")
@@ -326,6 +380,12 @@ class timedelta:
     def __deepcopy__(self, memo):
         return self
 
+    def __reduce__(self):
+        return (type(self), (self._days, self._seconds, self._microseconds))
+
+    def __getstate__(self):
+        return _user_state(self, _TIMEDELTA_INTERNAL)
+
     def __str__(self):
         mm, ss = divmod(self._seconds, 60)
         hh, mm = divmod(mm, 60)
@@ -356,6 +416,11 @@ timedelta.resolution = timedelta(microseconds=1)
 
 
 class tzinfo:
+    def __reduce__(self):
+        getinitargs = getattr(self, "__getinitargs__", None)
+        args = getinitargs() if getinitargs is not None else ()
+        return (type(self), args, self.__getstate__())
+
     def tzname(self, dt):
         raise NotImplementedError("tzinfo subclass must override tzname()")
 
@@ -385,6 +450,9 @@ class tzinfo:
         return dt + dtdst
 
 
+_TZInfo = tzinfo
+
+
 class timezone(tzinfo):
     _MAX_OFFSET = timedelta(hours=23, minutes=59)
     _MIN_OFFSET = -_MAX_OFFSET
@@ -402,6 +470,14 @@ class timezone(tzinfo):
         obj._offset = offset
         obj._name = name
         return obj
+
+    def __getinitargs__(self):
+        if self._name is None:
+            return (self._offset,)
+        return (self._offset, self._name)
+
+    def __getstate__(self):
+        return _user_state(self, _TIMEZONE_INTERNAL)
 
     def utcoffset(self, dt):
         if dt is None or isinstance(dt, datetime):
@@ -513,7 +589,19 @@ def _local_tz_for_timestamp(ts):
 
 
 class date:
-    def __new__(cls, year, month, day):
+    def __new__(cls, year=_UNSET, month=_UNSET, day=_UNSET):
+        if month is _UNSET or day is _UNSET:
+            if year is _UNSET:
+                raise _missing_arg("year", 1)
+            if month is _UNSET and day is _UNSET:
+                data = _pickled_state(year, 4, 2, 0xFF, 1, 12, "date")
+                if data is not None:
+                    obj = object.__new__(cls)
+                    obj._year = (data[0] << 8) | data[1]
+                    obj._month = data[2]
+                    obj._day = data[3]
+                    return obj
+            _raise_missing_ymd(year, month)
         year = _require_int(year, "year")
         month = _require_int(month, "month")
         day = _require_int(day, "day")
@@ -676,6 +764,13 @@ class date:
     def __deepcopy__(self, memo):
         return self
 
+    def __reduce__(self):
+        y = self._year
+        return (type(self), (bytes((y >> 8, y & 0xFF, self._month, self._day)),))
+
+    def __getstate__(self):
+        return _user_state(self, _DATETIME_INTERNAL)
+
 
 date.min = date(MINYEAR, 1, 1)
 date.max = date(MAXYEAR, 12, 31)
@@ -683,7 +778,24 @@ date.resolution = timedelta(days=1)
 
 
 class time:
-    def __new__(cls, hour=0, minute=0, second=0, microsecond=0, tzinfo=None, *, fold=0):
+    def __new__(cls, hour=0, minute=_UNSET, second=0, microsecond=0, tzinfo=None, *, fold=0):
+        if isinstance(hour, (bytes, str)) and second == 0 and microsecond == 0 and tzinfo is None:
+            data = _pickled_state(hour, 6, 0, 0x7F, 0, 23, "time")
+            if data is not None:
+                # ``minute`` carries the optional pickled tzinfo.
+                tz = None if minute is _UNSET else minute
+                if tz is not None and not isinstance(tz, _TZInfo):
+                    raise TypeError("bad tzinfo state arg")
+                obj = object.__new__(cls)
+                obj._hour = data[0] & 0x7F
+                obj._minute = data[1]
+                obj._second = data[2]
+                obj._microsecond = (data[3] << 16) | (data[4] << 8) | data[5]
+                obj._tzinfo = tz
+                obj._fold = 1 if data[0] & 0x80 else 0
+                return obj
+        if minute is _UNSET:
+            minute = 0
         hour, minute, second, microsecond, fold = _check_time_parts(
             hour, minute, second, microsecond, fold
         )
@@ -882,6 +994,30 @@ class time:
     def __deepcopy__(self, memo):
         return self
 
+    def __reduce__(self):
+        return self.__reduce_ex__(2)
+
+    def __reduce_ex__(self, protocol):
+        # The fold bit is only part of the pickled state from protocol 4 on,
+        # so pickles for older protocols stay readable by older Pythons.
+        us = self._microsecond
+        data = bytes(
+            (
+                self._hour | (self._fold << 7 if protocol > 3 else 0),
+                self._minute,
+                self._second,
+                us >> 16,
+                (us >> 8) & 0xFF,
+                us & 0xFF,
+            )
+        )
+        if self._tzinfo is None:
+            return (type(self), (data,))
+        return (type(self), (data, self._tzinfo))
+
+    def __getstate__(self):
+        return _user_state(self, _TIME_INTERNAL)
+
 
 time.min = time(0, 0)
 time.max = time(23, 59, 59, 999999)
@@ -891,9 +1027,9 @@ time.resolution = timedelta(microseconds=1)
 class datetime(date):
     def __new__(
         cls,
-        year,
-        month,
-        day,
+        year=_UNSET,
+        month=_UNSET,
+        day=_UNSET,
         hour=0,
         minute=0,
         second=0,
@@ -902,6 +1038,28 @@ class datetime(date):
         *,
         fold=0,
     ):
+        if day is _UNSET or month is _UNSET:
+            if year is _UNSET:
+                raise _missing_arg("year", 1)
+            if day is _UNSET:
+                data = _pickled_state(year, 10, 2, 0x7F, 1, 12, "datetime")
+                if data is not None:
+                    # ``month`` carries the optional pickled tzinfo.
+                    tz = None if month is _UNSET else month
+                    if tz is not None and not isinstance(tz, _TZInfo):
+                        raise TypeError("bad tzinfo state arg")
+                    obj = object.__new__(cls)
+                    obj._year = (data[0] << 8) | data[1]
+                    obj._month = data[2] & 0x7F
+                    obj._day = data[3]
+                    obj._hour = data[4]
+                    obj._minute = data[5]
+                    obj._second = data[6]
+                    obj._microsecond = (data[7] << 16) | (data[8] << 8) | data[9]
+                    obj._tzinfo = tz
+                    obj._fold = 1 if data[2] & 0x80 else 0
+                    return obj
+            _raise_missing_ymd(year, month)
         year = _require_int(year, "year")
         month = _require_int(month, "month")
         day = _require_int(day, "day")
@@ -1209,10 +1367,10 @@ class datetime(date):
         elif self._second != 0:
             parts.append(self._second)
         s = _cls_repr_prefix(type(self)) + "(" + ", ".join(str(p) for p in parts)
-        if self._tzinfo is not None:
-            s += ", tzinfo=" + repr(self._tzinfo)
         if self._fold:
             s += ", fold=1"
+        if self._tzinfo is not None:
+            s += ", tzinfo=" + repr(self._tzinfo)
         return s + ")"
 
     def _abs_us(self):
@@ -1310,6 +1468,31 @@ class datetime(date):
         if off is None:
             return hash(("naive_dt", dt_obj._abs_us()))
         return hash(("aware_dt", dt_obj._abs_us() - off._to_us()))
+
+    def __reduce__(self):
+        return self.__reduce_ex__(2)
+
+    def __reduce_ex__(self, protocol):
+        # The fold bit is only part of the pickled state from protocol 4 on.
+        y = self._year
+        us = self._microsecond
+        data = bytes(
+            (
+                y >> 8,
+                y & 0xFF,
+                self._month | (self._fold << 7 if protocol > 3 else 0),
+                self._day,
+                self._hour,
+                self._minute,
+                self._second,
+                us >> 16,
+                (us >> 8) & 0xFF,
+                us & 0xFF,
+            )
+        )
+        if self._tzinfo is None:
+            return (type(self), (data,))
+        return (type(self), (data, self._tzinfo))
 
 
 datetime.min = datetime(MINYEAR, 1, 1)
