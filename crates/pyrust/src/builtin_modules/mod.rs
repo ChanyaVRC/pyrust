@@ -285,12 +285,10 @@ macro_rules! pyrust_builtin_modules {
             module: &std::rc::Rc<std::cell::RefCell<crate::value::PyModule>>,
         ) -> crate::error::Result<()> {
             if name == "sys" {
-                let zipimport_mod = interp.load_module("zipimport")?;
-                if let Ok(zipimporter_cls) = interp.get_attr(&zipimport_mod, "zipimporter")
-                    && let Some(path_hooks) = module.borrow().get_attr_value("path_hooks")
-                {
-                    path_hooks.list_push(zipimporter_cls)?;
-                }
+                // `zipimport` (and its `sys.path_hooks` entry) is installed
+                // the first time a script could observe it, not on every
+                // startup (issue #3293); see `post_load_deferred`.
+                module.borrow().set_deferred_init(true);
                 return Ok(());
             }
             if name == "py_compile" {
@@ -546,10 +544,9 @@ pyrust_builtin_modules! {
     // event loop, streams, transports/protocols, TLS, Runner, subprocesses,
     // and 26 `asyncio.*` submodules (no `@inject`).
     asyncio,
-    // `abc` (issue #2612): the whole surface (`ABCMeta`, `ABC`,
-    // `abstractmethod`, …) is defined in `abc_py.py` and injected by the
-    // `@inject` post-load hook; the native body is empty.
-    abc @inject,
+    // `abc` (issues #2612, #3293): native Rust `ABCMeta`, `ABC`,
+    // `abstractmethod`, … — no Python source is compiled at import.
+    abc,
     // `dataclasses` (issue #2610): `@dataclass`, `field`, `fields`, `asdict`,
     // `astuple`, … are defined in `dataclasses_py.py` and injected by the
     // `@inject` post-load hook; the native body is empty.

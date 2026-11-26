@@ -11,6 +11,10 @@ use std::path::Path;
 
 use pyrust_derive::pyrust_module;
 
+#[cfg(windows)]
+use crate::builtin_modules::ntpath::ops as path_ops;
+#[cfg(not(windows))]
+use crate::builtin_modules::posixpath::ops as path_ops;
 use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{PyPath, PyValue};
 use crate::interpreter::{ExpandedCallArg, Interpreter, render_instance_str, render_value_repr};
@@ -46,28 +50,94 @@ fn set_site_attr(interp: &mut Interpreter, name: &str, value: Value) {
     }
 }
 
-fn os_path_call(interp: &mut Interpreter, func_name: &str, args: &[Value]) -> Result<Value> {
-    let os_path = interp.load_module("os.path")?;
-    let f = interp.get_attr(&os_path, func_name)?;
-    let call_args: Vec<ExpandedCallArg> = args
-        .iter()
-        .map(|v| ExpandedCallArg {
-            name: None,
-            value: v.clone(),
-        })
-        .collect();
-    interp.call_function_expanded(f, &call_args)
+/// `os.path.join(*parts)` through the host path implementation `os.path`
+/// itself delegates to, without importing `os.path` or dispatching a Python
+/// call (issue #3293).
+fn path_join(interp: &mut Interpreter, parts: &[Value]) -> Result<Value> {
+    let Some((first, rest)) = parts.split_first() else {
+        return Err(PyError::named(
+            "TypeError",
+            "join() missing 1 required positional argument: 'path'",
+        ));
+    };
+    path_ops::join(interp, first, rest)
+}
+
+/// The cached `sys` module object, when `sys` has been imported.
+fn cached_sys_module(
+    interp: &Interpreter,
+) -> Option<std::rc::Rc<std::cell::RefCell<crate::value::PyModule>>> {
+    let cached = interp.cold.module_cache.borrow().get("sys").cloned()?;
+    match cached.kind() {
+        ValueKind::PyModule(module) => Some(std::rc::Rc::clone(module)),
+        _ => None,
+    }
+}
+
+/// `sys.flags.<name>` as an integer.
+///
+/// `sys.flags` is deferred until a script reads it (issue #3293).  While it
+/// is untouched it still describes exactly this interpreter's configuration,
+/// so `site` answers from the configuration instead of forcing the
+/// struct-sequence (and the primitive classes behind it) into existence
+/// during startup.  Once a script has read or replaced `sys.flags`, the
+/// Python-visible object is authoritative.
+fn sys_flag(interp: &mut Interpreter, name: &str) -> Result<i64> {
+    let untouched = cached_sys_module(interp)
+        .is_some_and(|sys_module| sys_module.borrow().deferred_attr_is_unresolved("flags"));
+    if untouched {
+        let config = &interp.cold.runtime_config;
+        return Ok(match name {
+            "no_user_site" => config.no_user_site,
+            "no_site" => config.no_site,
+            _ => 0,
+        });
+    }
+    let sys_mod = interp.load_module("sys")?;
+    let flags = interp.get_attr(&sys_mod, "flags")?;
+    Ok(interp
+        .get_attr(&flags, name)
+        .ok()
+        .and_then(|v| v.as_int())
+        .unwrap_or(0))
+}
+
+/// `sys.version_info[:2]`, without building the deferred `sys.version_info`
+/// when no script has read or replaced it.
+fn sys_version_major_minor(interp: &mut Interpreter) -> Result<(i64, i64)> {
+    const DEFAULT: (i64, i64) = (3, 12);
+    let untouched = cached_sys_module(interp).is_some_and(|sys_module| {
+        sys_module
+            .borrow()
+            .deferred_attr_is_unresolved("version_info")
+    });
+    if untouched {
+        return Ok(DEFAULT);
+    }
+    let sys_mod = interp.load_module("sys")?;
+    let vi = interp.get_attr(&sys_mod, "version_info")?;
+    let field = |interp: &mut Interpreter, name: &str, default: i64| {
+        interp
+            .get_attr(&vi, name)
+            .ok()
+            .and_then(|v| v.as_int())
+            .unwrap_or(default)
+    };
+    Ok((
+        field(interp, "major", DEFAULT.0),
+        field(interp, "minor", DEFAULT.1),
+    ))
 }
 
 fn makepath_strings(interp: &mut Interpreter, parts: &[String]) -> Result<(String, String)> {
     let part_vals: Vec<Value> = parts.iter().map(Value::string).collect();
-    let joined = os_path_call(interp, "join", &part_vals)?;
-    let dir_val = match os_path_call(interp, "abspath", std::slice::from_ref(&joined)) {
+    let joined = path_join(interp, &part_vals)?;
+    let dir_val = match path_ops::abspath(interp, &joined) {
         Ok(v) => v,
         Err(ref e) if e.class_name_is("OSError") => joined,
         Err(e) => return Err(e),
     };
-    let normcase_val = os_path_call(interp, "normcase", std::slice::from_ref(&dir_val))?;
+    let normcase_val = path_ops::normcase(interp, &dir_val)?;
     let dir = render_instance_str(interp, &dir_val)?;
     let dircase = render_instance_str(interp, &normcase_val)?;
     Ok((dir, dircase))
@@ -169,37 +239,18 @@ fn compute_userbase(interp: &mut Interpreter) -> Result<Option<String>> {
             .filter(|s| !s.is_empty())
             .unwrap_or("~")
             .to_string();
-        let joined = os_path_call(
-            interp,
-            "join",
-            &[Value::string(base), Value::string("Python")],
-        )?;
-        let expanded = os_path_call(interp, "expanduser", &[joined])?;
+        let joined = path_join(interp, &[Value::string(base), Value::string("Python")])?;
+        let expanded = path_ops::expanduser(interp, &joined)?;
         Ok(Some(render_instance_str(interp, &expanded)?))
     } else {
-        let joined = os_path_call(
-            interp,
-            "join",
-            &[Value::string("~"), Value::string(".local")],
-        )?;
-        let expanded = os_path_call(interp, "expanduser", &[joined])?;
+        let joined = path_join(interp, &[Value::string("~"), Value::string(".local")])?;
+        let expanded = path_ops::expanduser(interp, &joined)?;
         Ok(Some(render_instance_str(interp, &expanded)?))
     }
 }
 
 fn compute_usersite_path(interp: &mut Interpreter, userbase: &str) -> Result<String> {
-    let sys_mod = interp.load_module("sys")?;
-    let vi = interp.get_attr(&sys_mod, "version_info")?;
-    let major = interp
-        .get_attr(&vi, "major")
-        .ok()
-        .and_then(|v| v.as_int())
-        .unwrap_or(3);
-    let minor = interp
-        .get_attr(&vi, "minor")
-        .ok()
-        .and_then(|v| v.as_int())
-        .unwrap_or(12);
+    let (major, minor) = sys_version_major_minor(interp)?;
     if cfg!(windows) {
         Ok(format!("{userbase}\\Python{major}{minor}\\site-packages"))
     } else {
@@ -236,11 +287,7 @@ fn addpackage_impl(
     } else {
         (known_paths, false)
     };
-    let fullname_val = os_path_call(
-        interp,
-        "join",
-        &[Value::string(sitedir), Value::string(name)],
-    )?;
+    let fullname_val = path_join(interp, &[Value::string(sitedir), Value::string(name)])?;
     let fullname = render_instance_str(interp, &fullname_val)?;
     let full_path = Path::new(&fullname);
     if std::fs::symlink_metadata(full_path).is_err() {
@@ -361,14 +408,7 @@ fn addsitedir_impl(interp: &mut Interpreter, sitedir: &str, known_paths: Value) 
 }
 
 fn check_enableusersite_impl(interp: &mut Interpreter) -> Result<Value> {
-    let sys_mod = interp.load_module("sys")?;
-    let flags = interp.get_attr(&sys_mod, "flags")?;
-    let no_user_site = interp
-        .get_attr(&flags, "no_user_site")
-        .ok()
-        .and_then(|v| v.as_int())
-        .unwrap_or(0);
-    if no_user_site != 0 {
+    if sys_flag(interp, "no_user_site")? != 0 {
         return Ok(Value::bool_(false));
     }
     #[cfg(unix)]
@@ -441,17 +481,7 @@ fn getsitepackages_impl(interp: &mut Interpreter, prefixes: Value) -> Result<Val
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_else(|| if cfg!(windows) { "DLLs" } else { "lib" }.to_string());
-    let vi = interp.get_attr(&sys_mod, "version_info")?;
-    let major = interp
-        .get_attr(&vi, "major")
-        .ok()
-        .and_then(|v| v.as_int())
-        .unwrap_or(3);
-    let minor = interp
-        .get_attr(&vi, "minor")
-        .ok()
-        .and_then(|v| v.as_int())
-        .unwrap_or(12);
+    let (major, minor) = sys_version_major_minor(interp)?;
 
     let mut sitepackages: Vec<Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -462,9 +492,8 @@ fn getsitepackages_impl(interp: &mut Interpreter, prefixes: Value) -> Result<Val
         }
         if cfg!(windows) {
             sitepackages.push(Value::string(&prefix));
-            let lib_site = os_path_call(
+            let lib_site = path_join(
                 interp,
-                "join",
                 &[
                     Value::string(&prefix),
                     Value::string("Lib"),
@@ -478,9 +507,8 @@ fn getsitepackages_impl(interp: &mut Interpreter, prefixes: Value) -> Result<Val
                 libdirs.push("lib".to_string());
             }
             for libdir in libdirs {
-                let path = os_path_call(
+                let path = path_join(
                     interp,
-                    "join",
                     &[
                         Value::string(&prefix),
                         Value::string(libdir),
@@ -496,8 +524,10 @@ fn getsitepackages_impl(interp: &mut Interpreter, prefixes: Value) -> Result<Val
 }
 
 fn abs_paths_impl(interp: &mut Interpreter) -> Result<()> {
-    let sys_mod = interp.load_module("sys")?;
-    let modules = interp.get_attr(&sys_mod, "modules")?;
+    // The active registry, read without *observing* `sys.modules`: the walk
+    // only rewrites `__file__` / `__cached__` of source-backed modules, so it
+    // must not be what makes the deferred `zipimport` entry appear.
+    let modules = interp.import_module_registry()?;
     let values_fn = interp.get_attr(&modules, "values")?;
     let values_view = interp.call_function_expanded(values_fn, &[])?;
     let mod_list = interp.collect_iterable(&values_view)?;
@@ -523,7 +553,7 @@ fn abs_paths_impl(interp: &mut Interpreter) -> Result<()> {
         for attr in ["__file__", "__cached__"] {
             if let Ok(val) = interp.get_attr(&m, attr)
                 && val.as_str().is_some()
-                && let Ok(abs) = os_path_call(interp, "abspath", &[val])
+                && let Ok(abs) = path_ops::abspath(interp, &val)
             {
                 let _ = interp.assign_attr(m.clone(), attr, abs);
             }
@@ -730,9 +760,9 @@ fn venv_impl(interp: &mut Interpreter, known_paths: Value) -> Result<Value> {
         return Ok(known_paths);
     }
 
-    let abs_exe_val = os_path_call(interp, "abspath", &[Value::string(&executable)])?;
-    let exe_dir_val = os_path_call(interp, "dirname", &[abs_exe_val])?;
-    let site_prefix_val = os_path_call(interp, "dirname", std::slice::from_ref(&exe_dir_val))?;
+    let abs_exe_val = path_ops::abspath(interp, &Value::string(&executable))?;
+    let exe_dir_val = path_ops::dirname(interp, &abs_exe_val)?;
+    let site_prefix_val = path_ops::dirname(interp, &exe_dir_val)?;
     let exe_dir = render_instance_str(interp, &exe_dir_val)?;
     let site_prefix = render_instance_str(interp, &site_prefix_val)?;
 
@@ -830,12 +860,7 @@ fn main_impl(interp: &mut Interpreter) -> Result<()> {
 /// in CPython's `Lib/site.py`, without any `@inject` or `site_py.py`).
 pub(crate) fn post_load_init(interp: &mut Interpreter, module: &Value) -> Result<()> {
     let sys_mod = interp.load_module("sys")?;
-    let flags = interp.get_attr(&sys_mod, "flags")?;
-    let no_site = interp
-        .get_attr(&flags, "no_site")
-        .ok()
-        .and_then(|v| v.as_int())
-        .unwrap_or(0);
+    let no_site = sys_flag(interp, "no_site")?;
 
     let prefix = interp
         .get_attr(&sys_mod, "prefix")
@@ -868,6 +893,12 @@ pub(crate) fn post_load_init(interp: &mut Interpreter, module: &Value) -> Result
         borrowed.insert_attr("USER_SITE".to_string(), Value::none());
         borrowed.insert_attr("USER_BASE".to_string(), Value::none());
     }
+
+    // CPython's `site.py` starts with `import os`, so `os` (and with it
+    // `os.path` and `abc`) is in `sys.modules` once `site` has been imported.
+    // The path helpers above no longer need the module object, so keep that
+    // observable contract with one explicit import.
+    interp.load_module("os")?;
 
     // Mirror CPython `site.py`:
     //   if not sys.flags.no_site:

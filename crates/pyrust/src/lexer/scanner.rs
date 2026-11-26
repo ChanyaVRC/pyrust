@@ -57,8 +57,27 @@ pub struct Lexer {
     warnings: Vec<(u32, String)>,
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: test-only counter observing how many Python
+//     sources the current thread has tokenized, so a test can assert that a
+//     code path (CLI startup, issue #3293) compiles no Python at all.
+// (b) Multi-interpreter / multi-threaded impact: none outside tests; each test
+//     thread counts its own sources.
+#[cfg(test)]
+thread_local! {
+    static SOURCES_LEXED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many Python sources this thread has tokenized so far.
+#[cfg(test)]
+pub(crate) fn sources_lexed() -> usize {
+    SOURCES_LEXED.with(std::cell::Cell::get)
+}
+
 impl Lexer {
     pub fn new(src: &str) -> Result<Self> {
+        #[cfg(test)]
+        SOURCES_LEXED.with(|count| count.set(count.get() + 1));
         let mut lexer = Self {
             tokens: Vec::new(),
             line_nos: Vec::new(),

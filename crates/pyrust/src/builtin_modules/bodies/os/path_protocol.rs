@@ -122,8 +122,10 @@ pub(super) fn prepare_os_module(interp: &mut Interpreter, module: &Value) {
                     "__abstractmethods__".to_string(),
                     pyrust_builtins::frozenset::frozenset(abs_set),
                 );
-                pl.attrs
-                    .insert("_abc_registry".to_string(), Value::set(PySet::default()));
+                pl.attrs.insert(
+                    "_abc_impl".to_string(),
+                    crate::builtin_modules::abc::new_abc_impl(),
+                );
             }
             link_class_bases(pl_rc, vec![Rc::clone(base_rc)]);
         }

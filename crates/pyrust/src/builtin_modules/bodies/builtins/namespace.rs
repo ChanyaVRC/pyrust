@@ -174,18 +174,15 @@ fn resolve_builtins_class(name: &str) -> Option<Value> {
 
 fn visit_startup_slots(visit: crate::value::LazyModuleSlotVisitor<'_>) {
     visit_startup_namespace(&mut |name, slot| match slot {
-        BuiltinsSlot::Class => {
-            if let Some(class) = resolve_builtins_class(name) {
-                visit(name, Some(class));
-            }
-        }
-        BuiltinsSlot::Function(_) | BuiltinsSlot::Constant(_) => visit(name, None),
+        BuiltinsSlot::Class => visit(name, true),
+        BuiltinsSlot::Function(_) | BuiltinsSlot::Constant(_) => visit(name, false),
     });
 }
 
 const DEFERRED_CLASSES: crate::value::LazyModuleAttrSource = crate::value::LazyModuleAttrSource {
     resolve: resolve_builtins_class,
     visit_slots: visit_startup_slots,
+    per_module: false,
 };
 
 /// Build the `builtins` module in one pass over the builtin families.

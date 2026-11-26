@@ -165,10 +165,10 @@ fn resolve_lazy_module_fixture(name: &str) -> Option<Value> {
 
 /// Startup order of the fixture namespace: `first`, `lazy_a`, `second`, `lazy_b`.
 fn visit_lazy_module_fixture(visit: LazyModuleSlotVisitor<'_>) {
-    visit("first", None);
-    visit("lazy_a", resolve_lazy_module_fixture("lazy_a"));
-    visit("second", None);
-    visit("lazy_b", resolve_lazy_module_fixture("lazy_b"));
+    visit("first", false);
+    visit("lazy_a", true);
+    visit("second", false);
+    visit("lazy_b", true);
 }
 
 fn lazy_module_fixture() -> PyModule {
@@ -181,6 +181,7 @@ fn lazy_module_fixture() -> PyModule {
         LazyModuleAttrSource {
             resolve: resolve_lazy_module_fixture,
             visit_slots: visit_lazy_module_fixture,
+            per_module: false,
         },
     )
 }

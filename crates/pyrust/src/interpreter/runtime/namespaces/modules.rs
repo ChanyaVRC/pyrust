@@ -265,24 +265,11 @@ impl Interpreter {
         }
 
         let mut sys = sys.borrow_mut();
-        // Seed the module slots at the *front* of the still-ordered `attrs`
-        // before it is moved into the live dict, so `list(vars(sys))` starts
-        // with CPython's five module-object slots in CPython's order — the
-        // same head the synthesised built-in `__dict__` produces for a module
-        // that keeps direct `attrs` storage (issue #2918). Appending them
-        // after `attach_live_namespace` put them at the tail instead.
-        for (index, (name, value)) in [
-            ("__name__", Value::string("sys")),
-            ("__doc__", Value::none()),
-            ("__package__", Value::string("")),
-            ("__loader__", Value::none()),
-            ("__spec__", Value::none()),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            sys.attrs.shift_insert(index, name.to_string(), value);
-        }
+        // `sys::module()` already seeds CPython's five module-object slots at
+        // the front of its namespace (issue #2918) and reserves a slot for
+        // every per-interpreter value written below, so each write lands at
+        // its startup position.  The heavy attributes stay deferred across
+        // the move into the live dict (issue #3293).
         sys.attach_live_namespace();
         sys.insert_attr("path".to_string(), Value::list(initial_paths));
         sys.insert_attr(
@@ -447,9 +434,72 @@ impl Interpreter {
         self.collect_iterable(&meta_path)
     }
 
+    /// Run a built-in module's deferred post-load step before Python code
+    /// reads, rebinds or deletes `attribute`, when that attribute is one the
+    /// step affects (issue #3293).
+    ///
+    /// Reached only while the module still carries its deferred-init marker,
+    /// so every other module attribute access pays one flag test.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn observe_deferred_module_init(
+        &mut self,
+        module: &Rc<RefCell<PyModule>>,
+        attribute: &str,
+    ) -> Result<()> {
+        crate::builtin_modules::post_load_deferred(self, module, Some(attribute))
+    }
+
+    /// Make sure the lazily installed `sys.path_hooks` entries exist before
+    /// the import system consults them for a search-path `entry` that a path
+    /// hook could claim (issue #3293).
+    ///
+    /// The only startup hook is `zipimport.zipimporter`.  It claims an entry
+    /// only when the entry, or one of its ancestors, is a regular file (an
+    /// archive, optionally followed by a path inside it); it rejects every
+    /// directory and every path below one.  Such an entry therefore resolves
+    /// the same way whether or not the hook exists, and never forces
+    /// `zipimport` to load.
+    ///
+    /// Returns `true` when the hook is still deferred afterwards, i.e. when it
+    /// would have rejected `entry`.
+    fn ensure_path_hooks_for_entry(&mut self, entry: &str) -> Result<bool> {
+        let Some(sys_module) = self.cold.module_cache.borrow().get("sys").cloned() else {
+            return Ok(false);
+        };
+        let ValueKind::PyModule(sys_module) = sys_module.kind() else {
+            return Ok(false);
+        };
+        if !sys_module.borrow().has_deferred_init() {
+            return Ok(false);
+        }
+        let mut probe = if entry.is_empty() {
+            std::path::Path::new(".")
+        } else {
+            std::path::Path::new(entry)
+        };
+        let names_archive = loop {
+            match std::fs::metadata(probe) {
+                Ok(metadata) => break metadata.is_file(),
+                Err(_) => match probe.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => probe = parent,
+                    _ => break false,
+                },
+            }
+        };
+        if !names_archive {
+            return Ok(true);
+        }
+        crate::builtin_modules::post_load_deferred(self, sys_module, None)?;
+        Ok(false)
+    }
+
     /// Consult `sys.path_importer_cache` and `sys.path_hooks` for a single
     /// search-path entry.
     fn lookup_path_hook_finder(&mut self, entry_str: &str) -> Result<PathEntryFinderLookup> {
+        // While the startup `zipimport` hook is still deferred it behaves as
+        // a hook that rejects this entry (issue #3293).
+        let startup_hook_deferred = self.ensure_path_hooks_for_entry(entry_str)?;
         let Some(cache) = self.cached_sys_attr("path_importer_cache") else {
             return Ok(PathEntryFinderLookup::DefaultFilesystem);
         };
@@ -501,7 +551,7 @@ impl Interpreter {
             },
             _ => return Ok(PathEntryFinderLookup::DefaultFilesystem),
         };
-        if hooks.is_empty() {
+        if hooks.is_empty() && !startup_hook_deferred {
             return Ok(PathEntryFinderLookup::DefaultFilesystem);
         }
 
@@ -1229,7 +1279,7 @@ impl Interpreter {
                 }
                 // Python-source post-load injection: every `@inject` module in
                 // `pyrust_builtin_modules!` (collections, asyncio, string,
-                // operator, typing, abc, dataclasses, enum, json, …) exec's its
+                // operator, typing, dataclasses, enum, json, …) exec's its
                 // `*_py.py` source onto the freshly imported module here.  Done
                 // *after* the module is in `module_cache` so each exec (which
                 // resolves builtins like `dict`/`tuple`/`property`) sees a
@@ -1245,23 +1295,22 @@ impl Interpreter {
                 // entry so `pkg.submod is sys.modules["pkg.submod"]` matches
                 // CPython.
                 if let ValueKind::PyModule(m) = val.kind() {
-                    let submodule_attrs: Vec<(String, Value)> = {
-                        let snapshot = m.borrow().attrs_snapshot();
-                        snapshot
-                            .into_iter()
-                            .filter(|(attr_name, attr_val)| {
-                                // Only consider attrs that are themselves
-                                // PyModules — primitive constants stay as-is.
-                                if !matches!(attr_val.kind(), ValueKind::PyModule(_)) {
-                                    return false;
-                                }
-                                // And only if there's a registered built-in
-                                // by the dotted name — otherwise leave it.
-                                let dotted = format!("{name}.{attr_name}");
-                                crate::builtin_modules::is_builtin_module(&dotted)
-                            })
-                            .collect()
-                    };
+                    // Scanned in place: only the (rare) matches are cloned,
+                    // and a still-deferred attribute is not built just to be
+                    // inspected — no deferred slot aliases a registered
+                    // built-in submodule (issue #3293).
+                    let submodule_attrs: Vec<(String, Value)> =
+                        m.borrow().collect_bound_attrs(|attr_name, attr_val| {
+                            // Only consider attrs that are themselves
+                            // PyModules — primitive constants stay as-is.
+                            if !matches!(attr_val.kind(), ValueKind::PyModule(_)) {
+                                return false;
+                            }
+                            // And only if there's a registered built-in
+                            // by the dotted name — otherwise leave it.
+                            let dotted = format!("{name}.{attr_name}");
+                            crate::builtin_modules::is_builtin_module(&dotted)
+                        });
                     for (attr_name, attr_val) in submodule_attrs {
                         let dotted = format!("{name}.{attr_name}");
                         // Recursive load goes through the cache, so the

@@ -82,12 +82,54 @@ impl Interpreter {
         class: Rc<RefCell<PyClass>>,
         args: &[ExpandedCallArg],
     ) -> Result<Value> {
+        // CPython's `object.__new__` refuses a class that still has abstract
+        // methods.  Only a class created through a metaclass can carry a
+        // non-empty `__abstractmethods__` here, so ordinary classes skip the
+        // probe entirely.
+        if class.borrow().metatype.is_some() {
+            self.reject_abstract_class(&class)?;
+        }
         if is_exception_class(&class) {
             return self.construct_exception_instance(class, args);
         }
 
         self.instantiate_normal_instance(class, args)
     }
+    /// Raise CPython 3.12's `TypeError` when `class` still has abstract
+    /// methods (issue #3293).
+    ///
+    /// Mirrors `object.__new__`: only the class's *own* `__abstractmethods__`
+    /// counts.  CPython caches it as the per-type `Py_TPFLAGS_IS_ABSTRACT`
+    /// flag, which is set by assigning `__abstractmethods__` on that type and
+    /// is not inherited; `abc.ABCMeta` assigns it on every class it creates.
+    fn reject_abstract_class(&mut self, class: &Rc<RefCell<PyClass>>) -> Result<()> {
+        let Some(abstracts) = class.borrow().attrs.get("__abstractmethods__").cloned() else {
+            return Ok(());
+        };
+        if !self.truthy_value(&abstracts)? {
+            return Ok(());
+        }
+        let mut names: Vec<String> = self
+            .collect_iterable(&abstracts)?
+            .iter()
+            .map(|name| match name.as_str() {
+                Some(text) => text.to_string(),
+                None => name.repr_raw(),
+            })
+            .collect();
+        names.sort();
+        let plural = if names.len() > 1 { "s" } else { "" };
+        let class_name = class.borrow().name.clone();
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "Can't instantiate abstract class {class_name} without an implementation \
+                 for abstract method{plural} '{}'",
+                names.join("', '")
+            ),
+        ))
+    }
+
     /// Instantiate a normal (non-exception) class: walk the MRO for a
     /// user-defined `__new__`, then call `__init__`, falling back to the
     /// default allocation + primitive-backing path when neither is defined.
