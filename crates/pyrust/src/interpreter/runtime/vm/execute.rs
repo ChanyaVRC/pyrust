@@ -476,6 +476,22 @@ impl Interpreter {
                             f,
                             &mut unwind_state!(),
                         ));
+                        // `*args`-only callee (#3422): bind straight from the
+                        // argument registers.
+                        if Self::is_varargs_positional_callee(&f) {
+                            regs[*func_reg as usize] =
+                                vm_try!(self.call_varargs_positional_from_regs(
+                                    &regs,
+                                    num_locals,
+                                    *func_reg,
+                                    *argc,
+                                    &f,
+                                    None,
+                                    code,
+                                    pc - 1,
+                                ));
+                            continue 'vm;
+                        }
                         regs[*func_reg as usize] = vm_try!(self.call_positional_cached(
                             &mut regs,
                             num_locals,
@@ -551,6 +567,26 @@ impl Interpreter {
                             *argc,
                             &mut unwind_state!(),
                         ));
+                    }
+                    // Bound `*args`-only method (#3422) — notably the `__exit__`
+                    // a `with` statement fetched, called with `(None, None,
+                    // None)` or the in-flight exception triple.
+                    if let ValueKind::BoundMethod { function, receiver } = func_val.kind()
+                        && Self::is_varargs_positional_callee(function)
+                    {
+                        let f = Rc::clone(function);
+                        let recv = Value::py_instance(Rc::clone(receiver));
+                        regs[*func_reg as usize] = vm_try!(self.call_varargs_positional_from_regs(
+                            &regs,
+                            num_locals,
+                            *func_reg,
+                            *argc,
+                            &f,
+                            Some(&recv),
+                            code,
+                            pc - 1,
+                        ));
+                        continue 'vm;
                     }
                     regs[*func_reg as usize] = vm_try!(self.call_positional_cached(
                         &mut regs,

@@ -219,6 +219,20 @@ impl Interpreter {
             CachedMethodResolution::Instance(unbound, instance) => (unbound, instance),
             CachedMethodResolution::Miss => return Ok(None),
         };
+        // Plain Python `*args`-only method (#3422): `invoke_class_method` would
+        // reach the same positional binder through the `ExpandedCallArg` buffer
+        // and `call_user_function_expanded`; bind `args` (this opcode's owned
+        // argument buffer) directly instead.
+        if let ValueKind::UserFunction(f) = unbound.kind()
+            && f.kind == pyrust_core::UserFunctionKind::Regular
+            && Self::is_varargs_positional_callee(f)
+        {
+            let f = Rc::clone(f);
+            let inst_val = Value::py_instance(inst_rc_clone);
+            return self
+                .call_varargs_positional(&f, Some(&inst_val), args)
+                .map(Some);
+        }
         // Exact builtin sentinel decoding and backing-storage selection belong
         // to `builtin_methods`; this cache layer delegates through Values and
         // remains independent of concrete Python method names.

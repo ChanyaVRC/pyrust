@@ -72,6 +72,25 @@ impl Value {
         }
     }
 
+    /// Build a tuple by cloning `items`, without the intermediate `Vec` that
+    /// [`Value::tuple`] needs for the empty / 2- / 3-element shapes (#3422):
+    /// those go straight to the shared empty singleton or the inline
+    /// `SmallTuple2/3` representation.  Used to pack a callee's `*args`.
+    pub fn tuple_from_slice(items: &[Value]) -> Self {
+        match items {
+            [] => EMPTY_TUPLE.with(|t| t.clone()),
+            [a, b] => Value::opaque(Opaque::SmallTuple2 {
+                items: [a.clone(), b.clone()],
+                obj_id: next_obj_id(),
+            }),
+            [a, b, c] => Value::opaque(Opaque::SmallTuple3 {
+                items: [a.clone(), b.clone(), c.clone()],
+                obj_id: next_obj_id(),
+            }),
+            _ => Value::tuple(items.to_vec()),
+        }
+    }
+
     pub fn dict(d: PyDict) -> Self {
         Value::opaque(Opaque::Dict(Rc::new(RefCell::new(d))))
     }
