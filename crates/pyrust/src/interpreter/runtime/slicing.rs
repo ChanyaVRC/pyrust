@@ -240,8 +240,10 @@ impl Interpreter {
         let len = items.len() as i64;
         let (start, end, step) = Self::resolve_slice_bounds(len, lo, hi, st)?;
         if step == 1 {
+            // `start > stop` (e.g. `x[4:1] = ...`) is an empty slice at `start`:
+            // CPython inserts there rather than failing, so clamp `stop` up.
             let s = start as usize;
-            let e = end as usize;
+            let e = end.max(start) as usize;
             items.splice(s..e, new_items);
         } else {
             let indices = Self::slice_target_indices(len, start, end, step);
@@ -269,7 +271,10 @@ impl Interpreter {
         let len = items.len() as i64;
         let (start, end, step) = Self::resolve_slice_bounds(len, lo, hi, st)?;
         if step == 1 {
-            items.drain(start as usize..end as usize);
+            // `start > stop` selects nothing, so there is nothing to delete.
+            if end > start {
+                items.drain(start as usize..end as usize);
+            }
             return Ok(());
         }
         let indices = Self::slice_target_indices(len, start, end, step);
