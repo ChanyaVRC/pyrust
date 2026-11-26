@@ -19,7 +19,15 @@ pub(super) enum HashState {
 
 impl HashState {
     /// Resolve an algorithm name matching CPython 3.12's `hashlib.new()`.
+    ///
+    /// The exact spellings are `hashlib`'s own names plus the OpenSSL aliases
+    /// it recognises case-sensitively; any other spelling falls back to
+    /// OpenSSL's case-insensitive name table ([`Self::from_openssl_alias`]).
     pub(super) fn from_name(name: &str) -> Option<Self> {
+        Self::from_exact_name(name).or_else(|| Self::from_openssl_alias(&name.to_ascii_lowercase()))
+    }
+
+    fn from_exact_name(name: &str) -> Option<Self> {
         match name {
             "md5" | "MD5" => Some(Self::Md5(Md5::new())),
             "sha1" | "SHA1" | "sha-1" | "SHA-1" => Some(Self::Sha1(Sha1::new())),
@@ -41,6 +49,32 @@ impl HashState {
             "blake2s" => Some(Self::Blake2s(Blake2s::new_default())),
             _ => None,
         }
+    }
+
+    /// OpenSSL's digest-name table is case-insensitive, so `Sha1`,
+    /// `SHAKE128` and `blake2b512` resolve although `hashlib` never lists
+    /// them.  `lower` is already ASCII-lowercased.
+    fn from_openssl_alias(lower: &str) -> Option<Self> {
+        let canonical = match lower {
+            "md5" | "sha1" | "sha224" | "sha256" | "sha384" | "sha512" => lower,
+            "sha-1" => "sha1",
+            "sha-224" | "sha2-224" => "sha224",
+            "sha-256" | "sha2-256" => "sha256",
+            "sha-384" | "sha2-384" => "sha384",
+            "sha-512" | "sha2-512" => "sha512",
+            "sha-512/224" | "sha2-512/224" | "sha512-224" => "sha512_224",
+            "sha-512/256" | "sha2-512/256" | "sha512-256" => "sha512_256",
+            "sha3-224" => "sha3_224",
+            "sha3-256" => "sha3_256",
+            "sha3-384" => "sha3_384",
+            "sha3-512" => "sha3_512",
+            "shake128" | "shake-128" => "shake_128",
+            "shake256" | "shake-256" => "shake_256",
+            "blake2b512" => "blake2b",
+            "blake2s256" => "blake2s",
+            _ => return None,
+        };
+        Self::from_exact_name(canonical)
     }
 
     pub(super) fn new_blake2b(params: Blake2Params<'_>) -> Self {

@@ -960,6 +960,32 @@ pub fn to_bytes_checked(value: &Value) -> Result<Vec<u8>> {
     mv.tobytes_order('C')
 }
 
+/// Bytes of a `memoryview` as `PyObject_GetBuffer(PyBUF_SIMPLE)` would expose
+/// them: a released view raises `ValueError`, a non-C-contiguous view raises
+/// `BufferError` (unlike [`to_bytes_checked`], which gathers strided data).
+pub fn to_simple_buffer_bytes(value: &Value) -> Result<Vec<u8>> {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return Err(PyError::runtime("expected memoryview".to_string()));
+    };
+    if !is_memoryview_ops(ops) {
+        return Err(PyError::runtime("expected memoryview".to_string()));
+    }
+    let borrow = state.borrow();
+    let mv = borrow
+        .downcast_ref::<MemoryViewState>()
+        .expect("memoryview state");
+    if mv.released {
+        return Err(released_error());
+    }
+    if !mv.is_c_contiguous() {
+        return Err(PyError::named(
+            "BufferError",
+            "memoryview: underlying buffer is not C-contiguous".to_string(),
+        ));
+    }
+    mv.tobytes_order('C')
+}
+
 /// Try to extract a contiguous writable slice view `(data_rc, offset, nbytes)` from
 /// a `memoryview`. Returns `Err` for released, readonly, or non-contiguous views.
 pub fn writable_contiguous_range(value: &Value) -> Result<WritableContiguousRange> {
