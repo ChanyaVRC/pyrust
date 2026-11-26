@@ -1496,6 +1496,73 @@ fn sock_read_tls_step(
     Ok(n)
 }
 
+fn handle_read_exact_raw(handle: &Value, buf: &mut [u8]) -> io::Result<bool> {
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        let n = super::socket::handle_read_raw(handle, &mut buf[filled..])?;
+        if n == 0 {
+            return Ok(false);
+        }
+        filled += n;
+    }
+    Ok(true)
+}
+
+/// Consume the peer's TLS `close_notify` alert along exact 5-byte TLS record
+/// boundaries so that any subsequent cleartext bytes (e.g. after RFC 4217 FTP
+/// `CCC` / `SSLSocket.unwrap()`) remain untouched in the kernel socket buffer.
+pub(crate) fn sock_tls_shutdown_read(
+    interp: &mut Interpreter,
+    conn: &mut Connection,
+    handle: &Value,
+) -> Result<()> {
+    let mut probe = [0u8; 1];
+    loop {
+        match conn.reader().read(&mut probe) {
+            Ok(0) => return Ok(()),
+            Ok(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                let _ = sock_flush_tls(interp, conn, handle);
+                let mut hdr = [0u8; 5];
+                let got_hdr = match handle_read_exact_raw(handle, &mut hdr) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(()),
+                };
+                if !got_hdr {
+                    return Ok(());
+                }
+                let rec_len = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
+                if rec_len > 18_432 {
+                    return Ok(());
+                }
+                let mut record = vec![0u8; 5 + rec_len];
+                record[..5].copy_from_slice(&hdr);
+                let got_body = match handle_read_exact_raw(handle, &mut record[5..]) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(()),
+                };
+                if !got_body {
+                    return Ok(());
+                }
+                let mut cursor = Cursor::new(&record[..]);
+                while (cursor.position() as usize) < record.len() {
+                    let consumed = match conn.read_tls(&mut cursor) {
+                        Ok(n) => n,
+                        Err(_) => return Ok(()),
+                    };
+                    if consumed == 0 {
+                        break;
+                    }
+                    if conn.process_new_packets().is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(_) => return Ok(()),
+        }
+    }
+}
+
 pub(crate) fn sock_do_handshake(
     interp: &mut Interpreter,
     conn: &mut Connection,

@@ -564,9 +564,15 @@ pub(crate) fn post_load_init(
         crate::builtin_modules::macros::link_class_bases(ss_rc, vec![Rc::clone(base_rc)]);
     }
 
-    // Mirror `_create_default_https_context = create_default_context` and
+    // Mirror `_create_default_https_context = create_default_context`,
+    // `_create_stdlib_context = _create_unverified_context`, and
     // `SSLSocket` / `SSLObject` class attributes on `SSLContext`.
     let create_default_fn = module.borrow().attrs.get("create_default_context").cloned();
+    let create_unverified_fn = module
+        .borrow()
+        .attrs
+        .get("_create_unverified_context")
+        .cloned();
     let ssl_sock_cls = module.borrow().attrs.get("SSLSocket").cloned();
     let ssl_obj_cls = module.borrow().attrs.get("SSLObject").cloned();
     let ssl_ctx_cls = module.borrow().attrs.get("SSLContext").cloned();
@@ -574,6 +580,11 @@ pub(crate) fn post_load_init(
         module
             .borrow_mut()
             .insert_attr("_create_default_https_context".to_string(), f);
+    }
+    if let Some(f) = create_unverified_fn {
+        module
+            .borrow_mut()
+            .insert_attr("_create_stdlib_context".to_string(), f);
     }
     if let Some(ctx_v) = ssl_ctx_cls
         && let ValueKind::PyClass(ctx_rc) = ctx_v.kind()
@@ -1115,6 +1126,7 @@ pyrust_module! {
                 if let Some(ref mut conn) = st.conn {
                     conn.send_close_notify();
                     let _ = ssl_engine::sock_flush_tls(_interp, conn, &handle);
+                    let _ = ssl_engine::sock_tls_shutdown_read(_interp, conn, &handle);
                 }
                 st.conn = None;
                 st.handshake_done = false;
