@@ -50,8 +50,8 @@ use crate::value::{
     UserFunctionKind, Value, ValueKind, classify_sort, range_len,
 };
 
-// Builtins are registered in independent semantic families, then merged into
-// the single flat Python builtins namespace below.
+// Builtins are registered in independent semantic families.  `namespace.rs`
+// walks them once to populate the single flat Python builtins namespace.
 
 mod scalar {
     use super::{
@@ -341,73 +341,7 @@ pub(crate) fn regs() -> &'static [crate::builtin_registry::BuiltinReg] {
     REGS_CELL.as_slice()
 }
 
-/// Build one builtins module by merging the attributes produced by each
-/// builtin family. Registration names remain flat through the shared FN_PREFIX.
-pub(crate) fn module() -> Value {
-    // Insertion-ordered (issue #2918): the sub-module list below is fixed at
-    // compile time, so `vars(builtins)` is stable across runs.
-    let mut attrs = crate::value::ModuleAttrs::default();
-    for part in [
-        scalar::module(),
-        identity_and_repr::module(),
-        numeric_functions::module(),
-        aggregation::module(),
-        iteration::module(),
-        reflection::module(),
-        length::module(),
-        ordering::module(),
-        rounding::module(),
-        sequence_constructors::module(),
-        bytes_constructors::module(),
-        complex_constructor::module(),
-        collection_constructors::module(),
-        text_constructor::module(),
-        int_constructor::module(),
-        float_constructor::module(),
-        services::module(),
-        container_protocols::module(),
-        object_basics::module(),
-        type_protocols::module(),
-        primitive_construction_protocols::module(),
-        object_comparison::module(),
-        operators::module(),
-        object_protocols::module(),
-        exception_protocols::module(),
-        importing::module(),
-        typing_protocols::module(),
-    ] {
-        if let ValueKind::PyModule(module) = part.kind() {
-            // Filter out dotted internal registry keys (e.g. `list.__init__`,
-            // `BaseException.add_note`, `bytearray_iterator.__getattribute__`):
-            // those remain in `regs()` for `builtin_registry::lookup` but must
-            // not leak into Python-visible `builtins.__dict__` / `vars(builtins)`
-            // / `dir(builtins)` (issue #2971).
-            attrs.extend(
-                module
-                    .borrow()
-                    .attrs
-                    .iter()
-                    .filter(|(name, _)| !name.contains('.'))
-                    .map(|(name, value)| (name.clone(), value.clone())),
-            );
-        }
-    }
-    // These objects are namespace data, not callable registry entries.  Put
-    // them in the module at construction time so every builtins provider
-    // (the canonical globals provider and a freshly imported module alike)
-    // exposes the same authoritative mapping.
-    attrs.insert("None".to_string(), Value::none());
-    attrs.insert("True".to_string(), Value::bool_(true));
-    attrs.insert("False".to_string(), Value::bool_(false));
-    attrs.insert("Ellipsis".to_string(), Value::ellipsis());
-    attrs.insert("NotImplemented".to_string(), Value::not_implemented());
-    attrs.insert("__debug__".to_string(), Value::bool_(true));
-    Value::py_module(Rc::new(RefCell::new(crate::value::PyModule::new(
-        MODULE_NAME.to_string(),
-        attrs,
-    ))))
-}
-
+include!("builtins/namespace.rs");
 include!("builtins/constructor_support.rs");
 include!("builtins/reflection_support.rs");
 include!("builtins/ordering_support.rs");
@@ -446,6 +380,71 @@ mod family_boundary_tests {
         include_str!("builtins/importing.rs"),
         include_str!("builtins/typing_protocols.rs"),
     );
+
+    /// Issue #3294: the namespace is composed by visiting each family's
+    /// exports directly.  No family `module()` is built to be merged and
+    /// thrown away.
+    #[test]
+    fn namespace_is_composed_without_family_modules() {
+        const FACADE: &str = include_str!("builtins.rs");
+        const COMPOSER: &str = include_str!("builtins/namespace.rs");
+        let families = FACADE
+            .lines()
+            .filter_map(|line| line.strip_prefix("mod ")?.strip_suffix(" {"))
+            .filter(|name| *name != "family_boundary_tests")
+            .collect::<Vec<_>>();
+        assert_eq!(families.len(), 27, "builtin family list changed");
+        for family in families {
+            let family_module = format!("{family}::module()");
+            assert!(
+                !FACADE.contains(&family_module) && !COMPOSER.contains(&family_module),
+                "{family} is built as a throwaway module instead of being visited in place"
+            );
+            assert_eq!(
+                COMPOSER
+                    .matches(&format!("{family}::for_each_function_export("))
+                    .count(),
+                1,
+                "{family} must contribute to the builtins namespace exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn module_stores_only_flat_functions_and_constants() {
+        let module = super::module();
+        let super::ValueKind::PyModule(module) = module.kind() else {
+            panic!("builtins must be a module");
+        };
+        let module = module.borrow();
+        assert!(module.has_pending_lazy_attrs());
+        assert!(
+            module.attrs.len() <= super::EAGER_SLOT_CAPACITY,
+            "raise EAGER_SLOT_CAPACITY so the startup map is sized in one allocation"
+        );
+        for (name, value) in &module.attrs {
+            assert!(
+                !name.contains('.'),
+                "{name} is a registry key, not a builtins name"
+            );
+            assert!(
+                !matches!(value.kind(), super::ValueKind::PyClass(_))
+                    && super::builtin_type_slot(name).is_none(),
+                "{name} must stay deferred until first use"
+            );
+        }
+        // Every flat registration is still reachable, whether it is stored
+        // as a function token or resolved as the type of the same name.
+        for registration in super::regs() {
+            if !registration.name.contains('.') {
+                assert!(
+                    module.get_attr_value(registration.name).is_some(),
+                    "builtins.{} is missing",
+                    registration.name
+                );
+            }
+        }
+    }
 
     #[test]
     fn builtin_families_declare_parent_dependencies_explicitly() {

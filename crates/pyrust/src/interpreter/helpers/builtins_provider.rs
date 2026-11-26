@@ -1,7 +1,7 @@
 // Thread-local justification:
 // (a) Why `thread_local!`: Holds a `!Send` NaN-boxed `Value` (`Rc<RefCell<PyModule>>`)
 //     for the `builtins` module so script startup clones one `Rc` instead of
-//     rebuilding ~136 entries.
+//     rebuilding the namespace.
 // (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
 //     thread share the cached `builtins` module attrs map unless a script
 //     replaces `__builtins__`; separate threads own independent `builtins`
@@ -9,29 +9,22 @@
 pyrust_core::gil_local! {
     /// Per-GIL-group cache of the `builtins` module value.
     /// `seed_module_dunders` clones this `Value` (one `Rc` increment) instead
-    /// of rebuilding the module's ~136-entry `ModuleAttrs` map from scratch on
-    /// every script invocation.
-    static BUILTINS_MODULE_CACHE: Value = {
-        let module = crate::builtin_modules::load_builtin_module("builtins")
-            .unwrap_or_else(Value::none);
-        crate::builtin_modules::prepare_builtins_module(&module);
-        module
-    };
+    /// of rebuilding the module's `ModuleAttrs` map from scratch on every
+    /// script invocation.
+    static BUILTINS_MODULE_CACHE: Value =
+        crate::builtin_modules::load_builtin_module("builtins").unwrap_or_else(Value::none);
 }
 
 /// Return a clone of the thread-local `builtins` module.  O(1) on subsequent
 /// calls — clones the `Rc<RefCell<PyModule>>` reference (attrs map is shared).
 ///
-/// On the very first call per thread, applies post-processing to populate
-/// the module attrs with:
-///   - Primitive type `PyClass` singletons (`int`, `str`, `list`, …), replacing
-///     the `BuiltinFunction(name)` tokens that `pyrust_module!` emits.
-///   - Built-in exception class `PyClass` singletons (`ValueError`, `TypeError`,
-///     …), which CPython exposes as attributes of the `builtins` module
-///     (issue #1255).
-///
-/// The mutation is applied once and is shared by all future callers because
-/// every `Value::clone` of a `PyModule` shares the same `Rc<RefCell<PyModule>>`.
+/// The module is built in a single pass that stores only function tokens and
+/// constants.  The class objects CPython also exposes there — the primitive
+/// type singletons (`int`, `str`, `list`, …) and the built-in exception
+/// hierarchy (issue #1255) — are deferred attributes of the module: each is
+/// resolved to its per-GIL-group singleton on first lookup, and all of them are
+/// materialized in insertion order once the whole namespace is observed
+/// (issue #3294).
 pub(crate) fn cached_builtins_module() -> Value {
     BUILTINS_MODULE_CACHE.with(Value::clone)
 }

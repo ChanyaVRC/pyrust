@@ -197,7 +197,7 @@ impl Interpreter {
                 // deletion tombstone for a synthetic dunder that was already
                 // deleted — treat it the same as absent so that a second `del`
                 // correctly raises AttributeError.
-                let existing = module.borrow().attrs.get(name).cloned();
+                let existing = module.borrow().get_attr_value(name);
                 match existing {
                     Some(v) if !v.is_unset() => {
                         // A real (non-tombstone) value is present.  Remove it,
