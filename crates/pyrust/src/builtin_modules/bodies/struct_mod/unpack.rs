@@ -1,16 +1,16 @@
-//! Binary unpacking engine and `unpack` / `unpack_from` / `iter_unpack` entry
-//! points for `struct`.
+//! Binary unpacking engine and `unpack` / `unpack_from` / `iter_unpack`
+//! operations for `struct`.
 
 use std::ffi::c_long;
 
 use crate::error::Result;
-use crate::interpreter::{ExpandedCallArg, Interpreter, reject_keyword_args_expanded};
+use crate::interpreter::Interpreter;
 use crate::value::Value;
 
 use super::coercion::{
     extract_readonly_bytes, f16_bits_to_f64, resolve_offset, value_from_u64, value_from_usize,
 };
-use super::format::{CompiledFormat, Endian, FormatCode, compile_format, raise_struct_error};
+use super::format::{CompiledFormat, Endian, FormatCode, raise_struct_error};
 
 macro_rules! read_bytes {
     ($endian:expr, $ty:ty, $src:expr) => {{
@@ -113,56 +113,48 @@ pub(super) fn unpack_from_slice(compiled: &CompiledFormat, buf: &[u8]) -> Value 
     Value::tuple(results)
 }
 
-pub(super) fn unpack_entry(
+/// `struct.unpack` / `Struct.unpack`: the buffer must match the struct size.
+pub(super) fn unpack_buffer(
     interp: &mut Interpreter,
-    fn_name: &str,
-    args: &[ExpandedCallArg],
+    compiled: &CompiledFormat,
+    buffer: &Value,
+    error_cls: &Value,
 ) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    let error_cls = &args[0].value;
-    let compiled = compile_format(&args[1].value, error_cls)?;
-    let buf = extract_readonly_bytes(interp, &args[2].value)?;
+    let buf = extract_readonly_bytes(interp, buffer)?;
     if buf.len() != compiled.size {
         return Err(raise_struct_error(
             error_cls,
             format!("unpack requires a buffer of {} bytes", compiled.size),
         ));
     }
-    Ok(unpack_from_slice(&compiled, &buf))
+    Ok(unpack_from_slice(compiled, &buf))
 }
 
-pub(super) fn unpack_from_entry(
+/// `struct.unpack_from` / `Struct.unpack_from`.
+pub(super) fn unpack_buffer_from(
     interp: &mut Interpreter,
-    fn_name: &str,
-    args: &[ExpandedCallArg],
+    compiled: &CompiledFormat,
+    buffer: &Value,
+    offset: &Value,
+    error_cls: &Value,
 ) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    let error_cls = &args[0].value;
-    let compiled = compile_format(&args[1].value, error_cls)?;
-    let buf = extract_readonly_bytes(interp, &args[2].value)?;
-    let start = resolve_offset(
-        interp,
-        &args[3].value,
-        buf.len(),
-        compiled.size,
-        false,
-        error_cls,
-    )?;
+    let buf = extract_readonly_bytes(interp, buffer)?;
+    let start = resolve_offset(interp, offset, buf.len(), compiled.size, false, error_cls)?;
     Ok(unpack_from_slice(
-        &compiled,
+        compiled,
         &buf[start..start + compiled.size],
     ))
 }
 
-pub(super) fn check_iter_unpack_entry(
+/// `struct.iter_unpack` / `Struct.iter_unpack`: validate the buffer and return
+/// a snapshot of its bytes for the iterator to walk.
+pub(super) fn snapshot_for_iter_unpack(
     interp: &mut Interpreter,
-    fn_name: &str,
-    args: &[ExpandedCallArg],
-) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    let error_cls = &args[0].value;
-    let compiled = compile_format(&args[1].value, error_cls)?;
-    let buf = extract_readonly_bytes(interp, &args[2].value)?;
+    compiled: &CompiledFormat,
+    buffer: &Value,
+    error_cls: &Value,
+) -> Result<Vec<u8>> {
+    let buf = extract_readonly_bytes(interp, buffer)?;
     if compiled.size == 0 {
         return Err(raise_struct_error(
             error_cls,
@@ -178,8 +170,5 @@ pub(super) fn check_iter_unpack_entry(
             ),
         ));
     }
-    Ok(Value::tuple(vec![
-        Value::int(compiled.size as i64),
-        Value::int(buf.len() as i64),
-    ]))
+    Ok(buf)
 }
