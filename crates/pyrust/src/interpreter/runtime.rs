@@ -174,9 +174,10 @@ mod builtin_methods {
     include!("runtime/builtin_methods.rs");
 }
 pub(crate) use builtin_methods::{
-    NativeClassMethodCachePlan, adapt_builtin_subclass_method, bind_builtin_attribute,
-    bind_builtin_class_special, bind_cached_native_class_method, builtin_callable_metadata,
-    builtin_callable_presentation, default_instance_state, dir_names, is_builtin_callable_adapter,
+    DirectContainerMethod, DirectNativeMethod, NativeClassMethodCachePlan,
+    adapt_builtin_subclass_method, bind_builtin_attribute, bind_builtin_class_special,
+    bind_cached_native_class_method, builtin_callable_metadata, builtin_callable_presentation,
+    default_instance_state, dir_names, is_builtin_callable_adapter,
     is_builtin_class_getitem_sentinel, is_class_bound_any_callable, is_object_protocol_method,
     make_builtin_generic_alias, primitive_owned_object_dunder,
 };

@@ -12,6 +12,19 @@ impl Interpreter {
         let Some(spec) = pyrust_builtins::dict::method_spec(method) else {
             return pyrust_builtins::dict::call(method, &receiver, pos.into_vec(), kw);
         };
+        self.dispatch_dict_container_spec(receiver, spec, pos, kw, ordered_mapping)
+    }
+
+    /// `dict` method body after the name has been resolved to its typed spec
+    /// (shared with the per-site `CallMethod` cache, #3379).
+    fn dispatch_dict_container_spec(
+        &mut self,
+        receiver: Value,
+        spec: pyrust_builtins::dict::MethodSpec,
+        pos: smallvec::SmallVec<[Value; 4]>,
+        kw: &PyDict,
+        ordered_mapping: bool,
+    ) -> Result<Value> {
         spec.validate_keywords(!kw.is_empty())?;
         spec.validate_positional_arity(pos.len())?;
         let resolved = spec.method();
@@ -40,6 +53,18 @@ impl Interpreter {
         let Some(spec) = pyrust_builtins::set::method_spec(method) else {
             return pyrust_builtins::set::call(method, &receiver, pos);
         };
+        self.dispatch_set_container_spec(receiver, spec, pos, kw)
+    }
+
+    /// `set` method body after the name has been resolved to its typed spec
+    /// (shared with the per-site `CallMethod` cache, #3379).
+    fn dispatch_set_container_spec(
+        &mut self,
+        receiver: Value,
+        spec: pyrust_builtins::set::MethodSpec,
+        pos: Vec<Value>,
+        kw: &PyDict,
+    ) -> Result<Value> {
         spec.validate_keywords(!kw.is_empty())?;
         spec.validate_positional_arity(pos.len())?;
         self.call_set_method_resolved(spec.method(), receiver, pos)

@@ -81,6 +81,7 @@ pub fn lower_mir_to_fncode(func: &MirFn) -> FnCode {
         kwcall_cache: RefCell::new(SparsePcCache::new()),
         fmt_spec_cache: RefCell::new(SparsePcCache::new()),
         call_builtin_cache: RefCell::new(SiteCache::new()),
+        builtin_method_cache: RefCell::new(SiteCache::new()),
         cached_code_object: RefCell::new(None),
         exc_table: Vec::new(),
         has_exc_handlers: true,

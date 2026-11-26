@@ -285,6 +285,11 @@ fn inline_cache_entry_sizes_stay_compact() {
         size_of::<crate::interpreter::CallBuiltinCacheEntry>()
     );
     assert!(
+        size_of::<crate::bytecode::BuiltinMethodCacheEntry>() <= 16,
+        "BuiltinMethodCacheEntry grew to {} B (guard <= 16 B; keep NativeMethod boxed)",
+        size_of::<crate::bytecode::BuiltinMethodCacheEntry>()
+    );
+    assert!(
         size_of::<BinOpCacheEntry>() <= 4,
         "BinOpCacheEntry grew to {} B (guard <= 4 B)",
         size_of::<BinOpCacheEntry>()
@@ -414,6 +419,10 @@ work(1, 2)
             code.call_builtin_cache.borrow().is_empty(),
             "{stage}: call_builtin_cache must start unallocated"
         );
+        assert!(
+            code.builtin_method_cache.borrow().is_empty(),
+            "{stage}: builtin_method_cache must start unallocated"
+        );
         assert_eq!(
             code.exc_table.capacity(),
             0,
@@ -426,6 +435,7 @@ work(1, 2)
             assert_eq!(proto.code.kwcall_cache.borrow().capacity(), 0);
             assert_eq!(proto.code.fmt_spec_cache.borrow().capacity(), 0);
             assert!(proto.code.call_builtin_cache.borrow().is_empty());
+            assert!(proto.code.builtin_method_cache.borrow().is_empty());
             assert_eq!(proto.code.exc_table.capacity(), 0);
         }
     };
@@ -483,4 +493,112 @@ assert result == ('9:7:5:3:9.5', 41, 60, 60), result
     interp
         .exec_program(&stmts, false)
         .expect("re-entrant inline caches must preserve exact results");
+}
+
+/// Execute `src` and return the named module-level function's compiled body.
+fn executed_function_code(
+    interp: &mut crate::interpreter::Interpreter,
+    name: &str,
+) -> (Value, *const crate::bytecode::FnCode) {
+    let function = interp
+        .lookup_name(name)
+        .expect("lookup succeeds")
+        .unwrap_or_else(|| panic!("{name} must be defined"));
+    let pyrust_core::ValueKind::UserFunction(f) = function.kind() else {
+        panic!("{name} must be a UserFunction");
+    };
+    let code: *const crate::bytecode::FnCode = f
+        .precompiled_code
+        .as_deref()
+        .and_then(|any| any.downcast_ref::<crate::bytecode::FnCode>())
+        .unwrap_or_else(|| panic!("{name} must have precompiled FnCode"));
+    (function, code)
+}
+
+fn call_method_pc(code: &crate::bytecode::FnCode) -> usize {
+    code.insns
+        .iter()
+        .position(|insn| matches!(insn, crate::bytecode::Insn::CallMethod { .. }))
+        .expect("function body must contain a fused CallMethod site")
+}
+
+/// Issue #3379: each `CallMethod` site records the typed target for its
+/// built-in receiver, demotes on a second receiver shape, and allocates
+/// nothing for a site that never ran.
+#[test]
+fn builtin_method_cache_records_typed_targets_per_site() {
+    use crate::bytecode::BuiltinMethodCacheEntry;
+
+    let mut interp = crate::interpreter::Interpreter::default();
+    interp
+        .exec_source(
+            r#"
+from collections import deque
+
+def on_list(o):
+    return o.append(1)
+
+def on_deque(o):
+    return o.append(1)
+
+def on_both(o):
+    return o.append(1)
+
+def on_user(o):
+    return o.append(1)
+
+def never_called(o):
+    return o.append(1)
+
+class User:
+    def append(self, x):
+        return x
+
+for _ in range(4):
+    on_list([])
+    on_deque(deque())
+    on_both([])
+    on_both(deque())
+    on_user(User())
+"#,
+            None,
+            None,
+        )
+        .expect("cache probe script must execute");
+
+    let entry_at = |name: &str, interp: &mut crate::interpreter::Interpreter| {
+        let (_keepalive, code) = executed_function_code(interp, name);
+        // SAFETY: `_keepalive` holds the function (and so its `FnCode`) alive
+        // for the duration of this closure.
+        let code = unsafe { &*code };
+        let pc = call_method_pc(code);
+        code.builtin_method_cache.borrow().get(pc).cloned()
+    };
+
+    assert!(matches!(
+        entry_at("on_list", &mut interp),
+        Some(BuiltinMethodCacheEntry::Container(_))
+    ));
+    assert!(matches!(
+        entry_at("on_deque", &mut interp),
+        Some(BuiltinMethodCacheEntry::NativeMethod(_))
+    ));
+    assert!(matches!(
+        entry_at("on_both", &mut interp),
+        Some(BuiltinMethodCacheEntry::Megamorphic)
+    ));
+    assert!(
+        !matches!(
+            entry_at("on_user", &mut interp),
+            Some(BuiltinMethodCacheEntry::Container(_) | BuiltinMethodCacheEntry::NativeMethod(_))
+        ),
+        "a Python-level method must never be cached as a built-in target"
+    );
+    let (_keepalive, cold) = executed_function_code(&mut interp, "never_called");
+    // SAFETY: `_keepalive` keeps the function's `FnCode` alive.
+    let cold = unsafe { &*cold };
+    assert!(
+        cold.builtin_method_cache.borrow().is_empty(),
+        "an unexecuted function must pay 0 heap bytes for the cache"
+    );
 }
