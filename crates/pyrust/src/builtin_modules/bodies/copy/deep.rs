@@ -7,43 +7,29 @@ use std::rc::Rc;
 use super::deep_protocol::deep_copy_via_protocol;
 use super::memo::{
     DeepCopyDepthGuard, deepcopy_kept_identity, memo_get, memo_insert, memo_insert_obj,
-    value_identity,
+    memo_keep_alive, value_identity,
 };
 use super::protocol::{
     InstanceReduction, copy_exception, resolve_instance_copy_reduction, unpicklable_error,
 };
 use super::reconstruct::{
     apply_getitem_reduction_state, construct_getitem_reduction, rebuild_reduced_iterator,
-    reconstruct_reduction_deep,
+    reconstruct_reduction,
 };
 use crate::error::{PyError, Result};
 use crate::interpreter::{ExpandedCallArg, Interpreter, is_exception_class, key_to_value};
 use crate::value::{PyDict, PyInstance, PyKey, PySet, Value, ValueKind};
 
-pub(super) fn deep_copy(obj: Value, memo: &Value, interp: &mut Interpreter) -> Result<Value> {
-    deep_copy_with_reconstruct(obj, memo, None, interp)
-}
-
-pub(super) fn deep_copy_key(
-    key: PyKey,
-    memo: &Value,
-    reconstruct: Option<&Value>,
-    interp: &mut Interpreter,
-) -> Result<PyKey> {
+pub(super) fn deep_copy_key(key: PyKey, memo: &Value, interp: &mut Interpreter) -> Result<PyKey> {
     let kv = key_to_value(key);
-    let deep_kv = deep_copy_with_reconstruct(kv, memo, reconstruct, interp)?;
+    let deep_kv = deep_copy(kv, memo, interp)?;
     interp.value_to_pykey(&deep_kv)
 }
 
-fn deep_copy_set_keys(
-    keys: Vec<PyKey>,
-    memo: &Value,
-    reconstruct: Option<&Value>,
-    interp: &mut Interpreter,
-) -> Result<PySet> {
+fn deep_copy_set_keys(keys: Vec<PyKey>, memo: &Value, interp: &mut Interpreter) -> Result<PySet> {
     let mut new_set: PySet = PySet::with_capacity_and_hasher(keys.len(), Default::default());
     for k in keys {
-        let new_k = deep_copy_key(k, memo, reconstruct, interp)?;
+        let new_k = deep_copy_key(k, memo, interp)?;
         new_set.insert(new_k);
     }
     Ok(new_set)
@@ -54,7 +40,6 @@ pub(super) fn deep_copy_storage_elements(
     state: &pyrust_core::BuiltinState,
     copied: &Value,
     memo: &Value,
-    reconstruct: Option<&Value>,
     interp: &mut Interpreter,
 ) -> Result<bool> {
     let Some(elements) = ops.storage_elements(state) else {
@@ -62,12 +47,7 @@ pub(super) fn deep_copy_storage_elements(
     };
     let mut deep_elements = Vec::with_capacity(elements.len());
     for element in elements {
-        deep_elements.push(deep_copy_with_reconstruct(
-            element,
-            memo,
-            reconstruct,
-            interp,
-        )?);
+        deep_elements.push(deep_copy(element, memo, interp)?);
     }
     if let ValueKind::BuiltinObject {
         ops: copied_ops,
@@ -84,12 +64,7 @@ pub(super) fn deep_copy_storage_elements(
 /// `id`) terminates cycles and preserves shared references; the copy of a
 /// container/instance is inserted into the memo *before* its children are
 /// recursed into.
-pub(super) fn deep_copy_with_reconstruct(
-    obj: Value,
-    memo: &Value,
-    reconstruct: Option<&Value>,
-    interp: &mut Interpreter,
-) -> Result<Value> {
+pub(super) fn deep_copy(obj: Value, memo: &Value, interp: &mut Interpreter) -> Result<Value> {
     let _depth_guard = DeepCopyDepthGuard::enter(interp)?;
     if let Some(id) = value_identity(&obj)
         && let Some(existing) = memo_get(memo, id)
@@ -97,6 +72,18 @@ pub(super) fn deep_copy_with_reconstruct(
         return Ok(existing);
     }
 
+    let copied = deep_copy_uncached(&obj, memo, interp)?;
+    // CPython's `deepcopy` tail: a copy that is not the original is memoised
+    // and the original is kept alive for the lifetime of the memo.
+    if !deepcopy_kept_identity(&obj, &copied) {
+        memo_insert_obj(memo, &obj, &copied);
+        memo_keep_alive(memo, &obj);
+    }
+    Ok(copied)
+}
+
+fn deep_copy_uncached(obj: &Value, memo: &Value, interp: &mut Interpreter) -> Result<Value> {
+    let obj = obj.clone();
     match obj.kind() {
         // Immutable scalars.
         ValueKind::None
@@ -117,7 +104,7 @@ pub(super) fn deep_copy_with_reconstruct(
                 .expect("frozenset arm: as_items must succeed");
             let keys: Vec<PyKey> = items_rc.iter().cloned().collect();
             drop(items_rc);
-            let new_set = deep_copy_set_keys(keys, memo, reconstruct, interp)?;
+            let new_set = deep_copy_set_keys(keys, memo, interp)?;
             let result = pyrust_builtins::frozenset::frozenset(new_set);
             memo_insert_obj(memo, &obj, &result);
             Ok(result)
@@ -130,7 +117,7 @@ pub(super) fn deep_copy_with_reconstruct(
             let mut new_items = Vec::with_capacity(items_vec.len());
             let mut all_same = true;
             for item in &items_vec {
-                let copied = deep_copy_with_reconstruct(item.clone(), memo, reconstruct, interp)?;
+                let copied = deep_copy(item.clone(), memo, interp)?;
                 if !deepcopy_kept_identity(item, &copied) {
                     all_same = false;
                 }
@@ -156,7 +143,7 @@ pub(super) fn deep_copy_with_reconstruct(
             let new_list = Value::list(Vec::with_capacity(items_vec.len()));
             memo_insert_obj(memo, &obj, &new_list);
             for item in items_vec {
-                let copied = deep_copy_with_reconstruct(item, memo, reconstruct, interp)?;
+                let copied = deep_copy(item, memo, interp)?;
                 new_list.list_push(copied)?;
             }
             Ok(new_list)
@@ -173,8 +160,8 @@ pub(super) fn deep_copy_with_reconstruct(
             ));
             memo_insert_obj(memo, &obj, &new_dict);
             for (k, v) in pairs {
-                let deep_k = deep_copy_key(k, memo, reconstruct, interp)?;
-                let deep_v = deep_copy_with_reconstruct(v, memo, reconstruct, interp)?;
+                let deep_k = deep_copy_key(k, memo, interp)?;
+                let deep_v = deep_copy(v, memo, interp)?;
                 let _ = new_dict.dict_insert(deep_k, deep_v);
             }
             Ok(new_dict)
@@ -186,7 +173,7 @@ pub(super) fn deep_copy_with_reconstruct(
             drop(items);
             let new_set_val = Value::set(PySet::default());
             memo_insert_obj(memo, &obj, &new_set_val);
-            let new_set = deep_copy_set_keys(keys, memo, reconstruct, interp)?;
+            let new_set = deep_copy_set_keys(keys, memo, interp)?;
             new_set_val.set_with_mut(|s| *s = new_set).ok_or_else(|| {
                 PyError::named("TypeError", "deepcopy: set rebuild failed".to_string())
             })?;
@@ -202,7 +189,7 @@ pub(super) fn deep_copy_with_reconstruct(
                 return Ok(obj.clone());
             };
             memo_insert_obj(memo, &obj, &copied);
-            if !deep_copy_storage_elements(ops, state, &copied, memo, reconstruct, interp)?
+            if !deep_copy_storage_elements(ops, state, &copied, memo, interp)?
                 && let Some(pairs) = copied.dict_with(|d| {
                     d.iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
@@ -210,7 +197,7 @@ pub(super) fn deep_copy_with_reconstruct(
                 })
             {
                 for (key, value) in pairs {
-                    let deep_value = deep_copy_with_reconstruct(value, memo, reconstruct, interp)?;
+                    let deep_value = deep_copy(value, memo, interp)?;
                     let _ = copied.dict_insert(key, deep_value);
                 }
             }
@@ -218,12 +205,12 @@ pub(super) fn deep_copy_with_reconstruct(
         }
 
         // Built-in iterator objects (#2974).
-        ValueKind::Generator(_) => deep_copy_generator(&obj, memo, reconstruct, interp),
+        ValueKind::Generator(_) => deep_copy_generator(&obj, memo, interp),
 
         // PyInstance — CPython 3.12 copy.deepcopy precedence.
         ValueKind::PyInstance(rc) => {
             let rc = Rc::clone(rc);
-            deep_copy_instance(&rc, &obj, memo, reconstruct, interp)
+            deep_copy_instance(&rc, &obj, memo, interp)
         }
 
         // Anything else — return as-is.
@@ -231,16 +218,11 @@ pub(super) fn deep_copy_with_reconstruct(
     }
 }
 
-fn deep_copy_generator(
-    obj: &Value,
-    memo: &Value,
-    reconstruct: Option<&Value>,
-    interp: &mut Interpreter,
-) -> Result<Value> {
+fn deep_copy_generator(obj: &Value, memo: &Value, interp: &mut Interpreter) -> Result<Value> {
     let rebuilt = match crate::interpreter::copy_iterator_object(obj, true)? {
         crate::interpreter::IteratorCopy::Rebuilt(copy) => copy,
         crate::interpreter::IteratorCopy::BytearrayReduction { carrier, position } => {
-            let copied_carrier = deep_copy_with_reconstruct(carrier, memo, reconstruct, interp)?;
+            let copied_carrier = deep_copy(carrier, memo, interp)?;
             let copy = rebuild_reduced_iterator(copied_carrier, position, interp)?;
             memo_insert_obj(memo, obj, &copy);
             return Ok(copy);
@@ -250,7 +232,7 @@ fn deep_copy_generator(
             owner,
             position,
         } => {
-            let copied_owner = deep_copy_with_reconstruct(owner, memo, reconstruct, interp)?;
+            let copied_owner = deep_copy(owner, memo, interp)?;
             let copy = construct_getitem_reduction(constructor, copied_owner, interp)?;
             memo_insert_obj(memo, obj, &copy);
             apply_getitem_reduction_state(&copy, position, interp)?;
@@ -260,8 +242,7 @@ fn deep_copy_generator(
             return Err(unpicklable_error(noun));
         }
         crate::interpreter::IteratorCopy::Unowned => {
-            let mut copy_child =
-                |v: Value| deep_copy_with_reconstruct(v, memo, reconstruct, interp);
+            let mut copy_child = |v: Value| deep_copy(v, memo, interp);
             let mut get_memo = |id: i64| memo_get(memo, id);
             let mut put_memo = |id: i64, v: Value| memo_insert(memo, id, v);
             return Ok(crate::interpreter::copy_provider_iterator(
@@ -279,12 +260,7 @@ fn deep_copy_generator(
     if let Some(sources) = crate::interpreter::iterator_retained_values(&rebuilt) {
         let mut deep_sources = Vec::with_capacity(sources.len());
         for source in sources {
-            deep_sources.push(deep_copy_with_reconstruct(
-                source,
-                memo,
-                reconstruct,
-                interp,
-            )?);
+            deep_sources.push(deep_copy(source, memo, interp)?);
         }
         crate::interpreter::set_iterator_retained_values(&rebuilt, deep_sources)?;
     }
@@ -295,7 +271,6 @@ fn deep_copy_instance(
     rc: &Rc<RefCell<PyInstance>>,
     obj: &Value,
     memo: &Value,
-    reconstruct: Option<&Value>,
     interp: &mut Interpreter,
 ) -> Result<Value> {
     let class = Rc::clone(&rc.borrow().class);
@@ -319,38 +294,7 @@ fn deep_copy_instance(
     }
     match resolve_instance_copy_reduction(obj, &class, true, interp)? {
         InstanceReduction::Reduced(reduction) => {
-            let rebuilt = if let Some(reconstruct) = reconstruct {
-                let deepcopy_fn =
-                    pyrust_builtins::native_builtin_callable::native_generation_builtin(
-                        Value::builtin_function("copy.deepcopy"),
-                        reconstruct.clone(),
-                        "deepcopy",
-                        "copy",
-                    );
-                interp.call_function_expanded(
-                    reconstruct.clone(),
-                    &[
-                        ExpandedCallArg {
-                            name: None,
-                            value: obj.clone(),
-                        },
-                        ExpandedCallArg {
-                            name: None,
-                            value: memo.clone(),
-                        },
-                        ExpandedCallArg {
-                            name: None,
-                            value: reduction,
-                        },
-                        ExpandedCallArg {
-                            name: None,
-                            value: deepcopy_fn,
-                        },
-                    ],
-                )?
-            } else {
-                reconstruct_reduction_deep(obj, reduction, memo, interp)?
-            };
+            let rebuilt = reconstruct_reduction(obj, reduction, Some(memo), interp)?;
             if !deepcopy_kept_identity(obj, &rebuilt) {
                 memo_insert_obj(memo, obj, &rebuilt);
             }
@@ -363,7 +307,7 @@ fn deep_copy_instance(
                 position,
             } = crate::interpreter::copy_iterator_object(obj, true)?
             {
-                let copied_owner = deep_copy_with_reconstruct(owner, memo, reconstruct, interp)?;
+                let copied_owner = deep_copy(owner, memo, interp)?;
                 let copy = construct_getitem_reduction(constructor, copied_owner, interp)?;
                 memo_insert_obj(memo, obj, &copy);
                 apply_getitem_reduction_state(&copy, position, interp)?;
@@ -373,7 +317,7 @@ fn deep_copy_instance(
                 copy_exception(
                     rc,
                     interp,
-                    |v, interp| deep_copy_with_reconstruct(v, memo, reconstruct, interp),
+                    |v, interp| deep_copy(v, memo, interp),
                     |new_val| {
                         if let Some(id) = obj_id {
                             memo_insert(memo, id, new_val.clone());
@@ -383,9 +327,8 @@ fn deep_copy_instance(
             } else if crate::builtin_modules::itertools::is_unpicklable_itertools_class(&class) {
                 Err(unpicklable_error(&pyrust_core::error_type_name(obj)))
             } else if let Some(result) = {
-                let mut copy_child = |v: Value, interp: &mut Interpreter| {
-                    deep_copy_with_reconstruct(v, memo, reconstruct, interp)
-                };
+                let mut copy_child =
+                    |v: Value, interp: &mut Interpreter| deep_copy(v, memo, interp);
                 let mut put_memo = |id: i64, v: Value| memo_insert(memo, id, v);
                 crate::builtin_modules::itertools::copy_groupby_or_grouper(
                     rc,
@@ -397,7 +340,7 @@ fn deep_copy_instance(
             } {
                 result
             } else {
-                deep_copy_via_protocol(rc, obj, memo, reconstruct, interp)
+                deep_copy_via_protocol(rc, obj, memo, interp)
             }
         }
     }

@@ -517,10 +517,10 @@ pyrust_builtin_modules! {
     io,
     // `typing` Python-source members (issue #2516) injected via `@inject`.
     typing @inject,
-    // `copy.copy` keeps its native container fast paths. A private injected
-    // Python helper owns the rare staticmethod-reduction reconstruction path
-    // so its observable Python protocol operations match CPython (#2958).
-    copy @inject,
+    // `copy` (issues #2958, #3346): 100% native Rust in `bodies/copy.rs`; the
+    // reduction reconstruction (`copy._reconstruct`) lives in
+    // `bodies/copy/reconstruct.rs`, with no Python-source injection.
+    copy,
     pathlib,
     // `string`: ASCII character-class constants are native; `capwords`,
     // `Template`, and `Formatter` are injected from `string_py.py` by the
