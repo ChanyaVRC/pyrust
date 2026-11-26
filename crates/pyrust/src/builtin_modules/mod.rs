@@ -583,10 +583,10 @@ pyrust_builtin_modules! {
     // (`bisect_left` / `bisect_right` / `insort_left` / `insort_right` plus the
     // `bisect` / `insort` aliases) in `bisect.rs`; no Python-source injection.
     bisect,
-    // `heapq` (issue #2784): heap-queue (priority-queue) algorithms — a
-    // pure-Python module (`heapq_py.py`) injected by the `@inject` post-load
-    // hook; the native body is empty.
-    heapq @inject,
+    // `heapq` (issues #2784, #3363): 100% native heap-queue algorithms
+    // (`heappush` / `heappop` / `heapify` / `merge` / `nlargest` / ...) in
+    // `heapq.rs`; no Python-source injection.
+    heapq,
     // `pprint` (issue #2812): a pure-Python pretty-printer (`pprint_py.py`,
     // transcribed from CPython 3.12's `Lib/pprint.py`) — `pprint`, `pformat`,
     // `PrettyPrinter`, `isreadable`, `isrecursive`, `saferepr`, `pp` — injected
