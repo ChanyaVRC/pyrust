@@ -300,9 +300,8 @@ impl Interpreter {
                     regs[*dst as usize] = vm_try!(self.load_global_cached(code, *name_idx));
                 }
                 Insn::StoreGlobal(name_idx, src) => {
-                    let name = pool_get!(code.names, *name_idx, "name");
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
-                    self.assign_name(name, val);
+                    vm_try!(self.store_global_cached(code, *name_idx, val));
                 }
                 Insn::LoadCell(dst, cell_idx) => match cells.as_slice()[*cell_idx as usize].get() {
                     Some(val) => regs[*dst as usize] = val,

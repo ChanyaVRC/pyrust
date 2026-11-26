@@ -10,8 +10,8 @@ use smallvec::SmallVec;
 use crate::value::Value;
 
 use super::{
-    AttrCacheEntry, BinOpCacheEntry, CellSlotMeta, FnProto, GlobalCacheEntry, Insn, InsnDesc,
-    KwCallCacheEntry, SiteCache, SparsePcCache,
+    AttrCacheEntry, BinOpCacheEntry, CellSlotMeta, FnProto, GlobalCacheEntry,
+    GlobalStoreCacheEntry, Insn, InsnDesc, KwCallCacheEntry, SiteCache, SparsePcCache,
 };
 
 /// Maximum register slots allowed in one executable frame.
@@ -352,6 +352,15 @@ pub struct FnCode {
     /// provider's shared mutation state. Custom `__builtins__` modules/dicts
     /// are never cached.
     pub(crate) global_cache: RefCell<Vec<GlobalCacheEntry>>,
+    /// Per-name inline cache for the root binding a `StoreGlobal` overwrites
+    /// (#3423).
+    ///
+    /// Lazily allocated on the first cacheable store (0 heap bytes for code
+    /// that never rebinds a global) and indexed by `name_idx`, so every
+    /// `StoreGlobal` site of one name shares its locator. It is deliberately
+    /// separate from `global_cache`: a read and a write of the same name keep
+    /// different guards and must not evict each other.
+    pub(crate) global_store_cache: RefCell<Vec<GlobalStoreCacheEntry>>,
     /// Precomputed per-name Bloom masks used to invalidate only value or
     /// canonical-fallback caches that may exist in this root namespace.
     pub(crate) global_cache_interest_masks: Vec<u64>,

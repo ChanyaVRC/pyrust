@@ -121,6 +121,7 @@ impl Compiler {
             comp_enclosing_locals: self.comp_enclosing_locals.clone(),
             attr_cache: RefCell::new(crate::bytecode::SiteCache::new()),
             global_cache: RefCell::new(Vec::new()),
+            global_store_cache: RefCell::new(Vec::new()),
             global_cache_interest_masks,
             binop_cache: RefCell::new(Vec::new()),
             kwcall_cache: RefCell::new(crate::bytecode::SparsePcCache::new()),

@@ -1,7 +1,7 @@
 //! Global-name resolution cache protocol.
 
 use std::collections::HashMap;
-use std::rc::Weak;
+use std::rc::{Rc, Weak};
 
 use crate::value::Value;
 
@@ -10,9 +10,11 @@ use crate::value::Value;
 /// A name resolves either from the module environment or from the canonical
 /// `builtins` module, so both forms share one mutually exclusive cache entry.
 /// `FnCode` is reusable across interpreters and explicit `eval`/`exec`
-/// namespaces, so both variants guard the root namespace identity. Environment
-/// hits additionally guard the value generation; builtin-module hits guard the
-/// namespace structure generation and the shared module's mutation state.
+/// namespaces, so every variant guards the root namespace identity. Environment
+/// hits additionally guard the value generation; root-slot hits guard the
+/// structure generation and revalidate their slot on every read; builtin-module
+/// hits guard the namespace structure generation and the shared module's
+/// mutation state.
 /// Cached heap identities are held weakly so the code object cannot keep an
 /// obsolete global alive (or close a function -> code -> cache -> function
 /// cycle). A dead weak value is a normal miss; representations without a
@@ -27,6 +29,27 @@ pub(crate) enum GlobalCacheEntry {
         namespace_id: u64,
         environment_version: u64,
         value: pyrust_core::WeakValueCache,
+    },
+    /// Self-validating locator for a binding stored in the root namespace map
+    /// (#3423).
+    ///
+    /// The entry names the binding's slot by index and key identity and reads
+    /// the current value through it, so overwriting the binding needs no cache
+    /// invalidation at all: the next hit simply observes the new value. It
+    /// holds the key string only, never the bound value. Removing or
+    /// re-inserting the binding changes the slot's key, which is an ordinary
+    /// miss; the structure generation additionally rejects the entry while a
+    /// PEP 695 scope could shadow the name.
+    ///
+    /// A hit costs one more dependent load than the value form, so this lane
+    /// is used only where the value form is unavailable: for a name some
+    /// `StoreGlobal` cache overwrites in place, and for a value that
+    /// [`pyrust_core::WeakValueCache`] cannot hold without owning it.
+    EnvironmentSlot {
+        namespace_id: u64,
+        structure_version: u64,
+        index: u32,
+        key: Rc<str>,
     },
     /// Pointer-free locator for a value held in a live Script register file.
     ///
@@ -64,6 +87,30 @@ pub(crate) fn global_cache_interest_mask(name: &str) -> u64 {
     pyrust_core::namespace_name_interest_mask(name)
 }
 
+/// Cached target of one `StoreGlobal` name slot (#3423).
+///
+/// `RootSlot` records that the name was last assigned into an existing root
+/// namespace binding, located by a self-validating
+/// [`pyrust_core::NamespaceStoreSlot`]. A hit overwrites that binding in place
+/// instead of repeating name resolution, insertion, and mirror discovery.
+///
+/// `declared_in` is the proof that a frame whose lexical environment is *not*
+/// the root still targets the root: the active function's `global`-name set,
+/// which contained this name when the entry was filled. Holding the set keeps
+/// its allocation from being reused, so pointer equality with the active
+/// function's set proves the declaration. It is `None` when the entry was
+/// filled from the root environment itself, where a `global` declaration and a
+/// plain module-scope store write the same binding.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum GlobalStoreCacheEntry {
+    #[default]
+    Empty,
+    RootSlot {
+        slot: pyrust_core::NamespaceStoreSlot,
+        declared_in: Option<pyrust_core::NameSet>,
+    },
+}
+
 impl GlobalCacheEntry {
     #[cfg(test)]
     #[inline]
@@ -71,6 +118,7 @@ impl GlobalCacheEntry {
         match self {
             Self::Empty => None,
             Self::Environment { namespace_id, .. }
+            | Self::EnvironmentSlot { namespace_id, .. }
             | Self::ScriptFastLocal { namespace_id, .. }
             | Self::BuiltinModule { namespace_id, .. } => Some(*namespace_id),
         }
@@ -90,9 +138,16 @@ impl GlobalCacheEntry {
             structure_version,
             u64::MAX,
             |_, _, _| None,
+            |_, _| None,
         )
     }
 
+    /// Validate this entry against the root namespace snapshot and produce the
+    /// cached resolution.
+    ///
+    /// `script_lookup` reads a live Script register through its pointer-free
+    /// locator; `slot_lookup` reads a root binding through its `(index, key)`
+    /// slot locator. Both return `None` when their locator went stale.
     #[inline]
     pub(crate) fn lookup_with_fastlocal(
         &self,
@@ -101,6 +156,7 @@ impl GlobalCacheEntry {
         structure_version: u64,
         current_mirror_epoch: u64,
         script_lookup: impl FnOnce(u64, &Weak<HashMap<String, u32>>, u32) -> Option<Value>,
+        slot_lookup: impl FnOnce(u32, &Rc<str>) -> Option<Value>,
     ) -> Option<Value> {
         match self {
             Self::Empty => None,
@@ -113,6 +169,20 @@ impl GlobalCacheEntry {
                     && *cached_environment_version == environment_version
                 {
                     value.upgrade()
+                } else {
+                    None
+                }
+            }
+            Self::EnvironmentSlot {
+                namespace_id: cached_namespace_id,
+                structure_version: cached_structure_version,
+                index,
+                key,
+            } => {
+                if *cached_namespace_id == namespace_id
+                    && *cached_structure_version == structure_version
+                {
+                    slot_lookup(*index, key)
                 } else {
                     None
                 }
@@ -167,6 +237,24 @@ impl GlobalCacheEntry {
             namespace_id,
             environment_version,
             value,
+        }
+    }
+
+    /// Cache a root-namespace binding by slot locator rather than by value.
+    pub(crate) fn environment_slot(
+        namespace_id: u64,
+        structure_version: u64,
+        index: u32,
+        key: Rc<str>,
+    ) -> Self {
+        if namespace_id == u64::MAX || structure_version == u64::MAX {
+            return Self::Empty;
+        }
+        Self::EnvironmentSlot {
+            namespace_id,
+            structure_version,
+            index,
+            key,
         }
     }
 
@@ -231,6 +319,18 @@ impl std::fmt::Debug for GlobalCacheEntry {
                 .field("namespace_id", namespace_id)
                 .field("environment_version", environment_version)
                 .finish_non_exhaustive(),
+            Self::EnvironmentSlot {
+                namespace_id,
+                structure_version,
+                index,
+                key,
+            } => formatter
+                .debug_struct("EnvironmentSlot")
+                .field("namespace_id", namespace_id)
+                .field("structure_version", structure_version)
+                .field("index", index)
+                .field("key", key)
+                .finish(),
             Self::ScriptFastLocal {
                 namespace_id,
                 environment_version,

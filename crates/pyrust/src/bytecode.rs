@@ -18,8 +18,9 @@ pub use cache::{
 };
 pub(crate) use cache::{
     BINOP_SPEC_THRESHOLD, BinOpCacheEntry, BinopTypeTag, BuiltinMethodCacheEntry, GlobalCacheEntry,
-    NativeMethodCacheEntry, SiteCache, SparsePcCache, global_cache_interest_mask,
-    is_attr_cache_site, is_builtin_method_cache_site, is_call_builtin_cache_site,
+    GlobalStoreCacheEntry, NativeMethodCacheEntry, SiteCache, SparsePcCache,
+    global_cache_interest_mask, is_attr_cache_site, is_builtin_method_cache_site,
+    is_call_builtin_cache_site,
 };
 pub use code::FnCode;
 pub(crate) use code::{

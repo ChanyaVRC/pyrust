@@ -120,15 +120,25 @@ fn script_fastlocal_cache_always_guards_mirror_epoch() {
         &Value::int(9),
     );
     assert_eq!(
-        inline.lookup_with_fastlocal(17, 23, 0, 5, |_, _, _| {
-            panic!("inline values do not need a live-slot read")
-        }),
+        inline.lookup_with_fastlocal(
+            17,
+            23,
+            0,
+            5,
+            |_, _, _| panic!("inline values do not need a live-slot read"),
+            |_, _| panic!("a register entry never reads a root slot"),
+        ),
         Some(Value::int(9))
     );
     assert_eq!(
-        inline.lookup_with_fastlocal(17, 23, 0, 6, |_, _, _| {
-            panic!("a stale mirror epoch must reject before slot lookup")
-        }),
+        inline.lookup_with_fastlocal(
+            17,
+            23,
+            0,
+            6,
+            |_, _, _| panic!("a stale mirror epoch must reject before slot lookup"),
+            |_, _| panic!("a register entry never reads a root slot"),
+        ),
         None
     );
 
@@ -136,14 +146,134 @@ fn script_fastlocal_cache_always_guards_mirror_epoch() {
     let locator =
         GlobalCacheEntry::script_fastlocal(17, 24, 7, Rc::downgrade(&local_index), 4, &heap);
     assert_eq!(
-        locator.lookup_with_fastlocal(17, 24, 0, 7, |epoch, layout, register| {
-            assert_eq!(epoch, 7);
-            assert!(std::rc::Weak::ptr_eq(layout, &Rc::downgrade(&local_index)));
-            assert_eq!(register, 4);
-            Some(heap.clone())
-        }),
+        locator.lookup_with_fastlocal(
+            17,
+            24,
+            0,
+            7,
+            |epoch, layout, register| {
+                assert_eq!(epoch, 7);
+                assert!(std::rc::Weak::ptr_eq(layout, &Rc::downgrade(&local_index)));
+                assert_eq!(register, 4);
+                Some(heap.clone())
+            },
+            |_, _| panic!("a register entry never reads a root slot"),
+        ),
         Some(heap)
     );
+}
+
+/// Issue #3423: a root-slot entry caches *where* a global lives, never its
+/// value, so rebinding the name is observed by the next hit without any
+/// generation advancing, while removing or re-inserting it is a miss.
+#[test]
+fn environment_slot_entries_read_the_live_binding_and_reject_a_replaced_key() {
+    let root = Environment::new(None);
+    let namespace_id = root.borrow().namespace_id();
+    for name in ["first", "second", "counter"] {
+        root.borrow_mut()
+            .namespace_values_mut()
+            .insert(name, Value::int(1));
+    }
+    let (index, key) = root
+        .borrow()
+        .namespace_root_binding_slot("counter", &Value::int(1))
+        .expect("a bound name has a slot locator");
+    assert_eq!(
+        root.borrow()
+            .namespace_root_binding_slot("counter", &Value::int(2)),
+        None,
+        "a value some other provider resolved must not be attributed to the slot"
+    );
+    let entry = GlobalCacheEntry::environment_slot(namespace_id, 3, index, key);
+    let read = |environment_version, structure_version| {
+        entry.lookup_with_fastlocal(
+            namespace_id,
+            environment_version,
+            structure_version,
+            0,
+            |_, _, _| panic!("a root-slot entry never reads a register"),
+            |index, key| root.borrow().namespace_root_slot_value(index, key),
+        )
+    };
+
+    assert_eq!(read(7, 3), Some(Value::int(1)));
+    // Rebinding keeps the slot and its key: the entry observes the new value
+    // although no generation moved.
+    root.borrow_mut()
+        .namespace_values_mut()
+        .insert("counter", Value::int(41));
+    assert_eq!(read(7, 3), Some(Value::int(41)));
+    assert_eq!(
+        read(8, 3),
+        Some(Value::int(41)),
+        "root-slot entries must ignore the unrelated value generation"
+    );
+    assert_eq!(
+        read(7, 4),
+        None,
+        "a structure change (a PEP 695 scope, a deletion) must reject the entry"
+    );
+    assert_eq!(
+        entry.lookup_with_fastlocal(
+            namespace_id + 1,
+            7,
+            3,
+            0,
+            |_, _, _| None,
+            |_, _| panic!("another namespace must reject before the slot read"),
+        ),
+        None
+    );
+
+    // A lexical child reads the same root binding through its parent chain.
+    let child = Environment::new(Some(Rc::clone(&root)));
+    let (child_index, child_key) = child
+        .borrow()
+        .namespace_root_binding_slot("counter", &Value::int(41))
+        .expect("a child resolves the root slot");
+    assert_eq!(
+        child
+            .borrow()
+            .namespace_root_slot_value(child_index, &child_key),
+        Some(Value::int(41))
+    );
+
+    // `del counter; counter = 5` re-inserts under a fresh key, and deleting an
+    // earlier name shifts every later slot: both are ordinary misses.
+    root.borrow_mut().namespace_values_mut().remove("counter");
+    assert_eq!(read(7, 3), None);
+    root.borrow_mut()
+        .namespace_values_mut()
+        .insert("counter", Value::int(5));
+    assert_eq!(read(7, 3), None, "a re-inserted binding has a new key");
+    let (index, key) = root
+        .borrow()
+        .namespace_root_binding_slot("counter", &Value::int(5))
+        .expect("the re-inserted name has a slot locator");
+    let shifted = GlobalCacheEntry::environment_slot(namespace_id, 3, index, key);
+    root.borrow_mut().namespace_values_mut().remove("first");
+    assert_eq!(
+        shifted.lookup_with_fastlocal(
+            namespace_id,
+            7,
+            3,
+            0,
+            |_, _, _| None,
+            |index, key| root.borrow().namespace_root_slot_value(index, key),
+        ),
+        None,
+        "a shifted slot must never be read as the cached name"
+    );
+
+    assert!(matches!(
+        GlobalCacheEntry::environment_slot(namespace_id, u64::MAX, 0, Rc::from("counter")),
+        GlobalCacheEntry::Empty
+    ));
+    assert!(matches!(
+        GlobalCacheEntry::environment_slot(u64::MAX, 3, 0, Rc::from("counter")),
+        GlobalCacheEntry::Empty
+    ));
 }
 
 #[test]
@@ -373,6 +503,11 @@ fn inline_cache_entry_sizes_stay_compact() {
         size_of::<BinOpCacheEntry>() <= 4,
         "BinOpCacheEntry grew to {} B (guard <= 4 B)",
         size_of::<BinOpCacheEntry>()
+    );
+    assert!(
+        size_of::<crate::bytecode::GlobalStoreCacheEntry>() <= 64,
+        "GlobalStoreCacheEntry grew to {} B (guard <= 64 B; one entry per name slot)",
+        size_of::<crate::bytecode::GlobalStoreCacheEntry>()
     );
 }
 

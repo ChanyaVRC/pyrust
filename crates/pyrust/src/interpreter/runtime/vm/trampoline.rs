@@ -93,9 +93,12 @@ fn vm_tramp_fill_omitted_defaults(
 /// Gate check shared by plain-function and bound-method trampolining (#2234 / #2345 / #3159).
 ///
 /// Uses the precomputed `UserFunction::trampoline_arity` sentinel so callee
-/// eligibility (`Regular`, no `global` declarations, no variadic/keyword-only
-/// parameters, and plain handler-free/own-cell-free bytecode) reduces to a
-/// single integer comparison for an exact-arity call. A call omitting trailing
+/// eligibility (`Regular`, no variadic/keyword-only parameters, and plain
+/// handler-free/own-cell-free bytecode) reduces to a single integer comparison
+/// for an exact-arity call. A callee that declares names `global` is eligible
+/// (#3423): the committed frame runs under the callee's own defining env and
+/// function frame view, so its global reads and writes target the callee's
+/// module even when the caller lives in another one. A call omitting trailing
 /// defaulted parameters (`nsupplied < trampoline_arity`) additionally
 /// consults the cold [`vm_tramp_omitted_defaults_ok`] (#3381); too many
 /// arguments always decline. Then verifies the caller is outside any `try` and
@@ -133,7 +136,6 @@ fn vm_tramp_check_gate<'a>(
         .as_deref()
         .and_then(|any| any.downcast_ref::<crate::bytecode::FnCode>())?;
     debug_assert!(matches!(f.kind, pyrust_core::UserFunctionKind::Regular));
-    debug_assert!(f.global_names.is_empty());
     debug_assert_eq!(f.params.len(), arity);
     debug_assert!(
         !f.params

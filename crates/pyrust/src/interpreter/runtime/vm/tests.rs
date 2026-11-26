@@ -31,6 +31,7 @@ mod vm_tests {
             comp_enclosing_locals: None,
             attr_cache: std::cell::RefCell::new(crate::bytecode::SiteCache::new()),
             global_cache: std::cell::RefCell::new(Vec::new()),
+            global_store_cache: std::cell::RefCell::new(Vec::new()),
             global_cache_interest_masks: Vec::new(),
             binop_cache: std::cell::RefCell::new(Vec::new()),
             kwcall_cache: std::cell::RefCell::new(crate::bytecode::SparsePcCache::new()),
@@ -1125,6 +1126,8 @@ assert exc_first == 42
                 + code.global_cache_interest_masks.capacity() * size_of::<u64>();
             let mut cache_heap = code.attr_cache.borrow().heap_bytes()
                 + code.global_cache.borrow().capacity() * size_of::<GlobalCacheEntry>()
+                + code.global_store_cache.borrow().capacity()
+                    * size_of::<crate::bytecode::GlobalStoreCacheEntry>()
                 + code.binop_cache.borrow().capacity() * size_of::<BinOpCacheEntry>()
                 + code.kwcall_cache.borrow().heap_bytes()
                 + code.fmt_spec_cache.borrow().heap_bytes()
@@ -1445,7 +1448,8 @@ cm_fn = C.__dict__['cm']
         assert_eq!(arity_of("has_args"), UserFunction::TRAMPOLINE_INELIGIBLE);
         assert_eq!(arity_of("has_kwargs"), UserFunction::TRAMPOLINE_INELIGIBLE);
         assert_eq!(arity_of("has_kwonly"), UserFunction::TRAMPOLINE_INELIGIBLE);
-        assert_eq!(arity_of("uses_global"), UserFunction::TRAMPOLINE_INELIGIBLE);
+        // A `global` declaration no longer disqualifies a callee (#3423).
+        assert_eq!(arity_of("uses_global"), 1);
         assert_eq!(arity_of("is_gen"), UserFunction::TRAMPOLINE_INELIGIBLE);
         assert_eq!(arity_of("is_coro"), UserFunction::TRAMPOLINE_INELIGIBLE);
         // `for` loops no longer disqualify a callee (#3377); a loop wrapped in

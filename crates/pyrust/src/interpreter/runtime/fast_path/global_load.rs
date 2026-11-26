@@ -45,6 +45,7 @@ impl Interpreter {
                                 register,
                             )
                         },
+                        |index, key| env.namespace_root_slot_value(index, key),
                     )
                 });
                 if let Some(value) = cached {
@@ -73,14 +74,46 @@ impl Interpreter {
             GlobalResolutionCache::Environment(version)
                 if version != u64::MAX && namespace.cacheable() =>
             {
-                self.env
+                // The value form is the cheapest hit, but it is only coherent
+                // while every rebind of the name advances the value
+                // generation. A name some `StoreGlobal` cache overwrites in
+                // place does not (#3423), so it must be cached by slot locator
+                // instead. The locator also serves values the value form
+                // cannot hold without owning them.
+                let value_entry = if self
+                    .env
                     .borrow()
-                    .register_namespace_value_cache_interest(cache_interest_mask);
-                set_global_cache(
-                    code,
-                    slot,
-                    GlobalCacheEntry::environment(current_namespace_id, version, &resolution.value),
-                );
+                    .namespace_store_slot_interested(cache_interest_mask)
+                {
+                    GlobalCacheEntry::Empty
+                } else {
+                    GlobalCacheEntry::environment(current_namespace_id, version, &resolution.value)
+                };
+                let entry = if !matches!(value_entry, GlobalCacheEntry::Empty) {
+                    self.env
+                        .borrow()
+                        .register_namespace_value_cache_interest(cache_interest_mask);
+                    value_entry
+                } else if let Some((index, key)) = self
+                    .env
+                    .borrow()
+                    .namespace_root_binding_slot(name, &resolution.value)
+                {
+                    // Module fast-local writes must keep this binding
+                    // current: the entry reads it without a generation.
+                    self.env
+                        .borrow()
+                        .record_namespace_env_binding_mask(cache_interest_mask);
+                    GlobalCacheEntry::environment_slot(
+                        current_namespace_id,
+                        current_structure_version,
+                        index,
+                        key,
+                    )
+                } else {
+                    GlobalCacheEntry::Empty
+                };
+                set_global_cache(code, slot, entry);
             }
             GlobalResolutionCache::ScriptFastLocal {
                 environment_version,

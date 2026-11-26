@@ -136,6 +136,14 @@ struct RootNamespaceState {
     /// only on a possible overlap, avoiding a HashMap probe on ordinary module
     /// assignments while preventing stale slow bindings from winning lookup.
     env_binding_interest: Cell<u64>,
+    /// Names some `StoreGlobal` cache overwrites in place without advancing a
+    /// generation (#3423). A `LoadGlobal` cache for such a name must hold a
+    /// slot locator, never the value. The first in-place overwrite of a name
+    /// registers its Bloom mask here and then advances the generations once,
+    /// which invalidates every value-backed entry filled before; none can be
+    /// filled afterwards, so no stale value can be observed. False positives
+    /// only select the locator lane for an unrelated name.
+    store_slot_interest: Cell<u64>,
     /// Live Script fast-local mirrors for this root. Mutations through any
     /// alias of an exposed namespace dictionary update every matching mirror
     /// at the storage boundary, including mutations performed by a child
@@ -195,6 +203,7 @@ impl RootNamespaceState {
             value_cache_interest: Cell::new(0),
             fallback_cache_interest: Cell::new(0),
             env_binding_interest: Cell::new(0),
+            store_slot_interest: Cell::new(0),
             active_mirrors: RefCell::new(Vec::new()),
             active_mirror_count: Cell::new(0),
             fastlocal_mirror_epoch: Cell::new(0),

@@ -173,10 +173,11 @@ pub struct UserFunction {
     ///
     /// Holds the positional parameter count (the *maximum* number of positional
     /// arguments a trampolined call may supply) when this function is eligible
-    /// for the in-loop Python→Python trampoline (`Regular`, no `global`
-    /// declarations, no `*args`/`**kwargs`/keyword-only parameters, and
-    /// precompiled non-generator, non-coroutine, exception-handler-free,
-    /// own-cell-free bytecode; `for` loops are allowed, #3377), or
+    /// for the in-loop Python→Python trampoline (`Regular`, no
+    /// `*args`/`**kwargs`/keyword-only parameters, and precompiled
+    /// non-generator, non-coroutine, exception-handler-free, own-cell-free
+    /// bytecode; `for` loops are allowed, #3377, and so are `global`
+    /// declarations, #3423), or
     /// [`Self::TRAMPOLINE_INELIGIBLE`] (`u16::MAX`) otherwise. Since call-site
     /// `argc <= 256 < u16::MAX`, an exact-arity call
     /// (`nsupplied == trampoline_arity`) is a single integer comparison; a call

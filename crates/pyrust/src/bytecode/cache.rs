@@ -13,6 +13,7 @@ pub(crate) use binop::{BINOP_SPEC_THRESHOLD, BinOpCacheEntry, BinopTypeTag};
 pub(crate) use builtin_method::{
     BuiltinMethodCacheEntry, NativeMethodCacheEntry, is_builtin_method_cache_site,
 };
+pub(crate) use global::GlobalStoreCacheEntry;
 pub(crate) use global::{GlobalCacheEntry, global_cache_interest_mask};
 pub use kw_call::KwCallCacheEntry;
 pub use kw_call::{KwCallExArgsCache, KwCallExSimpleCache, KwCallSimpleCache};
