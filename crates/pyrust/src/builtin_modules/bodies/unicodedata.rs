@@ -173,6 +173,12 @@ pub(crate) fn normalize_nfkc(s: &str) -> String {
     normalize::normalize(NormForm::Nfkc, s)
 }
 
+/// Unicode 15.0.0 decimal digit value of `cp` (`Py_UNICODE_TODECIMAL`), or
+/// `None` when it is not a decimal digit (shared with `_string`).
+pub(crate) fn decimal_value(cp: u32) -> Option<u32> {
+    u32::try_from(lookup_record(cp).dec).ok()
+}
+
 /// Return the official Unicode 15.0.0 character name for `cp`, if any.
 pub(crate) fn unicode15_name(cp: u32) -> Option<String> {
     let rec = lookup_record(cp);

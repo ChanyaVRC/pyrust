@@ -262,12 +262,25 @@ impl Interpreter {
         if let Some(hook) = GENERIC_SUBCLASS_HOOK.get() {
             hook(self, class)?;
         }
-        let lookup_base = class
-            .borrow()
-            .base
-            .clone()
-            .unwrap_or_else(object_class_singleton);
-        let Some(method_val) = lookup_class_attr(&lookup_base, "__init_subclass__") else {
+        // CPython calls `super(cls, cls).__init_subclass__`: the first class
+        // after `cls` in its MRO that defines the hook.  With a single base
+        // that is exactly the base chain; with several bases a later base can
+        // precede the primary base's ancestors (`class C(Mixin, Template)`).
+        let has_extra_bases = !class.borrow().extra_bases.is_empty();
+        let method_val = if has_extra_bases {
+            crate::interpreter::c3_linearize_classes(class)
+                .into_iter()
+                .skip(1)
+                .find_map(|ancestor| ancestor.borrow().attrs.get("__init_subclass__").cloned())
+        } else {
+            let lookup_base = class
+                .borrow()
+                .base
+                .clone()
+                .unwrap_or_else(object_class_singleton);
+            lookup_class_attr(&lookup_base, "__init_subclass__")
+        };
+        let Some(method_val) = method_val else {
             return Ok(());
         };
         let new_cls = Value::py_class(Rc::clone(class));
