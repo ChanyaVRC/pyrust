@@ -38,6 +38,7 @@ pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, 
         "binascii" => binascii::prepare_module(interpreter, module),
         "bisect" => bisect::prepare_module(interpreter, module),
         "unicodedata" => unicodedata::prepare_module(interpreter, module),
+        "zlib" => zlib::prepare_module(interpreter, module),
         "shelve" => shelve::prepare_module(interpreter, module),
         "plistlib" => plistlib::prepare_module(interpreter, module),
         #[cfg(windows)]
