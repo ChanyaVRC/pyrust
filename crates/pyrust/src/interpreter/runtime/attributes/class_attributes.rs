@@ -361,6 +361,15 @@ impl Interpreter {
                     _ => Value::class_bound_method(Rc::clone(f), Rc::clone(&class)),
                 });
             }
+            if let ValueKind::BuiltinFunction(fn_name) = meta_val.kind()
+                && builtin_callable_metadata(fn_name).kind
+                    == crate::builtin_registry::BuiltinCallableKind::MethodDescriptor
+            {
+                return Ok(pyrust_builtins::super_bound_builtin::super_bound_builtin(
+                    fn_name.to_string(),
+                    Value::py_class(Rc::clone(&class)),
+                ));
+            }
             return Ok(meta_val);
         }
         // Issue #1960: on an MRO miss, fall back to the metaclass's
@@ -369,16 +378,19 @@ impl Interpreter {
         // `metaclass_dunder` returns `Some` only for a user override, so
         // ordinary classes keep raising `AttributeError` directly.
         if let Some(getattr_val) = metaclass_dunder(&class, "__getattr__")
-            && let ValueKind::UserFunction(f) = getattr_val.kind()
+            && matches!(
+                getattr_val.kind(),
+                ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
+            )
         {
-            let func = Rc::clone(f);
-            return self.call_user_function_expanded(
-                func,
+            return invoke_class_method(
+                self,
+                getattr_val,
+                Value::py_class(Rc::clone(&class)),
                 &[ExpandedCallArg {
                     name: None,
                     value: Value::string(name),
                 }],
-                &[Value::py_class(Rc::clone(&class))],
             );
         }
         // Issue #2096: every class is callable (to construct instances) via the

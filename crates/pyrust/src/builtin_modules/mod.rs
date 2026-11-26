@@ -18,6 +18,7 @@
 pub(crate) mod macros;
 pub(crate) mod asyncio_rt;
 pub(crate) mod asyncio_submodules;
+pub(crate) mod ctypes_rt;
 pub(crate) mod encodings_codecs;
 pub(crate) mod internal_shims;
 pub(crate) mod ssl_engine;
@@ -387,6 +388,10 @@ macro_rules! pyrust_builtin_modules {
                 "smtplib" => return smtplib::post_load_init(interp, module),
                 "poplib" => return poplib::post_load_init(interp, module),
                 "imaplib" => return imaplib::post_load_init(interp, module),
+                "_ctypes" => return _ctypes::post_load_init(interp, module),
+                "ctypes._endian" => return ctypes_endian::post_load_init(interp, module),
+                "ctypes" => return ctypes::post_load_init(interp, module),
+                "ctypes.wintypes" => return ctypes_wintypes::post_load_init(interp, module),
                 _ => {}
             }
             if asyncio_submodules::post_load_init(name, interp, module)? {
@@ -1020,6 +1025,13 @@ pyrust_builtin_modules! {
     winreg,
     #[cfg(windows)]
     winsound,
+    // `_ctypes`, `ctypes`, `ctypes._endian`, `ctypes.util`, and `ctypes.wintypes`
+    // (issue #3265): 100% native-Rust Python 3.12 FFI with zero C libffi dependency.
+    _ctypes,
+    "ctypes._endian" as ctypes_endian,
+    "ctypes.util" as ctypes_util,
+    "ctypes.wintypes" as ctypes_wintypes,
+    ctypes,
 }
 
 include!("finalization.rs");

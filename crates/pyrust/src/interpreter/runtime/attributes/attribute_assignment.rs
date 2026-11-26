@@ -456,6 +456,20 @@ impl Interpreter {
                 "cannot set '{name}' attribute of immutable type '{n}'"
             ));
         }
+        // Mirror `get_attr_class` (#2081): a data descriptor on the metaclass
+        // intercepts `Cls.name = value` before writing into `cls.__dict__`.
+        if let Some(meta_val) = metaclass_dunder(class, name)
+            && is_data_descriptor(&meta_val)
+            && let Some(result) = call_descriptor_set(
+                self,
+                &meta_val,
+                Value::py_class(Rc::clone(class)),
+                value.clone(),
+                name,
+            )?
+        {
+            return result;
+        }
         // __dict__ is a read-only descriptor on type objects — CPython
         // raises AttributeError on direct assignment.
         if name == "__dict__" {
