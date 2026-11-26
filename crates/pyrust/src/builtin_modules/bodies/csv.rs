@@ -23,7 +23,6 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::ffi::c_long;
 use std::rc::Rc;
 
 use pyrust_derive::pyrust_module;
@@ -231,9 +230,16 @@ struct CsvState {
 //     writers and dialects keep the objects they were created with.
 pyrust_core::gil_local! {
     static CSV_STATE: RefCell<Option<CsvState>> = const { RefCell::new(None) };
-    /// `field_size_limit` (a C `long`; 128 KiB by default).
-    static FIELD_LIMIT: Cell<c_long> = const { Cell::new(128 * 1024) };
+    /// `field_size_limit` (a C `long`, see [`C_LONG_RANGE`]; 128 KiB by default).
+    static FIELD_LIMIT: Cell<i64> = const { Cell::new(128 * 1024) };
 }
+
+/// The range of a C `long`, which bounds `field_size_limit`: 32-bit on
+/// Windows (LLP64), 64-bit on the LP64 targets.
+#[cfg(windows)]
+const C_LONG_RANGE: std::ops::RangeInclusive<i64> = (i32::MIN as i64)..=(i32::MAX as i64);
+#[cfg(not(windows))]
+const C_LONG_RANGE: std::ops::RangeInclusive<i64> = i64::MIN..=i64::MAX;
 
 fn state() -> Result<CsvState> {
     CSV_STATE
@@ -242,7 +248,7 @@ fn state() -> Result<CsvState> {
 }
 
 fn field_limit() -> i64 {
-    FIELD_LIMIT.with(|limit| i64::from(limit.get()))
+    FIELD_LIMIT.with(Cell::get)
 }
 
 // ── Generic helpers ──────────────────────────────────────────────────────────
@@ -499,7 +505,7 @@ fn field_size_limit_impl(call_args: &[ExpandedCallArg]) -> Result<Value> {
     let old_limit = FIELD_LIMIT.with(Cell::get);
     if let Some(new_limit) = &slots[0] {
         let value = match new_limit.kind() {
-            ValueKind::Int(v) => c_long::try_from(v).ok(),
+            ValueKind::Int(v) => C_LONG_RANGE.contains(&v).then_some(v),
             ValueKind::BigInt(_) => None,
             _ => return Err(args::type_error("limit must be an integer")),
         };
@@ -511,7 +517,7 @@ fn field_size_limit_impl(call_args: &[ExpandedCallArg]) -> Result<Value> {
         };
         FIELD_LIMIT.with(|limit| limit.set(value));
     }
-    Ok(Value::int(i64::from(old_limit)))
+    Ok(Value::int(old_limit))
 }
 
 /// `csv.Dialect._validate`: `_Dialect(self)`, re-raising `TypeError` as
