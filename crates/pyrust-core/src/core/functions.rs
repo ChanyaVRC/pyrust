@@ -171,13 +171,19 @@ pub struct UserFunction {
     pub memo_positional_parameter_count: u16,
     /// Precomputed VM call-trampoline gate (#3159).
     ///
-    /// Holds the exact positional parameter count when this function is
-    /// eligible for the in-loop Python→Python trampoline (`Regular`, no
-    /// `global` declarations, no `*args`/`**kwargs`/keyword-only parameters,
-    /// and precompiled non-generator, non-coroutine, loop-free, handler-free,
-    /// own-cell-free bytecode), or [`Self::TRAMPOLINE_INELIGIBLE`] (`u16::MAX`)
-    /// otherwise. Since call-site `argc <= 256 < u16::MAX`, the hot trampoline
-    /// gate reduces to a single integer comparison (`nsupplied == trampoline_arity`).
+    /// Holds the positional parameter count (the *maximum* number of positional
+    /// arguments a trampolined call may supply) when this function is eligible
+    /// for the in-loop Python→Python trampoline (`Regular`, no `global`
+    /// declarations, no `*args`/`**kwargs`/keyword-only parameters, and
+    /// precompiled non-generator, non-coroutine, exception-handler-free,
+    /// own-cell-free bytecode; `for` loops are allowed, #3377), or
+    /// [`Self::TRAMPOLINE_INELIGIBLE`] (`u16::MAX`) otherwise. Since call-site
+    /// `argc <= 256 < u16::MAX`, an exact-arity call
+    /// (`nsupplied == trampoline_arity`) is a single integer comparison; a call
+    /// omitting trailing defaulted parameters (`nsupplied < trampoline_arity`)
+    /// has its omitted defaults checked and bound at call time from
+    /// `params[].default` (#3381), declining when `f.__defaults__` was
+    /// reassigned or deleted.
     pub trampoline_arity: u16,
     /// Precomputed bind target for the function's own name (the self-reference
     /// register used by recursive calls), or `None` when the name has no local

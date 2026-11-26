@@ -30,14 +30,59 @@ enum TrampEnter<T> {
 /// (#2234 / #3159).
 const TRAMP_ARENA_CAPACITY: usize = 16 * 1024;
 
+/// Whether a call supplying `nsupplied < trampoline_arity` positional arguments
+/// can bind every omitted trailing parameter from its compile-time default
+/// (#3381).
+///
+/// Also rejects trampoline-ineligible callees (whose `trampoline_arity` is the
+/// `u16::MAX` sentinel, so any shorter call looks "under-supplied").
+///
+/// Out of line and cold: exact-arity calls never reach it. A per-object
+/// `f.__defaults__` / `del f.__defaults__` override realigns or removes the
+/// defaults, so those functions decline and take the canonical binder, which
+/// raises the exact CPython `TypeError` on a shortfall.
+#[inline(never)]
+fn vm_tramp_omitted_defaults_ok(f: &pyrust_core::UserFunction, nsupplied: usize) -> bool {
+    f.trampoline_arity != pyrust_core::UserFunction::TRAMPOLINE_INELIGIBLE
+        && f.defaults_override.borrow().is_none()
+        && f.params
+            .get(nsupplied..)
+            .is_some_and(|omitted| omitted.iter().all(|p| p.default.is_some()))
+}
+
+/// Bind the omitted trailing parameters of a call that supplied `nsupplied`
+/// positional arguments from the callee's defaults at call time, so mutable
+/// default objects are shared exactly as on the native path (#3381).
+///
+/// Only reached when `nsupplied < trampoline_arity`, after
+/// [`vm_tramp_omitted_defaults_ok`] accepted the call.
+#[inline(never)]
+fn vm_tramp_fill_omitted_defaults(
+    arena: &mut [Value],
+    base: usize,
+    f: &pyrust_core::UserFunction,
+    nsupplied: usize,
+) {
+    for i in nsupplied..f.trampoline_arity as usize {
+        if let pyrust_core::ParamBind::Reg(r) = f.param_binds[i]
+            && let Some(default) = &f.params[i].default
+        {
+            arena[base + r as usize] = default.clone();
+        }
+    }
+}
+
 /// Gate check shared by plain-function and bound-method trampolining (#2234 / #2345 / #3159).
 ///
 /// Uses the precomputed `UserFunction::trampoline_arity` sentinel so callee
 /// eligibility (`Regular`, no `global` declarations, no variadic/keyword-only
-/// parameters, exact arity, and plain handler-free/own-cell-free bytecode)
-/// reduces to a single integer comparison, then verifies the caller
-/// is outside any `try` and that the fixed-capacity `tramp_arena` has room
-/// without reallocating (which would dangle live `RegSlice`s).
+/// parameters, and plain handler-free/own-cell-free bytecode) reduces to a
+/// single integer comparison for an exact-arity call. A call omitting trailing
+/// defaulted parameters (`nsupplied < trampoline_arity`) additionally
+/// consults the cold [`vm_tramp_omitted_defaults_ok`] (#3381); too many
+/// arguments always decline. Then verifies the caller is outside any `try` and
+/// that the fixed-capacity `tramp_arena` has room without reallocating (which
+/// would dangle live `RegSlice`s).
 #[inline(always)]
 fn vm_tramp_check_gate<'a>(
     f: &'a pyrust_core::UserFunction,
@@ -47,7 +92,8 @@ fn vm_tramp_check_gate<'a>(
     nsupplied: usize,
     tramp_arena: &mut Vec<Value>,
 ) -> Option<(&'a crate::bytecode::FnCode, usize)> {
-    if nsupplied != f.trampoline_arity as usize {
+    let arity = f.trampoline_arity as usize;
+    if nsupplied != arity && (nsupplied > arity || !vm_tramp_omitted_defaults_ok(f, nsupplied)) {
         return None;
     }
     if !exc_handlers.is_empty()
@@ -70,7 +116,7 @@ fn vm_tramp_check_gate<'a>(
         .and_then(|any| any.downcast_ref::<crate::bytecode::FnCode>())?;
     debug_assert!(matches!(f.kind, pyrust_core::UserFunctionKind::Regular));
     debug_assert!(f.global_names.is_empty());
-    debug_assert_eq!(f.params.len(), nsupplied);
+    debug_assert_eq!(f.params.len(), arity);
     debug_assert!(
         !f.params
             .iter()
@@ -277,6 +323,9 @@ impl Interpreter {
                 self.tramp_arena[base + r as usize] = v;
             }
         }
+        if nparams < func.trampoline_arity as usize {
+            vm_tramp_fill_omitted_defaults(&mut self.tramp_arena, base, &func, nparams);
+        }
         if let Some(slot) = func.self_bind {
             self.tramp_arena[base + slot as usize] = Value::user_function(Rc::clone(&func));
         }
@@ -344,6 +393,9 @@ impl Interpreter {
             if let pyrust_core::ParamBind::Reg(r) = f.param_binds[i] {
                 self.tramp_arena[base + r as usize] = v;
             }
+        }
+        if nparams < f.trampoline_arity as usize {
+            vm_tramp_fill_omitted_defaults(&mut self.tramp_arena, base, f, nparams);
         }
         if let Some(slot) = f.self_bind {
             self.tramp_arena[base + slot as usize] = func_val.clone();
@@ -414,6 +466,9 @@ impl Interpreter {
             if let pyrust_core::ParamBind::Reg(r) = f.param_binds[1 + i as usize] {
                 self.tramp_arena[base + r as usize] = v;
             }
+        }
+        if (argc as usize) + 1 < f.trampoline_arity as usize {
+            vm_tramp_fill_omitted_defaults(&mut self.tramp_arena, base, f, argc as usize + 1);
         }
         self.vm_tramp_commit_frame(
             dst,
