@@ -1,197 +1,112 @@
-// `binascii` module — body for the `binascii @inject` entry in
-// `pyrust_builtin_modules!` (issue #3145).
+// `binascii` — 100% native Rust implementation of CPython 3.12's `binascii`
+// extension module (issues #3145, #3308).
 //
-// Native Rust implementations for hex, Base64, CRC-32, CRC-HQX (CCITT),
-// uuencode, and quoted-printable codecs live here; the public Python surface
-// (`Error`, `Incomplete`, and exact CPython 3.12 function signatures) is
-// injected from `binascii_py.py` by `inject_python_members`.
+// Hex, Base64, CRC-32, CRC-HQX (CCITT), uuencode, and quoted-printable codecs
+// plus the `Error` / `Incomplete` exceptions are declared directly in the
+// `pyrust_module!` block below; there is no Python-source injection.
 //
 // Reference: <https://docs.python.org/3/library/binascii.html>
 
-use std::cell::RefCell;
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{
-    ExpandedCallArg, Interpreter, builtin_data_backing, reject_keyword_args_expanded,
-    value_type_name_str,
+use crate::interpreter::builtin_args::{
+    FromValue, OptValueRef, OptionalArg, PyBytesLike, PyIndex, PyValueRef,
 };
-use crate::value::{PyBigInt, PyBigIntSign, PyKey, PyToPrimitive, Value, ValueKind};
+use crate::interpreter::{ExpandedCallArg, Interpreter, builtin_data_backing, value_type_name_str};
+use crate::value::{PyBigInt, PyBigIntSign, Value, ValueKind};
 use pyrust_derive::pyrust_module;
-
-/// Python-source definitions for the public `binascii` surface.
-const BINASCII_PY_SOURCE: &str = include_str!("binascii_py.py");
-
-/// Private native helpers seeded into the injected exec namespace and removed
-/// from `binascii.__dict__` after injection so `dir(binascii)` matches CPython.
-const BINASCII_NATIVE_HELPERS: [&str; 10] = [
-    "_b2a_hex",
-    "_a2b_hex",
-    "_b2a_base64",
-    "_a2b_base64",
-    "_crc32",
-    "_crc_hqx",
-    "_b2a_uu",
-    "_a2b_uu",
-    "_b2a_qp",
-    "_a2b_qp",
-];
-
-/// Public names exported from `BINASCII_PY_SOURCE` onto the `binascii` module.
-const BINASCII_PY_EXPORTS: [&str; 14] = [
-    "Error",
-    "Incomplete",
-    "a2b_base64",
-    "a2b_hex",
-    "a2b_qp",
-    "a2b_uu",
-    "b2a_base64",
-    "b2a_hex",
-    "b2a_qp",
-    "b2a_uu",
-    "crc32",
-    "crc_hqx",
-    "hexlify",
-    "unhexlify",
-];
-
-/// Execute `BINASCII_PY_SOURCE` once, wire its wrappers to the native helpers,
-/// hide the internal helper names from `dir(binascii)`, and export the public
-/// CPython 3.12 `binascii` surface onto `module`.
-pub(crate) fn inject_python_members(
-    interp: &mut Interpreter,
-    module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<Option<Value>> {
-    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
-    {
-        let mut module_ref = module.borrow_mut();
-        for helper in BINASCII_NATIVE_HELPERS {
-            if let Some(func) = module_ref.attrs.shift_remove(helper) {
-                ns.dict_insert(PyKey::str_from(helper), func)?;
-            }
-        }
-    }
-    interp.exec_source(BINASCII_PY_SOURCE, Some(ns.clone()), None)?;
-    let dict = ns
-        .as_dict()
-        .ok_or_else(|| PyError::runtime("binascii: exec namespace not a dict".into()))?;
-    for name in BINASCII_PY_EXPORTS {
-        if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            if let ValueKind::PyClass(cls_rc) = val.kind() {
-                let mut class = cls_rc.borrow_mut();
-                class
-                    .attrs
-                    .insert("__module__".to_string(), Value::string("binascii"));
-                class.error_name = match name {
-                    "Error" => Some("binascii.Error"),
-                    "Incomplete" => Some("binascii.Incomplete"),
-                    _ => None,
-                };
-            }
-            module
-                .borrow_mut()
-                .attrs
-                .insert(name.to_string(), val.clone());
-        }
-    }
-    Ok(Some(ns.clone()))
-}
 
 // ── Error & buffer helpers ───────────────────────────────────────────────────
 
-fn raise_binascii_error(error_cls: &Value, msg: impl Into<String>) -> PyError {
-    let msg = msg.into();
-    if let ValueKind::PyClass(cls_rc) = error_cls.kind() {
+/// A `binascii.Error` message produced by a pure codec routine; converted to a
+/// real `binascii.Error` instance by [`raise_binascii_error`] at the module
+/// boundary.
+#[derive(Debug)]
+struct CodecError(String);
+
+impl CodecError {
+    fn new(msg: impl Into<String>) -> Self {
+        CodecError(msg.into())
+    }
+}
+
+impl std::fmt::Display for CodecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+type CodecResult<T> = std::result::Result<T, CodecError>;
+
+/// Instantiate `binascii.Error(msg)` from the module's own exception class.
+fn raise_binascii_error(interp: &mut Interpreter, err: CodecError) -> PyError {
+    if let Ok(module) = interp.load_module("binascii")
+        && let Ok(cls) = interp.get_attr(&module, "Error")
+        && let ValueKind::PyClass(cls_rc) = cls.kind()
+    {
         return PyError::raised(crate::interpreter::instantiate_exception(
             Rc::clone(cls_rc),
-            vec![Value::string(&msg)],
+            vec![Value::string(&err.0)],
         ));
     }
-    PyError::runtime(msg)
+    PyError::named("ValueError", err.0)
 }
 
-fn try_extract_bytes_like(val: &Value) -> Option<Vec<u8>> {
-    if let ValueKind::Bytes(rc) = val.kind() {
-        return Some(rc.as_ref().clone());
-    }
-    if let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(val) {
-        return Some(snap);
-    }
-    if pyrust_builtins::memoryview::is_memoryview(val) {
-        return pyrust_builtins::memoryview::to_bytes_checked(val).ok();
-    }
-    if let Some(backing) = builtin_data_backing(val) {
-        if let ValueKind::Bytes(rc) = backing.kind() {
-            return Some(rc.as_ref().clone());
-        }
-        if let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(&backing) {
-            return Some(snap);
-        }
-    }
-    // Support `array.array` instances (backed by `self._buf` bytearray).
-    if let ValueKind::PyInstance(inst_rc) = val.kind() {
-        let inst = inst_rc.borrow();
-        let is_array = {
-            let cls = inst.class.borrow();
-            cls.name == "array"
-                && cls
-                    .attrs
-                    .get("__module__")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|m| m == "array")
-        };
-        if is_array
-            && let Some(buf) = inst.attrs.get("_buf")
-            && let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(buf)
-        {
-            return Some(snap);
-        }
-    }
-    None
+fn type_error(msg: String) -> PyError {
+    PyError::named("TypeError", msg)
 }
 
-fn extract_bytes_like(val: &Value) -> Result<Vec<u8>> {
-    try_extract_bytes_like(val).ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            format!(
-                "a bytes-like object is required, not '{}'",
-                value_type_name_str(val)
-            ),
-        )
-    })
+/// Resolve a bytes-like argument (`bytes`, `bytearray`, `memoryview`, `array`,
+/// PEP 688 exporters, and subclasses), borrowing `bytes` without a copy.
+fn extract_bytes_like<'a>(interp: &mut Interpreter, val: &'a Value) -> Result<PyBytesLike<'a>> {
+    if !PyBytesLike::matches(val) {
+        return Err(type_error(format!(
+            "a bytes-like object is required, not '{}'",
+            value_type_name_str(val)
+        )));
+    }
+    PyBytesLike::try_from_value_with_interp(interp, val, "binascii", "data")
 }
 
-fn extract_ascii_buffer(val: &Value) -> Result<Vec<u8>> {
+fn ascii_only(s: &str) -> Result<Cow<'_, [u8]>> {
+    if !s.is_ascii() {
+        return Err(PyError::named(
+            "ValueError",
+            "string argument should contain only ASCII characters".to_string(),
+        ));
+    }
+    Ok(Cow::Borrowed(s.as_bytes()))
+}
+
+/// Resolve an "ASCII string or bytes-like" argument (`a2b_*` input).
+fn extract_ascii_buffer<'a>(interp: &mut Interpreter, val: &'a Value) -> Result<Cow<'a, [u8]>> {
     if let ValueKind::Str(s) = val.kind() {
-        if !s.is_ascii() {
-            return Err(PyError::named(
-                "ValueError",
-                "string argument should contain only ASCII characters".to_string(),
-            ));
-        }
-        return Ok(s.as_bytes().to_vec());
+        return ascii_only(s);
     }
     if let Some(backing) = builtin_data_backing(val)
         && let ValueKind::Str(s) = backing.kind()
     {
-        if !s.is_ascii() {
-            return Err(PyError::named(
-                "ValueError",
-                "string argument should contain only ASCII characters".to_string(),
-            ));
-        }
-        return Ok(s.as_bytes().to_vec());
+        return ascii_only(s).map(|b| Cow::Owned(b.into_owned()));
     }
-    try_extract_bytes_like(val).ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            format!(
-                "argument should be bytes, buffer or ASCII string, not '{}'",
-                value_type_name_str(val)
-            ),
-        )
-    })
+    if !PyBytesLike::matches(val) {
+        return Err(type_error(format!(
+            "argument should be bytes, buffer or ASCII string, not '{}'",
+            value_type_name_str(val)
+        )));
+    }
+    Ok(Cow::Owned(
+        PyBytesLike::try_from_value_with_interp(interp, val, "binascii", "data")?.into_vec(),
+    ))
+}
+
+/// Truthiness of an optional boolean-ish argument (`PyObject_IsTrue`).
+fn optional_truthy(interp: &mut Interpreter, arg: &OptValueRef<'_>, default: bool) -> Result<bool> {
+    match arg {
+        OptionalArg::Provided(v) => interp.truthy_value(v.0),
+        OptionalArg::Omitted => Ok(default),
+    }
 }
 
 fn bigint_low_u32(bi: &PyBigInt) -> u32 {
@@ -204,72 +119,28 @@ fn bigint_low_u32(bi: &PyBigInt) -> u32 {
     }
 }
 
-fn resolve_index_value(interp: &mut Interpreter, val: &Value) -> Result<Value> {
-    match val.kind() {
-        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => Ok(val.clone()),
-        ValueKind::PyInstance(_) | ValueKind::PyClass(_) => {
-            if let Some(indexed) = interp.try_value_to_index(val)? {
-                Ok(indexed)
-            } else {
-                Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "'{}' object cannot be interpreted as an integer",
-                        value_type_name_str(val)
-                    ),
-                ))
-            }
-        }
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(val)
-            ),
-        )),
+/// `unsigned int` converter with `bitwise=True`: any integer, wrapped to 32 bits.
+fn index_to_u32_mask(idx: &PyIndex) -> u32 {
+    match idx.as_i64() {
+        Some(n) => n as u32,
+        None => bigint_low_u32(&idx.to_bigint()),
     }
 }
 
-fn extract_u32_mask(interp: &mut Interpreter, val: &Value) -> Result<u32> {
-    let idx = resolve_index_value(interp, val)?;
-    match idx.kind() {
-        ValueKind::Int(n) => Ok(n as u32),
-        ValueKind::Bool(b) => Ok(u32::from(b)),
-        ValueKind::BigInt(bi) => Ok(bigint_low_u32(bi)),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(val)
-            ),
-        )),
-    }
-}
-
-fn extract_c_int(interp: &mut Interpreter, val: &Value) -> Result<i32> {
-    let idx = resolve_index_value(interp, val)?;
-    match idx.kind() {
-        ValueKind::Bool(b) => Ok(i32::from(b)),
-        ValueKind::Int(n) => i32::try_from(n).map_err(|_| {
+/// `int` (C `int`) converter: `OverflowError` outside the 32-bit signed range.
+fn index_to_c_int(idx: &PyIndex) -> Result<i32> {
+    idx.as_i64()
+        .and_then(|n| i32::try_from(n).ok())
+        .ok_or_else(|| {
             PyError::named(
                 "OverflowError",
                 "Python int too large to convert to C int".to_string(),
             )
-        }),
-        ValueKind::BigInt(bi) => bi.to_i32().ok_or_else(|| {
-            PyError::named(
-                "OverflowError",
-                "Python int too large to convert to C int".to_string(),
-            )
-        }),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(val)
-            ),
-        )),
-    }
+        })
+}
+
+fn resolve_index(interp: &mut Interpreter, val: &Value) -> Result<PyIndex> {
+    PyIndex::try_from_value_with_interp(interp, val, "binascii", "value")
 }
 
 // ── Hex encoding / decoding ──────────────────────────────────────────────────
@@ -403,17 +274,14 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
-fn decode_hex_bytes(data: &[u8], error_cls: &Value) -> Result<Vec<u8>> {
+fn decode_hex_bytes(data: &[u8]) -> CodecResult<Vec<u8>> {
     if !data.len().is_multiple_of(2) {
-        return Err(raise_binascii_error(error_cls, "Odd-length string"));
+        return Err(CodecError::new("Odd-length string"));
     }
     let mut out = Vec::with_capacity(data.len() / 2);
     for pair in data.as_chunks::<2>().0 {
         let (Some(hi), Some(lo)) = (hex_nibble(pair[0]), hex_nibble(pair[1])) else {
-            return Err(raise_binascii_error(
-                error_cls,
-                "Non-hexadecimal digit found",
-            ));
+            return Err(CodecError::new("Non-hexadecimal digit found"));
         };
         out.push((hi << 4) | lo);
     }
@@ -471,12 +339,9 @@ fn encode_base64(data: &[u8], newline: bool) -> Vec<u8> {
     out
 }
 
-fn decode_base64(data: &[u8], strict_mode: bool, error_cls: &Value) -> Result<Vec<u8>> {
+fn decode_base64(data: &[u8], strict_mode: bool) -> CodecResult<Vec<u8>> {
     if strict_mode && !data.is_empty() && data[0] == b'=' {
-        return Err(raise_binascii_error(
-            error_cls,
-            "Leading padding not allowed",
-        ));
+        return Err(CodecError::new("Leading padding not allowed"));
     }
 
     let mut out = Vec::with_capacity((data.len() / 4) * 3 + 3);
@@ -489,16 +354,13 @@ fn decode_base64(data: &[u8], strict_mode: bool, error_cls: &Value) -> Result<Ve
         if c == b'=' {
             padding_started = true;
             if strict_mode && quad_pos == 0 {
-                return Err(raise_binascii_error(
-                    error_cls,
-                    "Excess padding not allowed",
-                ));
+                return Err(CodecError::new("Excess padding not allowed"));
             }
             if quad_pos >= 2 {
                 pads += 1;
                 if quad_pos + pads >= 4 {
                     if strict_mode && i + 1 < data.len() {
-                        return Err(raise_binascii_error(error_cls, "Excess data after padding"));
+                        return Err(CodecError::new("Excess data after padding"));
                     }
                     if quad_pos == 2 {
                         out.push(((leftchar >> 4) & 0xff) as u8);
@@ -516,19 +378,13 @@ fn decode_base64(data: &[u8], strict_mode: bool, error_cls: &Value) -> Result<Ve
         let val = B64_DECODE[c as usize];
         if val == 0xff {
             if strict_mode {
-                return Err(raise_binascii_error(
-                    error_cls,
-                    "Only base64 data is allowed",
-                ));
+                return Err(CodecError::new("Only base64 data is allowed"));
             }
             continue;
         }
 
         if strict_mode && padding_started {
-            return Err(raise_binascii_error(
-                error_cls,
-                "Discontinuous padding not allowed",
-            ));
+            return Err(CodecError::new("Discontinuous padding not allowed"));
         }
 
         pads = 0;
@@ -546,14 +402,11 @@ fn decode_base64(data: &[u8], strict_mode: bool, error_cls: &Value) -> Result<Ve
     if quad_pos != 0 {
         if quad_pos == 1 {
             let data_chars = (out.len() / 3) * 4 + 1;
-            return Err(raise_binascii_error(
-                error_cls,
-                format!(
-                    "Invalid base64-encoded string: number of data characters ({data_chars}) cannot be 1 more than a multiple of 4"
-                ),
-            ));
+            return Err(CodecError::new(format!(
+                "Invalid base64-encoded string: number of data characters ({data_chars}) cannot be 1 more than a multiple of 4"
+            )));
         }
-        return Err(raise_binascii_error(error_cls, "Incorrect padding"));
+        return Err(CodecError::new("Incorrect padding"));
     }
 
     Ok(out)
@@ -628,9 +481,9 @@ fn uu_encode_char(val: u8, backtick: bool) -> u8 {
     if backtick && v == 0 { b'`' } else { v + 0x20 }
 }
 
-fn encode_uu(data: &[u8], backtick: bool, error_cls: &Value) -> Result<Vec<u8>> {
+fn encode_uu(data: &[u8], backtick: bool) -> CodecResult<Vec<u8>> {
     if data.len() > 45 {
-        return Err(raise_binascii_error(error_cls, "At most 45 bytes at once"));
+        return Err(CodecError::new("At most 45 bytes at once"));
     }
     let mut out = Vec::with_capacity(2 + data.len().div_ceil(3) * 4);
     out.push(uu_encode_char(data.len() as u8, backtick));
@@ -648,7 +501,7 @@ fn encode_uu(data: &[u8], backtick: bool, error_cls: &Value) -> Result<Vec<u8>> 
     Ok(out)
 }
 
-fn decode_uu(data: &[u8], error_cls: &Value) -> Result<Vec<u8>> {
+fn decode_uu(data: &[u8]) -> CodecResult<Vec<u8>> {
     // Match CPython's `binascii_a2b_uu_impl` quirks (including empty input -> 32 NULs).
     let (first, rest) = match data.split_first() {
         Some((&f, r)) => (f, r),
@@ -671,7 +524,7 @@ fn decode_uu(data: &[u8], error_cls: &Value) -> Result<Vec<u8>> {
             } else {
                 let d = c.wrapping_sub(0x20) & 0x3f;
                 if !(0x20..=0x60).contains(&c) {
-                    return Err(raise_binascii_error(error_cls, "Illegal char"));
+                    return Err(CodecError::new("Illegal char"));
                 }
                 d
             }
@@ -698,7 +551,7 @@ fn decode_uu(data: &[u8], error_cls: &Value) -> Result<Vec<u8>> {
             continue;
         }
         // Check if CPython allows trailing padding chars within the same 4-char group.
-        return Err(raise_binascii_error(error_cls, "Trailing garbage"));
+        return Err(CodecError::new("Trailing garbage"));
     }
 
     Ok(out)
@@ -839,98 +692,179 @@ fn decode_qp(data: &[u8], header: bool) -> Vec<u8> {
     }
     out
 }
+// ── Shared function bodies ───────────────────────────────────────────────────
 
-// ── Native module helpers ────────────────────────────────────────────────────
+/// `b2a_hex` / `hexlify`: validates `data`, then `bytes_per_sep`, then `sep`,
+/// matching Argument Clinic's conversion order followed by
+/// `_Py_strhex_bytes_with_sep`.
+fn hex_encode(
+    interp: &mut Interpreter,
+    data: &Value,
+    sep: &OptValueRef<'_>,
+    bytes_per_sep: &OptValueRef<'_>,
+) -> Result<Value> {
+    let data = extract_bytes_like(interp, data)?;
+    let bps = match bytes_per_sep {
+        OptionalArg::Provided(v) => index_to_c_int(&resolve_index(interp, v.0)?)?,
+        OptionalArg::Omitted => 1,
+    };
+    let sep = match sep {
+        OptionalArg::Provided(v) => Some(parse_hexlify_sep(v.0)?),
+        OptionalArg::Omitted => None,
+    };
+    Ok(Value::bytes(encode_hex_bytes(&data, sep, bps)))
+}
+
+fn hex_decode(interp: &mut Interpreter, hexstr: &Value) -> Result<Value> {
+    let data = extract_ascii_buffer(interp, hexstr)?;
+    decode_hex_bytes(&data)
+        .map(Value::bytes)
+        .map_err(|e| raise_binascii_error(interp, e))
+}
+
+/// `crc32` / `crc_hqx` shared argument handling: returns the data and the
+/// 32-bit-masked initial value (`default` when omitted).
+fn crc_args<'a>(
+    interp: &mut Interpreter,
+    data: &'a Value,
+    crc: &OptValueRef<'_>,
+    default: u32,
+) -> Result<(PyBytesLike<'a>, u32)> {
+    let data = extract_bytes_like(interp, data)?;
+    let init = match crc {
+        OptionalArg::Provided(v) => index_to_u32_mask(&resolve_index(interp, v.0)?),
+        OptionalArg::Omitted => default,
+    };
+    Ok((data, init))
+}
+
+/// CPython's `binascii.Error` / `binascii.Incomplete` have `__doc__ = None`;
+/// native exception classes only get a `__doc__` entry when they carry one.
+pub(crate) fn prepare_module(_interp: &mut Interpreter, module: &Value) {
+    let ValueKind::PyModule(mod_rc) = module.kind() else {
+        return;
+    };
+    for name in ["Error", "Incomplete"] {
+        let cls = mod_rc.borrow().attrs.get(name).cloned();
+        if let Some(cls) = cls
+            && let ValueKind::PyClass(cls_rc) = cls.kind()
+        {
+            cls_rc
+                .borrow_mut()
+                .attrs
+                .entry("__doc__".to_string())
+                .or_insert_with(Value::none);
+        }
+    }
+}
+
+// ── Module definition ────────────────────────────────────────────────────────
 
 pyrust_module! {
-    /// `_b2a_hex(data, sep, has_sep, bytes_per_sep)` -> `bytes`.
-    fn _b2a_hex(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let data = extract_bytes_like(&args[0].value)?;
-        let has_sep = _interp.truthy_value(&args[2].value)?;
-        // CPython validates `bytes_per_sep` unconditionally before `sep`.
-        let bps = extract_c_int(_interp, &args[3].value)?;
-        let sep = if has_sep {
-            Some(parse_hexlify_sep(&args[1].value)?)
-        } else {
-            None
-        };
-        Ok(Value::bytes(encode_hex_bytes(&data, sep, bps)))
+    constants {
+        "__doc__" => Value::string("Conversion between binary data and ASCII"),
     }
 
-    /// `_a2b_hex(error_cls, hexstr)` -> `bytes`.
-    fn _a2b_hex(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let error_cls = &args[0].value;
-        let data = extract_ascii_buffer(&args[1].value)?;
-        Ok(Value::bytes(decode_hex_bytes(&data, error_cls)?))
+    exception Error(ValueError);
+    exception Incomplete;
+
+    fn b2a_hex(
+        data: PyValueRef<'_>,
+        #[default(OptionalArg::Omitted)] sep: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] bytes_per_sep: OptValueRef<'_>,
+    ) -> Result<Value> {
+        hex_encode(_interp, data.0, &sep, &bytes_per_sep)
     }
 
-    /// `_b2a_base64(data, newline)` -> `bytes`.
-    fn _b2a_base64(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let data = extract_bytes_like(&args[0].value)?;
-        let newline = _interp.truthy_value(&args[1].value)?;
+    fn hexlify(
+        data: PyValueRef<'_>,
+        #[default(OptionalArg::Omitted)] sep: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] bytes_per_sep: OptValueRef<'_>,
+    ) -> Result<Value> {
+        hex_encode(_interp, data.0, &sep, &bytes_per_sep)
+    }
+
+    fn a2b_hex(#[positional_only] hexstr: PyValueRef<'_>) -> Result<Value> {
+        hex_decode(_interp, hexstr.0)
+    }
+
+    fn unhexlify(#[positional_only] hexstr: PyValueRef<'_>) -> Result<Value> {
+        hex_decode(_interp, hexstr.0)
+    }
+
+    fn b2a_base64(
+        #[positional_only] data: PyValueRef<'_>,
+        #[keyword_only] #[default(OptionalArg::Omitted)] newline: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let data = extract_bytes_like(_interp, data.0)?;
+        let newline = optional_truthy(_interp, &newline, true)?;
         Ok(Value::bytes(encode_base64(&data, newline)))
     }
 
-    /// `_a2b_base64(error_cls, data, strict_mode)` -> `bytes`.
-    fn _a2b_base64(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let error_cls = &args[0].value;
-        let data = extract_ascii_buffer(&args[1].value)?;
-        let strict_mode = _interp.truthy_value(&args[2].value)?;
-        Ok(Value::bytes(decode_base64(&data, strict_mode, error_cls)?))
+    fn a2b_base64(
+        #[positional_only] data: PyValueRef<'_>,
+        #[keyword_only] #[default(OptionalArg::Omitted)] strict_mode: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let data = extract_ascii_buffer(_interp, data.0)?;
+        let strict_mode = optional_truthy(_interp, &strict_mode, false)?;
+        decode_base64(&data, strict_mode)
+            .map(Value::bytes)
+            .map_err(|e| raise_binascii_error(_interp, e))
     }
 
-    /// `_crc32(data, value)` -> `int` (unsigned 32-bit CRC-32).
-    fn _crc32(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let data = extract_bytes_like(&args[0].value)?;
-        let init = extract_u32_mask(_interp, &args[1].value)?;
+    fn crc32(
+        #[positional_only] data: PyValueRef<'_>,
+        #[positional_only] #[default(OptionalArg::Omitted)] crc: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let (data, init) = crc_args(_interp, data.0, &crc, 0)?;
         Ok(Value::int(i64::from(compute_crc32(&data, init))))
     }
 
-    /// `_crc_hqx(data, value)` -> `int` (unsigned 16-bit CRC-CCITT).
-    fn _crc_hqx(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let data = extract_bytes_like(&args[0].value)?;
-        let init = (extract_u32_mask(_interp, &args[1].value)? & 0xffff) as u16;
-        Ok(Value::int(i64::from(compute_crc_hqx(&data, init))))
+    fn crc_hqx(
+        #[positional_only] data: PyValueRef<'_>,
+        #[positional_only] crc: PyValueRef<'_>,
+    ) -> Result<Value> {
+        let (data, init) = crc_args(_interp, data.0, &OptionalArg::Provided(crc), 0)?;
+        Ok(Value::int(i64::from(compute_crc_hqx(&data, (init & 0xffff) as u16))))
     }
 
-    /// `_b2a_uu(error_cls, data, backtick)` -> `bytes`.
-    fn _b2a_uu(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let error_cls = &args[0].value;
-        let data = extract_bytes_like(&args[1].value)?;
-        let backtick = _interp.truthy_value(&args[2].value)?;
-        Ok(Value::bytes(encode_uu(&data, backtick, error_cls)?))
+    fn b2a_uu(
+        #[positional_only] data: PyValueRef<'_>,
+        #[keyword_only] #[default(OptionalArg::Omitted)] backtick: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let data = extract_bytes_like(_interp, data.0)?;
+        let backtick = optional_truthy(_interp, &backtick, false)?;
+        encode_uu(&data, backtick)
+            .map(Value::bytes)
+            .map_err(|e| raise_binascii_error(_interp, e))
     }
 
-    /// `_a2b_uu(error_cls, data)` -> `bytes`.
-    fn _a2b_uu(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let error_cls = &args[0].value;
-        let data = extract_ascii_buffer(&args[1].value)?;
-        Ok(Value::bytes(decode_uu(&data, error_cls)?))
+    fn a2b_uu(#[positional_only] data: PyValueRef<'_>) -> Result<Value> {
+        let data = extract_ascii_buffer(_interp, data.0)?;
+        decode_uu(&data)
+            .map(Value::bytes)
+            .map_err(|e| raise_binascii_error(_interp, e))
     }
 
-    /// `_b2a_qp(data, quotetabs, istext, header)` -> `bytes`.
-    fn _b2a_qp(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let data = extract_bytes_like(&args[0].value)?;
-        let quotetabs = _interp.truthy_value(&args[1].value)?;
-        let istext = _interp.truthy_value(&args[2].value)?;
-        let header = _interp.truthy_value(&args[3].value)?;
+    fn b2a_qp(
+        data: PyValueRef<'_>,
+        #[default(OptionalArg::Omitted)] quotetabs: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] istext: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] header: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let data = extract_bytes_like(_interp, data.0)?;
+        let quotetabs = optional_truthy(_interp, &quotetabs, false)?;
+        let istext = optional_truthy(_interp, &istext, true)?;
+        let header = optional_truthy(_interp, &header, false)?;
         Ok(Value::bytes(encode_qp(&data, quotetabs, istext, header)))
     }
 
-    /// `_a2b_qp(data, header)` -> `bytes`.
-    fn _a2b_qp(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let data = extract_ascii_buffer(&args[0].value)?;
-        let header = _interp.truthy_value(&args[1].value)?;
+    fn a2b_qp(
+        data: PyValueRef<'_>,
+        #[default(OptionalArg::Omitted)] header: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let data = extract_ascii_buffer(_interp, data.0)?;
+        let header = optional_truthy(_interp, &header, false)?;
         Ok(Value::bytes(decode_qp(&data, header)))
     }
 }
@@ -942,7 +876,7 @@ mod tests {
     #[test]
     fn a2b_base64_strict_rejects_excess_padding_after_full_quad() {
         for sample in [b"YWJj=".as_slice(), b"YWJj==", b"YWJj=a", b"YWJj==a"] {
-            let err = decode_base64(sample, true, &Value::none()).unwrap_err();
+            let err = decode_base64(sample, true).unwrap_err();
             assert!(
                 err.to_string().contains("Excess padding not allowed"),
                 "unexpected error for {:?}: {err}",
