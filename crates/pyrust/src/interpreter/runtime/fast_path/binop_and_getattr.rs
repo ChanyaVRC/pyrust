@@ -277,6 +277,10 @@ impl Interpreter {
         // through to the slow path.
         enum AttrFastResult {
             Hit(Value),
+            /// Plain `@property` getter hit (#3382): the cache borrow must be
+            /// released before `fget` runs, because the getter may re-enter code
+            /// that fills or invalidates this very cache.
+            Property(Rc<pyrust_core::UserFunction>, Value),
             Miss,
         }
         let fast = {
@@ -334,6 +338,36 @@ impl Interpreter {
                                 // Unset slot — slow path raises AttributeError.
                                 None => AttrFastResult::Miss,
                             }
+                        } else {
+                            AttrFastResult::Miss
+                        }
+                    } else {
+                        AttrFastResult::Miss
+                    }
+                }
+                // Plain `@property` read (#3382): `property` is a data
+                // descriptor, so it wins over the instance `__dict__` and the
+                // hit does not probe `inst.attrs`.  The class guards below are
+                // the only validation needed; the fill policy already
+                // excluded `__getattribute__` / `__getattr__` / `property`
+                // subclasses / non-function getters.
+                Some(AttrCacheEntry::PropertyGet(entry)) => {
+                    if let Some(inst_rc) = regs[obj as usize].as_py_instance_rc() {
+                        let inst = inst_rc.borrow();
+                        let same_class = Rc::as_ptr(&inst.class) == entry.class_ptr.as_ptr();
+                        let stamp_ok = pyrust_core::class_cache_stamp_matches(
+                            inst.class.borrow().mutation_version.get(),
+                            entry.class_version,
+                            entry.epoch,
+                        );
+                        if same_class && stamp_ok {
+                            drop(inst);
+                            entry
+                                .fget
+                                .upgrade_user_function()
+                                .map_or(AttrFastResult::Miss, |fget| {
+                                    AttrFastResult::Property(fget, regs[obj as usize].clone())
+                                })
                         } else {
                             AttrFastResult::Miss
                         }
@@ -441,6 +475,17 @@ impl Interpreter {
         };
         match fast {
             AttrFastResult::Hit(result) => {
+                regs[dst as usize] = result;
+            }
+            AttrFastResult::Property(fget, receiver) => {
+                let result = self.call_user_function_expanded(
+                    fget,
+                    &[ExpandedCallArg {
+                        name: None,
+                        value: receiver,
+                    }],
+                    &[],
+                )?;
                 regs[dst as usize] = result;
             }
             AttrFastResult::Miss => {

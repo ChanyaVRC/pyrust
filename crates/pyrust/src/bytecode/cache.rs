@@ -8,7 +8,7 @@ mod kw_call;
 mod storage;
 
 pub use attr::AttrCacheEntry;
-pub use attr::{NativeClassMethodCacheEntry, SlotAttrCacheEntry};
+pub use attr::{NativeClassMethodCacheEntry, PropertyGetCacheEntry, SlotAttrCacheEntry};
 pub(crate) use binop::{BINOP_SPEC_THRESHOLD, BinOpCacheEntry, BinopTypeTag};
 pub(crate) use builtin_method::{
     BuiltinMethodCacheEntry, NativeMethodCacheEntry, is_builtin_method_cache_site,

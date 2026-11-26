@@ -7,7 +7,8 @@
 #[inline(always)]
 fn fill_get_attr_cache(code: &crate::bytecode::FnCode, pc: usize, name: &str, obj_val: &Value) {
     use crate::bytecode::{
-        AttrCacheEntry, NativeClassMethodCacheEntry, SlotAttrCacheEntry, is_attr_cache_site,
+        AttrCacheEntry, NativeClassMethodCacheEntry, PropertyGetCacheEntry, SlotAttrCacheEntry,
+        is_attr_cache_site,
     };
     let site_pc = pc - 1;
     // Once a site deopts, generic lookup is authoritative forever. Avoid
@@ -54,6 +55,20 @@ fn fill_get_attr_cache(code: &crate::bytecode::FnCode, pc: usize, name: &str, ob
             }
         }
         Some(AttrCacheEntry::SlotAttr(entry)) => {
+            if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                let new_ptr = Rc::as_ptr(&inst_rc.borrow().class);
+                if new_ptr != entry.class_ptr.as_ptr() {
+                    AttrCacheEntry::Megamorphic
+                } else {
+                    AttrCacheEntry::Empty
+                }
+            } else if matches!(obj_val.kind(), ValueKind::PyClass(_)) {
+                AttrCacheEntry::Megamorphic
+            } else {
+                return;
+            }
+        }
+        Some(AttrCacheEntry::PropertyGet(entry)) => {
             if let Some(inst_rc) = obj_val.as_py_instance_rc() {
                 let new_ptr = Rc::as_ptr(&inst_rc.borrow().class);
                 if new_ptr != entry.class_ptr.as_ptr() {
@@ -137,6 +152,19 @@ fn fill_get_attr_cache(code: &crate::bytecode::FnCode, pc: usize, name: &str, ob
                     }
                     ReadAttributeCachePlan::Class(value) => {
                         AttrCacheEntry::class_attr(&inst.class, class_version, epoch, &value)
+                    }
+                    ReadAttributeCachePlan::Property(fget) => {
+                        match pyrust_core::WeakValueCache::new(&fget) {
+                            Some(fget) => {
+                                AttrCacheEntry::PropertyGet(Box::new(PropertyGetCacheEntry {
+                                    class_ptr,
+                                    class_version,
+                                    epoch,
+                                    fget,
+                                }))
+                            }
+                            None => return,
+                        }
                     }
                     ReadAttributeCachePlan::NativeClassMethod(_) => {
                         unreachable!("native classmethod plans handled before instance cache fill")

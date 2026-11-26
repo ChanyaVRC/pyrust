@@ -23,6 +23,27 @@ fn descriptor_cache_kind(value: &Value) -> DescriptorCacheKind {
     }
 }
 
+/// Return the `fget` of `class.<name>` when it is an exact built-in `property`
+/// (not a partial `.setter`/`.getter` accessor) whose getter is a regular Python
+/// function and the class defines no `__getattr__`.
+fn plain_property_getter(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> {
+    let class_attr = lookup_class_attr(class, name)?;
+    let fget = pyrust_builtins::property::with_property(&class_attr, |state| {
+        state
+            .partial_slot
+            .is_none()
+            .then(|| Value::clone(&state.fget))
+    })??;
+    let is_plain_function = matches!(
+        fget.kind(),
+        ValueKind::UserFunction(function) if matches!(function.kind, UserFunctionKind::Regular)
+    );
+    if !is_plain_function || lookup_class_attr(class, "__getattr__").is_some() {
+        return None;
+    }
+    Some(fget)
+}
+
 /// Resolution shape that a `GetAttr` inline cache may safely retain.
 pub(crate) enum ReadAttributeCachePlan {
     Uncacheable,
@@ -30,6 +51,9 @@ pub(crate) enum ReadAttributeCachePlan {
     Slot(pyrust_core::MemberSlotId),
     Class(Value),
     NativeClassMethod(pyrust_builtins::classmethod::NativeClassMethodCachePlan),
+    /// Exact built-in `property` with a plain Python-function getter (`fget`),
+    /// issue #3382.
+    Property(Value),
 }
 
 /// Resolution shape that a `CallMethod` inline cache may safely retain.
@@ -99,6 +123,19 @@ pub(crate) fn read_attribute_cache_plan(target: &Value, name: &str) -> ReadAttri
         && instance.attrs.get_member_slot(slot_id).is_some()
     {
         return ReadAttributeCachePlan::Slot(slot_id);
+    }
+
+    // `property` is a data descriptor, so it wins over the instance `__dict__`
+    // and a hit never needs to probe `inst.attrs`.  Only an exact built-in
+    // property with a regular Python-function getter is admitted, and only on
+    // classes without a `__getattr__` hook (an `AttributeError` raised by `fget`
+    // would otherwise have to fall back to it).
+    if !matches!(
+        name,
+        "real" | "imag" | "numerator" | "denominator" | "__traceback__"
+    ) && let Some(fget) = plain_property_getter(&instance.class, name)
+    {
+        return ReadAttributeCachePlan::Property(fget);
     }
 
     if instance.attrs.contains_key(name) {

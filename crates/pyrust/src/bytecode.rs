@@ -14,7 +14,7 @@ mod instruction;
 
 pub use cache::{
     AttrCacheEntry, KwCallCacheEntry, KwCallExArgsCache, KwCallExSimpleCache, KwCallSimpleCache,
-    NativeClassMethodCacheEntry, SlotAttrCacheEntry,
+    NativeClassMethodCacheEntry, PropertyGetCacheEntry, SlotAttrCacheEntry,
 };
 pub(crate) use cache::{
     BINOP_SPEC_THRESHOLD, BinOpCacheEntry, BinopTypeTag, BuiltinMethodCacheEntry, GlobalCacheEntry,

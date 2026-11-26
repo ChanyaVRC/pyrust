@@ -110,7 +110,8 @@ impl Interpreter {
                 AttrCacheEntry::InstanceAttr { .. }
                 | AttrCacheEntry::SlotAttr(_)
                 | AttrCacheEntry::SetInstanceAttr { .. }
-                | AttrCacheEntry::SetSlotAttr(_),
+                | AttrCacheEntry::SetSlotAttr(_)
+                | AttrCacheEntry::PropertyGet(_),
             ) => AttrCacheEntry::Empty,
         };
         cache.set_or_init(

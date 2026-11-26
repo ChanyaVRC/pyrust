@@ -294,6 +294,58 @@ fn set_slot_attr_entry_keeps_weak_class_identity_and_stays_compact() {
 }
 
 #[test]
+fn property_get_entry_holds_getter_weakly_and_stays_compact() {
+    let class = Rc::new(RefCell::new(PyClass::new("P", "P", None, IndexMap::new())));
+    let fget = Value::user_function(Rc::new(UserFunction {
+        id: next_fn_id(),
+        kind: UserFunctionKind::Regular,
+        name: Rc::from("x"),
+        qualname: Rc::from("P.x"),
+        name_overrides: RefCell::new(None),
+        module: RefCell::new(Value::unset()),
+        doc: RefCell::new(Value::none()),
+        attrs: RefCell::new(None),
+        annotations: RefCell::new(Value::unset()),
+        defaults_override: RefCell::new(None),
+        params: Vec::new(),
+        param_binds: Rc::new(Vec::new()),
+        memo_positional_parameter_count: 0,
+        trampoline_arity: UserFunction::TRAMPOLINE_INELIGIBLE,
+        self_bind: None,
+        local_names: Rc::new(HashSet::new()),
+        local_index: Rc::new(HashMap::new()),
+        global_names: Rc::new(HashSet::new()),
+        nonlocal_names: Rc::new(HashSet::new()),
+        env: Environment::new(None),
+        closure_cells: smallvec::SmallVec::new(),
+        is_memo_pure: false,
+        iterable_coroutine: std::cell::Cell::new(false),
+        precompiled_code: None,
+        wrapped_func: None,
+    }));
+    let entry = AttrCacheEntry::PropertyGet(Box::new(super::PropertyGetCacheEntry {
+        class_ptr: Rc::downgrade(&class),
+        class_version: 2,
+        epoch: 5,
+        fget: pyrust_core::WeakValueCache::new(&fget).expect("function getter is cacheable"),
+    }));
+    assert!(format!("{entry:?}").starts_with("PropertyGet("));
+    let AttrCacheEntry::PropertyGet(payload) = &entry else {
+        unreachable!()
+    };
+    assert!(payload.fget.upgrade_user_function().is_some());
+    // The cache never owns the getter: once the property drops it, the entry
+    // is an ordinary miss instead of keeping `function -> code -> cache` alive.
+    drop(fget);
+    assert!(payload.fget.upgrade_user_function().is_none());
+    let old_ptr = Rc::as_ptr(&class);
+    drop(class);
+    assert!(payload.class_ptr.upgrade().is_none());
+    assert_eq!(payload.class_ptr.as_ptr(), old_ptr);
+    assert!(std::mem::size_of::<AttrCacheEntry>() <= 32);
+}
+
+#[test]
 fn inline_cache_entry_sizes_stay_compact() {
     use std::mem::size_of;
 
