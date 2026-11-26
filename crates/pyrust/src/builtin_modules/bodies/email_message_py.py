@@ -9,10 +9,10 @@ from io import BytesIO, StringIO
 
 from email import policy as _policy
 from email import utils
+from email.charset import Charset
+from email.errors import HeaderParseError
 from email.policy import compat32
 from email.utils import (
-    _Charset as Charset,
-    _HeaderParseError as HeaderParseError,
     _decode_b_with_defects,
     _quopri_body_decode,
 )
@@ -388,7 +388,10 @@ class Message:
                 return
             if not isinstance(charset, Charset):
                 charset = Charset(charset)
-            payload = payload.encode(charset.output_charset, "surrogateescape")
+            out_cs = charset.output_charset or "ascii"
+            if out_cs.lower().replace("_", "-") == "us-ascii":
+                out_cs = "ascii"
+            payload = payload.encode(out_cs, "surrogateescape")
         if hasattr(payload, "decode"):
             self._payload = payload.decode("ascii", "surrogateescape")
         else:
@@ -418,7 +421,9 @@ class Message:
             self._payload = charset.body_encode(self._payload)
         if "Content-Transfer-Encoding" not in self:
             cte = charset.get_body_encoding()
-            if cte == "7or8bit":
+            if callable(cte):
+                cte(self)
+            elif cte == "7or8bit":
                 payload = self._payload
                 if payload is None:
                     self["Content-Transfer-Encoding"] = "7bit"
@@ -437,7 +442,10 @@ class Message:
                     try:
                         payload = payload.encode("ascii", "surrogateescape")
                     except UnicodeError:
-                        payload = payload.encode(charset.output_charset)
+                        out_cs = charset.output_charset or "ascii"
+                        if out_cs.lower().replace("_", "-") == "us-ascii":
+                            out_cs = "ascii"
+                        payload = payload.encode(out_cs)
                 self._payload = charset.body_encode(payload)
                 self.add_header("Content-Transfer-Encoding", cte)
 
