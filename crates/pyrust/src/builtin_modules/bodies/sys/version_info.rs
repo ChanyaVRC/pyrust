@@ -266,10 +266,12 @@ pyrust_core::gil_local! {
     };
 }
 
-/// Build the `sys.flags` structseq value populated from `cfg` (matching
-/// CPython 3.12's 18-field `sys.flags` tuple subtype).
-pub(crate) fn make_flags_from_config(cfg: &crate::interpreter::RuntimeConfig) -> Value {
-    flags::make([
+/// The 18 `sys.flags` fields of `cfg`, in struct-sequence order.
+///
+/// Every field is an immediate (`int` / `bool`), so capturing them detaches
+/// the eventual struct-sequence from `RuntimeConfig` without allocating.
+fn flag_fields(cfg: &crate::interpreter::RuntimeConfig) -> [Value; 18] {
+    [
         Value::int(cfg.debug),
         Value::int(cfg.inspect),
         Value::int(cfg.interactive),
@@ -288,7 +290,25 @@ pub(crate) fn make_flags_from_config(cfg: &crate::interpreter::RuntimeConfig) ->
         Value::int(cfg.warn_default_encoding),
         Value::bool_(cfg.safe_path),
         Value::int(cfg.int_max_str_digits),
-    ])
+    ]
+}
+
+/// Build the `sys.flags` structseq value populated from `cfg` (matching
+/// CPython 3.12's 18-field `sys.flags` tuple subtype).
+pub(crate) fn make_flags_from_config(cfg: &crate::interpreter::RuntimeConfig) -> Value {
+    flags::make(flag_fields(cfg))
+}
+
+/// A builder for `cfg`'s `sys.flags` that allocates nothing until it runs.
+///
+/// `sys.flags` is a `tuple` subclass instance, so building it forces the
+/// primitive class objects into existence; an interpreter that never reads
+/// `sys.flags` should not pay for that at startup (issue #3293).
+pub(crate) fn deferred_flags(
+    cfg: &crate::interpreter::RuntimeConfig,
+) -> crate::value::LazyModuleAttrInit {
+    let fields = flag_fields(cfg);
+    Box::new(move || flags::make(fields))
 }
 
 /// Build the default `sys.flags` singleton value (no CLI options).

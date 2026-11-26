@@ -119,10 +119,10 @@ pub(crate) fn post_load_init(
                 "__abstractmethods__".to_string(),
                 pyrust_builtins::frozenset::frozenset(abs_set),
             );
-            cls_rc
-                .borrow_mut()
-                .attrs
-                .insert("_abc_registry".to_string(), Value::set(PySet::default()));
+            cls_rc.borrow_mut().attrs.insert(
+                "_abc_impl".to_string(),
+                crate::builtin_modules::abc::new_abc_impl(),
+            );
             for mname in ["children", "resources", "open_binary"] {
                 let orig = cls_rc.borrow().attrs.get(mname).cloned();
                 if let Some(func) = orig {
@@ -154,10 +154,10 @@ pub(crate) fn post_load_init(
                     "__abstractmethods__".to_string(),
                     pyrust_builtins::frozenset::frozenset(abs_set),
                 );
-                cls_rc
-                    .borrow_mut()
-                    .attrs
-                    .insert("_abc_registry".to_string(), Value::set(PySet::default()));
+                cls_rc.borrow_mut().attrs.insert(
+                    "_abc_impl".to_string(),
+                    crate::builtin_modules::abc::new_abc_impl(),
+                );
             }
         }
     }
@@ -171,10 +171,10 @@ pub(crate) fn post_load_init(
                     "__abstractmethods__".to_string(),
                     pyrust_builtins::frozenset::frozenset(PySet::default()),
                 );
-                cls_rc
-                    .borrow_mut()
-                    .attrs
-                    .insert("_abc_registry".to_string(), Value::set(PySet::default()));
+                cls_rc.borrow_mut().attrs.insert(
+                    "_abc_impl".to_string(),
+                    crate::builtin_modules::abc::new_abc_impl(),
+                );
             }
         }
     }

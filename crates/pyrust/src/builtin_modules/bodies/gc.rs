@@ -130,8 +130,14 @@ fn collect_direct_referents(value: &Value, out: &mut Vec<Value>) {
             }
         }
         ValueKind::PyModule(m) => {
+            // The live dict is handed to Python code here, so it must list
+            // every attribute, including the still-deferred ones.
+            let exposed = m
+                .try_borrow_mut()
+                .ok()
+                .and_then(|mut module| module.exposed_live_namespace());
             let b = m.borrow();
-            if let Some(live_dict) = b.live_namespace() {
+            if let Some(live_dict) = exposed.or_else(|| b.live_namespace()) {
                 out.push(live_dict);
             } else {
                 // `attrs_snapshot` also yields deferred (not yet materialized)

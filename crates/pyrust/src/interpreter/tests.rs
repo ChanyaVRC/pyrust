@@ -29,4 +29,5 @@ mod tests {
     include!("tests/declaration_syntax.rs");
     include!("tests/lazy_builtins.rs");
     include!("tests/lazy_feature_states.rs");
+    include!("tests/startup_diet.rs");
 }

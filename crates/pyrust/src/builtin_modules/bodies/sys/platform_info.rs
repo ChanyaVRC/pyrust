@@ -278,20 +278,78 @@ pub(crate) fn detect_pyvenv_startup(arg0: Option<&str>) -> Option<VenvStartupInf
     })
 }
 
-/// Build a simple named-attribute PyInstance under a fresh anonymous
-/// class with the given class name.  Used for the namespace-like sys
-/// members that only need attribute access.
-fn make_named_struct(class_name: &str, fields: Vec<(&str, Value)>) -> Value {
+/// The classes of the struct-sequence style `sys` values.
+#[derive(Clone, Copy)]
+enum InfoClass {
+    FloatInfo,
+    IntInfo,
+    HashInfo,
+    Implementation,
+    ThreadInfo,
+    AsyncgenHooks,
+}
+
+impl InfoClass {
+    const COUNT: usize = 6;
+
+    const fn display_name(self) -> &'static str {
+        match self {
+            Self::FloatInfo => "sys.float_info",
+            Self::IntInfo => "sys.int_info",
+            Self::HashInfo => "sys.hash_info",
+            Self::Implementation => "sys.implementation",
+            Self::ThreadInfo => "sys.thread_info",
+            Self::AsyncgenHooks => "asyncgen_hooks",
+        }
+    }
+
+    /// Tuple-backed classes support sequence operations and
+    /// `isinstance(..., tuple)`, matching CPython's `PyStructSequence`.
+    const fn is_tuple_backed(self) -> bool {
+        matches!(self, Self::ThreadInfo | Self::AsyncgenHooks)
+    }
+}
+
+// Thread-local justification:
+// (a) Why `thread_local!`: `PyClass` is `!Send + !Sync`, so the class objects
+//     of `sys.float_info` and friends cannot live in a process-global
+//     `OnceLock`.
+// (b) Multi-interpreter / multi-threaded impact: interpreters on one GIL group
+//     share these class objects, exactly as they share `sys.version_info`'s
+//     class and every built-in type; each `sys` module still owns its own
+//     instances.  Each class is built on first use, so a script that never
+//     reads the value never allocates its class (issue #3293).
+pyrust_core::gil_local! {
+    static INFO_CLASSES: [std::cell::OnceCell<Rc<RefCell<PyClass>>>; InfoClass::COUNT] =
+        std::array::from_fn(|_| std::cell::OnceCell::new());
+}
+
+/// The shared class object for one struct-sequence style `sys` value.
+fn info_class(kind: InfoClass) -> Rc<RefCell<PyClass>> {
+    INFO_CLASSES.with(|classes| {
+        Rc::clone(classes[kind as usize].get_or_init(|| {
+            let base = kind
+                .is_tuple_backed()
+                .then(|| crate::interpreter::primitive_class_by_name("tuple"))
+                .flatten();
+            Rc::new(RefCell::new(PyClass::new(
+                kind.display_name(),
+                kind.display_name(),
+                base,
+                indexmap::IndexMap::new(),
+            )))
+        }))
+    })
+}
+
+/// Build a simple named-attribute `PyInstance` of a shared class.  Used for
+/// the namespace-like sys members that only need attribute access.
+fn make_named_struct(kind: InfoClass, fields: Vec<(&str, Value)>) -> Value {
     let mut attrs = InstanceAttrs::new();
     for (k, v) in fields {
         attrs.insert(k, v);
     }
-    let class = Rc::new(RefCell::new(PyClass::new(
-        class_name,
-        class_name,
-        None,
-        indexmap::IndexMap::new(),
-    )));
+    let class = info_class(kind);
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
@@ -299,7 +357,8 @@ fn make_named_struct(class_name: &str, fields: Vec<(&str, Value)>) -> Value {
 /// attribute access and sequence operations (`len`, indexing, unpacking,
 /// tuple equality, `isinstance(..., tuple)`), matching CPython's
 /// `PyStructSequence` for `sys.thread_info` and `sys.get_asyncgen_hooks()`.
-fn make_struct_seq(class_name: &str, fields: Vec<(&str, Value)>) -> Value {
+fn make_struct_seq(kind: InfoClass, fields: Vec<(&str, Value)>) -> Value {
+    debug_assert!(kind.is_tuple_backed());
     let mut attrs = InstanceAttrs::new();
     let mut tuple_values = Vec::with_capacity(fields.len());
     for (k, v) in fields {
@@ -307,20 +366,14 @@ fn make_struct_seq(class_name: &str, fields: Vec<(&str, Value)>) -> Value {
         attrs.insert(k, v);
     }
     attrs.set_builtin_data(Value::tuple(tuple_values));
-    let tuple_base = crate::interpreter::primitive_class_by_name("tuple");
-    let class = Rc::new(RefCell::new(PyClass::new(
-        class_name,
-        class_name,
-        tuple_base,
-        indexmap::IndexMap::new(),
-    )));
+    let class = info_class(kind);
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
 /// Build `sys.float_info` — IEEE-754 double-precision limits.
 pub(super) fn make_float_info() -> Value {
     make_named_struct(
-        "sys.float_info",
+        InfoClass::FloatInfo,
         vec![
             ("max", Value::float(f64::MAX)),
             ("max_exp", Value::int(1024)),
@@ -340,7 +393,7 @@ pub(super) fn make_float_info() -> Value {
 /// Build `sys.int_info`.
 pub(super) fn make_int_info() -> Value {
     make_named_struct(
-        "sys.int_info",
+        InfoClass::IntInfo,
         vec![
             ("bits_per_digit", Value::int(30)),
             ("sizeof_digit", Value::int(4)),
@@ -354,7 +407,7 @@ pub(super) fn make_int_info() -> Value {
 /// CPython 3.12 64-bit build (`modulus = 2**61 - 1`, SipHash-1-3).
 pub(super) fn make_hash_info() -> Value {
     make_named_struct(
-        "sys.hash_info",
+        InfoClass::HashInfo,
         vec![
             ("width", Value::int(64)),
             ("modulus", Value::int(2_305_843_009_213_693_951)),
@@ -374,7 +427,7 @@ pub(super) fn make_hash_info() -> Value {
 pub(super) fn make_implementation() -> Value {
     let version = make_version_info();
     make_named_struct(
-        "sys.implementation",
+        InfoClass::Implementation,
         vec![
             ("name", Value::string("cpython")),
             ("version", version),
@@ -493,7 +546,7 @@ pub(super) fn make_thread_info() -> Value {
         (Value::string("pthread"), Value::string("semaphore"))
     };
     make_struct_seq(
-        "sys.thread_info",
+        InfoClass::ThreadInfo,
         vec![("name", name), ("lock", lock), ("version", Value::none())],
     )
 }
@@ -501,15 +554,31 @@ pub(super) fn make_thread_info() -> Value {
 /// Build `sys.asyncgen_hooks(firstiter, finalizer)`.
 pub(super) fn make_asyncgen_hooks(firstiter: Value, finalizer: Value) -> Value {
     make_struct_seq(
-        "asyncgen_hooks",
+        InfoClass::AsyncgenHooks,
         vec![("firstiter", firstiter), ("finalizer", finalizer)],
     )
+}
+
+// Thread-local justification:
+// (a) Why `thread_local!`: `Value` is `!Send + !Sync`, so the frozenset cannot
+//     live in a process-global `OnceLock`.
+// (b) Multi-interpreter / multi-threaded impact: the frozenset is immutable,
+//     so interpreters on one GIL group can share the one object; it is built
+//     (300 interned strings) on the first `sys.stdlib_module_names` read of
+//     the group instead of once per `sys` module object (issue #3293).
+pyrust_core::gil_local! {
+    static STDLIB_MODULE_NAMES: std::cell::OnceCell<Value> = const { std::cell::OnceCell::new() };
+}
+
+/// `sys.stdlib_module_names`, shared by every `sys` module of the GIL group.
+pub(super) fn stdlib_module_names() -> Value {
+    STDLIB_MODULE_NAMES.with(|names| names.get_or_init(make_stdlib_module_names).clone())
 }
 
 /// Build `sys.stdlib_module_names` — CPython 3.12.3's exact 300-entry
 /// `frozenset` of standard library module names (from CPython v3.12.3
 /// `Python/stdlib_module_names.h`, issues #2970 / #3242).
-pub(super) fn make_stdlib_module_names() -> Value {
+fn make_stdlib_module_names() -> Value {
     const NAMES: &[&str] = &[
         "__future__",
         "_abc",

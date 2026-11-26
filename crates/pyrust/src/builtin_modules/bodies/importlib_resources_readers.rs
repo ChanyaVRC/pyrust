@@ -115,8 +115,10 @@ fn attach_base(cls_val: &Value, base_val: &Value) {
             "__abstractmethods__".to_string(),
             pyrust_builtins::frozenset::frozenset(PySet::default()),
         );
-        cls.attrs
-            .insert("_abc_registry".to_string(), Value::set(PySet::default()));
+        cls.attrs.insert(
+            "_abc_impl".to_string(),
+            crate::builtin_modules::abc::new_abc_impl(),
+        );
     }
 }
 

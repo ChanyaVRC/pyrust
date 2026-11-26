@@ -87,6 +87,9 @@ impl Interpreter {
         name: &str,
     ) -> Result<Value> {
         let module = Rc::clone(module);
+        if module.borrow().has_deferred_init() {
+            self.observe_deferred_module_init(&module, name)?;
+        }
         let filesystem_namespace = module.borrow().filesystem_namespace();
         let live_namespace = module.borrow().live_namespace();
         let has_explicit_namespace = filesystem_namespace.is_some() || live_namespace.is_some();
@@ -95,10 +98,14 @@ impl Interpreter {
         // `types.ModuleType` instances, or built-in modules upgraded on first
         // `__dict__` read) return their exact backing dict.  Saturate the
         // mutation token whenever an alias is exposed so caches never observe
-        // stale values after direct dict mutation (#2970).
+        // stale values after direct dict mutation (#2970).  Handing the dict
+        // out also materializes any still-deferred attribute into it first.
         if name == "__dict__"
             && let Some(namespace) = live_namespace
         {
+            if module.borrow().has_pending_lazy_attrs() {
+                return Ok(module.borrow_mut().attach_live_namespace_with_dunders());
+            }
             module.borrow().disable_cache();
             return Ok(namespace);
         }

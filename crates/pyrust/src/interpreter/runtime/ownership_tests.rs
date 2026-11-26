@@ -928,6 +928,7 @@ fn runtime_only_uses_the_builtin_module_provider_at_the_import_boundary() {
         "crate::builtin_modules::load_builtin_module",
         "crate::builtin_modules::prepare_builtin_module",
         "crate::builtin_modules::post_load_inject",
+        "crate::builtin_modules::post_load_deferred",
     ];
     for path in sources {
         let source = std::fs::read_to_string(&path).expect("runtime source must be readable");

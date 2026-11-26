@@ -176,6 +176,9 @@ impl Interpreter {
                     return Err(pyrust_core::py_err!("AttributeError", "readonly attribute"));
                 }
                 let module = Rc::clone(module);
+                if module.borrow().has_deferred_init() {
+                    self.observe_deferred_module_init(&module, name)?;
+                }
                 self.ensure_module_namespace_synced(&module);
                 if module.borrow().filesystem_namespace().is_some()
                     || module.borrow().live_namespace().is_some()

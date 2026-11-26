@@ -104,8 +104,10 @@ fn mark_abc(
             "__abstractmethods__".to_string(),
             pyrust_builtins::frozenset::frozenset(abs_set),
         );
-        cls.attrs
-            .insert("_abc_registry".to_string(), Value::set(PySet::default()));
+        cls.attrs.insert(
+            "_abc_impl".to_string(),
+            crate::builtin_modules::abc::new_abc_impl(),
+        );
     }
     for &method_name in own_abs_methods {
         let orig = cls_rc.borrow().attrs.get(method_name).cloned();

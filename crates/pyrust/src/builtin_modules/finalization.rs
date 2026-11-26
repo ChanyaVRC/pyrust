@@ -12,6 +12,7 @@ pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, 
             interpreter.initialize_system_module(module);
             prepare_sys_module(interpreter, module);
         }
+        "abc" => abc::prepare_module(module),
         "collections" => prepare_collections_module(module),
         "contextlib" => prepare_contextlib_module(module),
         "functools" => prepare_functools_module(module),
@@ -44,12 +45,68 @@ pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, 
     }
 }
 
+/// Deferred half of `post_load_inject`: run (at most once) the
+/// initialization step that hook left pending on a built-in module.
+///
+/// `observed` names the attribute Python code is about to read, rebind or
+/// delete; the step then runs only if it affects that attribute.  `None`
+/// runs it unconditionally (the import system needs its effect).
+///
+/// For `sys` the step publishes the import system the way CPython presents it
+/// at startup: `zipimport` in `sys.modules` and `zipimport.zipimporter` in
+/// `sys.path_hooks`.  Those are observable only through the two attributes
+/// themselves or through the namespace dictionary that holds them.
+///
+/// The marker is cleared before the step runs: the step imports modules, and
+/// a re-entrant observation must see the step as already taken rather than
+/// recurse into it.
+pub(crate) fn post_load_deferred(
+    interpreter: &mut Interpreter,
+    module: &Rc<std::cell::RefCell<crate::value::PyModule>>,
+    observed: Option<&str>,
+) -> crate::error::Result<()> {
+    if !module.borrow().has_deferred_init() {
+        return Ok(());
+    }
+    let is_sys = module.borrow().name == "sys";
+    if !is_sys {
+        return Ok(());
+    }
+    if observed.is_some_and(|attribute| !matches!(attribute, "path_hooks" | "modules" | "__dict__"))
+    {
+        return Ok(());
+    }
+    module.borrow().set_deferred_init(false);
+    install_zipimport_path_hook(interpreter, module)
+}
+
+/// Import `zipimport` and register `zipimport.zipimporter` as the first
+/// `sys.path_hooks` entry, as CPython does while bootstrapping its import
+/// system.
+fn install_zipimport_path_hook(
+    interpreter: &mut Interpreter,
+    sys_module: &Rc<std::cell::RefCell<crate::value::PyModule>>,
+) -> crate::error::Result<()> {
+    let zipimport_module = interpreter.load_module("zipimport")?;
+    if let Ok(zipimporter_class) = interpreter.get_attr(&zipimport_module, "zipimporter")
+        && let Some(path_hooks) = sys_module.borrow().get_attr_value("path_hooks")
+        && matches!(path_hooks.kind(), ValueKind::List(_))
+    {
+        path_hooks.list_insert(0, zipimporter_class)?;
+    }
+    Ok(())
+}
+
 fn prepare_sys_module(interpreter: &Interpreter, module: &Value) {
     let ValueKind::PyModule(sys_mod) = module.kind() else {
         return;
     };
-    let flags = sys::make_flags_from_config(&interpreter.cold.runtime_config);
-    sys_mod.borrow_mut().insert_attr("flags".to_string(), flags);
+    // `sys.flags` reflects this interpreter's configuration but is only built
+    // when a script reads it (issue #3293).
+    sys_mod.borrow_mut().set_deferred_attr(
+        "flags",
+        sys::deferred_flags(&interpreter.cold.runtime_config),
+    );
 }
 
 fn prepare_collections_module(module: &Value) {
