@@ -456,6 +456,71 @@ fn deferred_builtins_state_is_per_provider() {
     });
 }
 
+/// Issue #3420: a deferred builtin class resolves through the `LoadGlobal`
+/// cache, so a hot loop reads it from the cache instead of resolving it again.
+#[test]
+fn hot_loop_builtin_class_reads_hit_the_global_cache() {
+    on_fresh_runtime_thread(|| {
+        let interpreter = run_program(
+            "def run():\n    n = 0\n    for _ in range(2000):\n\
+             \x20       n += len(range(3)) + int(2) + len(str(1))\n    return n\n\
+             total = run()\n",
+        );
+        assert_eq!(
+            interpreter.lookup_name("total").unwrap(),
+            Some(Value::int(2000 * 6))
+        );
+        let resolutions = crate::builtin_modules::builtins::deferred_class_resolutions();
+        assert!(
+            resolutions < 50,
+            "cached `range`/`int`/`str` loads must not re-resolve per iteration: {resolutions}"
+        );
+        assert!(!exc_class_cache_is_initialized());
+    });
+}
+
+/// Issue #3420: a cached builtin class never survives shadowing, rebinding or
+/// deleting the name, and the original class comes back unchanged afterwards.
+#[test]
+fn cached_builtin_class_is_invalidated_by_shadowing_and_builtins_mutation() {
+    on_fresh_runtime_thread(|| {
+        let interpreter = run_program(
+            "import builtins\n\
+             def read():\n    return range\n\
+             def read_int():\n    return int\n\
+             original = read()\n\
+             warm = all(read() is original for _ in range(10)) and read_int() is int\n\
+             builtins.range = len\n\
+             rebound = read() is len and all(read() is len for _ in (1, 2, 3))\n\
+             builtins.range = original\n\
+             restored = read() is original and read() is builtins.range\n\
+             del builtins.range\n\
+             def raises():\n    try:\n        read()\n    except NameError:\n        return True\n    return False\n\
+             deleted = raises() and raises()\n\
+             builtins.range = original\n\
+             back = read() is original\n\
+             def shadow():\n    return int\n\
+             before = shadow() is int\n\
+             int = 'shadowed'\n\
+             shadowed = shadow() == 'shadowed' and read_int() == 'shadowed'\n\
+             del int\n\
+             unshadowed = shadow() is builtins.int and read_int() is builtins.int\n",
+        );
+        for flag in [
+            "warm",
+            "rebound",
+            "restored",
+            "deleted",
+            "back",
+            "before",
+            "shadowed",
+            "unshadowed",
+        ] {
+            assert!(global_is_true(&interpreter, flag), "{flag}");
+        }
+    });
+}
+
 /// The static name table must stay in step with the class cache: it is the
 /// cache's order, minus dotted registry keys and module-owned classes.
 #[test]
