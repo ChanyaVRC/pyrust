@@ -30,7 +30,7 @@ pub(crate) fn prepare_module(interp: &Interpreter, module: &Value) {
         return;
     };
     let (garbage, callbacks) = {
-        let state = interp.cold.gc_state.borrow();
+        let state = interp.features().gc();
         (state.garbage.clone(), state.callbacks.clone())
     };
     let mut m = mod_rc.borrow_mut();
@@ -134,8 +134,10 @@ fn collect_direct_referents(value: &Value, out: &mut Vec<Value>) {
             if let Some(live_dict) = b.live_namespace() {
                 out.push(live_dict);
             } else {
-                for (_, v) in &b.attrs {
-                    out.push(v.clone());
+                // `attrs_snapshot` also yields deferred (not yet materialized)
+                // attributes such as lazily-built `builtins` classes.
+                for (_, v) in b.attrs_snapshot() {
+                    out.push(v);
                 }
             }
         }
@@ -257,7 +259,7 @@ fn current_callbacks_snapshot(interp: &mut Interpreter) -> Vec<Value> {
             ValueKind::PyModule(mod_rc) => mod_rc.borrow().get_attr_value("callbacks"),
             _ => None,
         })
-        .unwrap_or_else(|| interp.cold.gc_state.borrow().callbacks.clone());
+        .unwrap_or_else(|| interp.features().gc().callbacks.clone());
     interp.collect_iterable(&cb_list).unwrap_or_default()
 }
 
@@ -303,17 +305,17 @@ pyrust_module! {
     }
 
     fn enable() -> Result<Value> {
-        _interp.cold.gc_state.borrow_mut().enabled = true;
+        _interp.features().gc_mut().enabled = true;
         Ok(Value::none())
     }
 
     fn disable() -> Result<Value> {
-        _interp.cold.gc_state.borrow_mut().enabled = false;
+        _interp.features().gc_mut().enabled = false;
         Ok(Value::none())
     }
 
     fn isenabled() -> Result<Value> {
-        Ok(Value::bool_(_interp.cold.gc_state.borrow().enabled))
+        Ok(Value::bool_(_interp.features().gc().enabled))
     }
 
     fn collect(#[default(OptionalArg::Omitted)] generation: OptValueRef<'_>) -> Result<Value> {
@@ -333,7 +335,7 @@ pyrust_module! {
         invoke_gc_callbacks(_interp, &callbacks, "start", generation_num, 0, 0);
 
         {
-            let mut state = _interp.cold.gc_state.borrow_mut();
+            let mut state = _interp.features().gc_mut();
             let gen_idx = generation_num as usize;
             state.stats[gen_idx].0 += 1;
             match gen_idx {
@@ -357,7 +359,7 @@ pyrust_module! {
     }
 
     fn get_count() -> Result<Value> {
-        let (c0, c1, c2) = _interp.cold.gc_state.borrow().counts;
+        let (c0, c1, c2) = _interp.features().gc().counts;
         Ok(Value::tuple(vec![
             Value::int(c0),
             Value::int(c1),
@@ -366,7 +368,7 @@ pyrust_module! {
     }
 
     fn get_threshold() -> Result<Value> {
-        let (t0, t1, t2) = _interp.cold.gc_state.borrow().thresholds;
+        let (t0, t1, t2) = _interp.features().gc().thresholds;
         Ok(Value::tuple(vec![
             Value::int(t0),
             Value::int(t1),
@@ -388,7 +390,7 @@ pyrust_module! {
             Some(v) => Some(v.expect_i64("set_threshold", "threshold2")?),
             None => None,
         };
-        let mut state = _interp.cold.gc_state.borrow_mut();
+        let mut state = _interp.features().gc_mut();
         state.thresholds.0 = t0;
         if let Some(v1) = t1 {
             state.thresholds.1 = v1;
@@ -400,12 +402,12 @@ pyrust_module! {
     }
 
     fn get_debug() -> Result<Value> {
-        Ok(Value::int(_interp.cold.gc_state.borrow().debug))
+        Ok(Value::int(_interp.features().gc().debug))
     }
 
     fn set_debug(#[positional_only] flags: PyIndex) -> Result<Value> {
         let f = flags.expect_i64("set_debug", "flags")?;
-        _interp.cold.gc_state.borrow_mut().debug = f;
+        _interp.features().gc_mut().debug = f;
         Ok(Value::none())
     }
 
@@ -461,7 +463,7 @@ pyrust_module! {
     }
 
     fn get_stats() -> Result<Value> {
-        let stats = _interp.cold.gc_state.borrow().stats;
+        let stats = _interp.features().gc().stats;
         let mut out = Vec::with_capacity(3);
         for (collections, collected, uncollectable) in stats {
             let mut d = PyDict::default();
@@ -483,16 +485,16 @@ pyrust_module! {
 
     fn freeze() -> Result<Value> {
         let count = collect_live_tracked_objects(_interp).len().max(1) as i64;
-        _interp.cold.gc_state.borrow_mut().freeze_count += count;
+        _interp.features().gc_mut().freeze_count += count;
         Ok(Value::none())
     }
 
     fn unfreeze() -> Result<Value> {
-        _interp.cold.gc_state.borrow_mut().freeze_count = 0;
+        _interp.features().gc_mut().freeze_count = 0;
         Ok(Value::none())
     }
 
     fn get_freeze_count() -> Result<Value> {
-        Ok(Value::int(_interp.cold.gc_state.borrow().freeze_count))
+        Ok(Value::int(_interp.features().gc().freeze_count))
     }
 }

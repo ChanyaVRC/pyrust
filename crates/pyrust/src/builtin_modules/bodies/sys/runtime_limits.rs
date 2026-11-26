@@ -142,7 +142,9 @@ pub(super) fn getswitchinterval(
     fn_name: &str,
 ) -> Result<Value> {
     require_no_args(args, fn_name, "getswitchinterval")?;
-    Ok(Value::float(interp.sys_state.borrow().switch_interval))
+    Ok(Value::float(
+        interp.features().sys_with(|state| state.switch_interval),
+    ))
 }
 
 pub(super) fn setswitchinterval(
@@ -181,7 +183,7 @@ pub(super) fn setswitchinterval(
             "switch interval must be strictly positive".to_string(),
         ));
     }
-    interp.sys_state.borrow_mut().switch_interval = interval;
+    interp.features().sys_mut().switch_interval = interval;
     Ok(Value::none())
 }
 
@@ -192,7 +194,9 @@ pub(super) fn get_coroutine_origin_tracking_depth(
 ) -> Result<Value> {
     require_no_args(args, fn_name, "get_coroutine_origin_tracking_depth")?;
     Ok(Value::int(
-        interp.sys_state.borrow().coroutine_origin_tracking_depth as i64,
+        interp
+            .features()
+            .sys_with(|state| state.coroutine_origin_tracking_depth) as i64,
     ))
 }
 
@@ -208,9 +212,6 @@ pub(super) fn set_coroutine_origin_tracking_depth(
             "depth must be >= 0".to_string(),
         ));
     }
-    interp
-        .sys_state
-        .borrow_mut()
-        .coroutine_origin_tracking_depth = depth as usize;
+    interp.features().sys_mut().coroutine_origin_tracking_depth = depth as usize;
     Ok(Value::none())
 }

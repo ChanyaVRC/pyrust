@@ -21,9 +21,8 @@
 //! 3. **Per-thread `Interpreter` handle**: Each spawned worker OS thread owns
 //!    its own `Interpreter` struct (separate `tramp_arena`, `tramp_stack`,
 //!    `gen_drive_stack`, `vm_frame_views`, `active_exception`, `env`) sharing
-//!    interpreter-wide state (`module_cache`, `sys_state`, `warnings_state`,
-//!    `atexit_state`, `gc_state`, `gil_state`, etc.) via `Rc`/`Arc` — the exact
-//!    same pattern used by filesystem-import child interpreters in `modules.rs`.
+//!    interpreter-wide state (`module_cache`, `feature_states`, `gil_state`,
+//!    etc.) via `Rc`/`Arc` — the exact same pattern used by filesystem-import child interpreters in `modules.rs`.
 //!    There is no cross-thread raw `*mut Interpreter` pointer.
 //! 4. **Shared GIL TLS**: While holding the GIL, worker OS threads install a
 //!    `pyrust_core::GilTlsGuard` pointing at the root thread's `HotTlsOwner` so
@@ -56,9 +55,7 @@ use pyrust_core::{GilTlsGuard, HotTlsOwner, active_tls, home_tls_owner};
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{
-    AtexitCallback, FaulthandlerRuntimeState, GcRuntimeState, Interpreter, InterpreterColdState,
-    MonitoringRuntimeState, RuntimeConfig, SharedWarningsState, SysRuntimeState,
-    TracemallocRuntimeState, get_int_max_str_digits,
+    Interpreter, InterpreterColdState, RuntimeConfig, SharedFeatureStates, get_int_max_str_digits,
 };
 use crate::value::{EnvRef, Value};
 
@@ -415,18 +412,12 @@ unsafe impl<T> Send for GilSend<T> {}
 struct WorkerInitBundle {
     bootstrap_fn: Value,
     root_env: EnvRef,
-    warnings_state: SharedWarningsState,
-    sys_state: Rc<RefCell<SysRuntimeState>>,
     script_dir: Option<PathBuf>,
     script_filename: Option<Arc<str>>,
     script_argv: Vec<String>,
     module_cache: Rc<RefCell<std::collections::HashMap<String, Value>>>,
     bootstrap_module_registry: Value,
-    atexit_state: Rc<RefCell<Vec<Option<AtexitCallback>>>>,
-    gc_state: Rc<RefCell<GcRuntimeState>>,
-    tracemalloc_state: Rc<RefCell<TracemallocRuntimeState>>,
-    faulthandler_state: Rc<RefCell<FaulthandlerRuntimeState>>,
-    monitoring_state: Rc<RefCell<MonitoringRuntimeState>>,
+    feature_states: Rc<SharedFeatureStates>,
     runtime_config: Rc<RuntimeConfig>,
     recursion_limit: usize,
     int_max_str_digits: usize,
@@ -671,7 +662,10 @@ impl Interpreter {
         if !gil.has_waiters() {
             return Ok(());
         }
-        let switch_secs = self.sys_state.borrow().switch_interval.max(0.000_1);
+        let switch_secs = self
+            .features()
+            .sys_with(|state| state.switch_interval)
+            .max(0.000_1);
         let should_yield = LAST_SWITCH_INSTANT.with(|c| match c.get() {
             None => true,
             Some(ts) => ts.elapsed().as_secs_f64() >= switch_secs,
@@ -758,18 +752,12 @@ impl Interpreter {
         let bundle = GilSend(WorkerInitBundle {
             bootstrap_fn,
             root_env,
-            warnings_state: Rc::clone(&self.warnings_state),
-            sys_state: Rc::clone(&self.sys_state),
             script_dir: self.cold.script_dir.clone(),
             script_filename: self.cold.script_filename.clone(),
             script_argv: self.cold.script_argv.clone(),
             module_cache: Rc::clone(&self.cold.module_cache),
             bootstrap_module_registry: self.cold.bootstrap_module_registry.clone(),
-            atexit_state: Rc::clone(&self.cold.atexit_state),
-            gc_state: Rc::clone(&self.cold.gc_state),
-            tracemalloc_state: Rc::clone(&self.cold.tracemalloc_state),
-            faulthandler_state: Rc::clone(&self.cold.faulthandler_state),
-            monitoring_state: Rc::clone(&self.cold.monitoring_state),
+            feature_states: Rc::clone(&self.cold.feature_states),
             runtime_config: Rc::clone(&self.cold.runtime_config),
             recursion_limit: self.recursion_limit,
             int_max_str_digits: get_int_max_str_digits(self),
@@ -796,22 +784,19 @@ impl Interpreter {
 
                 // Unwrap the bundle strictly while holding the GIL.
                 let init = bundle.into_inner();
-                let mut cold = InterpreterColdState::new_with_gil(Arc::clone(&worker_gil), false);
+                let mut cold = InterpreterColdState::new_shared(
+                    Arc::clone(&worker_gil),
+                    false,
+                    init.feature_states,
+                );
                 cold.script_dir = init.script_dir;
                 cold.script_filename = init.script_filename;
                 cold.script_argv = init.script_argv;
                 cold.module_cache = init.module_cache;
                 cold.bootstrap_module_registry = init.bootstrap_module_registry;
-                cold.atexit_state = init.atexit_state;
-                cold.gc_state = init.gc_state;
-                cold.tracemalloc_state = init.tracemalloc_state;
-                cold.faulthandler_state = init.faulthandler_state;
-                cold.monitoring_state = init.monitoring_state;
                 cold.runtime_config = init.runtime_config;
                 let mut worker_interp = Interpreter::new_worker(
                     init.root_env,
-                    init.warnings_state,
-                    init.sys_state,
                     init.int_max_str_digits,
                     init.recursion_limit,
                     Box::new(cold),

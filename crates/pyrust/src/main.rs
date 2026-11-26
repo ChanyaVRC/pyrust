@@ -799,7 +799,7 @@ fn finish_cli_interpreter(
         return Ok(());
     }
     if let Err(err) = result {
-        if !interp.cold.atexit_state.borrow().is_empty() {
+        if interp.features().atexit_len() != 0 {
             match err.kind() {
                 crate::error::PyErrorKind::Runtime(msg) => eprintln!("{msg}"),
                 other => eprintln!("{other}"),

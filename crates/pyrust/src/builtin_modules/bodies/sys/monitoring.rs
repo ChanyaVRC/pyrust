@@ -1,6 +1,6 @@
 // `sys.monitoring` namespace (PEP 669, Python 3.12, issue #3246).
 //
-// Backed by per-interpreter `InterpreterColdState::monitoring_state` so zero
+// Backed by per-interpreter `SharedFeatureStates::monitoring` so zero
 // hot-path cost is incurred unless monitoring tools/events are enabled.
 //
 // Reference: <https://docs.python.org/3.12/library/sys.monitoring.html>
@@ -203,7 +203,7 @@ pub(super) fn use_tool_id(
             )
         })?
         .to_owned();
-    let mut st = interp.cold.monitoring_state.borrow_mut();
+    let mut st = interp.features().monitoring_mut();
     if st.tools[tid].is_some() {
         return Err(PyError::named(
             "ValueError",
@@ -230,7 +230,7 @@ pub(super) fn free_tool_id(
         ));
     }
     let tid = parse_tool_id(interp, &args[0].value, "free_tool_id")?;
-    let mut st = interp.cold.monitoring_state.borrow_mut();
+    let mut st = interp.features().monitoring_mut();
     st.tools[tid] = None;
     Ok(Value::none())
 }
@@ -251,7 +251,7 @@ pub(super) fn clear_tool_id(
         ));
     }
     let tid = parse_tool_id(interp, &args[0].value, "clear_tool_id")?;
-    let mut st = interp.cold.monitoring_state.borrow_mut();
+    let mut st = interp.features().monitoring_mut();
     st.global_events[tid] = 0;
     st.local_events[tid].clear();
     st.callbacks[tid].clear();
@@ -271,7 +271,7 @@ pub(super) fn get_tool(
         ));
     }
     let tid = parse_tool_id(interp, &args[0].value, "get_tool")?;
-    let st = interp.cold.monitoring_state.borrow();
+    let st = interp.features().monitoring();
     Ok(match &st.tools[tid] {
         Some(name) => Value::string(name),
         None => Value::none(),
@@ -295,7 +295,7 @@ pub(super) fn get_events(
     }
     let tid = parse_tool_id(interp, &args[0].value, "get_events")?;
     Ok(Value::int(
-        interp.cold.monitoring_state.borrow().global_events[tid],
+        interp.features().monitoring().global_events[tid],
     ))
 }
 
@@ -327,7 +327,7 @@ pub(super) fn set_events(
     if event_set < 0 || (event_set & !GLOBAL_SETTABLE_MASK) != 0 {
         return Err(PyError::named("ValueError", "Invalid event set"));
     }
-    interp.cold.monitoring_state.borrow_mut().global_events[tid] = event_set;
+    interp.features().monitoring_mut().global_events[tid] = event_set;
     Ok(Value::none())
 }
 
@@ -348,7 +348,7 @@ pub(super) fn get_local_events(
     }
     let tid = parse_tool_id(interp, &args[0].value, "get_local_events")?;
     let code_id = require_code_id(&args[1].value, "get_local_events")?;
-    let mask = interp.cold.monitoring_state.borrow().local_events[tid]
+    let mask = interp.features().monitoring().local_events[tid]
         .get(&code_id)
         .copied()
         .unwrap_or(0);
@@ -385,7 +385,7 @@ pub(super) fn set_local_events(
             "Cannot set non-local events with set_local_events()",
         ));
     }
-    let mut st = interp.cold.monitoring_state.borrow_mut();
+    let mut st = interp.features().monitoring_mut();
     if event_set == 0 {
         st.local_events[tid].remove(&code_id);
     } else {
@@ -429,7 +429,7 @@ pub(super) fn register_callback(
             ),
         ));
     }
-    let mut st = interp.cold.monitoring_state.borrow_mut();
+    let mut st = interp.features().monitoring_mut();
     let prev = if func.is_none() {
         st.callbacks[tid].remove(&event)
     } else {

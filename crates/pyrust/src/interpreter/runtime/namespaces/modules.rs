@@ -871,7 +871,7 @@ impl Interpreter {
 
     /// Notify all registered `sys.addaudithook` callbacks of an audit event.
     pub(crate) fn emit_audit_event(&mut self, event: &str, event_args: &[Value]) -> Result<()> {
-        let hooks: Vec<Value> = self.sys_state.borrow().audit_hooks.clone();
+        let hooks: Vec<Value> = self.features().sys_with(|state| state.audit_hooks.clone());
         if hooks.is_empty() {
             return Ok(());
         }
@@ -1442,21 +1442,17 @@ impl Interpreter {
                 script_argv: self.cold.script_argv.clone(),
                 module_cache: Rc::clone(&self.cold.module_cache),
                 bootstrap_module_registry: self.cold.bootstrap_module_registry.clone(),
-                atexit_state: Rc::clone(&self.cold.atexit_state),
                 runtime_config: Rc::clone(&self.cold.runtime_config),
-                gc_state: Rc::clone(&self.cold.gc_state),
-                tracemalloc_state: Rc::clone(&self.cold.tracemalloc_state),
-                faulthandler_state: Rc::clone(&self.cold.faulthandler_state),
-                monitoring_state: Rc::clone(&self.cold.monitoring_state),
-                ..InterpreterColdState::new_with_gil(
+                // One `Rc` shares every lazily-initialized optional feature
+                // state (gc/atexit/warnings/sys/...) with the parent (#3296).
+                ..InterpreterColdState::new_shared(
                     std::sync::Arc::clone(&self.cold.gil_state),
                     false,
+                    Rc::clone(&self.cold.feature_states),
                 )
             });
             let mut sub = Interpreter::new_worker(
                 Environment::new(None),
-                Rc::clone(&self.warnings_state),
-                Rc::clone(&self.sys_state),
                 get_int_max_str_digits(self),
                 self.recursion_limit,
                 sub_cold,
