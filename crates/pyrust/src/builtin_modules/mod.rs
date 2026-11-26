@@ -383,6 +383,10 @@ macro_rules! pyrust_builtin_modules {
                     return xml_etree_celementtree::post_load_init(interp, module);
                 }
                 "asyncio" => return asyncio::post_load_init(interp, module),
+                "ftplib" => return ftplib::post_load_init(interp, module),
+                "smtplib" => return smtplib::post_load_init(interp, module),
+                "poplib" => return poplib::post_load_init(interp, module),
+                "imaplib" => return imaplib::post_load_init(interp, module),
                 _ => {}
             }
             if asyncio_submodules::post_load_init(name, interp, module)? {
@@ -999,6 +1003,13 @@ pyrust_builtin_modules! {
     resource,
     #[cfg(unix)]
     syslog,
+    // `ftplib`, `smtplib`, `poplib`, and `imaplib` (issue #3258): 100% native-Rust
+    // Python 3.12 internet protocol client modules built over `socket` and `ssl`
+    // using PyRust's expanded macro toolkit (no `@inject`).
+    ftplib,
+    smtplib,
+    poplib,
+    imaplib,
 }
 
 include!("finalization.rs");
