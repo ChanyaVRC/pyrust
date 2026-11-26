@@ -112,7 +112,7 @@ impl Interpreter {
         // non-AttributeError exceptions propagate without __getattr__.
         let class = { Rc::clone(&instance.borrow().class) };
         if let Some(class_val) = lookup_class_attr(&class, name)
-            && is_data_descriptor(&class_val)
+            && is_data_descriptor_with_get(&class_val)
         {
             let desc_result = call_descriptor_get(
                 self,

@@ -110,7 +110,7 @@ impl Interpreter {
         // value and every other metadata attribute keeps its existing path.
         if name == "__module__"
             && let Some(meta_val) = metaclass_dunder(&class, name)
-            && is_data_descriptor(&meta_val)
+            && is_data_descriptor_with_get(&meta_val)
         {
             return call_descriptor_get(
                 self,
@@ -171,7 +171,7 @@ impl Interpreter {
         // attribute found there is a data descriptor (e.g. a `property`), invoke
         // its `__get__(cls, type(cls))`.
         if let Some(meta_val) = metaclass_dunder(&class, name)
-            && is_data_descriptor(&meta_val)
+            && is_data_descriptor_with_get(&meta_val)
         {
             return call_descriptor_get(
                 self,

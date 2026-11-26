@@ -24,6 +24,29 @@ pub(super) fn is_data_descriptor(val: &Value) -> bool {
     false
 }
 
+/// Returns `true` if `val` is a data descriptor that also defines `__get__`,
+/// i.e. one whose `__get__` must run *before* the instance `__dict__` on reads.
+///
+/// CPython's `_PyObject_GenericGetAttrWithDict` only lets a class attribute
+/// shadow the instance dict when `tp_descr_get` is set *and* the type is a
+/// data descriptor.  A descriptor defining only `__set__` / `__delete__`
+/// (issue #3365) has no read hook: the instance `__dict__` entry wins, and
+/// with no entry the descriptor object itself is returned.  Every builtin data
+/// descriptor (`property`, `__slots__` member descriptors, ...) implements
+/// `__get__`, so only user `PyInstance` descriptors need the extra probe.
+pub(super) fn is_data_descriptor_with_get(val: &Value) -> bool {
+    if !is_data_descriptor(val) {
+        return false;
+    }
+    match val.kind() {
+        ValueKind::PyInstance(inst) => {
+            let class = Rc::clone(&inst.borrow().class);
+            lookup_class_attr(&class, "__get__").is_some()
+        }
+        _ => true,
+    }
+}
+
 /// Returns `true` if `val` is a non-data descriptor: defines `__get__` on
 /// its type but NOT `__set__` or `__delete__`.  Non-data descriptors are
 /// checked after instance `__dict__` in CPython's lookup order.
