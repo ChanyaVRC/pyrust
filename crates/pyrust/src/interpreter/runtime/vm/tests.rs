@@ -1334,6 +1334,28 @@ assert out > 0
     }
 
     #[test]
+    fn bound_method_arity_precheck_admits_only_eligible_under_supplied_calls() {
+        use super::vm_tramp_arity_may_fit;
+        use pyrust_core::UserFunction;
+
+        // Exact arity and an under-supplied call to an eligible callee may
+        // enter the gate (#3421); an over-supplied one and any call to an
+        // ineligible callee must not.
+        assert!(vm_tramp_arity_may_fit(3, 3));
+        assert!(vm_tramp_arity_may_fit(3, 2));
+        assert!(vm_tramp_arity_may_fit(3, 1));
+        assert!(!vm_tramp_arity_may_fit(3, 4));
+        assert!(!vm_tramp_arity_may_fit(
+            UserFunction::TRAMPOLINE_INELIGIBLE,
+            1
+        ));
+        assert!(!vm_tramp_arity_may_fit(
+            UserFunction::TRAMPOLINE_INELIGIBLE,
+            2
+        ));
+    }
+
+    #[test]
     fn precomputed_trampoline_arity_matches_eligibility_rules() {
         use pyrust_core::{UserFunction, ValueKind};
 

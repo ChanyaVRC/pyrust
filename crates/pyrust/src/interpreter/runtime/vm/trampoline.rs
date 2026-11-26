@@ -50,6 +50,24 @@ fn vm_tramp_omitted_defaults_ok(f: &pyrust_core::UserFunction, nsupplied: usize)
             .is_some_and(|omitted| omitted.iter().all(|p| p.default.is_some()))
 }
 
+/// Cheap bound-method pre-check: can a call supplying `nsupplied` positional
+/// arguments (receiver included) possibly enter the trampoline of a callee with
+/// the precomputed `trampoline_arity`? True for an exact-arity call, and for an
+/// under-supplied call to a trampoline-eligible callee, which
+/// [`vm_tramp_check_gate`] then validates against the callee's defaults and
+/// declines (falling back to the canonical binder) when they cannot fill the gap
+/// (#3421).
+///
+/// Exact arity short-circuits on one integer compare, so it costs the same as
+/// the strict equality it replaces.
+#[inline(always)]
+fn vm_tramp_arity_may_fit(trampoline_arity: u16, nsupplied: usize) -> bool {
+    let arity = trampoline_arity as usize;
+    arity == nsupplied
+        || (arity > nsupplied
+            && trampoline_arity != pyrust_core::UserFunction::TRAMPOLINE_INELIGIBLE)
+}
+
 /// Bind the omitted trailing parameters of a call that supplied `nsupplied`
 /// positional arguments from the callee's defaults at call time, so mutable
 /// default objects are shared exactly as on the native path (#3381).
