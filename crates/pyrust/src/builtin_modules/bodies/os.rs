@@ -29,6 +29,8 @@ use pyrust_derive::pyrust_module;
 mod arguments;
 #[path = "os/environment.rs"]
 mod environment;
+#[cfg(unix)]
+pub(crate) use environment::env_lock;
 #[path = "os/fd_ops.rs"]
 mod fd_ops;
 pub(crate) use fd_ops::{
