@@ -177,20 +177,18 @@ else:
         ca.unctrl(0x81),
     )
 
-    # ── 3. pre-initscr error, keyname, has_key table ─────────────────────────
+    # ── 3. pre-initscr errors and has_key table ──────────────────────────────
     try:
         curses.unctrl(1)
         print("unctrl_pre_init", "NO_ERROR")
     except curses.error:
         print("unctrl_pre_init", "curses.error")
 
-    print(
-        "keyname_pre_init",
-        curses.keyname(ord("a")),
-        curses.keyname(1),
-        curses.keyname(curses.KEY_UP),
-        curses.keyname(curses.KEY_F5),
-    )
+    try:
+        curses.keyname(ord("a"))
+        print("keyname_pre_init", "NO_ERROR")
+    except curses.error:
+        print("keyname_pre_init", "curses.error")
     print(
         "has_key_table",
         isinstance(chk._capability_names, dict),
@@ -247,6 +245,13 @@ try:
     )
     log("has_key_up", curses.has_key(curses.KEY_UP), chk.has_key(curses.KEY_UP))
     log("unctrl_post_init", curses.unctrl(1), curses.unctrl(b"A"), curses.unctrl(0x7F))
+    log(
+        "keyname_post_init",
+        curses.keyname(ord("a")),
+        curses.keyname(1),
+        curses.keyname(curses.KEY_UP),
+        curses.keyname(curses.KEY_F5),
+    )
 
     # Window creation & writing/reading
     win = curses.newwin(10, 30, 2, 4)

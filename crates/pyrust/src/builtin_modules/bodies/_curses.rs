@@ -2261,6 +2261,7 @@ pyrust_module! {
     }
 
     fn keyname(#[positional_only] k: PyIndex) -> Result<Value> {
+        require_initscr(_interp)?;
         let code = k.expect_i64(FN_NAME, "k")?;
         if code < 0 {
             return Err(PyError::named(
