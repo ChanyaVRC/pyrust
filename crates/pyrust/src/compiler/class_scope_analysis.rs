@@ -423,6 +423,11 @@ fn collect_class_lambda_outer_refs_in_expr(
             collect_class_lambda_outer_refs_in_expr(target, local_index, class_locals, cells);
             collect_class_lambda_outer_refs_in_expr(index, local_index, class_locals, cells);
         }
+        Expr::SliceLit { lower, upper, step } => {
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells);
+            }
+        }
         Expr::Slice {
             target,
             lower,

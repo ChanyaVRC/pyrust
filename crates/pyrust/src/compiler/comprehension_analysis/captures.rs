@@ -359,6 +359,11 @@ fn lambda_captures_in_expr(
             lambda_captures_in_expr(target, local_index, is_class_scope, cells);
             lambda_captures_in_expr(index, local_index, is_class_scope, cells);
         }
+        Expr::SliceLit { lower, upper, step } => {
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                lambda_captures_in_expr(e, local_index, is_class_scope, cells);
+            }
+        }
         Expr::Slice {
             target,
             lower,

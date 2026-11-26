@@ -311,6 +311,11 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
             collect_transitive_free_vars_in_expr(target, uses);
             collect_transitive_free_vars_in_expr(index, uses);
         }
+        Expr::SliceLit { lower, upper, step } => {
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                collect_transitive_free_vars_in_expr(e, uses);
+            }
+        }
         Expr::Slice {
             target,
             lower,

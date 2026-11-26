@@ -78,85 +78,110 @@ impl Parser {
         object_start: Option<u32>,
         bracket_col: Option<u32>,
     ) -> Result<Expr> {
-        // Inside [ already consumed. Parse optional slice or index.
-        // A leading `*` (PEP 646 starred subscript, e.g. `m[*idx]`) forces the
-        // index to be a tuple even with a single element.
+        // Inside [ already consumed. Parse a comma-separated list of subscript
+        // items; each item is a plain expression, a starred expression (PEP 646,
+        // `m[*idx]`) or a slice `lo:hi:step` (#3316).  A lone slice with no
+        // comma keeps the dedicated `Expr::Slice` node (GetSlice fast path); a
+        // slice inside a tuple subscript (`a[1:2, 3]`) becomes a standalone
+        // `Expr::SliceLit` element of the index tuple.
+        let mut items: Vec<Expr> = Vec::new();
+        let mut saw_comma = false;
         let mut saw_star = false;
-        let first = if self.is(&Token::Colon) {
+        let mut lone_slice: Option<(Option<Expr>, Option<Expr>, Option<Expr>)> = None;
+        loop {
+            if self.is(&Token::Star) {
+                self.bump();
+                saw_star = true;
+                items.push(Expr::Starred(Box::new(self.parse_or()?)));
+            } else {
+                let lower = if self.is(&Token::Colon) {
+                    None
+                } else {
+                    Some(self.parse_expr()?)
+                };
+                if self.is(&Token::Colon) {
+                    let (lower, upper, step) = self.parse_slice_rest(lower)?;
+                    items.push(Expr::SliceLit {
+                        lower: lower.map(Box::new),
+                        upper: upper.map(Box::new),
+                        step: step.map(Box::new),
+                    });
+                } else {
+                    items.push(lower.ok_or_else(|| PyError::parse("empty subscript".to_string()))?);
+                }
+            }
+            if self.is(&Token::Comma) {
+                saw_comma = true;
+                self.bump();
+                if self.is(&Token::RBracket) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        if !saw_comma
+            && !saw_star
+            && items.len() == 1
+            && matches!(items[0], Expr::SliceLit { .. })
+            && let Some(Expr::SliceLit { lower, upper, step }) = items.pop()
+        {
+            lone_slice = Some((lower.map(|b| *b), upper.map(|b| *b), step.map(|b| *b)));
+        }
+        self.expect(&Token::RBracket)?;
+        if let Some((lower, upper, step)) = lone_slice {
+            return Ok(Expr::Slice {
+                target: Box::new(target),
+                lower: lower.map(Box::new),
+                upper: upper.map(Box::new),
+                step: step.map(Box::new),
+            });
+        }
+        // `a[b, c]` parses the same as `a[(b, c)]`; a trailing comma or a
+        // leading `*` forces a tuple even with a single element.
+        let index = if saw_comma || saw_star {
+            Expr::Tuple(items)
+        } else {
+            items.pop().expect("subscript has at least one item")
+        };
+        // Anchor: object `[object_start, bracket_col)` underlined `~`, the
+        // `[...]` part `[bracket_col, ]end)` underlined `^` (#2411).
+        let span = match (object_start, bracket_col, self.prev_end_col()) {
+            (Some(obj), Some(br), Some(end)) if obj <= br && br < end => Some((obj, br, end, end)),
+            _ => None,
+        };
+        Ok(Expr::Index {
+            target: Box::new(target),
+            index: Box::new(index),
+            span,
+        })
+    }
+
+    /// Parse the remainder of a slice after its (optional) lower bound; the
+    /// current token is the first `:`.  Stops before `,` / `]`.
+    #[allow(clippy::type_complexity)]
+    fn parse_slice_rest(
+        &mut self,
+        lower: Option<Expr>,
+    ) -> Result<(Option<Expr>, Option<Expr>, Option<Expr>)> {
+        self.bump(); // first `:`
+        let ends = |p: &Self| p.is(&Token::RBracket) || p.is(&Token::Comma);
+        let upper = if ends(self) || self.is(&Token::Colon) {
             None
-        } else if self.is(&Token::Star) {
-            self.bump();
-            saw_star = true;
-            Some(Expr::Starred(Box::new(self.parse_or()?)))
         } else {
             Some(self.parse_expr()?)
         };
-
-        if self.is(&Token::Colon) {
-            // Slice
+        let step = if self.is(&Token::Colon) {
             self.bump();
-            let upper = if self.is(&Token::RBracket) || self.is(&Token::Colon) {
+            if ends(self) {
                 None
             } else {
-                Some(Box::new(self.parse_expr()?))
-            };
-            let step = if self.is(&Token::Colon) {
-                self.bump();
-                if self.is(&Token::RBracket) {
-                    None
-                } else {
-                    Some(Box::new(self.parse_expr()?))
-                }
-            } else {
-                None
-            };
-            self.expect(&Token::RBracket)?;
-            Ok(Expr::Slice {
-                target: Box::new(target),
-                lower: first.map(Box::new),
-                upper,
-                step,
-            })
+                Some(self.parse_expr()?)
+            }
         } else {
-            // Plain index. If a comma follows, collect into a tuple key
-            // (e.g. `a[b, c]` parses the same as `a[(b, c)]`).
-            let first = first.ok_or_else(|| PyError::parse("empty subscript".to_string()))?;
-            let index = if self.is(&Token::Comma) {
-                let mut items = vec![first];
-                while self.is(&Token::Comma) {
-                    self.bump();
-                    if self.is(&Token::RBracket) {
-                        break;
-                    }
-                    if self.is(&Token::Star) {
-                        self.bump();
-                        items.push(Expr::Starred(Box::new(self.parse_or()?)));
-                    } else {
-                        items.push(self.parse_expr()?);
-                    }
-                }
-                Expr::Tuple(items)
-            } else if saw_star {
-                // A single starred index still forms a 1-tuple: `m[*xs]` -> `m[(*xs,)]`.
-                Expr::Tuple(vec![first])
-            } else {
-                first
-            };
-            self.expect(&Token::RBracket)?;
-            // Anchor: object `[object_start, bracket_col)` underlined `~`, the
-            // `[...]` part `[bracket_col, ]end)` underlined `^` (#2411).
-            let span = match (object_start, bracket_col, self.prev_end_col()) {
-                (Some(obj), Some(br), Some(end)) if obj <= br && br < end => {
-                    Some((obj, br, end, end))
-                }
-                _ => None,
-            };
-            Ok(Expr::Index {
-                target: Box::new(target),
-                index: Box::new(index),
-                span,
-            })
-        }
+            None
+        };
+        Ok((lower, upper, step))
     }
 
     fn parse_call_args(&mut self) -> Result<Vec<CallArg>> {

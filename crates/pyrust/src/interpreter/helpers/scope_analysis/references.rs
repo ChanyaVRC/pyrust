@@ -91,6 +91,11 @@ fn collect_var_refs_in_expr(
             collect_var_refs_in_expr(target, used, assigned);
             collect_var_refs_in_expr(index, used, assigned);
         }
+        Expr::SliceLit { lower, upper, step } => {
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                collect_var_refs_in_expr(e, used, assigned);
+            }
+        }
         Expr::Slice {
             target,
             lower,

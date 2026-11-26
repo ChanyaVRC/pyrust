@@ -88,6 +88,10 @@ impl Compiler {
                 self.free_temp(idx);
                 dst
             }
+            Expr::SliceLit { lower, upper, step } => {
+                // Standalone slice element of a tuple subscript (#3316).
+                self.compile_slice_key(lower.as_deref(), upper.as_deref(), step.as_deref())
+            }
             Expr::Slice {
                 target,
                 lower,
