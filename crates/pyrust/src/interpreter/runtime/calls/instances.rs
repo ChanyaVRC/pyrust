@@ -72,6 +72,137 @@ impl Interpreter {
         self.default_construct(class, args)
     }
 
+    /// Construct an instance of `class` through its validated call-site
+    /// [`PlainClassPlan`] (issue #3383).
+    ///
+    /// The caller must have just checked `plan.is_current(class)`.  The plan
+    /// then guarantees that `type.__call__` is the default one, that the class
+    /// is neither abstract, an exception, nor primitive-backed, and that
+    /// `__new__` is `object.__new__`, so this goes straight to allocation and
+    /// (when present) the ordinary-function `__init__` — the same observable
+    /// steps as `call_class_expanded`, minus the per-call re-derivation.
+    ///
+    /// Anything the plan does not cover is handed back to the generic path,
+    /// which stays the single owner of every diagnostic.
+    pub(crate) fn construct_plain_class(
+        &mut self,
+        class: &Rc<RefCell<PyClass>>,
+        plan: &PlainClassPlan,
+        args: &[ExpandedCallArg],
+    ) -> Result<Value> {
+        let Some(init) = &plan.init else {
+            if !args.is_empty() {
+                // `object.__new__` rejects the excess arguments (#2323).
+                return self.call_class_expanded(Rc::clone(class), args);
+            }
+            return Ok(self.allocate_plain_instance(class, plan));
+        };
+        let Some(function) = init.function.upgrade() else {
+            // A current stamp keeps the function stored on a live class, so
+            // this is unreachable; resolving afresh is always correct.
+            return self.call_class_expanded(Rc::clone(class), args);
+        };
+
+        let instance = self.allocate_plain_instance(class, plan);
+        let result = match self.call_plain_init_positional(
+            &function,
+            init.positional_parameter_count,
+            &instance,
+            args,
+        ) {
+            Some(result) => result?,
+            None => {
+                self.call_user_function_expanded(function, args, std::slice::from_ref(&instance))?
+            }
+        };
+        if !result.is_none() {
+            return Err(pyrust_core::type_err!(&format!(
+                "__init__() should return None, not '{}'",
+                pyrust_core::builtin_type_name(&result),
+            )));
+        }
+        Ok(instance)
+    }
+
+    /// Run a plan's `__init__` for an all-positional call by binding `self`,
+    /// each argument, and any trailing defaults straight into their
+    /// destination registers — the binding the general binder would produce,
+    /// without its keyword matching and arity bookkeeping.
+    ///
+    /// Returns `None`, having run nothing, whenever that binding is not
+    /// provably complete (a keyword argument, too many arguments, a missing
+    /// argument without a default, a signature with `*args` / `**kwargs` /
+    /// keyword-only parameters); the caller then uses the general binder,
+    /// which owns every argument diagnostic.
+    #[inline]
+    fn call_plain_init_positional(
+        &mut self,
+        function: &Rc<UserFunction>,
+        positional_parameter_count: usize,
+        instance: &Value,
+        args: &[ExpandedCallArg],
+    ) -> Option<Result<Value>> {
+        let supplied = args.len() + 1;
+        // `usize::MAX` marks a signature that always needs the general binder.
+        if positional_parameter_count == usize::MAX
+            || supplied > positional_parameter_count
+            || args.iter().any(|arg| arg.name.is_some())
+        {
+            return None;
+        }
+        let code = self.get_or_compile_bytecode(function)?;
+        let num_regs = code.num_regs as usize;
+        let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+        let mut cells = allocate_frame_cells(&code, &function.closure_cells);
+        let bound: Result<bool> = (|| {
+            bind_param_direct(function, num_regs, &mut regs, &cells, 0, instance.clone())?;
+            for (index, arg) in args.iter().enumerate() {
+                bind_param_direct(
+                    function,
+                    num_regs,
+                    &mut regs,
+                    &cells,
+                    index + 1,
+                    arg.value.clone(),
+                )?;
+            }
+            for index in supplied..positional_parameter_count {
+                // Override-aware, so a reassigned `__defaults__` is honoured.
+                let Some(default) = function.positional_default(index) else {
+                    return Ok(false);
+                };
+                bind_param_direct(function, num_regs, &mut regs, &cells, index, default)?;
+            }
+            Ok(true)
+        })();
+        match bound {
+            Ok(true) => {
+                Some(self.run_bound_user_frame_inline(function, &code, &mut regs, &mut cells))
+            }
+            // Nothing ran yet: the frame's own registers and cells are simply
+            // dropped and the general binder reports the missing argument.
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        }
+    }
+
+    /// Allocate the bare instance of a plain class, counting it for the
+    /// finalizer bookkeeping when its class defines `__del__` (#3341).
+    #[inline]
+    fn allocate_plain_instance(
+        &mut self,
+        class: &Rc<RefCell<PyClass>>,
+        plan: &PlainClassPlan,
+    ) -> Value {
+        if plan.has_finalizer {
+            self.note_possible_finalizable_instance(class);
+        }
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(class),
+            attrs: InstanceAttrs::new(),
+        })))
+    }
+
     /// The default `type.__call__` behaviour: allocate via `__new__` and run
     /// `__init__`.  This is the single construction site reached both by a
     /// plain `Cls(*args)` (when the metaclass does not override `__call__`) and

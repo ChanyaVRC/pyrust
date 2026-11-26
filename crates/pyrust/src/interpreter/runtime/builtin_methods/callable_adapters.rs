@@ -128,6 +128,24 @@ impl Interpreter {
         matches!(function.kind(), ValueKind::BuiltinFunction("id")).then(|| argument.object_id())
     }
 
+    /// Does [`Self::call_class_after_primitive_miss`] route `class` to a
+    /// typing-marker or canonical-class adapter instead of ordinary Python
+    /// construction?
+    ///
+    /// The call-site construction plan (issue #3383) asks this once when a
+    /// plan is resolved, so the adapter set stays owned by this domain and a
+    /// planned class can never bypass an adapter added below.
+    pub(super) fn class_has_construction_adapter(class: &Rc<RefCell<PyClass>>) -> bool {
+        pyrust_builtins::typing_marker::classify(class).is_some()
+            || matches!(
+                class.borrow().canonical_tag,
+                Some(
+                    pyrust_core::CanonicalClassTag::MappingProxy
+                        | pyrust_core::CanonicalClassTag::GenericAlias
+                )
+            )
+    }
+
     /// Continue class dispatch after the caller has proved that the exact
     /// identity is absent from `PRIMITIVE_CLASS_DISPATCH`.
     ///

@@ -216,17 +216,250 @@ mod vm_tests {
         ));
     }
 
+    fn ordinary_test_class(
+        name: &str,
+        attrs: indexmap::IndexMap<String, Value>,
+    ) -> std::rc::Rc<std::cell::RefCell<pyrust_core::PyClass>> {
+        std::rc::Rc::new(std::cell::RefCell::new(pyrust_core::PyClass::new(
+            name,
+            name,
+            Some(crate::interpreter::object_class_singleton()),
+            attrs,
+        )))
+    }
+
+    fn cached_plain_class_plan(
+        code: &FnCode,
+    ) -> std::rc::Rc<crate::interpreter::calls::PlainClassPlan> {
+        match code.call_builtin_cache.borrow().get(0) {
+            Some(crate::interpreter::CallBuiltinCacheEntry::PlainClass(plan)) => {
+                std::rc::Rc::clone(plan)
+            }
+            other => panic!("expected a plain-class construction plan, found {other:?}"),
+        }
+    }
+
+    fn assert_instance_of(
+        value: &Value,
+        class: &std::rc::Rc<std::cell::RefCell<pyrust_core::PyClass>>,
+    ) {
+        let pyrust_core::ValueKind::PyInstance(instance) = value.kind() else {
+            panic!("class construction must return an instance");
+        };
+        assert!(std::rc::Rc::ptr_eq(&instance.borrow().class, class));
+    }
+
     #[test]
-    fn ordinary_class_call_records_negative_primitive_identity() {
-        use std::cell::RefCell;
+    fn plain_class_call_records_construction_plan() {
         use std::rc::Rc;
 
-        let class = Rc::new(RefCell::new(pyrust_core::PyClass::new(
-            "Ordinary",
-            "Ordinary",
-            Some(crate::interpreter::object_class_singleton()),
-            indexmap::IndexMap::new(),
-        )));
+        let class = ordinary_test_class("Plain", indexmap::IndexMap::new());
+        let code = call_code(0);
+        let function = Value::py_class(Rc::clone(&class));
+
+        assert!(matches!(
+            Interpreter::probe_builtin_vectorcall(&code, 0, &function, &[]),
+            BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::FirstClass)
+        ));
+        let first = execute_call(&code, function.clone(), Vec::new())
+            .expect("plain class construction must execute");
+        assert_instance_of(&first, &class);
+        let plan = cached_plain_class_plan(&code);
+        assert!(plan.is_for_class(&class));
+        assert!(plan.is_current(&class));
+        assert!(plan.is_allocation_only());
+        assert!(!plan.has_finalizer());
+
+        let warm_probe = Interpreter::probe_builtin_vectorcall(&code, 0, &function, &[]);
+        assert!(matches!(
+            &warm_probe,
+            BuiltinCallProbe::PlainClass(token) if Rc::ptr_eq(token, &plan)
+        ));
+        let exclusive_cache_borrow = code.call_builtin_cache.borrow_mut();
+        let warm = execute_call_with_probe(&code, function.clone(), Vec::new(), warm_probe)
+            .expect("a plan token must not read the cache again");
+        drop(exclusive_cache_borrow);
+        assert_instance_of(&warm, &class);
+        assert!(
+            !first.is_identical_to(&warm),
+            "every construction must allocate a fresh instance"
+        );
+        assert!(Rc::ptr_eq(&cached_plain_class_plan(&code), &plan));
+    }
+
+    #[test]
+    fn plain_class_plan_keeps_argument_diagnostics_on_the_generic_path() {
+        use std::rc::Rc;
+
+        let class = ordinary_test_class("NoArgs", indexmap::IndexMap::new());
+        let code = call_code(1);
+        let function = Value::py_class(Rc::clone(&class));
+
+        for _ in 0..3 {
+            let error = execute_call(&code, function.clone(), vec![Value::int(1)])
+                .expect_err("object.__init__ must reject an argument on a warm plan");
+            assert!(error.class_name_is("TypeError"));
+            assert_eq!(error.to_string(), "TypeError: NoArgs() takes no arguments");
+            assert!(cached_plain_class_plan(&code).is_for_class(&class));
+        }
+    }
+
+    #[test]
+    fn plain_class_plan_is_refreshed_in_place_by_an_unrelated_class_mutation() {
+        use std::rc::Rc;
+
+        let class = ordinary_test_class("Stable", indexmap::IndexMap::new());
+        let bystander = ordinary_test_class("Bystander", indexmap::IndexMap::new());
+        let code = call_code(0);
+        let function = Value::py_class(Rc::clone(&class));
+
+        execute_call(&code, function.clone(), Vec::new()).expect("plain class must construct");
+        let plan = cached_plain_class_plan(&code);
+
+        Interpreter::default()
+            .assign_attr(Value::py_class(bystander), "marker", Value::int(1))
+            .expect("a user class attribute must be assignable");
+        assert!(
+            !plan.is_current(&class),
+            "any class mutation must invalidate the stamp through the global epoch"
+        );
+
+        let rebuilt = execute_call(&code, function, Vec::new())
+            .expect("a stale plan must re-resolve and construct");
+        assert_instance_of(&rebuilt, &class);
+        assert!(
+            Rc::ptr_eq(&cached_plain_class_plan(&code), &plan),
+            "unchanged construction facts must reuse the cached plan allocation"
+        );
+        assert!(plan.is_current(&class));
+    }
+
+    #[test]
+    fn plain_class_plan_is_replaced_when_construction_facts_change() {
+        use std::rc::Rc;
+
+        let class = ordinary_test_class("Mutating", indexmap::IndexMap::new());
+        let code = call_code(0);
+        let function = Value::py_class(Rc::clone(&class));
+
+        execute_call(&code, function.clone(), Vec::new()).expect("plain class must construct");
+        let plan = cached_plain_class_plan(&code);
+        assert!(!plan.has_finalizer());
+
+        // Insert the finalizer slot directly (and stamp the mutation by hand)
+        // so this thread's finalizer machinery stays unarmed.
+        {
+            let mut borrowed = class.borrow_mut();
+            borrowed.attrs.insert("__del__".to_string(), Value::none());
+            borrowed.bump_mutation_version();
+        }
+        pyrust_core::bump_class_epoch();
+        assert!(!plan.is_current(&class));
+
+        let rebuilt = execute_call(&code, function, Vec::new())
+            .expect("a class that gained a finalizer must still construct");
+        assert_instance_of(&rebuilt, &class);
+        let replacement = cached_plain_class_plan(&code);
+        assert!(!Rc::ptr_eq(&replacement, &plan));
+        assert!(replacement.has_finalizer());
+        assert!(replacement.is_current(&class));
+        assert!(
+            !plan.is_current(&class),
+            "a superseded plan must never be revalidated"
+        );
+    }
+
+    #[test]
+    fn plain_class_plan_is_demoted_when_the_class_stops_being_plain() {
+        use std::rc::Rc;
+
+        let class = ordinary_test_class("Demoted", indexmap::IndexMap::new());
+        let code = call_code(0);
+        let function = Value::py_class(Rc::clone(&class));
+
+        execute_call(&code, function.clone(), Vec::new()).expect("plain class must construct");
+        cached_plain_class_plan(&code);
+
+        // A non-empty `__abstractmethods__` is never plan-eligible; whether it
+        // also rejects construction stays the generic path's decision.
+        Interpreter::default()
+            .assign_attr(
+                function.clone(),
+                "__abstractmethods__",
+                Value::tuple(vec![Value::string("pending")]),
+            )
+            .expect("a user class attribute must be assignable");
+        let generic = execute_call(&code, function.clone(), Vec::new())
+            .expect("a class without a metaclass is not abstract");
+        assert_instance_of(&generic, &class);
+        assert!(matches!(
+            code.call_builtin_cache.borrow().get(0),
+            Some(crate::interpreter::CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(cached))
+                if cached.as_ptr() == Rc::as_ptr(&class)
+        ));
+        assert!(matches!(
+            Interpreter::probe_builtin_vectorcall(&code, 0, &function, &[]),
+            BuiltinCallProbe::ClassAfterPrimitiveMiss
+        ));
+    }
+
+    #[test]
+    fn plain_class_plan_counts_finalizable_classes() {
+        use std::rc::Rc;
+
+        let mut attrs = indexmap::IndexMap::new();
+        attrs.insert("__del__".to_string(), Value::none());
+        let class = ordinary_test_class("Finalizable", attrs);
+        let code = call_code(0);
+
+        let value = execute_call(&code, Value::py_class(Rc::clone(&class)), Vec::new())
+            .expect("a finalizable plain class must construct");
+        assert_instance_of(&value, &class);
+        let plan = cached_plain_class_plan(&code);
+        assert!(plan.has_finalizer());
+        assert!(plan.is_allocation_only());
+    }
+
+    #[test]
+    fn polymorphic_class_call_site_keeps_the_generic_construction_tail() {
+        use std::rc::Rc;
+
+        let first = ordinary_test_class("First", indexmap::IndexMap::new());
+        let second = ordinary_test_class("Second", indexmap::IndexMap::new());
+        let code = call_code(0);
+        let first_value = Value::py_class(Rc::clone(&first));
+        let second_value = Value::py_class(Rc::clone(&second));
+
+        execute_call(&code, first_value.clone(), Vec::new()).expect("first class must construct");
+        assert!(cached_plain_class_plan(&code).is_for_class(&first));
+
+        assert!(matches!(
+            Interpreter::probe_builtin_vectorcall(&code, 0, &second_value, &[]),
+            BuiltinCallProbe::EligibleMiss(BuiltinCallCacheMiss::Class)
+        ));
+        for (value, class) in [(&second_value, &second), (&first_value, &first)] {
+            let constructed = execute_call(&code, value.clone(), Vec::new())
+                .expect("a polymorphic site must keep constructing");
+            assert_instance_of(&constructed, class);
+            assert!(
+                matches!(
+                    code.call_builtin_cache.borrow().get(0),
+                    Some(crate::interpreter::CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(
+                        cached
+                    )) if cached.as_ptr() == Rc::as_ptr(class)
+                ),
+                "a second class must not install a construction plan"
+            );
+        }
+    }
+
+    #[test]
+    fn non_plain_class_call_records_negative_primitive_identity() {
+        use std::rc::Rc;
+
+        let class = ordinary_test_class("Wrapped", indexmap::IndexMap::new());
+        // A wrapped `__new__` slot (#2335) is not plan-eligible.
+        class.borrow().new_slot_wrapped.set(true);
         let code = call_code(0);
         let function = Value::py_class(Rc::clone(&class));
 
@@ -325,13 +558,12 @@ mod vm_tests {
 
         execute_call(&code, Value::py_class(Rc::clone(&class)), Vec::new())
             .expect("CallMemo bypass must execute ordinary construction");
-        assert!(matches!(
-            code.call_builtin_cache.borrow().get(0),
-            Some(crate::interpreter::CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(cached))
-                if cached.as_ptr() == Rc::as_ptr(&class)
-        ));
-        execute_call(&code, Value::py_class(class), Vec::new())
-            .expect("CallMemo warm negative must keep executing the generic tail");
+        let plan = cached_plain_class_plan(&code);
+        assert!(plan.is_for_class(&class));
+        let warm = execute_call(&code, Value::py_class(Rc::clone(&class)), Vec::new())
+            .expect("CallMemo warm plan must keep constructing");
+        assert_instance_of(&warm, &class);
+        assert!(Rc::ptr_eq(&cached_plain_class_plan(&code), &plan));
     }
 
     #[test]
