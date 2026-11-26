@@ -574,9 +574,9 @@ pyrust_builtin_modules! {
     // resolves to a real `PyModule`.
     random @inject,
     // `time` (issue #2787): native clock / sleep functions and the libc-backed
-    // calendar conversions; `struct_time` is defined in `time_py.py` and
-    // injected by the `@inject` post-load hook.
-    time @inject,
+    // calendar conversions; `struct_time` is a native `pyrust_struct_seq!`
+    // type (issue #3307) — no `@inject` Python body.
+    time,
     // `textwrap` (issue #2786): a pure-Python module (`textwrap_py.py`) —
     // `TextWrapper`, `wrap`, `fill`, `shorten`, `dedent`, `indent` — injected
     // by the `@inject` post-load hook; the native body is empty.

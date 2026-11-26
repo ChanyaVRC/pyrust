@@ -155,4 +155,49 @@ print(isinstance(tz, tuple))            # True
 print(len(tz) == 2)                     # True
 print(all(isinstance(n, str) for n in tz))  # True
 
+# ── native struct_time surface (issue #3307) ─────────────────────────────────
+st = time.struct_time
+print(st.__module__, st.__name__, st.__qualname__)   # time struct_time struct_time
+print(st.n_fields, st.n_sequence_fields, st.n_unnamed_fields)  # 11 9 0
+print(st.__match_args__)
+print(issubclass(st, tuple), st.__mro__[1] is tuple)
+g0 = time.gmtime(0)
+print(g0.tm_zone in ("UTC", "GMT"), g0.tm_gmtoff)  # True 0
+print(g0[2:5], g0[-1], list(g0)[:3])
+print(len(g0), g0 == (1970, 1, 1, 0, 0, 0, 3, 1, 0))
+y, mo, d, *rest = g0
+print(y, mo, d, rest)
+print(hash(g0) == hash(tuple(g0)))
+print(type(time.localtime(0)) is st, type(time.struct_time((1,) * 9)) is st)
+# extra attributes are not part of the sequence and default to None
+bare = st((2020, 6, 15, 1, 2, 3, 0, 167, 0))
+print(bare.tm_zone, bare.tm_gmtoff, len(bare))
+# a 10/11-element sequence fills the extra fields
+ext = st((2020, 6, 15, 1, 2, 3, 0, 167, 0, "XYZ", 3600))
+print(ext.tm_zone, ext.tm_gmtoff, len(ext), ext[8])
+print(repr(ext))
+print(ext == bare)
+# constructor errors
+for bad in [(1, 2, 3), tuple(range(12)), 5, None]:
+    try:
+        st(bad)
+    except Exception as e:
+        print(type(e).__name__, e)
+try:
+    st()
+except TypeError as e:
+    print("noarg:", e)
+try:
+    int(g0)
+except TypeError as e:
+    print("int:", e)
+# mktime / strftime accept struct_time and plain tuples
+print(time.strftime("%Y-%m-%d", st((2021, 3, 4, 0, 0, 0, 3, 63, 0))))
+print(time.strftime("%Y-%m-%d", (2021, 3, 4, 0, 0, 0, 3, 63, 0)))
+print(g0 < st((1971, 1, 1, 0, 0, 0, 0, 1, 0)))
+import copy, pickle
+print(copy.copy(g0) == g0, pickle.loads(pickle.dumps(g0)) == g0)
+print(time.gmtime(-1)[:6], time.gmtime(2**31)[:6])
+print(time.gmtime(1.9)[:6], time.gmtime(-1.5)[:6])
+
 print("time ok")

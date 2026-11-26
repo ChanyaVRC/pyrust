@@ -521,6 +521,9 @@ pub(crate) fn build_struct_seq_class(spec: &'static StructSeqSpec) -> Rc<RefCell
         attrs,
     );
     class.non_subclassable_name = Some(spec.qualname);
+    // CPython's `tp_name` is the dotted qualname, so error messages say
+    // `'time.struct_time' object ...`.
+    class.error_name = Some(spec.qualname);
     let cls_rc = Rc::new(RefCell::new(class));
     tuple_base
         .borrow()
@@ -636,7 +639,15 @@ fn structseq_new(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<V
         ));
     }
 
-    let values = interp.collect_iterable(&sequence)?;
+    // CPython's `PySequence_Fast(arg, "constructor requires a sequence")`
+    // replaces the generic "not iterable" failure for non-iterable input.
+    let values = interp.collect_iterable(&sequence).map_err(|e| {
+        if e.class_name_is("TypeError") && e.to_string().ends_with("object is not iterable") {
+            PyError::named("TypeError", "constructor requires a sequence".to_string())
+        } else {
+            e
+        }
+    })?;
     let min_len = spec.n_sequence_fields();
     let max_len = spec.n_fields();
     if min_len == max_len {
