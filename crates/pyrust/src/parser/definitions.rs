@@ -331,24 +331,20 @@ impl Parser {
 
         loop {
             if seen_kwargs {
-                return Err(PyError::parse("parameter after **kwargs".to_string()));
+                return Err(PyError::parse(
+                    "arguments cannot follow var-keyword argument".to_string(),
+                ));
             }
 
             if self.is(&Token::Slash) {
-                if seen_slash {
-                    return Err(PyError::parse(
-                        "duplicate '/' in function parameter list".to_string(),
-                    ));
-                }
                 if seen_star {
-                    return Err(PyError::parse(
-                        "'/' must appear before '*' in parameter list".to_string(),
-                    ));
+                    return Err(PyError::parse("/ must be ahead of *".to_string()));
+                }
+                if seen_slash {
+                    return Err(PyError::parse("/ may appear only once".to_string()));
                 }
                 if params.is_empty() {
-                    return Err(PyError::parse(
-                        "at least one parameter must precede '/'".to_string(),
-                    ));
+                    return Err(PyError::parse("invalid syntax".to_string()));
                 }
                 // Mark all prior params as positional-only.
                 for p in &mut params {
@@ -433,7 +429,8 @@ impl Parser {
                         } else {
                             if seen_default && !seen_args && !seen_star {
                                 return Err(PyError::parse(
-                                    "non-default argument follows default argument".to_string(),
+                                    "parameter without a default follows parameter with a default"
+                                        .to_string(),
                                 ));
                             }
                             None
