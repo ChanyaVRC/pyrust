@@ -485,13 +485,15 @@ macro_rules! dispatch_insn_operands {
                     subj,
                     cls,
                     n,
+                    nkw,
+                    ..
                 })) = $desc
                 else {
                     unreachable!("MatchClassPositional missing descriptor");
                 };
                 $v.read_reg(subj);
                 $v.read_reg(cls);
-                $v.write_window(dst_base, *n);
+                $v.write_window(dst_base, *n + *nkw + 1);
             }
         }
     }};

@@ -203,7 +203,7 @@ fn for_each_write(insn: &Insn, descs: &[InsnDesc], mut f: impl FnMut(u32)) {
         // MatchClassPositional writes dst_base..dst_base+n.
         MatchClassPositional(desc_idx) => {
             let desc = descs[*desc_idx as usize].as_match_class_positional();
-            for i in 0..desc.n {
+            for i in 0..desc.window_len() {
                 f(desc.dst_base + i);
             }
         }

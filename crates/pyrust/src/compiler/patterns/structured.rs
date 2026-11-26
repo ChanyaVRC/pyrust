@@ -240,7 +240,7 @@ impl Compiler {
         self.emit(Insn::Move(arg1, cls_r));
         // Keep cls_r alive when we have positional sub-patterns: the
         // MatchClassPositional instruction needs the class to load __match_args__.
-        let cls_for_pos = if !positional.is_empty() {
+        let cls_for_pos = if !positional.is_empty() || !kwargs.is_empty() {
             let saved = self.alloc_temp();
             self.emit(Insn::Move(saved, cls_r));
             self.free_temp(cls_r);
@@ -255,56 +255,54 @@ impl Compiler {
         let jmp = self.emit(Insn::JumpIfFalse(isinstance_fn, 0));
         fail_patches.push(jmp);
         self.free_temp(isinstance_fn);
-        // Positional sub-patterns: resolved via __match_args__.
-        if !positional.is_empty() {
-            let cls_reg = cls_for_pos.expect("set above when positional non-empty");
-            let n = match u32::try_from(positional.len()) {
-                Ok(count) => count,
-                Err(_) => {
-                    self.failed = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some("too many positional class sub-patterns".to_string());
-                    }
-                    return;
-                }
-            };
-            let dst_base = self.alloc_temp();
-            for _ in 1..positional.len() {
-                self.alloc_temp();
-            }
-            let desc_idx =
-                self.push_desc(InsnDesc::MatchClassPositional(MatchClassPositionalDesc {
-                    dst_base,
-                    subj,
-                    cls: cls_reg,
-                    n,
-                }));
-            self.emit(Insn::MatchClassPositional(desc_idx));
-            self.free_temp(cls_reg);
-            for (i, pat) in positional.iter().enumerate() {
-                let attr_r = dst_base + i as u32;
-                self.compile_pattern_match(attr_r, pat, fail_patches);
-                if self.failed {
-                    for j in i..positional.len() {
-                        self.free_temp(dst_base + j as u32);
-                    }
-                    return;
-                }
-                self.free_temp(attr_r);
-            }
-        } else if let Some(cls_reg) = cls_for_pos {
-            self.free_temp(cls_reg);
+        // Positional (via __match_args__) and keyword attribute values are all
+        // fetched up front, like CPython's MATCH_CLASS: an attribute that is
+        // missing (AttributeError) makes the whole class pattern fail to match
+        // rather than raise.
+        if positional.is_empty() && kwargs.is_empty() {
+            return;
         }
-        // Keyword sub-patterns: matched directly against named attributes.
-        for (attr_name, attr_pat) in kwargs {
-            let name_idx = self.intern_name(attr_name);
-            let attr_r = self.alloc_temp();
-            self.emit(Insn::GetAttr(attr_r, subj, name_idx));
-            self.compile_pattern_match(attr_r, attr_pat, fail_patches);
-            self.free_temp(attr_r);
+        let cls_reg = cls_for_pos.expect("set above when any attribute sub-pattern exists");
+        let (Ok(n), Ok(nkw)) = (u32::try_from(positional.len()), u32::try_from(kwargs.len()))
+        else {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("too many class sub-patterns".to_string());
+            }
+            return;
+        };
+        let kw_names: Vec<Value> = kwargs
+            .iter()
+            .map(|(name, _)| Value::string(name.as_str()))
+            .collect();
+        let kwnames_idx = self.intern_const(Value::tuple(kw_names));
+        let window_len = positional.len() + kwargs.len() + 1;
+        let dst_base = self.alloc_temp();
+        for _ in 1..window_len {
+            self.alloc_temp();
+        }
+        let found = dst_base + n + nkw;
+        let desc_idx = self.push_desc(InsnDesc::MatchClassPositional(MatchClassPositionalDesc {
+            dst_base,
+            subj,
+            cls: cls_reg,
+            n,
+            nkw,
+            kwnames_idx,
+        }));
+        self.emit(Insn::MatchClassPositional(desc_idx));
+        let jmp = self.emit(Insn::JumpIfFalse(found, 0));
+        fail_patches.push(jmp);
+        let sub_patterns = positional.iter().chain(kwargs.iter().map(|(_, pat)| pat));
+        for (i, pat) in sub_patterns.enumerate() {
+            self.compile_pattern_match(dst_base + i as u32, pat, fail_patches);
             if self.failed {
                 return;
             }
         }
+        for offset in (0..window_len as u32).rev() {
+            self.free_temp(dst_base + offset);
+        }
+        self.free_temp(cls_reg);
     }
 }
