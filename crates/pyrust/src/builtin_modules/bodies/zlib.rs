@@ -1,24 +1,27 @@
-// `zlib` module — body for the `zlib @inject` entry in
-// `pyrust_builtin_modules!` (issue #3186).
+// `zlib` — 100% native Rust implementation of CPython 3.12's `zlib` extension
+// module (issues #3186, #3324).
 //
 // Pure-Rust RFC 1951 (DEFLATE), RFC 1950 (zlib), and RFC 1952 (gzip)
 // compression/decompression plus CRC-32 and Adler-32 live under `bodies/zlib/`.
-// The public Python 3.12 surface (`error`, constants, functions, `Compress`,
-// `Decompress`) is injected from `zlib_py.py`.
+// The public Python 3.12 surface (`error`, constants, the checksum and
+// one-shot functions, and the `Compress` / `Decompress` stream objects) is
+// declared directly in the `pyrust_module!` block below; there is no
+// Python-source injection.
 //
 // Reference: <https://docs.python.org/3/library/zlib.html>
 
-use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::builtin_modules::macros::native_state::set_native_state;
 use crate::error::{PyError, Result};
-use crate::interpreter::{
-    ExpandedCallArg, Interpreter, builtin_data_backing, reject_keyword_args_expanded,
-    value_type_name_str,
+use crate::interpreter::builtin_args::{
+    FromValue, OptValueRef, OptionalArg, PyBytesLike, PyIndex, PyValueRef,
 };
-use crate::value::{PyBigInt, PyBigIntSign, PyKey, PyToPrimitive, Value, ValueKind};
-use pyrust_core::BuiltinTypeOps;
+use crate::interpreter::{ExpandedCallArg, Interpreter, value_type_name_str};
+use crate::value::{
+    InstanceAttrs, PyBigInt, PyBigIntSign, PyClass, PyInstance, PyModule, Value, ValueKind,
+};
 use pyrust_derive::pyrust_module;
 
 #[path = "zlib/checksum.rs"]
@@ -30,13 +33,13 @@ mod inflate;
 #[path = "zlib/tables.rs"]
 mod tables;
 
-use self::checksum::{adler32, crc32};
+use self::checksum::{adler32 as adler32_sum, crc32 as crc32_sum};
 use self::deflate::Deflater;
 use self::inflate::Inflater;
 
 /// Compute IEEE 802.3 CRC-32 checksum over `data`.
 pub(crate) fn crc32_bytes(data: &[u8], init: u32) -> u32 {
-    crc32(data, init)
+    crc32_sum(data, init)
 }
 
 /// Compress `data` with raw DEFLATE (RFC 1951, `wbits = -15`) for ZIP entries.
@@ -58,250 +61,175 @@ pub(crate) fn raw_inflate(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Python-source definitions for the public `zlib` surface.
-const ZLIB_PY_SOURCE: &str = include_str!("zlib_py.py");
+const MODULE_DOC: &str =
+    "The functions in this module allow compression and decompression using the
+zlib library, which is based on GNU zip.
 
-/// Private native helpers seeded into the injected exec namespace and removed
-/// from `zlib.__dict__` after injection so `dir(zlib)` matches CPython.
-const ZLIB_NATIVE_HELPERS: [&str; 12] = [
-    "_crc32",
-    "_adler32",
-    "_compress",
-    "_decompress",
-    "_compressobj_new",
-    "_compressobj_compress",
-    "_compressobj_flush",
-    "_compressobj_copy",
-    "_decompressobj_new",
-    "_decompressobj_decompress",
-    "_decompressobj_flush",
-    "_decompressobj_copy",
-];
+adler32(string[, start]) -- Compute an Adler-32 checksum.
+compress(data[, level]) -- Compress data, with compression level 0-9 or -1.
+compressobj([level[, ...]]) -- Return a compressor object.
+crc32(string[, start]) -- Compute a CRC-32 checksum.
+decompress(string,[wbits],[bufsize]) -- Decompresses a compressed string.
+decompressobj([wbits[, zdict]]) -- Return a decompressor object.
 
-/// Public names exported from `ZLIB_PY_SOURCE` onto the `zlib` module.
-const ZLIB_PY_EXPORTS: [&str; 31] = [
-    "DEFLATED",
-    "DEF_BUF_SIZE",
-    "DEF_MEM_LEVEL",
-    "MAX_WBITS",
-    "ZLIB_RUNTIME_VERSION",
-    "ZLIB_VERSION",
-    "Z_BEST_COMPRESSION",
-    "Z_BEST_SPEED",
-    "Z_BLOCK",
-    "Z_DEFAULT_COMPRESSION",
-    "Z_DEFAULT_STRATEGY",
-    "Z_FILTERED",
-    "Z_FINISH",
-    "Z_FIXED",
-    "Z_FULL_FLUSH",
-    "Z_HUFFMAN_ONLY",
-    "Z_NO_COMPRESSION",
-    "Z_NO_FLUSH",
-    "Z_PARTIAL_FLUSH",
-    "Z_RLE",
-    "Z_SYNC_FLUSH",
-    "Z_TREES",
-    "adler32",
-    "compress",
-    "compressobj",
-    "crc32",
-    "decompress",
-    "decompressobj",
-    "error",
-    "_Compress",
-    "_Decompress",
-];
+'wbits' is window buffer size and container format.
+Compressor objects support compress() and flush() methods; decompressor
+objects support decompress() and flush().";
 
-/// Execute `ZLIB_PY_SOURCE` once, hide internal helpers, and export the
-/// public CPython 3.12 `zlib` surface onto `module`.
-pub(crate) fn inject_python_members(
+const MAX_WBITS: i32 = 15;
+const Z_DEFAULT_COMPRESSION: i32 = -1;
+const Z_FINISH: i32 = 4;
+const DEFLATED: i32 = 8;
+const DEF_MEM_LEVEL: i32 = 8;
+const DEF_BUF_SIZE: i64 = 16384;
+
+// ── Per-interpreter class registry ───────────────────────────────────────────
+
+#[derive(Default)]
+struct ZlibRegistry {
+    /// `zlib.error`.  Every generation of the module shares one class so
+    /// exceptions raised by an earlier import still match a later one.
+    error: Option<Rc<RefCell<PyClass>>>,
+    /// `zlib.Compress` — the type returned by `compressobj()`; CPython does
+    /// not export it from the module.
+    compress: Option<Rc<RefCell<PyClass>>>,
+    /// `zlib.Decompress` — the type returned by `decompressobj()`; likewise
+    /// not exported.
+    decompress: Option<Rc<RefCell<PyClass>>>,
+}
+
+// `gil_local!` justification:
+// (a) Why: the registry stores `!Send` `Rc` class handles shared by every
+//     Python thread of one interpreter under the GIL.
+// (b) Isolation: independent interpreters on separate OS threads each get
+//     their own registry, so classes never leak between them.
+pyrust_core::gil_local! {
+    static REGISTRY: RefCell<ZlibRegistry> = RefCell::new(ZlibRegistry::default());
+}
+
+fn registered(
+    pick: impl Fn(&ZlibRegistry) -> Option<Rc<RefCell<PyClass>>>,
+) -> Option<Rc<RefCell<PyClass>>> {
+    REGISTRY.with(|registry| pick(&registry.borrow()))
+}
+
+/// Resolve a registry class, importing `zlib` first if it is not loaded yet.
+fn registry_class(
     interp: &mut Interpreter,
-    module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<Option<Value>> {
-    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
-    {
-        let mut module_ref = module.borrow_mut();
-        for helper in ZLIB_NATIVE_HELPERS {
-            if let Some(func) = module_ref.attrs.shift_remove(helper) {
-                ns.dict_insert(PyKey::str_from(helper), func)?;
-            }
-        }
+    what: &str,
+    pick: impl Fn(&ZlibRegistry) -> Option<Rc<RefCell<PyClass>>>,
+) -> Result<Rc<RefCell<PyClass>>> {
+    if let Some(cls) = registered(&pick) {
+        return Ok(cls);
     }
-    interp.exec_source(ZLIB_PY_SOURCE, Some(ns.clone()), None)?;
-    let dict = ns
-        .as_dict()
-        .ok_or_else(|| PyError::runtime("zlib: exec namespace not a dict".into()))?;
-    for name in ZLIB_PY_EXPORTS {
-        if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            if let ValueKind::PyClass(cls_rc) = val.kind() {
-                let mut class = cls_rc.borrow_mut();
-                class
-                    .attrs
-                    .insert("__module__".to_string(), Value::string("zlib"));
-                if name == "error" {
-                    class.error_name = Some("zlib.error");
+    interp.load_module("zlib")?;
+    registered(&pick)
+        .ok_or_else(|| PyError::runtime(format!("zlib: {what} class is not initialised")))
+}
+
+/// Publish the freshly built module's classes.
+///
+/// The first generation seen by this interpreter wins: later generations of
+/// the module are re-pointed at its `error`.  `Compress` / `Decompress` are
+/// removed from the module namespace (CPython does not export them) and kept
+/// only in the registry.
+fn adopt_module_classes(module: &Rc<RefCell<PyModule>>) {
+    REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let mut module = module.borrow_mut();
+        match registry.error.clone() {
+            Some(shared) => {
+                module.insert_attr("error".to_string(), Value::py_class(shared));
+            }
+            None => {
+                if let Some(ValueKind::PyClass(cls)) = module.attrs.get("error").map(Value::kind) {
+                    registry.error = Some(Rc::clone(cls));
                 }
             }
-            if !name.starts_with('_') {
-                module
-                    .borrow_mut()
-                    .attrs
-                    .insert(name.to_string(), val.clone());
+        }
+        for name in ["Compress", "Decompress"] {
+            let Some(hidden) = module.attrs.shift_remove(name) else {
+                continue;
+            };
+            let ValueKind::PyClass(cls) = hidden.kind() else {
+                continue;
+            };
+            let slot = if name == "Compress" {
+                &mut registry.compress
+            } else {
+                &mut registry.decompress
+            };
+            if slot.is_none() {
+                *slot = Some(Rc::clone(cls));
+            }
+        }
+    });
+}
+
+/// Post-import wiring: share `error` across module generations, hide the
+/// stream classes, and give the classes CPython's `__doc__ = None`.
+pub(crate) fn prepare_module(_interp: &mut Interpreter, module: &Value) {
+    let ValueKind::PyModule(module) = module.kind() else {
+        return;
+    };
+    for name in ["error", "Compress", "Decompress"] {
+        let class = module.borrow().attrs.get(name).cloned();
+        if let Some(class) = class
+            && let ValueKind::PyClass(class) = class.kind()
+        {
+            let mut class = class.borrow_mut();
+            class
+                .attrs
+                .entry("__doc__".to_string())
+                .or_insert_with(Value::none);
+            if name == "error" {
+                class.error_name = Some("zlib.error");
             }
         }
     }
-    Ok(Some(ns.clone()))
-}
-
-// ── Opaque native compressor / decompressor state ────────────────────────────
-
-struct CompressorOps;
-const COMPRESSOR_OPS: &CompressorOps = &CompressorOps;
-
-impl BuiltinTypeOps for CompressorOps {
-    fn type_name(&self) -> &'static str {
-        "_zlib_compressor"
-    }
-}
-
-struct DecompressorOps;
-const DECOMPRESSOR_OPS: &DecompressorOps = &DecompressorOps;
-
-impl BuiltinTypeOps for DecompressorOps {
-    fn type_name(&self) -> &'static str {
-        "_zlib_decompressor"
-    }
-}
-
-fn wrap_deflater(state: Deflater) -> Value {
-    let boxed: Box<dyn Any> = Box::new(state);
-    Value::builtin_object(COMPRESSOR_OPS, boxed)
-}
-
-fn wrap_inflater(state: Inflater) -> Value {
-    let boxed: Box<dyn Any> = Box::new(state);
-    Value::builtin_object(DECOMPRESSOR_OPS, boxed)
-}
-
-fn with_deflater<R>(val: &Value, action: impl FnOnce(&Deflater) -> R) -> Result<R> {
-    let ValueKind::BuiltinObject { ops, state } = val.kind() else {
-        return Err(PyError::runtime("invalid zlib compressor state".into()));
-    };
-    if !pyrust_core::builtin_ops_is::<CompressorOps>(ops) {
-        return Err(PyError::runtime("invalid zlib compressor state".into()));
-    }
-    let borrow = state.borrow();
-    let d = borrow
-        .downcast_ref::<Deflater>()
-        .ok_or_else(|| PyError::runtime("invalid zlib compressor state".into()))?;
-    Ok(action(d))
-}
-
-fn with_deflater_mut<R>(val: &Value, action: impl FnOnce(&mut Deflater) -> R) -> Result<R> {
-    let ValueKind::BuiltinObject { ops, state } = val.kind() else {
-        return Err(PyError::runtime("invalid zlib compressor state".into()));
-    };
-    if !pyrust_core::builtin_ops_is::<CompressorOps>(ops) {
-        return Err(PyError::runtime("invalid zlib compressor state".into()));
-    }
-    let mut borrow = state.borrow_mut();
-    let d = borrow
-        .downcast_mut::<Deflater>()
-        .ok_or_else(|| PyError::runtime("invalid zlib compressor state".into()))?;
-    Ok(action(d))
-}
-
-fn with_inflater<R>(val: &Value, action: impl FnOnce(&Inflater) -> R) -> Result<R> {
-    let ValueKind::BuiltinObject { ops, state } = val.kind() else {
-        return Err(PyError::runtime("invalid zlib decompressor state".into()));
-    };
-    if !pyrust_core::builtin_ops_is::<DecompressorOps>(ops) {
-        return Err(PyError::runtime("invalid zlib decompressor state".into()));
-    }
-    let borrow = state.borrow();
-    let d = borrow
-        .downcast_ref::<Inflater>()
-        .ok_or_else(|| PyError::runtime("invalid zlib decompressor state".into()))?;
-    Ok(action(d))
-}
-
-fn with_inflater_mut<R>(val: &Value, action: impl FnOnce(&mut Inflater) -> R) -> Result<R> {
-    let ValueKind::BuiltinObject { ops, state } = val.kind() else {
-        return Err(PyError::runtime("invalid zlib decompressor state".into()));
-    };
-    if !pyrust_core::builtin_ops_is::<DecompressorOps>(ops) {
-        return Err(PyError::runtime("invalid zlib decompressor state".into()));
-    }
-    let mut borrow = state.borrow_mut();
-    let d = borrow
-        .downcast_mut::<Inflater>()
-        .ok_or_else(|| PyError::runtime("invalid zlib decompressor state".into()))?;
-    Ok(action(d))
+    adopt_module_classes(module);
 }
 
 // ── Error, buffer & integer helpers ──────────────────────────────────────────
 
-fn raise_zlib_error(error_cls: &Value, msg: impl Into<String>) -> PyError {
+/// Instantiate `zlib.error(msg)` from the shared exception class.
+fn raise_zlib_error(interp: &mut Interpreter, msg: impl Into<String>) -> PyError {
     let msg = msg.into();
-    if let ValueKind::PyClass(cls_rc) = error_cls.kind() {
-        return PyError::raised(crate::interpreter::instantiate_exception(
-            Rc::clone(cls_rc),
+    match registry_class(interp, "error", |r| r.error.clone()) {
+        Ok(cls) => PyError::raised(crate::interpreter::instantiate_exception(
+            cls,
             vec![Value::string(&msg)],
-        ));
+        )),
+        Err(_) => PyError::runtime(msg),
     }
-    PyError::runtime(msg)
 }
 
-fn try_extract_bytes_like(val: &Value) -> Option<Vec<u8>> {
-    if let ValueKind::Bytes(rc) = val.kind() {
-        return Some(rc.as_ref().clone());
-    }
-    if let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(val) {
-        return Some(snap);
-    }
-    if pyrust_builtins::memoryview::is_memoryview(val) {
-        return pyrust_builtins::memoryview::to_bytes_checked(val).ok();
-    }
-    if let Some(backing) = builtin_data_backing(val) {
-        if let ValueKind::Bytes(rc) = backing.kind() {
-            return Some(rc.as_ref().clone());
-        }
-        if let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(&backing) {
-            return Some(snap);
-        }
-    }
-    if let ValueKind::PyInstance(inst_rc) = val.kind() {
-        let inst = inst_rc.borrow();
-        let is_array = {
-            let cls = inst.class.borrow();
-            cls.name == "array"
-                && cls
-                    .attrs
-                    .get("__module__")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|m| m == "array")
-        };
-        if is_array
-            && let Some(buf) = inst.attrs.get("_buf")
-            && let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(buf)
-        {
-            return Some(snap);
-        }
-    }
-    None
+fn type_error(msg: String) -> PyError {
+    PyError::named("TypeError", msg)
 }
 
-fn extract_bytes_like(val: &Value) -> Result<Vec<u8>> {
-    try_extract_bytes_like(val).ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            format!(
-                "a bytes-like object is required, not '{}'",
-                value_type_name_str(val)
-            ),
-        )
-    })
+fn value_error(msg: &str) -> PyError {
+    PyError::named("ValueError", msg.to_string())
+}
+
+/// Resolve a `Py_buffer` argument (`bytes`, `bytearray`, `memoryview`,
+/// `array`, PEP 688 exporters, and subclasses), borrowing `bytes` zero-copy.
+fn extract_bytes_like<'a>(
+    interp: &mut Interpreter,
+    val: &'a Value,
+    arg_name: &str,
+) -> Result<PyBytesLike<'a>> {
+    if !PyBytesLike::matches(val) {
+        return Err(type_error(format!(
+            "a bytes-like object is required, not '{}'",
+            value_type_name_str(val)
+        )));
+    }
+    PyBytesLike::try_from_value_with_interp(interp, val, "zlib", arg_name)
+}
+
+fn resolve_index(interp: &mut Interpreter, val: &Value, arg_name: &str) -> Result<PyIndex> {
+    PyIndex::try_from_value_with_interp(interp, val, "zlib", arg_name)
 }
 
 fn bigint_low_u32(bi: &PyBigInt) -> u32 {
@@ -314,309 +242,427 @@ fn bigint_low_u32(bi: &PyBigInt) -> u32 {
     }
 }
 
-fn resolve_index_value(interp: &mut Interpreter, val: &Value) -> Result<Value> {
-    match val.kind() {
-        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => Ok(val.clone()),
-        ValueKind::PyInstance(_) | ValueKind::PyClass(_) => {
-            if let Some(indexed) = interp.try_value_to_index(val)? {
-                Ok(indexed)
-            } else {
-                Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "'{}' object cannot be interpreted as an integer",
-                        value_type_name_str(val)
-                    ),
-                ))
-            }
-        }
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(val)
-            ),
-        )),
+/// `unsigned int` converter with `bitwise=True`: any integer, wrapped to 32 bits.
+fn index_to_u32_mask(idx: &PyIndex) -> u32 {
+    match idx.as_i64() {
+        Some(n) => n as u32,
+        None => bigint_low_u32(&idx.to_bigint()),
     }
 }
 
-fn extract_u32_mask(interp: &mut Interpreter, val: &Value) -> Result<u32> {
-    let idx = resolve_index_value(interp, val)?;
-    match idx.kind() {
-        ValueKind::Int(n) => Ok(n as u32),
-        ValueKind::Bool(b) => Ok(u32::from(b)),
-        ValueKind::BigInt(bi) => Ok(bigint_low_u32(bi)),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(val)
-            ),
-        )),
-    }
-}
-
-fn extract_c_int(interp: &mut Interpreter, val: &Value) -> Result<i32> {
-    let idx = resolve_index_value(interp, val)?;
-    match idx.kind() {
-        ValueKind::Bool(b) => Ok(i32::from(b)),
-        ValueKind::Int(n) => i32::try_from(n).map_err(|_| {
+/// `int` (C `int`) converter: `OverflowError` outside the 32-bit signed range.
+fn index_to_c_int(idx: &PyIndex) -> Result<i32> {
+    idx.as_i64()
+        .and_then(|n| i32::try_from(n).ok())
+        .ok_or_else(|| {
             PyError::named(
                 "OverflowError",
                 "Python int too large to convert to C int".to_string(),
             )
-        }),
-        ValueKind::BigInt(bi) => bi.to_i32().ok_or_else(|| {
-            PyError::named(
-                "OverflowError",
-                "Python int too large to convert to C int".to_string(),
-            )
-        }),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(val)
-            ),
-        )),
+        })
+}
+
+/// `Py_ssize_t` converter: `OverflowError` outside the signed 64-bit range.
+fn index_to_ssize(idx: &PyIndex) -> Result<i64> {
+    idx.as_i64().ok_or_else(|| {
+        PyError::named(
+            "OverflowError",
+            "Python int too large to convert to C ssize_t".to_string(),
+        )
+    })
+}
+
+fn opt_c_int(
+    interp: &mut Interpreter,
+    arg: &OptValueRef<'_>,
+    default: i32,
+    arg_name: &str,
+) -> Result<i32> {
+    match arg {
+        OptionalArg::Provided(v) => index_to_c_int(&resolve_index(interp, v.0, arg_name)?),
+        OptionalArg::Omitted => Ok(default),
     }
 }
 
-fn extract_nonneg_usize(interp: &mut Interpreter, val: &Value, err_msg: &str) -> Result<usize> {
-    let idx = resolve_index_value(interp, val)?;
-    let n: i64 = match idx.kind() {
-        ValueKind::Bool(b) => i64::from(b),
-        ValueKind::Int(n) => n,
-        ValueKind::BigInt(bi) => bi.to_i64().ok_or_else(|| {
-            PyError::named(
-                "OverflowError",
-                "Python int too large to convert to C ssize_t".to_string(),
-            )
-        })?,
-        _ => {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'{}' object cannot be interpreted as an integer",
-                    value_type_name_str(val)
-                ),
-            ));
-        }
+fn opt_ssize(
+    interp: &mut Interpreter,
+    arg: &OptValueRef<'_>,
+    default: i64,
+    arg_name: &str,
+) -> Result<i64> {
+    match arg {
+        OptionalArg::Provided(v) => index_to_ssize(&resolve_index(interp, v.0, arg_name)?),
+        OptionalArg::Omitted => Ok(default),
+    }
+}
+
+/// Shared body of `crc32` / `adler32`: parse `(data, value)` in CPython's order.
+fn checksum_args<'a>(
+    interp: &mut Interpreter,
+    data: &'a Value,
+    value: &OptValueRef<'_>,
+    default: u32,
+) -> Result<(PyBytesLike<'a>, u32)> {
+    let data = extract_bytes_like(interp, data, "data")?;
+    let init = match value {
+        OptionalArg::Provided(v) => index_to_u32_mask(&resolve_index(interp, v.0, "value")?),
+        OptionalArg::Omitted => default,
     };
-    if n < 0 {
-        return Err(PyError::named("ValueError", err_msg.to_string()));
-    }
-    Ok(n as usize)
+    Ok((data, init))
 }
 
-fn inflater_result_tuple(out: Vec<u8>, inf: &Inflater) -> Value {
-    Value::tuple(vec![
-        Value::bytes(out),
-        Value::bool_(inf.eof),
-        Value::bytes(inf.unused_data.clone()),
-        Value::bytes(inf.unconsumed_tail.clone()),
-    ])
+// ── Stream object construction ───────────────────────────────────────────────
+
+/// Allocate a hidden-class instance carrying `state` in its native slot.
+fn new_native_instance<T: 'static>(class: Rc<RefCell<PyClass>>, state: T) -> Result<Value> {
+    let inst = Value::py_instance(Rc::new(RefCell::new(PyInstance {
+        class,
+        attrs: InstanceAttrs::default(),
+    })));
+    set_native_state(&inst, state)?;
+    Ok(inst)
 }
+
+fn new_compressor(interp: &mut Interpreter, state: Deflater) -> Result<Value> {
+    let class = registry_class(interp, "Compress", |r| r.compress.clone())?;
+    new_native_instance(class, state)
+}
+
+fn new_decompressor(interp: &mut Interpreter, state: Inflater) -> Result<Value> {
+    let class = registry_class(interp, "Decompress", |r| r.decompress.clone())?;
+    new_native_instance(class, state)
+}
+
+fn copy_compressor(interp: &mut Interpreter, state: &Deflater) -> Result<Value> {
+    if state.is_finished() {
+        return Err(value_error("Inconsistent stream state"));
+    }
+    new_compressor(interp, state.clone())
+}
+
+fn copy_decompressor(interp: &mut Interpreter, state: &Inflater) -> Result<Value> {
+    new_decompressor(interp, state.clone())
+}
+
+fn cannot_create(name: &str) -> PyError {
+    type_error(format!("cannot create 'zlib.{name}' instances"))
+}
+
+fn cannot_pickle(name: &str) -> PyError {
+    type_error(format!("cannot pickle 'zlib.{name}' object"))
+}
+
+fn readonly_attribute() -> PyError {
+    PyError::named("AttributeError", "readonly attribute".to_string())
+}
+
+// ── Module definition ────────────────────────────────────────────────────────
 
 pyrust_module! {
-    fn _crc32(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::runtime("_crc32 expects 2 args".into()));
-        }
-        let data = extract_bytes_like(&args[0].value)?;
-        let init = extract_u32_mask(_interp, &args[1].value)?;
-        Ok(Value::int(i64::from(crc32(&data, init))))
+    constants {
+        "__doc__" => Value::string(MODULE_DOC),
+        "__version__" => Value::string("1.0"),
+        "MAX_WBITS" => Value::int(i64::from(MAX_WBITS)),
+        "DEFLATED" => Value::int(i64::from(DEFLATED)),
+        "DEF_MEM_LEVEL" => Value::int(i64::from(DEF_MEM_LEVEL)),
+        "DEF_BUF_SIZE" => Value::int(DEF_BUF_SIZE),
+        "Z_NO_COMPRESSION" => Value::int(0),
+        "Z_BEST_SPEED" => Value::int(1),
+        "Z_BEST_COMPRESSION" => Value::int(9),
+        "Z_DEFAULT_COMPRESSION" => Value::int(i64::from(Z_DEFAULT_COMPRESSION)),
+        "Z_DEFAULT_STRATEGY" => Value::int(0),
+        "Z_FILTERED" => Value::int(1),
+        "Z_HUFFMAN_ONLY" => Value::int(2),
+        "Z_RLE" => Value::int(3),
+        "Z_FIXED" => Value::int(4),
+        "Z_NO_FLUSH" => Value::int(0),
+        "Z_PARTIAL_FLUSH" => Value::int(1),
+        "Z_SYNC_FLUSH" => Value::int(2),
+        "Z_FULL_FLUSH" => Value::int(3),
+        "Z_FINISH" => Value::int(i64::from(Z_FINISH)),
+        "Z_BLOCK" => Value::int(5),
+        "Z_TREES" => Value::int(6),
+        "ZLIB_VERSION" => Value::string("1.3.1"),
+        "ZLIB_RUNTIME_VERSION" => Value::string("1.3.1"),
     }
 
-    fn _adler32(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::runtime("_adler32 expects 2 args".into()));
-        }
-        let data = extract_bytes_like(&args[0].value)?;
-        let init = extract_u32_mask(_interp, &args[1].value)?;
-        Ok(Value::int(i64::from(adler32(&data, init))))
+    // No docstring: CPython 3.12 `zlib.error.__doc__` is `None`.
+    exception error;
+
+    fn crc32(
+        #[positional_only] data: PyValueRef<'_>,
+        #[positional_only] #[default(OptionalArg::Omitted)] value: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let (data, init) = checksum_args(_interp, data.0, &value, 0)?;
+        Ok(Value::int(i64::from(crc32_sum(&data, init))))
     }
 
-    fn _compress(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 4 {
-            return Err(PyError::runtime("_compress expects 4 args".into()));
-        }
-        let error_cls = &args[0].value;
-        let data = extract_bytes_like(&args[1].value)?;
-        let level = extract_c_int(_interp, &args[2].value)?;
-        let wbits = extract_c_int(_interp, &args[3].value)?;
-        let mut def = Deflater::new(level, 8, wbits, 8, 0, Vec::new())
-            .map_err(|_| raise_zlib_error(error_cls, "Bad compression level"))?;
+    fn adler32(
+        #[positional_only] data: PyValueRef<'_>,
+        #[positional_only] #[default(OptionalArg::Omitted)] value: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let (data, init) = checksum_args(_interp, data.0, &value, 1)?;
+        Ok(Value::int(i64::from(adler32_sum(&data, init))))
+    }
+
+    fn compress(
+        #[positional_only] data: PyValueRef<'_>,
+        #[default(OptionalArg::Omitted)] level: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] wbits: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let data = extract_bytes_like(_interp, data.0, "data")?;
+        let level = opt_c_int(_interp, &level, Z_DEFAULT_COMPRESSION, "level")?;
+        let wbits = opt_c_int(_interp, &wbits, MAX_WBITS, "wbits")?;
+        let mut def = match Deflater::new(level, DEFLATED, wbits, DEF_MEM_LEVEL, 0, Vec::new()) {
+            Ok(def) => def,
+            Err(_) => return Err(raise_zlib_error(_interp, "Bad compression level")),
+        };
         let mut out = def
             .compress(&data)
-            .map_err(|e| raise_zlib_error(error_cls, e))?;
-        let tail = def.flush(4).map_err(|e| raise_zlib_error(error_cls, e))?;
+            .map_err(|e| raise_zlib_error(_interp, e))?;
+        let tail = def.flush(Z_FINISH).map_err(|e| raise_zlib_error(_interp, e))?;
         out.extend_from_slice(&tail);
         Ok(Value::bytes(out))
     }
 
-    fn _decompress(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 4 {
-            return Err(PyError::runtime("_decompress expects 4 args".into()));
+    fn decompress(
+        #[positional_only] data: PyValueRef<'_>,
+        #[default(OptionalArg::Omitted)] wbits: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] bufsize: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let data = extract_bytes_like(_interp, data.0, "data")?;
+        let wbits = opt_c_int(_interp, &wbits, MAX_WBITS, "wbits")?;
+        let bufsize = opt_ssize(_interp, &bufsize, DEF_BUF_SIZE, "bufsize")?;
+        if bufsize < 0 {
+            return Err(value_error("bufsize must be non-negative"));
         }
-        let error_cls = &args[0].value;
-        let data = extract_bytes_like(&args[1].value)?;
-        let wbits = extract_c_int(_interp, &args[2].value)?;
-        let _bufsize = extract_nonneg_usize(_interp, &args[3].value, "bufsize must be non-negative")?;
-        let mut inf = Inflater::new(wbits, Vec::new()).map_err(|_| {
-            raise_zlib_error(
-                error_cls,
-                "Error -2 while preparing to decompress data: inconsistent stream state",
-            )
-        })?;
+        let mut inf = match Inflater::new(wbits, Vec::new()) {
+            Ok(inf) => inf,
+            Err(_) => {
+                return Err(raise_zlib_error(
+                    _interp,
+                    "Error -2 while preparing to decompress data: inconsistent stream state",
+                ));
+            }
+        };
         let out = inf
             .decompress(&data, 0)
-            .map_err(|e| raise_zlib_error(error_cls, e))?;
+            .map_err(|e| raise_zlib_error(_interp, e))?;
         if !inf.eof {
             return Err(raise_zlib_error(
-                error_cls,
+                _interp,
                 "Error -5 while decompressing data: incomplete or truncated stream",
             ));
         }
         Ok(Value::bytes(out))
     }
 
-    fn _compressobj_new(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 6 {
-            return Err(PyError::runtime("_compressobj_new expects 6 args".into()));
-        }
-        let level = extract_c_int(_interp, &args[0].value)?;
-        let method = extract_c_int(_interp, &args[1].value)?;
-        let wbits = extract_c_int(_interp, &args[2].value)?;
-        let mem_level = extract_c_int(_interp, &args[3].value)?;
-        let strategy = extract_c_int(_interp, &args[4].value)?;
-        let zdict = if matches!(args[5].value.kind(), ValueKind::None) {
-            Vec::new()
-        } else {
-            extract_bytes_like(&args[5].value)?
+    #[allow(non_snake_case)]
+    fn compressobj(
+        #[default(OptionalArg::Omitted)] level: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] method: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] wbits: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] memLevel: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] strategy: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] zdict: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let level = opt_c_int(_interp, &level, Z_DEFAULT_COMPRESSION, "level")?;
+        let method = opt_c_int(_interp, &method, DEFLATED, "method")?;
+        let wbits = opt_c_int(_interp, &wbits, MAX_WBITS, "wbits")?;
+        let mem_level = opt_c_int(_interp, &memLevel, DEF_MEM_LEVEL, "memLevel")?;
+        let strategy = opt_c_int(_interp, &strategy, 0, "strategy")?;
+        let zdict = match &zdict {
+            OptionalArg::Provided(v) => extract_bytes_like(_interp, v.0, "zdict")?.into_vec(),
+            OptionalArg::Omitted => Vec::new(),
         };
+        let has_zdict = !zdict.is_empty();
         let def = Deflater::new(level, method, wbits, mem_level, strategy, zdict)
-            .map_err(|_| PyError::named("ValueError", "Invalid initialization option".to_string()))?;
-        Ok(wrap_deflater(def))
+            .map_err(|_| value_error("Invalid initialization option"))?;
+        // `deflateSetDictionary` is rejected for the gzip wrapper (`wbits > 15`).
+        if has_zdict && wbits > MAX_WBITS {
+            return Err(value_error("Invalid dictionary"));
+        }
+        new_compressor(_interp, def)
     }
 
-    fn _compressobj_compress(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 3 {
-            return Err(PyError::runtime("_compressobj_compress expects 3 args".into()));
-        }
-        let error_cls = &args[0].value;
-        let data = extract_bytes_like(&args[2].value)?;
-        let res = with_deflater_mut(&args[1].value, |d| d.compress(&data))?;
-        let out = res.map_err(|e| raise_zlib_error(error_cls, e))?;
-        Ok(Value::bytes(out))
-    }
-
-    fn _compressobj_flush(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 3 {
-            return Err(PyError::runtime("_compressobj_flush expects 3 args".into()));
-        }
-        let error_cls = &args[0].value;
-        let mode = extract_c_int(_interp, &args[2].value)?;
-        let res = with_deflater_mut(&args[1].value, |d| d.flush(mode))?;
-        let out = res.map_err(|e| raise_zlib_error(error_cls, e))?;
-        Ok(Value::bytes(out))
-    }
-
-    fn _compressobj_copy(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::runtime("_compressobj_copy expects 1 arg".into()));
-        }
-        let cloned = with_deflater(&args[0].value, |d| {
-            if d.is_finished() {
-                None
-            } else {
-                Some(d.clone())
+    fn decompressobj(
+        #[default(OptionalArg::Omitted)] wbits: OptValueRef<'_>,
+        #[default(OptionalArg::Omitted)] zdict: OptValueRef<'_>,
+    ) -> Result<Value> {
+        let wbits = opt_c_int(_interp, &wbits, MAX_WBITS, "wbits")?;
+        let zdict = match &zdict {
+            OptionalArg::Provided(v) => {
+                if !PyBytesLike::matches(v.0) {
+                    return Err(type_error(
+                        "zdict argument must support the buffer protocol".to_string(),
+                    ));
+                }
+                extract_bytes_like(_interp, v.0, "zdict")?.into_vec()
             }
-        })?;
-        match cloned {
-            Some(c) => Ok(wrap_deflater(c)),
-            None => Err(PyError::named(
-                "ValueError",
-                "Inconsistent stream state".to_string(),
-            )),
-        }
-    }
-
-    fn _decompressobj_new(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::runtime("_decompressobj_new expects 2 args".into()));
-        }
-        let wbits = extract_c_int(_interp, &args[0].value)?;
-        let zdict = extract_bytes_like(&args[1].value)?;
+            OptionalArg::Omitted => Vec::new(),
+        };
         let inf = Inflater::new(wbits, zdict)
-            .map_err(|_| PyError::named("ValueError", "Invalid initialization option".to_string()))?;
-        Ok(wrap_inflater(inf))
+            .map_err(|_| value_error("Invalid initialization option"))?;
+        new_decompressor(_interp, inf)
     }
 
-    fn _decompressobj_decompress(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 4 {
-            return Err(PyError::runtime("_decompressobj_decompress expects 4 args".into()));
+    // The type returned by `compressobj()`; not exported by `zlib`.
+    #[native_state(Deflater)]
+    class Compress {
+        fn __init__(_args) -> Result<Value> {
+            Err(cannot_create("Compress"))
         }
-        let error_cls = &args[0].value;
-        let data = extract_bytes_like(&args[2].value)?;
-        let max_length =
-            extract_nonneg_usize(_interp, &args[3].value, "max_length must be non-negative")?;
-        let res = with_inflater_mut(&args[1].value, |inf| {
-            let out = inf.decompress(&data, max_length)?;
-            Ok::<Value, String>(inflater_result_tuple(out, inf))
-        })?;
-        res.map_err(|e| raise_zlib_error(error_cls, e))
+
+        fn compress(
+            #[state_mut] state: &mut Deflater,
+            #[positional_only] data: PyValueRef<'_>,
+        ) -> Result<Value> {
+            let data = extract_bytes_like(_interp, data.0, "data")?;
+            let out = state
+                .compress(&data)
+                .map_err(|e| raise_zlib_error(_interp, e))?;
+            Ok(Value::bytes(out))
+        }
+
+        fn flush(
+            #[state_mut] state: &mut Deflater,
+            #[positional_only] #[default(OptionalArg::Omitted)] mode: OptValueRef<'_>,
+        ) -> Result<Value> {
+            let mode = opt_c_int(_interp, &mode, Z_FINISH, "mode")?;
+            // CPython answers `Z_NO_FLUSH` before touching the stream, so it
+            // succeeds even after the stream has been finished.
+            if mode == 0 {
+                return Ok(Value::bytes(Vec::new()));
+            }
+            let out = state.flush(mode).map_err(|e| raise_zlib_error(_interp, e))?;
+            Ok(Value::bytes(out))
+        }
+
+        fn __reduce__(#[positional_only] _this: PyValueRef<'_>) -> Result<Value> {
+            Err(cannot_pickle("Compress"))
+        }
+
+        fn __reduce_ex__(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _protocol: PyValueRef<'_>,
+        ) -> Result<Value> {
+            Err(cannot_pickle("Compress"))
+        }
+
+        fn copy(#[state] state: &Deflater) -> Result<Value> {
+            copy_compressor(_interp, state)
+        }
+
+        fn __copy__(#[state] state: &Deflater) -> Result<Value> {
+            copy_compressor(_interp, state)
+        }
+
+        fn __deepcopy__(
+            #[state] state: &Deflater,
+            #[positional_only] _memo: PyValueRef<'_>,
+        ) -> Result<Value> {
+            copy_compressor(_interp, state)
+        }
     }
 
-    fn _decompressobj_flush(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 3 {
-            return Err(PyError::runtime("_decompressobj_flush expects 3 args".into()));
+    // The type returned by `decompressobj()`; not exported by `zlib`.
+    #[native_state(Inflater)]
+    class Decompress {
+        fn __init__(_args) -> Result<Value> {
+            Err(cannot_create("Decompress"))
         }
-        let error_cls = &args[0].value;
-        let length =
-            extract_nonneg_usize(_interp, &args[2].value, "length must be greater than zero")?;
-        if length == 0 {
-            return Err(PyError::named(
-                "ValueError",
-                "length must be greater than zero".to_string(),
-            ));
-        }
-        let res = with_inflater_mut(&args[1].value, |inf| {
-            let out = inf.flush()?;
-            Ok::<Value, String>(inflater_result_tuple(out, inf))
-        })?;
-        res.map_err(|e| raise_zlib_error(error_cls, e))
-    }
 
-    fn _decompressobj_copy(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::runtime("_decompressobj_copy expects 1 arg".into()));
+        fn decompress(
+            #[state_mut] state: &mut Inflater,
+            #[positional_only] data: PyValueRef<'_>,
+            #[default(OptionalArg::Omitted)] max_length: OptValueRef<'_>,
+        ) -> Result<Value> {
+            let data = extract_bytes_like(_interp, data.0, "data")?;
+            let max_length = opt_ssize(_interp, &max_length, 0, "max_length")?;
+            if max_length < 0 {
+                return Err(value_error("max_length must be non-negative"));
+            }
+            let out = state
+                .decompress(&data, max_length as usize)
+                .map_err(|e| raise_zlib_error(_interp, e))?;
+            Ok(Value::bytes(out))
         }
-        let (cloned, eof, unused, tail) = with_inflater(&args[0].value, |inf| {
-            (
-                inf.clone(),
-                inf.eof,
-                inf.unused_data.clone(),
-                inf.unconsumed_tail.clone(),
-            )
-        })?;
-        Ok(Value::tuple(vec![
-            wrap_inflater(cloned),
-            Value::bool_(eof),
-            Value::bytes(unused),
-            Value::bytes(tail),
-        ]))
+
+        fn flush(
+            #[state_mut] state: &mut Inflater,
+            #[positional_only] #[default(OptionalArg::Omitted)] length: OptValueRef<'_>,
+        ) -> Result<Value> {
+            let length = opt_ssize(_interp, &length, DEF_BUF_SIZE, "length")?;
+            if length <= 0 {
+                return Err(value_error("length must be greater than zero"));
+            }
+            let out = state.flush().map_err(|e| raise_zlib_error(_interp, e))?;
+            Ok(Value::bytes(out))
+        }
+
+        fn __reduce__(#[positional_only] _this: PyValueRef<'_>) -> Result<Value> {
+            Err(cannot_pickle("Decompress"))
+        }
+
+        fn __reduce_ex__(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _protocol: PyValueRef<'_>,
+        ) -> Result<Value> {
+            Err(cannot_pickle("Decompress"))
+        }
+
+        fn copy(#[state] state: &Inflater) -> Result<Value> {
+            copy_decompressor(_interp, state)
+        }
+
+        fn __copy__(#[state] state: &Inflater) -> Result<Value> {
+            copy_decompressor(_interp, state)
+        }
+
+        fn __deepcopy__(
+            #[state] state: &Inflater,
+            #[positional_only] _memo: PyValueRef<'_>,
+        ) -> Result<Value> {
+            copy_decompressor(_interp, state)
+        }
+
+        #[getter]
+        fn eof(#[state] state: &Inflater) -> Result<Value> {
+            Ok(Value::bool_(state.eof))
+        }
+
+        #[setter("eof")]
+        fn set_eof(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValueRef<'_>,
+        ) -> Result<Value> {
+            Err(readonly_attribute())
+        }
+
+        #[getter]
+        fn unused_data(#[state] state: &Inflater) -> Result<Value> {
+            Ok(Value::bytes(state.unused_data.clone()))
+        }
+
+        #[setter("unused_data")]
+        fn set_unused_data(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValueRef<'_>,
+        ) -> Result<Value> {
+            Err(readonly_attribute())
+        }
+
+        #[getter]
+        fn unconsumed_tail(#[state] state: &Inflater) -> Result<Value> {
+            Ok(Value::bytes(state.unconsumed_tail.clone()))
+        }
+
+        #[setter("unconsumed_tail")]
+        fn set_unconsumed_tail(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValueRef<'_>,
+        ) -> Result<Value> {
+            Err(readonly_attribute())
+        }
     }
 }

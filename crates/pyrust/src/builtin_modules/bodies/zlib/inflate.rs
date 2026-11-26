@@ -371,15 +371,17 @@ impl Inflater {
                         let flg = buf[1];
                         let cm = cmf & 0x0f;
                         let cinfo = cmf >> 4;
-                        if cm != 8 {
-                            return Err(
-                                "Error -3 while decompressing data: unknown compression method"
-                                    .to_string(),
-                            );
-                        }
+                        // zlib's `inflate.c` validates the header checksum before
+                        // the compression method.
                         if !((u16::from(cmf) << 8) | u16::from(flg)).is_multiple_of(31) {
                             return Err(
                                 "Error -3 while decompressing data: incorrect header check"
+                                    .to_string(),
+                            );
+                        }
+                        if cm != 8 {
+                            return Err(
+                                "Error -3 while decompressing data: unknown compression method"
                                     .to_string(),
                             );
                         }
@@ -407,9 +409,7 @@ impl Inflater {
                             break;
                         }
                         if self.zdict.is_empty() {
-                            return Err(
-                                "Error 2 while decompressing data: need dictionary".to_string()
-                            );
+                            return Err("Error 2 while decompressing data".to_string());
                         }
                         let expected_dict_id = u32::from_be_bytes(*buf);
                         let actual_dict_id = adler32(&self.zdict, 1);
@@ -429,28 +429,33 @@ impl Inflater {
                             *have += 1;
                             pos += 1;
                         }
-                        if *have < 10 {
-                            break;
-                        }
-                        if buf[0] != 0x1f || buf[1] != 0x8b {
+                        // zlib validates the magic once two bytes are available and
+                        // the method / flags once four are, without waiting for the
+                        // full ten-byte fixed header.
+                        if *have >= 2 && (buf[0] != 0x1f || buf[1] != 0x8b) {
                             return Err(
                                 "Error -3 while decompressing data: incorrect header check"
                                     .to_string(),
                             );
                         }
-                        if buf[2] != 8 {
-                            return Err(
-                                "Error -3 while decompressing data: unknown compression method"
-                                    .to_string(),
-                            );
+                        if *have >= 4 {
+                            if buf[2] != 8 {
+                                return Err(
+                                    "Error -3 while decompressing data: unknown compression method"
+                                        .to_string(),
+                                );
+                            }
+                            if (buf[3] & 0xe0) != 0 {
+                                return Err(
+                                    "Error -3 while decompressing data: unknown header flags set"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        if *have < 10 {
+                            break;
                         }
                         let flags = buf[3];
-                        if (flags & 0xe0) != 0 {
-                            return Err(
-                                "Error -3 while decompressing data: unknown header flags set"
-                                    .to_string(),
-                            );
-                        }
                         self.header_crc = crc32(buf, 0);
                         self.state = next_gzip_header_state(flags, 0);
                     }
