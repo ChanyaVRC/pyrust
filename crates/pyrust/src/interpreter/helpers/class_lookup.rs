@@ -626,7 +626,10 @@ fn build_native_iterator_class(kind: NativeIteratorClass) -> Rc<RefCell<PyClass>
     }
     if kind == NativeIteratorClass::Bytearray {
         let qualified = registered_builtin_method_name(kind.full_type_name(), "__setstate__");
-        attrs.insert("__setstate__".to_string(), Value::builtin_function(qualified));
+        attrs.insert(
+            "__setstate__".to_string(),
+            Value::builtin_function(qualified),
+        );
     }
     if matches!(
         kind,
@@ -668,10 +671,7 @@ fn build_deque_iterator_classes() -> [Rc<RefCell<PyClass>>; 2] {
 
 #[cold]
 #[inline(never)]
-fn build_dict_view_class(
-    kind: DictViewClass,
-    base: Rc<RefCell<PyClass>>,
-) -> Rc<RefCell<PyClass>> {
+fn build_dict_view_class(kind: DictViewClass, base: Rc<RefCell<PyClass>>) -> Rc<RefCell<PyClass>> {
     let name = kind.class_name();
     let mut attrs = IndexMap::new();
     if kind.is_ordered() {
