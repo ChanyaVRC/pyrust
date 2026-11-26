@@ -167,7 +167,19 @@ impl Parser {
             } else {
                 None
             };
-            self.expect(&Token::Colon)?;
+            if !self.is(&Token::Colon) {
+                // CPython only reports `expected ':'` when the case header ends
+                // at the newline; any other stray token is `invalid syntax`.
+                return Err(PyError::parse(
+                    if self.is(&Token::Newline) {
+                        "expected ':'"
+                    } else {
+                        "invalid syntax"
+                    }
+                    .to_string(),
+                ));
+            }
+            self.bump();
             let (body, body_linenos) = self.parse_suite_with_linenos()?;
             arms.push(MatchArm {
                 pattern,
@@ -214,6 +226,129 @@ impl Parser {
         }
     }
 
+    /// Like `expect`, but a stray token inside a pattern is CPython's plain
+    /// `invalid syntax` rather than an `expected <Token>` message.
+    fn expect_in_pattern(&mut self, token: &Token) -> Result<()> {
+        if self.is(token) {
+            self.bump();
+            Ok(())
+        } else if self.is(&Token::Eof) {
+            self.expect(token)
+        } else {
+            Err(PyError::parse("invalid syntax".to_string()))
+        }
+    }
+
+    /// PEP 634 `signed_number` / `complex_number`:
+    /// `['-'] NUMBER [('+'|'-') imaginary NUMBER]`.  The left operand of a
+    /// complex literal must be real and the right one imaginary, with the same
+    /// `SyntaxError`s as CPython's `ensure_real` / `ensure_imaginary`.
+    fn parse_number_pattern_expr(&mut self) -> Result<Expr> {
+        let negative = self.is(&Token::Minus);
+        if negative {
+            self.bump();
+        }
+        let (num, left_imaginary) = match self.current().cloned() {
+            Some(Token::Int(n)) => (Expr::Int(n), false),
+            Some(Token::BigInt(s)) => (Expr::BigInt(s), false),
+            Some(Token::Float(f)) => (Expr::Float(f), false),
+            Some(Token::Imag(v)) => (Expr::Complex(0.0, v), true),
+            _ => return Err(PyError::parse("invalid syntax".to_string())),
+        };
+        self.bump();
+        let left = if negative {
+            Expr::Unary {
+                op: crate::ast::UnaryOp::Neg,
+                expr: Box::new(num),
+                span: None,
+            }
+        } else {
+            num
+        };
+        let op = match self.current() {
+            Some(Token::Plus) => crate::ast::BinaryOp::Add,
+            Some(Token::Minus) => crate::ast::BinaryOp::Sub,
+            _ => return Ok(left),
+        };
+        if left_imaginary {
+            return Err(PyError::parse(
+                "real number required in complex literal".to_string(),
+            ));
+        }
+        self.bump();
+        match self.current().cloned() {
+            Some(Token::Imag(v)) => {
+                self.bump();
+                Ok(Expr::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(Expr::Complex(0.0, v)),
+                    span: None,
+                })
+            }
+            Some(Token::Int(_)) | Some(Token::BigInt(_)) | Some(Token::Float(_)) => Err(
+                PyError::parse("imaginary number required in complex literal".to_string()),
+            ),
+            _ => Err(PyError::parse("invalid syntax".to_string())),
+        }
+    }
+
+    /// A run of adjacent string or bytes literals as a pattern value.  Mixing
+    /// `str` and `bytes` is rejected by the shared concatenation logic; an
+    /// f-string is rejected with `fstring_msg`.
+    fn parse_string_pattern_expr(&mut self, fstring_msg: &str) -> Result<Expr> {
+        let expr = self.parse_primary()?;
+        if matches!(expr, Expr::FString(_)) {
+            return Err(PyError::parse(fstring_msg.to_string()));
+        }
+        Ok(expr)
+    }
+
+    /// A mapping-pattern key: a literal or a dotted attribute lookup.
+    fn parse_mapping_pattern_key(&mut self) -> Result<Expr> {
+        const MSG: &str = "mapping pattern keys may only match literals and attribute lookups";
+        match self.current().cloned() {
+            Some(Token::Minus)
+            | Some(Token::Int(_))
+            | Some(Token::BigInt(_))
+            | Some(Token::Float(_))
+            | Some(Token::Imag(_)) => self.parse_number_pattern_expr(),
+            Some(Token::Str(_)) | Some(Token::Bytes(_)) | Some(Token::FString(_)) => {
+                self.parse_string_pattern_expr(MSG)
+            }
+            Some(Token::True) => {
+                self.bump();
+                Ok(Expr::Bool(true))
+            }
+            Some(Token::False) => {
+                self.bump();
+                Ok(Expr::Bool(false))
+            }
+            Some(Token::None) => {
+                self.bump();
+                Ok(Expr::None)
+            }
+            Some(Token::Ident(name)) => {
+                self.bump();
+                if !self.is(&Token::Dot) {
+                    return Err(PyError::parse("invalid syntax".to_string()));
+                }
+                let mut expr = Expr::Var(name, None);
+                while self.is(&Token::Dot) {
+                    self.bump();
+                    let attr = self.expect_ident("attribute name after '.' in pattern")?;
+                    expr = Expr::Attr {
+                        target: Box::new(expr),
+                        name: attr,
+                        span: None,
+                    };
+                }
+                Ok(expr)
+            }
+            _ => Err(PyError::parse("invalid syntax".to_string())),
+        }
+    }
+
     /// Parse a single (non-Or) pattern atom.
     fn parse_pattern_atom(&mut self) -> Result<Pattern> {
         match self.current().cloned() {
@@ -222,55 +357,19 @@ impl Parser {
                 self.bump();
                 Ok(Pattern::Wildcard)
             }
-            // Negative numeric literal: `-42`
-            Some(Token::Minus) => {
-                self.bump();
-                match self.current().cloned() {
-                    Some(Token::Int(n)) => {
-                        self.bump();
-                        Ok(Pattern::Literal(Expr::Unary {
-                            op: crate::ast::UnaryOp::Neg,
-                            expr: Box::new(Expr::Int(n)),
-                            span: None,
-                        }))
-                    }
-                    Some(Token::BigInt(s)) => {
-                        self.bump();
-                        Ok(Pattern::Literal(Expr::Unary {
-                            op: crate::ast::UnaryOp::Neg,
-                            expr: Box::new(Expr::BigInt(s)),
-                            span: None,
-                        }))
-                    }
-                    Some(Token::Float(f)) => {
-                        self.bump();
-                        Ok(Pattern::Literal(Expr::Unary {
-                            op: crate::ast::UnaryOp::Neg,
-                            expr: Box::new(Expr::Float(f)),
-                            span: None,
-                        }))
-                    }
-                    other => Err(PyError::parse(format!(
-                        "expected number after '-' in pattern, found {other:?}"
-                    ))),
-                }
-            }
-            // Literal: integer, float, string, True, False, None
-            Some(Token::Int(n)) => {
-                self.bump();
-                Ok(Pattern::Literal(Expr::Int(n)))
-            }
-            Some(Token::BigInt(s)) => {
-                self.bump();
-                Ok(Pattern::Literal(Expr::BigInt(s)))
-            }
-            Some(Token::Float(f)) => {
-                self.bump();
-                Ok(Pattern::Literal(Expr::Float(f)))
-            }
-            Some(Token::Str(s)) => {
-                self.bump();
-                Ok(Pattern::Literal(Expr::Str(s)))
+            // Numeric literals: signed numbers and complex literals
+            // (`-42`, `1.5`, `1+2j`, `-1-2j`, `3j`).
+            Some(Token::Minus)
+            | Some(Token::Int(_))
+            | Some(Token::BigInt(_))
+            | Some(Token::Float(_))
+            | Some(Token::Imag(_)) => Ok(Pattern::Literal(self.parse_number_pattern_expr()?)),
+            // Strings / bytes: adjacent literals concatenate (`"a" "b"`,
+            // `b"x" b"y"`); f-strings are not valid patterns.
+            Some(Token::Str(_)) | Some(Token::Bytes(_)) | Some(Token::FString(_)) => {
+                Ok(Pattern::Literal(self.parse_string_pattern_expr(
+                    "patterns may only match literals and attribute lookups",
+                )?))
             }
             Some(Token::True) => {
                 self.bump();
@@ -342,7 +441,7 @@ impl Parser {
                                 break;
                             }
                         }
-                        self.expect(&Token::RParen)?;
+                        self.expect_in_pattern(&Token::RParen)?;
                         Ok(Pattern::Class {
                             cls: Box::new(expr),
                             positional,
@@ -381,7 +480,7 @@ impl Parser {
                             break;
                         }
                     }
-                    self.expect(&Token::RParen)?;
+                    self.expect_in_pattern(&Token::RParen)?;
                     Ok(Pattern::Class {
                         cls: Box::new(cls),
                         positional,
@@ -415,7 +514,7 @@ impl Parser {
                         break;
                     }
                 }
-                self.expect(&Token::RBracket)?;
+                self.expect_in_pattern(&Token::RBracket)?;
                 Ok(Pattern::Sequence(elements))
             }
             // Mapping pattern: `{"key": pat, **rest}`
@@ -433,8 +532,8 @@ impl Parser {
                         }
                         break;
                     }
-                    let key = self.parse_expr()?;
-                    self.expect(&Token::Colon)?;
+                    let key = self.parse_mapping_pattern_key()?;
+                    self.expect_in_pattern(&Token::Colon)?;
                     let val_pat = self.parse_pattern()?;
                     pairs.push((key, val_pat));
                     if self.is(&Token::Comma) {
@@ -443,7 +542,7 @@ impl Parser {
                         break;
                     }
                 }
-                self.expect(&Token::RBrace)?;
+                self.expect_in_pattern(&Token::RBrace)?;
                 Ok(Pattern::Mapping(pairs, rest))
             }
             // Parenthesised pattern: grouping `(p)` or sequence `(p1, p2)` / `(p,)` / `()`.
@@ -491,17 +590,15 @@ impl Parser {
                             elements.push((self.parse_pattern()?, false));
                         }
                     }
-                    self.expect(&Token::RParen)?;
+                    self.expect_in_pattern(&Token::RParen)?;
                     Ok(Pattern::Sequence(elements))
                 } else {
                     // No comma → plain grouping; return the inner pattern.
-                    self.expect(&Token::RParen)?;
+                    self.expect_in_pattern(&Token::RParen)?;
                     Ok(first.0)
                 }
             }
-            other => Err(PyError::parse(format!(
-                "unexpected token in pattern: {other:?}"
-            ))),
+            _ => Err(PyError::parse("invalid syntax".to_string())),
         }
     }
 }
