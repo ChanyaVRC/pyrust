@@ -754,6 +754,20 @@ impl Interpreter {
             .is_some_and(is_inlined_comprehension_view)
     }
 
+    /// The function frame zero-argument `super()` reads its `__class__` cell
+    /// and first argument from: the innermost function frame once PEP 709
+    /// inlined-comprehension views are skipped (CPython runs those inside the
+    /// enclosing frame, so they share its cells and first parameter). A
+    /// generator expression is *not* inlined, so it resolves against its own
+    /// frame, exactly as in CPython.
+    pub(crate) fn zero_arg_super_frame_view(&self) -> Option<&VmFrameView> {
+        self.vm_frame_views
+            .iter()
+            .rev()
+            .find(|view| !is_inlined_comprehension_view(view))
+            .filter(|view| view.kind() == FrameKind::Function)
+    }
+
     /// `locals()` mapping for an inlined list / set / dict comprehension
     /// (PEP 709, CPython 3.12 `_PyFrame_GetLocals(frame, include_hidden=1)`).
     ///
