@@ -41,6 +41,71 @@ const TYPING_PY_EXPORTS: &[&str] = &[
     "NotRequired",
     "TypeGuard",
     "_UnpackGenericAlias",
+    "ForwardRef",
+    "AnyStr",
+    "Text",
+    // `_SpecialGenericAlias` instances (issue #3326).
+    "Hashable",
+    "Awaitable",
+    "Coroutine",
+    "AsyncIterable",
+    "AsyncIterator",
+    "Iterable",
+    "Iterator",
+    "Reversible",
+    "Sized",
+    "Container",
+    "Collection",
+    "AbstractSet",
+    "MutableSet",
+    "Mapping",
+    "MutableMapping",
+    "Sequence",
+    "MutableSequence",
+    "ByteString",
+    "Deque",
+    "MappingView",
+    "KeysView",
+    "ItemsView",
+    "ValuesView",
+    "ContextManager",
+    "AsyncContextManager",
+    "DefaultDict",
+    "OrderedDict",
+    "Counter",
+    "ChainMap",
+    "Generator",
+    "AsyncGenerator",
+    "Pattern",
+    "Match",
+    // Runtime-checkable protocols and the generic IO classes.
+    "SupportsInt",
+    "SupportsFloat",
+    "SupportsComplex",
+    "SupportsBytes",
+    "SupportsIndex",
+    "SupportsAbs",
+    "SupportsRound",
+    "IO",
+    "BinaryIO",
+    "TextIO",
+];
+
+/// Native module members the Python source references at definition time.
+const TYPING_PY_SEEDS: &[&str] = &[
+    "Optional",
+    "Union",
+    "Type",
+    "Callable",
+    "ClassVar",
+    "Final",
+    "Literal",
+    "Any",
+    "List",
+    "Generic",
+    "Protocol",
+    "_SpecialGenericAlias",
+    "_DeprecatedGenericAlias",
 ];
 
 /// Execute `typing_py.py` and copy its supported names onto `module`.
@@ -48,10 +113,13 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<PyModule>>,
 ) -> Result<Option<Value>> {
+    // `Generic` subclasses can only be created once `typing` is imported, so
+    // installing CPython's `Generic.__init_subclass__` bookkeeping here (before
+    // this module's own `class IO(Generic[AnyStr])`) covers every one of them.
+    crate::interpreter::install_generic_subclass_hook(super::aliases::init_generic_subclass);
+
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
-    for name in [
-        "Optional", "Union", "Type", "Callable", "ClassVar", "Final", "Literal",
-    ] {
+    for &name in TYPING_PY_SEEDS {
         if let Some(value) = module.borrow().attrs.get(name).cloned() {
             ns.dict_insert(PyKey::str_from(name), value)?;
         }

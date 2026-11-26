@@ -495,7 +495,19 @@ impl Interpreter {
         }
 
         if let Some(origin) = pyrust_builtins::generic_alias::as_generic_alias_origin(function) {
-            return self.call_function_expanded(origin, args).map(Some);
+            let result = self.call_function_expanded(origin, args)?;
+            // CPython's `ga_call` records the alias as `__orig_class__`,
+            // ignoring AttributeError / TypeError. Native values (`list[int]()`)
+            // carry no instance dict, so only instances are attempted.
+            if matches!(result.kind(), ValueKind::PyInstance(_))
+                && let Err(error) =
+                    self.assign_attr(result.clone(), "__orig_class__", function.clone())
+                && !error.class_name_is("AttributeError")
+                && !error.class_name_is("TypeError")
+            {
+                return Err(error);
+            }
+            return Ok(Some(result));
         }
 
         Ok(None)

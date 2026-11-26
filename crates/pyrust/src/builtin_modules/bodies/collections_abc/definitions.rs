@@ -57,6 +57,7 @@ pyrust_core::gil_local! {
     static ABC_ASYNC_ITERATOR:   Rc<RefCell<PyClass>> = abc_class!("AsyncIterator");
     static ABC_ASYNC_GENERATOR:  Rc<RefCell<PyClass>> = abc_class!("AsyncGenerator");
     static ABC_BUFFER:           Rc<RefCell<PyClass>> = abc_class!("Buffer");
+    static ABC_BYTE_STRING:      Rc<RefCell<PyClass>> = abc_class!("ByteString");
 
     // Once-per-thread flag: `true` after `init_abc_hierarchy_and_registry` has run.
     static ABC_REGISTERED: Cell<bool> = const { Cell::new(false) };
@@ -97,10 +98,11 @@ pub(super) enum Abc {
     AsyncIterator,
     AsyncGenerator,
     Buffer,
+    ByteString,
 }
 
 impl Abc {
-    pub(super) const ALL: [Abc; 25] = [
+    pub(super) const ALL: [Abc; 26] = [
         Self::Container,
         Self::Hashable,
         Self::Iterable,
@@ -126,6 +128,7 @@ impl Abc {
         Self::AsyncIterator,
         Self::AsyncGenerator,
         Self::Buffer,
+        Self::ByteString,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -155,6 +158,7 @@ impl Abc {
             Self::AsyncIterator => "AsyncIterator",
             Self::AsyncGenerator => "AsyncGenerator",
             Self::Buffer => "Buffer",
+            Self::ByteString => "ByteString",
         }
     }
 
@@ -185,6 +189,7 @@ impl Abc {
             Self::AsyncIterator => ABC_ASYNC_ITERATOR.with(Rc::clone),
             Self::AsyncGenerator => ABC_ASYNC_GENERATOR.with(Rc::clone),
             Self::Buffer => ABC_BUFFER.with(Rc::clone),
+            Self::ByteString => ABC_BYTE_STRING.with(Rc::clone),
         }
     }
 }

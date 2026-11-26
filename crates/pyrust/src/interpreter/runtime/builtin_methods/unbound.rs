@@ -8,12 +8,17 @@ impl Interpreter {
     /// already-imported module. This supports type-qualified builtin
     /// descriptors whose sentinel stores only the class name.
     fn collections_class_by_name(&self, name: &str) -> Option<Rc<RefCell<PyClass>>> {
-        let module_val = self
-            .cold
-            .module_cache
-            .borrow()
-            .get("collections")
-            .cloned()?;
+        self.cached_module_class_by_name("collections", name)
+            // `collections.abc.Iterable.__class_getitem__` & co. (issue #3326).
+            .or_else(|| self.cached_module_class_by_name("collections.abc", name))
+    }
+
+    fn cached_module_class_by_name(
+        &self,
+        module_name: &str,
+        name: &str,
+    ) -> Option<Rc<RefCell<PyClass>>> {
+        let module_val = self.cold.module_cache.borrow().get(module_name).cloned()?;
         let ValueKind::PyModule(module) = module_val.kind() else {
             return None;
         };
@@ -594,6 +599,9 @@ impl Interpreter {
                         // to" receiver-guard wording); `int.__index__` stays a
                         // slot wrapper.
                         | ("int", "__round__" | "__trunc__" | "__floor__" | "__ceil__")
+                        // Issue #3326: method_descriptors since CPython 3.11.
+                        | ("complex", "__complex__")
+                        | ("bytes", "__bytes__")
                         // Issue #2760: `__getnewargs__` is a method_descriptor on
                         // every numeric/immutable-sequence primitive, so its
                         // receiver-guard uses the "doesn't apply to" wording.

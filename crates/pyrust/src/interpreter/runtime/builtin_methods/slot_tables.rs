@@ -340,6 +340,9 @@ pub(super) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
             ("__rmod__", PA),
             ("__iter__", PA),
             ("__buffer__", PA),
+            // Issue #3326: `bytes.__bytes__` (a method_descriptor since 3.11)
+            // makes `isinstance(b"", typing.SupportsBytes)` hold.
+            ("__bytes__", PA),
             ("__eq__", P),
             ("__ne__", P),
             ("__lt__", P),
@@ -593,6 +596,10 @@ pub(super) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
             ("__trunc__", PA),
             ("__floor__", PA),
             ("__ceil__", PA),
+            // Issue #3326: `float.__int__`/`__float__` are float-owned slot
+            // wrappers (`typing.SupportsInt` / `SupportsFloat` check them).
+            ("__int__", PA),
+            ("__float__", PA),
         ],
         // Issue #2536: every dunder CPython 3.12 carries in `complex.__dict__`
         // is a complex-owned slot wrapper, so expose them unbound (`PA`) — the
@@ -629,6 +636,9 @@ pub(super) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
             ("__rtruediv__", PA),
             ("__rpow__", PA),
             ("__str__", P),
+            // Issue #3326: `complex.__complex__` (a method_descriptor since
+            // 3.11) makes `isinstance(1j, typing.SupportsComplex)` hold.
+            ("__complex__", PA),
         ],
         // Issue #2399: `range` is a `ValueKind::Range`/`BigRange`, not a
         // primitive `PyClass` populated by `build_primitive_classes`, so its

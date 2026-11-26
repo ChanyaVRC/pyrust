@@ -77,6 +77,171 @@ fn class_declared_type_params(origin: &Value) -> Vec<Value> {
     Vec::new()
 }
 
+/// CPython 3.12 `_generic_init_subclass`: record `__parameters__` on every new
+/// `Generic` subclass and reject plain / inconsistent `Generic` bases.
+///
+/// Classes that do not derive from `typing.Generic` return immediately, so
+/// ordinary class creation pays only one MRO walk.
+pub(super) fn init_generic_subclass(
+    interp: &mut Interpreter,
+    class: &Rc<RefCell<PyClass>>,
+) -> Result<()> {
+    let generic = generation::stable_generic_class();
+    if Rc::ptr_eq(class, &generic) || !crate::interpreter::class_is_subclass_of(class, &generic) {
+        return Ok(());
+    }
+    let is_plain_generic = |value: &Value| matches!(value.kind(), ValueKind::PyClass(base) if Rc::ptr_eq(base, &generic));
+    let orig_bases = class.borrow().attrs.get("__orig_bases__").cloned();
+    let parameters = match orig_bases {
+        Some(orig_bases) => {
+            let bases = match orig_bases.kind() {
+                ValueKind::Tuple(items) => items.to_vec(),
+                _ => Vec::new(),
+            };
+            if bases.iter().any(is_plain_generic) {
+                return Err(pyrust_core::type_err!("Cannot inherit from plain Generic"));
+            }
+            let collected = collect_type_parameters(interp, &orig_bases)?;
+            let mut generic_vars: Option<Value> = None;
+            for base in &bases {
+                let Some(instance) = base.as_py_instance_rc() else {
+                    continue;
+                };
+                if !generation::is_generic_alias_class(&instance.borrow().class) {
+                    continue;
+                }
+                let origin = instance.borrow().attrs.get("__origin__").cloned();
+                if !origin.as_ref().is_some_and(is_plain_generic) {
+                    continue;
+                }
+                if generic_vars.is_some() {
+                    return Err(pyrust_core::type_err!(
+                        "Cannot inherit from Generic[...] multiple times."
+                    ));
+                }
+                generic_vars = Some(
+                    instance
+                        .borrow()
+                        .attrs
+                        .get("__parameters__")
+                        .cloned()
+                        .unwrap_or_else(|| Value::tuple(vec![])),
+                );
+            }
+            match generic_vars {
+                Some(generic_vars) => {
+                    let declared = match generic_vars.kind() {
+                        ValueKind::Tuple(items) => items.to_vec(),
+                        _ => Vec::new(),
+                    };
+                    let used = match collected.kind() {
+                        ValueKind::Tuple(items) => items.to_vec(),
+                        _ => Vec::new(),
+                    };
+                    let missing: Vec<&Value> = used
+                        .iter()
+                        .filter(|var| !declared.iter().any(|declared| declared == *var))
+                        .collect();
+                    if !missing.is_empty() {
+                        let mut missing_names = Vec::with_capacity(missing.len());
+                        for var in missing {
+                            missing_names.push(interp.render_value_as_str(var)?);
+                        }
+                        let mut declared_names = Vec::with_capacity(declared.len());
+                        for var in &declared {
+                            declared_names.push(interp.render_value_as_str(var)?);
+                        }
+                        return Err(pyrust_core::type_err!(
+                            "Some type variables ({}) are not listed in Generic[{}]",
+                            missing_names.join(", "),
+                            declared_names.join(", ")
+                        ));
+                    }
+                    generic_vars
+                }
+                None => collected,
+            }
+        }
+        None => {
+            let (direct_generic, name) = {
+                let borrow = class.borrow();
+                let direct = borrow
+                    .base
+                    .as_ref()
+                    .is_some_and(|base| Rc::ptr_eq(base, &generic))
+                    || borrow
+                        .extra_bases
+                        .iter()
+                        .any(|base| Rc::ptr_eq(base, &generic));
+                (direct, borrow.name.clone())
+            };
+            if direct_generic && name != "Protocol" {
+                return Err(pyrust_core::type_err!("Cannot inherit from plain Generic"));
+            }
+            Value::tuple(vec![])
+        }
+    };
+    {
+        let mut borrow = class.borrow_mut();
+        borrow
+            .attrs
+            .insert("__parameters__".to_string(), parameters);
+        borrow.bump_mutation_version();
+    }
+    // `_ProtocolMeta` is an `ABCMeta` in CPython: protocol classes (and their
+    // concrete subclasses) track `__abstractmethods__`.
+    if generation::is_protocol_subclass(class) {
+        crate::builtin_modules::abc::compute_protocol_abstract_methods(interp, class)?;
+    }
+    Ok(())
+}
+
+/// CPython `_generic_class_getitem`'s `_check_generic` for a `Generic`
+/// subclass: the subscript must supply exactly one argument per type
+/// parameter. Classes with `ParamSpec` / `TypeVarTuple` parameters keep the
+/// dedicated normalization in [`normalize_generic_subscript`].
+fn check_generic_class_arity(interp: &mut Interpreter, origin: &Value, args: &Value) -> Result<()> {
+    let ValueKind::PyClass(class) = origin.kind() else {
+        return Ok(());
+    };
+    if Rc::ptr_eq(class, &generation::stable_generic_class())
+        || generation::is_protocol_marker_class(class)
+    {
+        return Ok(());
+    }
+    let parameters = class.borrow().attrs.get("__parameters__").cloned();
+    let Some(parameters) = parameters else {
+        return Ok(());
+    };
+    let ValueKind::Tuple(params) = parameters.kind() else {
+        return Ok(());
+    };
+    let variadic = params.iter().any(|param| {
+        is_paramspec_value(param)
+            || matches!(param.kind(), ValueKind::PyInstance(instance)
+                if crate::interpreter::is_typevartuple_class(&instance.borrow().class))
+    });
+    if variadic {
+        return Ok(());
+    }
+    let expected = params.len();
+    let actual = match args.kind() {
+        ValueKind::Tuple(items) => items.len(),
+        _ => 1,
+    };
+    if expected != 0 && actual == expected {
+        return Ok(());
+    }
+    let rendered = interp.render_value_as_str(origin)?;
+    if expected == 0 {
+        return Err(pyrust_core::type_err!("{rendered} is not a generic class"));
+    }
+    let quantity = if actual > expected { "many" } else { "few" };
+    Err(pyrust_core::type_err!(
+        "Too {quantity} arguments for {rendered}; actual {actual}, expected {expected}"
+    ))
+}
+
 /// Normalize subscript arguments for a generic class, applying CPython 3.12's
 /// `ParamSpec` preparation rules when the class declares `ParamSpec` parameters.
 fn normalize_generic_subscript(
@@ -141,15 +306,123 @@ pub(super) fn make_generic_alias(
 ) -> Result<Value> {
     let class = active_generic_alias_class(interp)?;
     let args_tuple = normalize_generic_subscript(interp, &origin, subscript)?;
-    let mut attrs = InstanceAttrs::with_capacity(4);
+    check_generic_class_arity(interp, &origin, &args_tuple)?;
+    let parameters = collect_type_parameters(interp, &args_tuple)?;
+    let mut attrs = InstanceAttrs::with_capacity(5);
     attrs.insert("_origin", origin.clone());
     attrs.insert("_args", args_tuple.clone());
     attrs.insert("__origin__", origin);
     attrs.insert("__args__", args_tuple);
+    attrs.insert("__parameters__", parameters);
     Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
         class,
         attrs,
     }))))
+}
+
+/// Construct CPython's named `_GenericAlias(origin, args, name=..., inst=...)`.
+///
+/// This is the subscripted form of a `_SpecialGenericAlias` such as
+/// `typing.Iterable[int]`: `__origin__` is the runtime class
+/// (`collections.abc.Iterable`) while `_name` keeps the `typing.` spelling.
+pub(super) fn make_named_generic_alias(
+    interp: &mut Interpreter,
+    origin: Value,
+    args: Vec<Value>,
+    name: Value,
+    inst: bool,
+) -> Result<Value> {
+    let class = active_generic_alias_class(interp)?;
+    let args_tuple = Value::tuple(args);
+    let parameters = collect_type_parameters(interp, &args_tuple)?;
+    let mut attrs = InstanceAttrs::with_capacity(7);
+    attrs.insert("_origin", origin.clone());
+    attrs.insert("_args", args_tuple.clone());
+    attrs.insert("_inst", Value::bool_(inst));
+    attrs.insert("_name", name);
+    attrs.insert("__origin__", origin);
+    attrs.insert("__args__", args_tuple);
+    attrs.insert("__parameters__", parameters);
+    Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
+        class,
+        attrs,
+    }))))
+}
+
+/// True for a `TypeVar`, `ParamSpec`, or `TypeVarTuple` instance — CPython's
+/// `hasattr(t, '__typing_subst__')` test in `_collect_parameters`.
+pub(super) fn is_type_parameter(value: &Value) -> bool {
+    let ValueKind::PyInstance(instance) = value.kind() else {
+        return false;
+    };
+    let class = Rc::clone(&instance.borrow().class);
+    crate::interpreter::is_typevar_class(&class)
+        || crate::interpreter::is_paramspec_class(&class)
+        || crate::interpreter::is_typevartuple_class(&class)
+}
+
+/// CPython 3.12 `typing._collect_parameters`: the type variables of `args`
+/// in first-appearance order, descending into tuples and into any argument's
+/// own `__parameters__` (classes are skipped).
+pub(super) fn collect_type_parameters(interp: &mut Interpreter, args: &Value) -> Result<Value> {
+    fn push_unique(out: &mut Vec<Value>, value: &Value) {
+        if !out.iter().any(|existing| existing == value) {
+            out.push(value.clone());
+        }
+    }
+    fn collect(interp: &mut Interpreter, value: &Value, out: &mut Vec<Value>) -> Result<()> {
+        // A `Callable[[T], int]`-style parameter list. Snapshot it so no list
+        // borrow is held across the recursive (attribute-reading) calls.
+        let list_items = match value.kind() {
+            ValueKind::List(items) => Some(items.to_vec()),
+            _ => None,
+        };
+        if let Some(items) = list_items {
+            for item in &items {
+                collect(interp, item, out)?;
+            }
+            return Ok(());
+        }
+        match value.kind() {
+            ValueKind::PyClass(_) => {}
+            ValueKind::Tuple(items) => {
+                for item in items {
+                    collect(interp, item, out)?;
+                }
+            }
+            _ if is_type_parameter(value) => push_unique(out, value),
+            ValueKind::PyInstance(instance) => {
+                let parameters = instance.borrow().attrs.get("__parameters__").cloned();
+                if let Some(parameters) = parameters
+                    && let ValueKind::Tuple(items) = parameters.kind()
+                {
+                    for item in items.iter() {
+                        push_unique(out, item);
+                    }
+                }
+            }
+            _ if pyrust_builtins::generic_alias::is_generic_alias(value) => {
+                let parameters = interp.get_attr(value, "__parameters__")?;
+                if let ValueKind::Tuple(items) = parameters.kind() {
+                    for item in items.iter() {
+                        push_unique(out, item);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    match args.kind() {
+        ValueKind::Tuple(items) => {
+            for item in items {
+                collect(interp, item, &mut out)?;
+            }
+        }
+        _ => collect(interp, args, &mut out)?,
+    }
+    Ok(Value::tuple(out))
 }
 
 /// Render a `_GenericAlias`'s argument tuple matching CPython 3.12's
@@ -179,10 +452,75 @@ pub(super) fn generic_alias_args_repr(interp: &mut Interpreter, sub: &Value) -> 
     }
 }
 
+/// `_GenericAlias.__mro_entries__(self, bases)`: validate the Python-level
+/// signature, then resolve the entries for a named alias
+/// (`typing.Iterable[int]`) or a `Generic[...]` alias.
+pub(super) fn generic_alias_mro_entries(
+    interp: &mut Interpreter,
+    instance: &Rc<RefCell<PyInstance>>,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
+    let user_args = &args[1..];
+    let positional_count = user_args
+        .iter()
+        .filter(|argument| argument.name.is_none())
+        .count();
+    let has_bases_keyword = user_args
+        .iter()
+        .any(|argument| argument.name.as_deref() == Some("bases"));
+
+    // `_GenericAlias.__mro_entries__` is an ordinary Python method with
+    // signature `(self, bases)`. The runtime supplies `self`, so validate the
+    // remaining expanded arguments here before reading the origin. `bases` is
+    // unused by CPython's `Generic[...]` branch, but it is still required and
+    // may be passed by keyword.
+    if user_args
+        .iter()
+        .any(|argument| argument.name.as_deref() == Some("self"))
+    {
+        return Err(pyrust_core::type_err!(
+            "_GenericAlias.__mro_entries__() got multiple values for argument 'self'"
+        ));
+    }
+    if positional_count > 0 && has_bases_keyword {
+        return Err(pyrust_core::type_err!(
+            "_GenericAlias.__mro_entries__() got multiple values for argument 'bases'"
+        ));
+    }
+    if let Some(name) = user_args
+        .iter()
+        .filter_map(|argument| argument.name.as_deref())
+        .find(|name| *name != "bases")
+    {
+        return Err(pyrust_core::type_err!(
+            "_GenericAlias.__mro_entries__() got an unexpected keyword argument '{name}'"
+        ));
+    }
+    if positional_count > 1 {
+        return Err(pyrust_core::type_err!(
+            "_GenericAlias.__mro_entries__() takes 2 positional arguments but {} were given",
+            positional_count + 1
+        ));
+    }
+    if positional_count == 0 && !has_bases_keyword {
+        return Err(pyrust_core::type_err!(
+            "_GenericAlias.__mro_entries__() missing 1 required positional argument: 'bases'"
+        ));
+    }
+    let bases_arg = user_args.first().map(|arg| &arg.value);
+    if let Some(bases) = bases_arg
+        && let Some(entries) =
+            super::special_aliases::named_mro_entries(interp, instance, &args[0].value, bases)
+    {
+        return entries;
+    }
+    resolve_generic_alias_mro_entries(instance, bases_arg)
+}
+
 /// Resolve `__mro_entries__(self, bases)` for `typing._GenericAlias`, enforcing
 /// CPython 3.12's duplicate-`Generic` and implicit PEP 695 `Protocol` /
 /// `NamedTuple` / `TypedDict` rules.
-pub(super) fn resolve_generic_alias_mro_entries(
+fn resolve_generic_alias_mro_entries(
     instance: &Rc<RefCell<PyInstance>>,
     bases_arg: Option<&Value>,
 ) -> Result<Value> {
@@ -451,7 +789,12 @@ fn build_union(raw: Vec<Value>, none_type: Value, union_origin: Value) -> Result
 }
 
 fn push_unique(values: &mut Vec<Value>, value: Value) {
-    if !values.contains(&value) {
+    // Equal `_GenericAlias` members (`Iterable[int]` twice) collapse like
+    // CPython's hash/`==` based `_deduplicate`.
+    if !values
+        .iter()
+        .any(|existing| super::special_aliases::alias_values_equal(existing, &value))
+    {
         values.push(value);
     }
 }

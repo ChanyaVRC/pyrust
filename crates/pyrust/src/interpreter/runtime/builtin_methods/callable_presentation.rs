@@ -93,6 +93,10 @@ fn slot_wrapper_parts(name: &str) -> Option<(&str, &str)> {
     if type_name == "int" && matches!(dunder, "__bool__" | "__float__" | "__int__") {
         return Some((type_name, dunder));
     }
+    // Issue #3326: `float.__int__`/`__float__` are float-owned slot wrappers.
+    if type_name == "float" && matches!(dunder, "__float__" | "__int__") {
+        return Some((type_name, dunder));
+    }
     // Issue #2297: `int.__index__` is an int-owned slot wrapper in CPython
     // (`<slot wrapper '__index__' of 'int' objects>`).  Its siblings
     // `__round__`/`__trunc__`/`__floor__`/`__ceil__` are `method_descriptor`s
@@ -297,6 +301,9 @@ fn method_descriptor_parts(name: &str) -> Option<(&str, &str)> {
                     "__round__" | "__trunc__" | "__floor__" | "__ceil__",
                     "int" | "float"
                 )
+                // Issue #3326: `<method '__complex__' of 'complex' objects>`.
+                | ("__complex__", "complex")
+                | ("__bytes__", "bytes")
         ) {
             return Some((type_name, method));
         }

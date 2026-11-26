@@ -572,6 +572,17 @@ fn collect_parameters(args: &Value) -> Value {
                     }
                 }
             }
+            // `Callable[[T], int]` keeps its parameter list as a `list`
+            // argument; its type variables are parameters too (issue #3326).
+            ValueKind::List(items) => {
+                if let ValueKind::Tuple(nested) =
+                    collect_parameters(&Value::tuple(items.to_vec())).kind()
+                {
+                    for p in nested.iter() {
+                        push_unique(&mut out, p.clone());
+                    }
+                }
+            }
             // A TypeVar / ParamSpec / TypeVarTuple is a PyInstance with a `__name__` attribute.
             ValueKind::PyInstance(inst_rc) if inst_rc.borrow().attrs.get("__name__").is_some() => {
                 push_unique(&mut out, item.clone());

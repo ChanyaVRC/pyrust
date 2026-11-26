@@ -18,12 +18,61 @@ const ANY_METHODS: &[(&str, &str)] = &[
 ];
 
 /// (method-short, registry-name) pairs for `_GenericAlias`.
+///
+/// The `_BaseGenericAlias.*` entries are shared with `_SpecialGenericAlias`,
+/// mirroring CPython 3.12 where both inherit them from `_BaseGenericAlias`.
 const GENERIC_ALIAS_METHODS: &[(&str, &str)] = &[
     ("__repr__", "typing._GenericAlias.__repr__"),
     ("__init__", "typing._GenericAlias.__init__"),
-    ("__call__", "typing._GenericAlias.__call__"),
+    ("__call__", "typing._BaseGenericAlias.__call__"),
     ("__mro_entries__", "typing._GenericAlias.__mro_entries__"),
+    ("__getitem__", "typing._GenericAlias.__getitem__"),
+    ("__eq__", "typing._GenericAlias.__eq__"),
+    ("__hash__", "typing._GenericAlias.__hash__"),
+    (
+        "__instancecheck__",
+        "typing._GenericAlias.__subclasscheck__",
+    ),
+    (
+        "__subclasscheck__",
+        "typing._GenericAlias.__subclasscheck__",
+    ),
+    ("__or__", "typing._BaseGenericAlias.__or__"),
+    ("__ror__", "typing._BaseGenericAlias.__ror__"),
+    ("__getattr__", "typing._BaseGenericAlias.__getattr__"),
 ];
+
+/// (method-short, registry-name) pairs for `_SpecialGenericAlias`, the type
+/// of bare `typing.Iterable`, `typing.Mapping`, `typing.Pattern`, ….
+const SPECIAL_GENERIC_ALIAS_METHODS: &[(&str, &str)] = &[
+    ("__init__", "typing._SpecialGenericAlias.__init__"),
+    ("__repr__", "typing._SpecialGenericAlias.__repr__"),
+    ("__getitem__", "typing._SpecialGenericAlias.__getitem__"),
+    (
+        "__mro_entries__",
+        "typing._SpecialGenericAlias.__mro_entries__",
+    ),
+    (
+        "__instancecheck__",
+        "typing._SpecialGenericAlias.__instancecheck__",
+    ),
+    (
+        "__subclasscheck__",
+        "typing._SpecialGenericAlias.__subclasscheck__",
+    ),
+    ("__reduce__", "typing._SpecialGenericAlias.__reduce__"),
+    ("__call__", "typing._BaseGenericAlias.__call__"),
+    ("__or__", "typing._BaseGenericAlias.__or__"),
+    ("__ror__", "typing._BaseGenericAlias.__ror__"),
+    ("__getattr__", "typing._BaseGenericAlias.__getattr__"),
+];
+
+/// `_DeprecatedGenericAlias` (`typing.ByteString`) only overrides the
+/// instance check so it can emit CPython's `DeprecationWarning`.
+const DEPRECATED_GENERIC_ALIAS_METHODS: &[(&str, &str)] = &[(
+    "__instancecheck__",
+    "typing._DeprecatedGenericAlias.__instancecheck__",
+)];
 
 /// (method-short, registry-name) pairs for `_TypingAlias`.
 const TYPING_ALIAS_METHODS: &[(&str, &str)] = &[
@@ -63,6 +112,8 @@ struct TypingGeneration {
     any_class: Weak<RefCell<PyClass>>,
     typing_alias_class: Weak<RefCell<PyClass>>,
     generic_alias_class: Weak<RefCell<PyClass>>,
+    special_generic_alias_class: Weak<RefCell<PyClass>>,
+    deprecated_generic_alias_class: Weak<RefCell<PyClass>>,
     generic_class: Weak<RefCell<PyClass>>,
     protocol_class: Weak<RefCell<PyClass>>,
     namedtuple_marker_class: Weak<RefCell<PyClass>>,
@@ -77,6 +128,8 @@ impl TypingGeneration {
         self.any_class.strong_count() > 0
             || self.typing_alias_class.strong_count() > 0
             || self.generic_alias_class.strong_count() > 0
+            || self.special_generic_alias_class.strong_count() > 0
+            || self.deprecated_generic_alias_class.strong_count() > 0
             || self.protocol_class.strong_count() > 0
             || self.namedtuple_marker_class.strong_count() > 0
             || self.typeddict_marker_class.strong_count() > 0
@@ -171,6 +224,83 @@ pub(super) fn current_generic_alias_class() -> Rc<RefCell<PyClass>> {
         |generation, class| generation.generic_alias_class = class,
         || build_method_class("_GenericAlias", GENERIC_ALIAS_METHODS),
     )
+}
+
+pub(super) fn current_special_generic_alias_class() -> Rc<RefCell<PyClass>> {
+    current_generation_class(
+        |generation| generation.special_generic_alias_class.upgrade(),
+        |generation, class| generation.special_generic_alias_class = class,
+        || build_method_class("_SpecialGenericAlias", SPECIAL_GENERIC_ALIAS_METHODS),
+    )
+}
+
+fn build_deprecated_generic_alias_class() -> Rc<RefCell<PyClass>> {
+    let base = current_special_generic_alias_class();
+    let mut attrs: IndexMap<String, Value> = IndexMap::new();
+    for (method, reg_name) in DEPRECATED_GENERIC_ALIAS_METHODS {
+        attrs.insert((*method).to_string(), Value::builtin_function(reg_name));
+    }
+    attrs.insert("__module__".to_string(), Value::string("typing"));
+    let class = Rc::new(RefCell::new(PyClass::new(
+        "_DeprecatedGenericAlias",
+        "_DeprecatedGenericAlias",
+        Some(Rc::clone(&base)),
+        attrs,
+    )));
+    base.borrow()
+        .subclasses
+        .borrow_mut()
+        .push(Rc::downgrade(&class));
+    class
+}
+
+pub(super) fn current_deprecated_generic_alias_class() -> Rc<RefCell<PyClass>> {
+    current_generation_class(
+        |generation| generation.deprecated_generic_alias_class.upgrade(),
+        |generation, class| generation.deprecated_generic_alias_class = class,
+        build_deprecated_generic_alias_class,
+    )
+}
+
+/// True when `class` is (a subclass of) `_SpecialGenericAlias` from any live
+/// `typing` import, i.e. `isinstance(x, typing._SpecialGenericAlias)`.
+pub(super) fn is_special_generic_alias_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    TYPING_GENERATIONS.with(|generations| {
+        generations.borrow().iter().any(|generation| {
+            generation
+                .special_generic_alias_class
+                .upgrade()
+                .is_some_and(|special| crate::interpreter::class_is_subclass_of(class, &special))
+        })
+    })
+}
+
+/// True when `class` is (a subclass of) `_DeprecatedGenericAlias` from any
+/// live `typing` import.
+pub(super) fn is_deprecated_generic_alias_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    TYPING_GENERATIONS.with(|generations| {
+        generations.borrow().iter().any(|generation| {
+            generation
+                .deprecated_generic_alias_class
+                .upgrade()
+                .is_some_and(|deprecated| {
+                    crate::interpreter::class_is_subclass_of(class, &deprecated)
+                })
+        })
+    })
+}
+
+/// True when `class` is (a subclass of) `_GenericAlias` from any live `typing`
+/// import, i.e. `isinstance(x, typing._GenericAlias)`.
+pub(super) fn is_generic_alias_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    TYPING_GENERATIONS.with(|generations| {
+        generations.borrow().iter().any(|generation| {
+            generation
+                .generic_alias_class
+                .upgrade()
+                .is_some_and(|alias| crate::interpreter::class_is_subclass_of(class, &alias))
+        })
+    })
 }
 
 pub(super) fn current_generic_class() -> Rc<RefCell<PyClass>> {

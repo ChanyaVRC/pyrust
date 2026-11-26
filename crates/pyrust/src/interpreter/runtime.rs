@@ -134,6 +134,7 @@ mod classes {
     };
     include!("runtime/classes.rs");
 }
+pub(crate) use classes::install_generic_subclass_hook;
 
 mod builtin_methods {
     use super::collection_ops::{

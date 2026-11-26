@@ -121,6 +121,7 @@ fn init_abc_hierarchy_and_registry() {
     let async_iterator = Abc::AsyncIterator.class();
     let async_generator = Abc::AsyncGenerator.class();
     let buffer_abc = Abc::Buffer.class();
+    let byte_string = Abc::ByteString.class();
 
     // Real ABC-to-ABC inheritance hierarchy (CPython 3.12).
     set_bases(&coroutine, &[&awaitable]);
@@ -140,6 +141,27 @@ fn init_abc_hierarchy_and_registry() {
     set_bases(&values_view, &[&mapping_view, &collection]);
     set_bases(&sequence, &[&reversible, &collection]);
     set_bases(&mut_sequence, &[&sequence]);
+    // Deprecated since 3.12 (slated for removal in 3.14) but still exported;
+    // `typing.ByteString` uses it as its origin.
+    set_bases(&byte_string, &[&sequence]);
+
+    // CPython defines `__class_getitem__ = classmethod(GenericAlias)` directly
+    // on these ABCs; every other generic ABC (`Sequence`, `Mapping`, …) and
+    // their subclasses inherit it, so `Sequence[int]` is a `types.GenericAlias`
+    // (issue #3326). `Hashable`, `Sized`, and `Buffer` stay unsubscriptable;
+    // `Callable` needs CPython's dedicated `_CallableGenericAlias`.
+    for (abc, sentinel) in [
+        (&awaitable, "Awaitable.__class_getitem__"),
+        (&async_iterable, "AsyncIterable.__class_getitem__"),
+        (&iterable, "Iterable.__class_getitem__"),
+        (&container, "Container.__class_getitem__"),
+        (&mapping_view, "MappingView.__class_getitem__"),
+    ] {
+        abc.borrow_mut().attrs.insert(
+            "__class_getitem__".to_string(),
+            Value::builtin_function(sentinel),
+        );
+    }
 
     pyrust_builtins::abc_marker::register(&mapping, pyrust_builtins::abc_marker::AbcKind::Mapping);
 
@@ -171,6 +193,8 @@ fn init_abc_hierarchy_and_registry() {
     reg_prim(&sequence, "bytes");
     reg_prim(&sequence, "memoryview");
     register_virtual_subclass(&sequence, &range_cls);
+    reg_prim(&byte_string, "bytes");
+    reg_prim(&byte_string, "bytearray");
     reg_prim(&buffer_abc, "bytes");
     reg_prim(&buffer_abc, "bytearray");
     reg_prim(&buffer_abc, "memoryview");

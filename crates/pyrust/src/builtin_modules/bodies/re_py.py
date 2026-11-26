@@ -1095,7 +1095,16 @@ class _Matcher:
 # --------------------------------------------------------------------------- #
 
 
+def _class_getitem(cls, item):
+    """PEP 585 `re.Pattern[str]` / `re.Match[bytes]` (a `types.GenericAlias`)."""
+    from types import GenericAlias
+
+    return GenericAlias(cls, item)
+
+
 class Match:
+    __class_getitem__ = classmethod(_class_getitem)
+
     def __init__(self, pattern, text, start, end, groups, pos, endpos):
         self.re = pattern
         self.string = text
@@ -1208,6 +1217,8 @@ def _is_bytes_like(obj):
 
 
 class Pattern:
+    __class_getitem__ = classmethod(_class_getitem)
+
     def __init__(self, pattern, flags):
         if isinstance(pattern, str):
             if flags & LOCALE:

@@ -18,6 +18,9 @@ fn validate_protocol_dunder_arity(method: &str, type_name: &str, given: usize) -
         // Issue #2297: `int.__index__`/`__trunc__`/`__floor__`/`__ceil__` are
         // zero-arg slot wrappers.
         | "__index__" | "__trunc__" | "__floor__" | "__ceil__" => 0,
+        // Issue #3326: `complex.__complex__` / `bytes.__bytes__` are named
+        // no-arg method_descriptors (checked just below).
+        "__complex__" | "__bytes__" => 0,
         "__setitem__" => 2,
         _ => 1,
     };
@@ -45,6 +48,11 @@ fn validate_protocol_dunder_arity(method: &str, type_name: &str, given: usize) -
         let owner = if type_name == "float" { "float" } else { "int" };
         return Err(pyrust_core::type_err!(
             "{owner}.{method}() takes no arguments ({given} given)"
+        ));
+    }
+    if matches!(method, "__complex__" | "__bytes__") {
+        return Err(pyrust_core::type_err!(
+            "{type_name}.{method}() takes no arguments ({given} given)"
         ));
     }
     if is_named_protocol_wrapper(method, type_name) {
@@ -206,11 +214,15 @@ impl Interpreter {
             // `(5).__float__()` → `5.0`, `(5).__int__()` → `5`.  Route through
             // the `float`/`int` constructors so int-subclass receivers coerce
             // exactly as the builtins do.
-            "__float__" | "__int__" => {
-                let ctor = if method == "__float__" {
-                    "float"
-                } else {
-                    "int"
+            // Issue #3326: `(1.5).__int__()`, `(1j).__complex__()`, and
+            // `b"x".__bytes__()` convert through their constructors in the same
+            // way (an exact-type copy of a subclass receiver).
+            "__float__" | "__int__" | "__complex__" | "__bytes__" => {
+                let ctor = match method {
+                    "__float__" => "float",
+                    "__complex__" => "complex",
+                    "__bytes__" => "bytes",
+                    _ => "int",
                 };
                 let arg = ExpandedCallArg {
                     name: None,
