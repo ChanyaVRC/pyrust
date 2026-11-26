@@ -135,10 +135,19 @@ fn lex_fstring(
                 // `\{` is just an invalid escape sequence, kept as `\`.
                 literal.push('\\');
             } else if raw {
-                // Raw mode: pass backslash and the following character verbatim.
+                // Raw mode: pass backslash and the following character verbatim
+                // (a CR / CRLF line ending is still normalized to `\n`).
                 literal.push('\\');
-                literal.push(next_ch);
-                pos += 1;
+                if next_ch == '\r' {
+                    literal.push('\n');
+                    pos += 1;
+                    if chars.get(pos) == Some(&'\n') {
+                        pos += 1;
+                    }
+                } else {
+                    literal.push(next_ch);
+                    pos += 1;
+                }
             } else {
                 // \<newline>: line continuation — consume backslash and newline, add nothing.
                 // Also handle CRLF: \<CR><LF> drops all three characters.
@@ -155,6 +164,18 @@ fn lex_fstring(
                     literal.push_str(&s);
                     pos = next_pos;
                 }
+            }
+            continue;
+        }
+
+        if c == '\r' {
+            // CPython's tokenizer translates `\r\n` / lone `\r` to `\n` in
+            // source text, so a multi-line f-string checked out with CRLF
+            // endings must still yield `\n` in its literal pieces.
+            literal.push('\n');
+            pos += 1;
+            if chars.get(pos) == Some(&'\n') {
+                pos += 1;
             }
             continue;
         }

@@ -120,3 +120,10 @@ for bad in ('rf"\\{}"', 'rf"\\{x!z}"'):
         eval(bad)
     except SyntaxError as err:
         print(bad, "-> SyntaxError", err.msg)
+
+# ── CRLF / CR line endings inside a multi-line f-string become "\n" ──────────
+for nl in ("\r\n", "\r"):
+    src = 'rf"""\\{x}' + nl + '\\\\{x}' + nl + '"""'
+    print(repr(eval(src)))
+    src = 'f"""a' + nl + '{x}' + nl + '"""'
+    print(repr(eval(src)))
