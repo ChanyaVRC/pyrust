@@ -201,6 +201,7 @@ else:
 
     # ── 4. Headless PTY full-screen curses / panel / textpad test ────────────
     PTY_CHILD_SCRIPT = r"""
+import _curses
 import curses
 import curses.ascii as ca
 import curses.has_key as chk
@@ -243,7 +244,7 @@ try:
         isinstance(curses.tigetstr("cup"), bytes),
         curses.tparm(b"\x1b[%i%p1%d;%p2%dH", 2, 4),
     )
-    log("has_key_up", curses.has_key(curses.KEY_UP), chk.has_key(curses.KEY_UP))
+    log("has_key_up", _curses.has_key(curses.KEY_UP), chk.has_key(curses.KEY_UP))
     log("unctrl_post_init", curses.unctrl(1), curses.unctrl(b"A"), curses.unctrl(0x7F))
     log(
         "keyname_post_init",
@@ -388,7 +389,7 @@ with open(out_path, "w", encoding="utf-8") as f:
                 [sys.executable, "-c", PTY_CHILD_SCRIPT, out_path],
                 stdin=slave_fd,
                 stdout=slave_fd,
-                stderr=slave_fd,
+                stderr=subprocess.PIPE,
                 env=env,
                 close_fds=True,
             )
@@ -406,7 +407,6 @@ with open(out_path, "w", encoding="utf-8") as f:
                     except OSError:
                         break
                 if proc.poll() is not None:
-                    # Drain any remaining bytes
                     while True:
                         rlist, _, _ = select.select([master_fd], [], [], 0.01)
                         if not rlist:
@@ -418,8 +418,11 @@ with open(out_path, "w", encoding="utf-8") as f:
                         except OSError:
                             break
                     break
+            stderr_bytes = proc.stderr.read() if proc.stderr else b""
             rc = proc.wait()
             print("pty_rc", rc)
+            if rc != 0:
+                print("pty_stderr:", stderr_bytes.decode("utf-8", errors="replace"))
         finally:
             if slave_fd >= 0:
                 os.close(slave_fd)
