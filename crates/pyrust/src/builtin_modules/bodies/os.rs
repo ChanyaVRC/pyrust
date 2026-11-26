@@ -32,7 +32,7 @@ mod environment;
 #[cfg(unix)]
 pub(crate) use environment::env_lock;
 #[path = "os/fd_ops.rs"]
-mod fd_ops;
+pub(crate) mod fd_ops;
 pub(crate) use fd_ops::{
     O_APPEND, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, clone_fd, close_fd_raw,
     fstat_fd_result, metadata_for_fd, register_fd, stat_path_result,
@@ -50,9 +50,14 @@ pub(crate) use result_types::make_stat_result;
 mod scandir;
 #[path = "os/system.rs"]
 mod system;
+#[cfg(windows)]
+#[path = "os/windows.rs"]
+pub(crate) mod windows;
 
 use self::process::PopenStreamState;
 use self::scandir::{DirEntryState, ScandirState};
+#[cfg(windows)]
+use self::windows::AddedDllDirectoryState;
 
 /// Post-load wiring invoked from `builtin_modules/finalization.rs`.
 pub(crate) fn prepare_module(interp: &mut Interpreter, module: &Value) {
@@ -306,6 +311,20 @@ pyrust_module! {
     fn umask(mask: PyIndex) -> Result<Value> { process::umask(mask.expect_i64(FN_NAME, "mask")?) }
     fn getlogin() -> Result<Value> { process::getlogin() }
     fn times() -> Result<Value> { process::times() }
+    #[cfg(windows)]
+    fn startfile(filepath: PyPath, #[default(None)] operation: Option<PyStr<'_>>, #[default(None)] arguments: Option<PyStr<'_>>, #[default(None)] cwd: Option<PyPath>, #[default(1_i64.into())] show_cmd: PyIndex) -> Result<Value> {
+        windows::startfile(filepath, operation.as_deref(), arguments.as_deref(), cwd, show_cmd.expect_i64(FN_NAME, "show_cmd")?)
+    }
+    #[cfg(windows)]
+    fn add_dll_directory(path: PyPath) -> Result<Value> { windows::add_dll_directory(_interp, path) }
+    #[cfg(windows)]
+    fn listdrives() -> Result<Value> { windows::listdrives() }
+    #[cfg(windows)]
+    fn listvolumes() -> Result<Value> { windows::listvolumes() }
+    #[cfg(windows)]
+    fn listmounts(volume: PyPath) -> Result<Value> { windows::listmounts(volume) }
+    #[cfg(windows)]
+    fn device_encoding(fd: PyIndex) -> Result<Value> { windows::device_encoding(fd.expect_i64(FN_NAME, "fd")?) }
 
     // ── Result-type & _Environ internal methods ──────────────────────────────
     #[py_name = "terminal_size.__repr__"]
@@ -426,6 +445,19 @@ pyrust_module! {
         fn __class_getitem__(#[positional_only] cls: PyValueRef<'_>, item: PyValueRef<'_>) -> Result<Value> {
             path_protocol::pathlike_class_getitem(cls.0, item.0)
         }
+    }
+
+    #[cfg(windows)]
+    #[native_state(AddedDllDirectoryState)]
+    class _AddedDllDirectory {
+        #[getter]
+        fn path(#[state] st: &AddedDllDirectoryState) -> Result<Value> { Ok(windows::added_dll_dir_path(st)) }
+        fn close(#[state_mut] st: &mut AddedDllDirectoryState) -> Result<Value> { windows::added_dll_dir_close(st) }
+        fn __enter__(#[positional_only] self_val: PyValueRef<'_>) -> Result<Value> { Ok(self_val.0.clone()) }
+        fn __exit__(#[state_mut] st: &mut AddedDllDirectoryState, #[varargs] _args: &[Value]) -> Result<Value> {
+            windows::added_dll_dir_close(st)
+        }
+        fn __repr__(#[state] st: &AddedDllDirectoryState) -> Result<Value> { windows::added_dll_dir_repr(st) }
     }
 }
 

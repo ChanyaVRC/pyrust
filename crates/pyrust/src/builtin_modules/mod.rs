@@ -1010,6 +1010,16 @@ pyrust_builtin_modules! {
     smtplib,
     poplib,
     imaplib,
+    // Windows-only OS modules (issue #3262): 100% native-Rust Python 3.12
+    // modules gated with `#[cfg(windows)]` so Unix raises `ModuleNotFoundError`.
+    #[cfg(windows)]
+    nt,
+    #[cfg(windows)]
+    msvcrt,
+    #[cfg(windows)]
+    winreg,
+    #[cfg(windows)]
+    winsound,
 }
 
 include!("finalization.rs");
