@@ -110,7 +110,6 @@ pyrust_module! {
             Value::string("whichdb"),
             Value::string("error"),
         ]),
-        "dumb" => super::dbm_dumb::module(),
     }
 
     /// Generic DBM error (wrapped into `dbm.error = (error, OSError)` during

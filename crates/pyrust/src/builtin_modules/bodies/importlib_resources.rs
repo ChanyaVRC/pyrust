@@ -209,6 +209,9 @@ pub(crate) fn post_load_init(
     module: &Rc<RefCell<PyModule>>,
 ) -> Result<()> {
     let res_abc = interp.load_module("importlib.resources.abc")?;
+    module
+        .borrow_mut()
+        .insert_attr("abc".to_string(), res_abc.clone());
     if let Ok(rr) = interp.get_attr(&res_abc, "ResourceReader") {
         module
             .borrow_mut()
@@ -244,9 +247,6 @@ pyrust_module! {
             Value::string("read_binary"),
             Value::string("read_text"),
         ]),
-        "abc" => super::importlib_resources_abc::module(),
-        "readers" => super::importlib_resources_readers::module(),
-        "simple" => super::importlib_resources_simple::module(),
     }
 
     #[native_state(AsFileState)]

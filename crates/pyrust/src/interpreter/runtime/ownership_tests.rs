@@ -923,6 +923,8 @@ fn runtime_only_uses_the_builtin_module_provider_at_the_import_boundary() {
     rust_sources_below(&root, &mut sources);
     let provider_prefix = "crate::builtin_modules::";
     let allowed_calls = [
+        "crate::builtin_modules::is_builtin_module",
+        "crate::builtin_modules::is_builtin_package",
         "crate::builtin_modules::load_builtin_module",
         "crate::builtin_modules::prepare_builtin_module",
         "crate::builtin_modules::post_load_inject",

@@ -20,6 +20,7 @@ pub(crate) fn post_load_init(
 ) -> Result<()> {
     let domreg_mod = interp.load_module("xml.dom.domreg")?;
     let mut m = module.borrow_mut();
+    m.insert_attr("domreg".to_string(), domreg_mod.clone());
     if let Ok(f) = interp.get_attr(&domreg_mod, "registerDOMImplementation") {
         m.insert_attr("registerDOMImplementation".to_string(), f);
     }
@@ -53,13 +54,6 @@ pyrust_module! {
         "XHTML_NAMESPACE" => Value::string("http://www.w3.org/1999/xhtml"),
         "EMPTY_NAMESPACE" => Value::none(),
         "EMPTY_PREFIX" => Value::none(),
-        "domreg" => super::xml_dom_domreg::module(),
-        "minicompat" => super::xml_dom_minicompat::module(),
-        "NodeFilter" => super::xml_dom_nodefilter::module(),
-        "xmlbuilder" => super::xml_dom_xmlbuilder::module(),
-        "minidom" => super::xml_dom_minidom::module(),
-        "expatbuilder" => super::xml_dom_expatbuilder::module(),
-        "pulldom" => super::xml_dom_pulldom::module(),
     }
 
     class Node {

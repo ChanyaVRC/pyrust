@@ -417,18 +417,30 @@ pub(crate) fn prepare_module(_interp: &mut Interpreter, module: &Value) {
     let ValueKind::PyModule(posix_rc) = module.kind() else {
         return;
     };
-    let os_raw = super::os::module();
-    let ValueKind::PyModule(os_rc) = os_raw.kind() else {
-        return;
+    posix_rc
+        .borrow_mut()
+        .insert_attr("environ".to_string(), build_posix_environ_dict());
+}
+
+/// Post-cache wiring invoked from `builtin_modules/mod.rs::post_load_inject`.
+/// Mirrors shared OS exports from the cached `os` module without constructing
+/// a throwaway `os::module()` copy.
+pub(crate) fn post_load_init(
+    interp: &mut Interpreter,
+    module: &Rc<RefCell<PyModule>>,
+) -> Result<()> {
+    let os_val = interp.load_module("os")?;
+    let ValueKind::PyModule(os_rc) = os_val.kind() else {
+        return Ok(());
     };
     let os_borrowed = os_rc.borrow();
-    let mut posix_mut = posix_rc.borrow_mut();
+    let mut posix_mut = module.borrow_mut();
     for &name in OS_TO_POSIX_EXPORTS {
         if let Some(val) = os_borrowed.attrs.get(name) {
             posix_mut.insert_attr(name.to_string(), val.clone());
         }
     }
-    posix_mut.insert_attr("environ".to_string(), build_posix_environ_dict());
+    Ok(())
 }
 
 /// Install all POSIX-only functions, structseq types, constants, and `environb`

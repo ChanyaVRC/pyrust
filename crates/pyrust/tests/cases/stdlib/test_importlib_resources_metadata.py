@@ -9,6 +9,7 @@ import importlib.resources.abc
 import importlib.resources.readers
 import importlib.resources.simple
 import importlib.simple
+import importlib.util
 import io
 import os
 import pathlib

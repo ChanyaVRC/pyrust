@@ -218,18 +218,29 @@ const MIXIN_TARGETS: [Abc; 12] = [
     Abc::MutableSequence,
 ];
 
+/// Populate all canonical `collections.abc` ABC singletons onto `module`
+/// (used by `_collections_abc` without eagerly importing `collections.abc`).
+pub(crate) fn populate_abc_exports(module: &Rc<RefCell<crate::value::PyModule>>) {
+    ensure_abc_initialized();
+    let mut m = module.borrow_mut();
+    for abc in Abc::ALL {
+        m.insert_attr(abc.name().to_string(), Value::py_class(abc.class()));
+    }
+}
+
 /// Install the concrete Python mixin methods from `collections_abc_py.py` onto
 /// the canonical `collections.abc` `PyClass` singletons once per thread.
-pub(crate) fn inject_python_members(
-    interp: &mut Interpreter,
-    module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<Option<Value>> {
+pub(crate) fn ensure_mixins_initialized(interp: &mut Interpreter) -> Result<()> {
     ensure_abc_initialized();
     if are_mixins_installed() {
-        return Ok(None);
+        return Ok(());
     }
 
-    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
+    let ns = Value::dict(crate::value::PyDict::default());
+    ns.dict_insert(
+        PyKey::str_from("__name__"),
+        Value::string("collections.abc"),
+    )?;
     interp.exec_source(COLLECTIONS_ABC_PY_SOURCE, Some(ns.clone()), None)?;
 
     {
@@ -273,5 +284,14 @@ pub(crate) fn inject_python_members(
     }
 
     mark_mixins_installed();
+    Ok(())
+}
+
+/// Post-load `@inject` entry point for `collections.abc`.
+pub(crate) fn inject_python_members(
+    interp: &mut Interpreter,
+    _module: &Rc<RefCell<crate::value::PyModule>>,
+) -> Result<Option<Value>> {
+    ensure_mixins_initialized(interp)?;
     Ok(None)
 }

@@ -64,6 +64,14 @@ pub(crate) fn prepare_module(interp: &mut Interpreter, module: &Value) {
     path_protocol::prepare_os_module(interp, module);
 }
 
+/// Post-cache wiring invoked from `builtin_modules/mod.rs::post_load_inject`.
+pub(crate) fn post_load_init(
+    interp: &mut Interpreter,
+    module: &std::rc::Rc<std::cell::RefCell<crate::value::PyModule>>,
+) -> Result<()> {
+    path_protocol::post_load_os_module(interp, module)
+}
+
 /// Registry names for the private `_Environ` class.
 const ENVIRON_METHODS: &[(&str, &str)] = &[
     ("__getitem__", "os._Environ.__getitem__"),
@@ -87,7 +95,6 @@ pub(super) const STAT_RESULT_REPR_REGISTRY: &str = "os.stat_result.__repr__";
 pyrust_module! {
     constants {
         "sep" => Value::string(std::path::MAIN_SEPARATOR.to_string()),
-        "path" => super::os_path::module(),
         "environ" => environment::make_environ_instance(ENVIRON_METHODS),
         "name" => Value::string(if cfg!(windows) { "nt" } else { "posix" }),
         "linesep" => Value::string(if cfg!(windows) { "\r\n" } else { "\n" }),

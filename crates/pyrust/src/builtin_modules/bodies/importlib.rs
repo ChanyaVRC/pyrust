@@ -2,11 +2,9 @@
 // `pyrust_builtin_modules!` (issue #3189).
 //
 // Exposes `import_module`, `reload`, `invalidate_caches`, and `__import__` from
-// `importlib_py.py` alongside the `machinery` and `util` submodules. Declaring
-// `machinery` and `util` as `PyModule` constants lets `Interpreter::load_module`
-// stitch them to the cached `sys.modules["importlib.machinery"]` and
-// `sys.modules["importlib.util"]` objects so all import forms share exact
-// module identity.
+// `importlib_py.py`. Submodules (`machinery`, `util`, `abc`, `resources`,
+// `readers`, `simple`, `metadata`) are loaded lazily on explicit import,
+// matching CPython 3.12.
 //
 // Reference: <https://docs.python.org/3/library/importlib.html>
 
@@ -32,16 +30,6 @@ const IMPORTLIB_PY_EXPORTS: &[&str] = &[
 ];
 
 pyrust_module! {
-    constants {
-        "machinery" => super::importlib_machinery::module(),
-        "util" => super::importlib_util::module(),
-        "abc" => super::importlib_abc::module(),
-        "resources" => super::importlib_resources::module(),
-        "readers" => super::importlib_readers::module(),
-        "simple" => super::importlib_simple::module(),
-        "metadata" => super::importlib_metadata::module(),
-    }
-
     /// Private bridge into `Interpreter::load_module` for `importlib.import_module`.
     #[arity_style(takes_exactly_one)]
     fn _load_module(#[positional_only] name: PyValue) -> Result<Value> {
