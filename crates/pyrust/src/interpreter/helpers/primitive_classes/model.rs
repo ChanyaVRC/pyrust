@@ -72,9 +72,13 @@ pub(crate) enum NativeIteratorClass {
 }
 
 impl NativeIteratorClass {
-    /// Iterator classes that own entries in `NATIVE_ITERATOR_CLASSES`.
+    /// All non-`reversed` concrete native iterator classes (bytearray + deque).
     /// `Reversed` reuses `BuiltinTypeClass::Reversed` instead.
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 3] = [Self::Bytearray, Self::Deque, Self::DequeReverse];
+
+    /// Iterator classes owned by `collections.deque` (lazily initialized).
+    pub(crate) const DEQUE: [Self; 2] = [Self::Deque, Self::DequeReverse];
 
     pub(crate) const fn full_type_name(self) -> &'static str {
         match self {
@@ -105,7 +109,11 @@ impl NativeIteratorClass {
     pub(crate) fn singleton(self) -> Rc<RefCell<PyClass>> {
         match self {
             Self::Reversed => BuiltinTypeClass::Reversed.singleton(),
-            _ => NATIVE_ITERATOR_CLASSES.with(|classes| Rc::clone(&classes[self as usize])),
+            Self::Bytearray => BYTEARRAY_ITERATOR_CLASS.with(Rc::clone),
+            Self::Deque => DEQUE_ITERATOR_CLASSES
+                .with(|cell| Rc::clone(&cell.get_or_init(build_deque_iterator_classes)[0])),
+            Self::DequeReverse => DEQUE_ITERATOR_CLASSES
+                .with(|cell| Rc::clone(&cell.get_or_init(build_deque_iterator_classes)[1])),
         }
     }
 
@@ -114,8 +122,12 @@ impl NativeIteratorClass {
         if ptr == Rc::as_ptr(&BuiltinTypeClass::Reversed.singleton()) {
             return Some(Self::Reversed);
         }
-        NATIVE_ITERATOR_CLASSES.with(|classes| {
-            Self::ALL
+        if BYTEARRAY_ITERATOR_CLASS.with(|candidate| ptr == Rc::as_ptr(candidate)) {
+            return Some(Self::Bytearray);
+        }
+        DEQUE_ITERATOR_CLASSES.with(|cell| {
+            let classes = cell.get()?;
+            Self::DEQUE
                 .into_iter()
                 .zip(classes)
                 .find_map(|(kind, candidate)| (ptr == Rc::as_ptr(candidate)).then_some(kind))
@@ -124,6 +136,9 @@ impl NativeIteratorClass {
 }
 
 impl DictViewClass {
+    pub(crate) const PLAIN: [Self; 3] = [Self::Keys, Self::Items, Self::Values];
+    pub(crate) const ORDERED: [Self; 3] =
+        [Self::OrderedKeys, Self::OrderedItems, Self::OrderedValues];
     pub(crate) const ALL: [Self; 6] = [
         Self::Keys,
         Self::Items,
@@ -186,8 +201,17 @@ impl DictViewClass {
 
     pub(crate) fn from_class(class: &Rc<RefCell<PyClass>>) -> Option<Self> {
         let ptr = Rc::as_ptr(class);
-        DICT_VIEW_CLASSES.with(|classes| {
-            Self::ALL
+        if let Some(kind) = DICT_VIEW_CLASSES.with(|classes| {
+            Self::PLAIN
+                .into_iter()
+                .zip(classes)
+                .find_map(|(kind, candidate)| (ptr == Rc::as_ptr(candidate)).then_some(kind))
+        }) {
+            return Some(kind);
+        }
+        ODICT_VIEW_CLASSES.with(|cell| {
+            let classes = cell.get()?;
+            Self::ORDERED
                 .into_iter()
                 .zip(classes)
                 .find_map(|(kind, candidate)| (ptr == Rc::as_ptr(candidate)).then_some(kind))
@@ -195,7 +219,17 @@ impl DictViewClass {
     }
 
     pub(crate) fn singleton(self) -> Rc<RefCell<PyClass>> {
-        DICT_VIEW_CLASSES.with(|classes| Rc::clone(&classes[self as usize]))
+        match self {
+            Self::Keys => DICT_VIEW_CLASSES.with(|classes| Rc::clone(&classes[0])),
+            Self::Items => DICT_VIEW_CLASSES.with(|classes| Rc::clone(&classes[1])),
+            Self::Values => DICT_VIEW_CLASSES.with(|classes| Rc::clone(&classes[2])),
+            Self::OrderedKeys => ODICT_VIEW_CLASSES
+                .with(|cell| Rc::clone(&cell.get_or_init(build_odict_view_classes)[0])),
+            Self::OrderedItems => ODICT_VIEW_CLASSES
+                .with(|cell| Rc::clone(&cell.get_or_init(build_odict_view_classes)[1])),
+            Self::OrderedValues => ODICT_VIEW_CLASSES
+                .with(|cell| Rc::clone(&cell.get_or_init(build_odict_view_classes)[2])),
+        }
     }
 }
 

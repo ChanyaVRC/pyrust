@@ -575,3 +575,379 @@ fn backingless_builtin_subclass_instances_raise_runtime_error_without_stack_over
             .unwrap_or_else(|e| panic!("unexpected uncaught error for `{stmt}`: {e:?}"));
     }
 }
+
+#[test]
+fn setattr_and_delattr_allocate_zero_pep695_typing_singletons() {
+    // Run on a dedicated thread so TLS OnceCells start pristine even under
+    // `--test-threads=1`.
+    std::thread::spawn(|| {
+        assert_eq!(
+            typing_class_singletons_initialized(),
+            [
+                ("TypeAliasType", false),
+                ("TypeVar", false),
+                ("ParamSpec", false),
+                ("ParamSpecArgs", false),
+                ("ParamSpecKwargs", false),
+                ("TypeVarTuple", false),
+            ],
+            "fresh thread must start with zero typing class singletons initialized"
+        );
+
+        let interpreter = run_program(
+            "class Box:\n\
+             \x20   def __getitem__(self, item):\n\
+             \x20       return item\n\
+             b = Box()\n\
+             b.x = 1\n\
+             setattr(b, 'y', 2)\n\
+             b.__bound__ = 'ok'\n\
+             b.__constraints__ = ()\n\
+             b.__value__ = 42\n\
+             read_vals = (b.x, getattr(b, 'y'), b.__bound__, b.__constraints__, b.__value__, b[int])\n\
+             del b.x\n\
+             delattr(b, 'y')\n\
+             del b.__bound__\n\
+             del b.__value__\n",
+        );
+        assert!(interpreter.lookup_name("read_vals").unwrap().is_some());
+
+        let user_class = Rc::new(RefCell::new(PyClass::new(
+            "UserClass",
+            "UserClass",
+            None,
+            IndexMap::new(),
+        )));
+        assert!(!is_typevar_class(&user_class));
+        assert!(!is_type_alias_class(&user_class));
+        assert!(!is_paramspec_class(&user_class));
+        assert!(!is_typevartuple_class(&user_class));
+        assert!(!is_paramspec_args_class(&user_class));
+        assert!(!is_paramspec_kwargs_class(&user_class));
+
+        assert_eq!(
+            typing_class_singletons_initialized(),
+            [
+                ("TypeAliasType", false),
+                ("TypeVar", false),
+                ("ParamSpec", false),
+                ("ParamSpecArgs", false),
+                ("ParamSpecKwargs", false),
+                ("TypeVarTuple", false),
+            ],
+            "setattr/delattr/getattr/indexing on user instances and predicate calls must allocate 0 PEP 695 typing singletons"
+        );
+    })
+    .join()
+    .expect("test thread panicked");
+}
+
+#[test]
+fn pep695_typing_objects_enforce_readonly_attributes_after_materialization() {
+    std::thread::spawn(|| {
+        let interpreter = run_program(
+            "def f[T, **P, *Ts](x: T) -> T:\n\
+             \x20   return x\n\
+             type Alias[U] = list[U]\n\
+             T, P, Ts = f.__type_params__\n\
+             p_args = P.args\n\
+             p_kwargs = P.kwargs\n\
+             def capture(fn):\n\
+             \x20   try:\n\
+             \x20       fn()\n\
+             \x20   except AttributeError as exc:\n\
+             \x20       return str(exc)\n\
+             \x20   raise AssertionError('expected AttributeError')\n\
+             results = {\n\
+             \x20   'tv_set_bound': capture(lambda: setattr(T, '__bound__', int)),\n\
+             \x20   'tv_del_bound': capture(lambda: delattr(T, '__bound__')),\n\
+             \x20   'tv_set_constraints': capture(lambda: setattr(T, '__constraints__', (int,))),\n\
+             \x20   'tv_set_name': capture(lambda: setattr(T, '__name__', 'X')),\n\
+             \x20   'tv_del_name': capture(lambda: delattr(T, '__name__')),\n\
+             \x20   'alias_set_name': capture(lambda: setattr(Alias, '__name__', 'Y')),\n\
+             \x20   'alias_set_value': capture(lambda: setattr(Alias, '__value__', int)),\n\
+             \x20   'alias_del_type_params': capture(lambda: delattr(Alias, '__type_params__')),\n\
+             \x20   'alias_set_module': capture(lambda: setattr(Alias, '__module__', 'm')),\n\
+             \x20   'ps_set_args': capture(lambda: setattr(P, 'args', 1)),\n\
+             \x20   'ps_del_kwargs': capture(lambda: delattr(P, 'kwargs')),\n\
+             \x20   'ps_set_name': capture(lambda: setattr(P, '__name__', 'Q')),\n\
+             \x20   'tvt_set_name': capture(lambda: setattr(Ts, '__name__', 'Us')),\n\
+             \x20   'tvt_del_name': capture(lambda: delattr(Ts, '__name__')),\n\
+             \x20   'pa_set_origin': capture(lambda: setattr(p_args, '__origin__', P)),\n\
+             \x20   'pk_del_origin': capture(lambda: delattr(p_kwargs, '__origin__')),\n\
+             }\n\
+             # Arbitrary attributes remain writable/deletable on PEP 695 objects\n\
+             T.custom = 123\n\
+             custom_ok = T.custom == 123\n\
+             del T.custom\n\
+             Alias.note = 'ok'\n\
+             alias_note_ok = Alias.note == 'ok'\n\
+             del Alias.note\n",
+        );
+
+        let results_val = interpreter.lookup_name("results").unwrap().unwrap();
+        let ValueKind::Dict(results) = results_val.kind() else {
+            panic!("expected results dict");
+        };
+        let expected = [
+            (
+                "tv_set_bound",
+                "attribute '__bound__' of 'typing.TypeVar' objects is not writable",
+            ),
+            (
+                "tv_del_bound",
+                "attribute '__bound__' of 'typing.TypeVar' objects is not writable",
+            ),
+            (
+                "tv_set_constraints",
+                "attribute '__constraints__' of 'typing.TypeVar' objects is not writable",
+            ),
+            ("tv_set_name", "readonly attribute"),
+            ("tv_del_name", "readonly attribute"),
+            ("alias_set_name", "readonly attribute"),
+            (
+                "alias_set_value",
+                "attribute '__value__' of 'typing.TypeAliasType' objects is not writable",
+            ),
+            (
+                "alias_del_type_params",
+                "attribute '__type_params__' of 'typing.TypeAliasType' objects is not writable",
+            ),
+            (
+                "alias_set_module",
+                "attribute '__module__' of 'typing.TypeAliasType' objects is not writable",
+            ),
+            (
+                "ps_set_args",
+                "attribute 'args' of 'typing.ParamSpec' objects is not writable",
+            ),
+            (
+                "ps_del_kwargs",
+                "attribute 'kwargs' of 'typing.ParamSpec' objects is not writable",
+            ),
+            ("ps_set_name", "readonly attribute"),
+            ("tvt_set_name", "readonly attribute"),
+            ("tvt_del_name", "readonly attribute"),
+            ("pa_set_origin", "readonly attribute"),
+            ("pk_del_origin", "readonly attribute"),
+        ];
+        for (key, msg) in expected {
+            assert_eq!(
+                results.get(&PyKey::str_from(key)).and_then(|v| v.as_str()),
+                Some(msg),
+                "mismatch for {key}"
+            );
+        }
+        assert_eq!(
+            interpreter.lookup_name("custom_ok").unwrap(),
+            Some(Value::bool_(true))
+        );
+        assert_eq!(
+            interpreter.lookup_name("alias_note_ok").unwrap(),
+            Some(Value::bool_(true))
+        );
+
+        let singletons = [
+            type_alias_class_singleton(),
+            typevar_class_singleton(),
+            paramspec_class_singleton(),
+            paramspec_args_class_singleton(),
+            paramspec_kwargs_class_singleton(),
+            typevartuple_class_singleton(),
+        ];
+        type ClassPredicate = fn(&Rc<RefCell<PyClass>>) -> bool;
+        let predicates: [ClassPredicate; 6] = [
+            is_type_alias_class,
+            is_typevar_class,
+            is_paramspec_class,
+            is_paramspec_args_class,
+            is_paramspec_kwargs_class,
+            is_typevartuple_class,
+        ];
+        for (i, cls) in singletons.iter().enumerate() {
+            for (j, pred) in predicates.iter().enumerate() {
+                assert_eq!(pred(cls), i == j, "predicate {j} on class {i}");
+            }
+        }
+        assert_eq!(
+            typing_class_singletons_initialized(),
+            [
+                ("TypeAliasType", true),
+                ("TypeVar", true),
+                ("ParamSpec", true),
+                ("ParamSpecArgs", true),
+                ("ParamSpecKwargs", true),
+                ("TypeVarTuple", true),
+            ]
+        );
+    })
+    .join()
+    .expect("test thread panicked");
+}
+
+#[test]
+fn primitive_calls_and_object_subclasses_keep_collections_and_module_lazy() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            lazy_class_singletons_initialized(),
+            (false, false, false),
+            "fresh thread must start with odict/deque/module singletons uninitialized"
+        );
+
+        let mut interpreter = run_program(
+            "a = int()\n\
+             b = set()\n\
+             c = dict()\n\
+             d = list()\n\
+             e = str()\n\
+             r = range(3)\n\
+             z = zip()\n\
+             class User:\n\
+             \x20   pass\n\
+             u = User()\n\
+             u_doc = User.__doc__\n\
+             subs_before = [cls.__name__ for cls in object.__subclasses__()]\n\
+             keys_subs_before = [cls.__name__ for cls in type({}.keys()).__subclasses__()]\n",
+        );
+
+        assert_eq!(
+            lazy_class_singletons_initialized(),
+            (false, false, false),
+            "int()/set()/dict()/object.__subclasses__() must not initialize odict_*, _deque_*iterator, or MODULE_TYPE"
+        );
+
+        let subs_before = interpreter.lookup_name("subs_before").unwrap().unwrap();
+        let ValueKind::List(subs_list) = subs_before.kind() else {
+            panic!("expected subs_before list");
+        };
+        let names_before: Vec<String> = subs_list
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        assert!(!names_before.iter().any(|n| n == "_deque_iterator"));
+        assert!(!names_before.iter().any(|n| n == "_deque_reverse_iterator"));
+        assert!(!names_before.iter().any(|n| n == "module"));
+
+        let keys_subs_before = interpreter.lookup_name("keys_subs_before").unwrap().unwrap();
+        let ValueKind::List(keys_list) = keys_subs_before.kind() else {
+            panic!("expected keys_subs_before list");
+        };
+        assert!(keys_list.is_empty());
+
+        // Now materialize collections.OrderedDict views, deque iterators, and
+        // types.ModuleType and verify dispatch + subclass registration work.
+        interpreter
+            .exec_source(
+                "import collections, types\n\
+                 dq = collections.deque([10, 20])\n\
+                 dq_it = iter(dq)\n\
+                 dq_rev = reversed(dq)\n\
+                 dq_it2 = collections._deque_iterator(dq)\n\
+                 dq_rev2 = type(dq_rev)(dq)\n\
+                 dq_vals = (list(dq_it), list(dq_rev), list(dq_it2), list(dq_rev2))\n\
+                 od = collections.OrderedDict([('a', 1), ('b', 2)])\n\
+                 ok, oi, ov = od.keys(), od.items(), od.values()\n\
+                 od_type_names = (type(ok).__name__, type(oi).__name__, type(ov).__name__)\n\
+                 def ctor_err(cls):\n\
+                 \x20   try:\n\
+                 \x20       cls()\n\
+                 \x20   except TypeError as exc:\n\
+                 \x20       return str(exc)\n\
+                 \x20   raise AssertionError('expected TypeError')\n\
+                 od_ctor_errs = (ctor_err(type(ok)), ctor_err(type(oi)), ctor_err(type(ov)))\n\
+                 m = types.ModuleType('demo', 'hello')\n\
+                 m_info = (type(m) is types.ModuleType, m.__name__, m.__doc__)\n\
+                 subs_after = [cls.__name__ for cls in object.__subclasses__()]\n\
+                 keys_subs_after = [cls.__name__ for cls in type({}.keys()).__subclasses__()]\n",
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            lazy_class_singletons_initialized(),
+            (true, true, true),
+            "odict, deque iterator, and module singletons must now be initialized"
+        );
+        assert_eq!(
+            interpreter.lookup_name("od_type_names").unwrap(),
+            Some(Value::tuple(vec![
+                Value::string("odict_keys"),
+                Value::string("odict_items"),
+                Value::string("odict_values"),
+            ]))
+        );
+        assert_eq!(
+            interpreter.lookup_name("od_ctor_errs").unwrap(),
+            Some(Value::tuple(vec![
+                Value::string("cannot create 'odict_keys' instances"),
+                Value::string("cannot create 'odict_items' instances"),
+                Value::string("cannot create 'odict_values' instances"),
+            ]))
+        );
+        assert_eq!(
+            interpreter.lookup_name("m_info").unwrap(),
+            Some(Value::tuple(vec![
+                Value::bool_(true),
+                Value::string("demo"),
+                Value::string("hello"),
+            ]))
+        );
+
+        let subs_after = interpreter.lookup_name("subs_after").unwrap().unwrap();
+        let ValueKind::List(subs_after_list) = subs_after.kind() else {
+            panic!("expected subs_after list");
+        };
+        let names_after: Vec<String> = subs_after_list
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        assert!(names_after.iter().any(|n| n == "_deque_iterator"));
+        assert!(names_after.iter().any(|n| n == "_deque_reverse_iterator"));
+        assert!(names_after.iter().any(|n| n == "module"));
+
+        let keys_subs_after = interpreter.lookup_name("keys_subs_after").unwrap().unwrap();
+        let ValueKind::List(keys_after_list) = keys_subs_after.kind() else {
+            panic!("expected keys_subs_after list");
+        };
+        assert_eq!(keys_after_list.len(), 1);
+        assert_eq!(keys_after_list[0].as_str(), Some("odict_keys"));
+    })
+    .join()
+    .expect("test thread panicked");
+}
+
+#[test]
+fn lazy_classes_materialized_before_primitive_dispatch_still_dispatch() {
+    // Verify the reverse initialization order: materialize MODULE_TYPE,
+    // ODICT_VIEW_CLASSES, and DEQUE_ITERATOR_CLASSES *before*
+    // PRIMITIVE_CLASS_DISPATCH is initialized, then confirm all of them are
+    // registered and dispatchable when PRIMITIVE_CLASS_DISPATCH is built.
+    std::thread::spawn(|| {
+        let module_cls = module_type_singleton();
+        let odict_keys_cls = DictViewClass::OrderedKeys.singleton();
+        let odict_items_cls = DictViewClass::OrderedItems.singleton();
+        let odict_values_cls = DictViewClass::OrderedValues.singleton();
+        let deque_it_cls = NativeIteratorClass::Deque.singleton();
+        let deque_rev_cls = NativeIteratorClass::DequeReverse.singleton();
+
+        assert_eq!(lazy_class_singletons_initialized(), (true, true, true));
+
+        for cls in [
+            &module_cls,
+            &odict_keys_cls,
+            &odict_items_cls,
+            &odict_values_cls,
+            &deque_it_cls,
+            &deque_rev_cls,
+        ] {
+            assert!(
+                primitive_class_dispatch(cls).is_some(),
+                "expected dispatch entry for {}",
+                cls.borrow().name
+            );
+        }
+    })
+    .join()
+    .expect("test thread panicked");
+}
