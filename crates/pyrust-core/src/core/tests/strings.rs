@@ -132,3 +132,100 @@ fn saturated_string_refcount_preserves_layout_flags() {
     drop(alias);
     drop(text);
 }
+
+/// Build a pyrust string from codepoints, writing lone surrogates as CESU-8.
+fn surrogate_text(codepoints: &[u32]) -> String {
+    let mut out = String::new();
+    for &cp in codepoints {
+        push_codepoint(&mut out, cp);
+    }
+    out
+}
+
+#[test]
+fn surrogate_detection_skips_valid_ed_lead_bytes() {
+    // Hangul syllables U+D000..=U+D7FF share the 0xED lead byte with the
+    // surrogate block but are valid UTF-8; long inputs exercise the
+    // word-at-a-time scan.
+    for text in ["", "ascii", "한글", &"한글텍스트".repeat(9), "日本語🙂"] {
+        assert!(!str_has_surrogates(text), "{text:?}");
+    }
+    for prefix_len in [0usize, 1, 7, 8, 9, 15, 16, 31] {
+        let mut cps: Vec<u32> = "한".repeat(prefix_len).chars().map(u32::from).collect();
+        cps.push(0xDCE9);
+        let text = surrogate_text(&cps);
+        assert!(str_has_surrogates(&text), "prefix {prefix_len}");
+    }
+    assert!(str_has_surrogates(&surrogate_text(&[0xD800])));
+    assert!(str_has_surrogates(&surrogate_text(&[0xDFFF, 0x61])));
+}
+
+#[test]
+fn surrogate_segments_split_text_runs_from_lone_surrogates() {
+    let plain = "héllo 한글";
+    assert_eq!(
+        str_segments(plain).collect::<Vec<_>>(),
+        vec![StrSegment::Text(plain)]
+    );
+    assert_eq!(str_segments("").count(), 0);
+
+    let text = surrogate_text(&[0xDC80, 0x61, 0xD55C, 0xD83D, 0xDE00, 0x62]);
+    let segments: Vec<_> = str_segments(&text).collect();
+    assert_eq!(segments.len(), 5);
+    assert!(matches!(segments[0], StrSegment::Surrogate { cp: 0xDC80, raw } if raw.len() == 3));
+    assert_eq!(segments[1], StrSegment::Text("a한"));
+    assert!(matches!(
+        segments[2],
+        StrSegment::Surrogate { cp: 0xD83D, .. }
+    ));
+    assert!(matches!(
+        segments[3],
+        StrSegment::Surrogate { cp: 0xDE00, .. }
+    ));
+    assert_eq!(segments[4], StrSegment::Text("b"));
+
+    // Copying every segment through reproduces the input byte-for-byte.
+    let upper = map_str_segments(&text, |run, out| out.push_str(&run.to_uppercase()));
+    assert_eq!(
+        upper.as_bytes(),
+        surrogate_text(&[0xDC80, 0x41, 0xD55C, 0xD83D, 0xDE00, 0x42]).as_bytes()
+    );
+}
+
+#[test]
+fn surrogate_safe_cursors_and_offsets_round_trip() {
+    let cps = [0x61, 0xDCE9, 0xE9, 0x1F642, 0xD800, 0x7A];
+    let text = surrogate_text(&cps);
+    assert_eq!(cesu8_codepoints(&text).collect::<Vec<_>>(), cps);
+    assert_eq!(str_codepoint_count(&text), cps.len());
+
+    // Walking backwards visits the same codepoints in reverse order.
+    let mut end = text.len();
+    let mut backwards = Vec::new();
+    while let Some((cp, start)) = cesu8_prev_codepoint(&text, end) {
+        backwards.push(cp);
+        end = start;
+    }
+    assert_eq!(end, 0);
+    backwards.reverse();
+    assert_eq!(backwards, cps);
+
+    let starts = [0usize, 1, 4, 6, 10, 13, 14];
+    for (n, &expected) in starts.iter().enumerate() {
+        assert_eq!(str_codepoint_offset(&text, n), expected, "offset {n}");
+        assert_eq!(str_codepoint_prefix(&text, n).len(), expected);
+    }
+    assert_eq!(str_codepoint_offset(&text, 99), text.len());
+}
+
+#[test]
+fn push_codepoint_writes_scalars_and_lone_surrogates() {
+    let mut out = String::new();
+    for cp in [0x41, 0xE9, 0x10FFFF, 0xD800, 0xDFFF] {
+        push_codepoint(&mut out, cp);
+    }
+    assert_eq!(
+        out.as_bytes(),
+        b"A\xC3\xA9\xF4\x8F\xBF\xBF\xED\xA0\x80\xED\xBF\xBF"
+    );
+}

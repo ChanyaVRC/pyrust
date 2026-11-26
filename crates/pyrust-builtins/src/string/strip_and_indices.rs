@@ -1,21 +1,59 @@
 fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => {
-            let mut out = String::with_capacity(s.len());
-            // CPython titlecases the first character (so Lt digraphs become their
-            // titlecase form, e.g. "ǆabc".capitalize() == "ǅabc"), then lowercases
-            // the remainder.
-            push_titlecase(&mut out, first);
-            out.extend(chars.as_str().chars().flat_map(char::to_lowercase));
-            out
+    // CPython titlecases the first character (so Lt digraphs become their
+    // titlecase form, e.g. "ǆabc".capitalize() == "ǅabc"), then lowercases the
+    // remainder.  Lone surrogates have no case mapping and are copied through,
+    // so only the surrogate-free runs reach the `char` APIs (#3315).
+    let mut out = String::with_capacity(s.len());
+    let mut first = true;
+    for seg in str_segments(s) {
+        match seg {
+            // A leading surrogate is "titlecased" to itself.
+            StrSegment::Surrogate { raw, .. } => out.push_str(raw),
+            StrSegment::Text(text) => {
+                let mut chars = text.chars();
+                if first && let Some(c) = chars.next() {
+                    push_titlecase(&mut out, c);
+                }
+                out.extend(chars.flat_map(char::to_lowercase));
+            }
         }
+        first = false;
     }
+    out
 }
 
-/// Linear membership avoids building a bitmap/hash set for short `chars`.
+/// Linear membership avoids building a hash set for short `chars`.
 const STRIP_LINEAR_SCAN_MAX: usize = 8;
+
+/// Byte range of `s` left after stripping the codepoints matching `pred` from
+/// the requested ends.
+///
+/// Walks codepoints inward from each end with the surrogate-safe cursor
+/// decoders, so the cost is proportional to what is stripped and a lone
+/// surrogate is an ordinary codepoint (std's `trim*` would decode it into an
+/// invalid `char`, #3315).  ASCII bytes decode in one comparison.
+#[inline]
+fn strip_span(s: &str, left: bool, right: bool, pred: impl Fn(u32) -> bool) -> (usize, usize) {
+    let mut start = 0;
+    let mut end = s.len();
+    if left {
+        while let Some((cp, next)) = cesu8_next_codepoint(s, start) {
+            if !pred(cp) {
+                break;
+            }
+            start = next;
+        }
+    }
+    if right {
+        while end > start {
+            match cesu8_prev_codepoint(s, end) {
+                Some((cp, prev)) if pred(cp) => end = prev,
+                _ => break,
+            }
+        }
+    }
+    (start, end)
+}
 
 fn strip_chars(
     src: &Value,
@@ -35,71 +73,44 @@ fn strip_chars(
             ));
         }
     };
-    let result = match chars_arg {
-        None => {
-            let mut result = s;
-            if left {
-                result = result.trim_start();
+    let (start, end) = match chars_arg {
+        // CPython strips `Py_UNICODE_ISSPACE` characters, the same set as
+        // `str.isspace()` (it includes `\x1c`–`\x1f`, unlike Rust's `trim`).
+        None => strip_span(s, left, right, is_python_space_cp),
+        // Nothing can be stripped.
+        Some("") => (0, s.len()),
+        Some(chars) if chars.len() == 1 => {
+            // A one-byte string is necessarily ASCII. Keep this common case
+            // below the membership-set setup cost.
+            let needle = u32::from(chars.as_bytes()[0]);
+            strip_span(s, left, right, |cp| cp == needle)
+        }
+        Some(chars) if chars.is_ascii() => {
+            let mut bitmap = [0u64; 2];
+            for byte in chars.bytes() {
+                bitmap[(byte >> 6) as usize] |= 1u64 << (byte & 63);
             }
-            if right {
-                result = result.trim_end();
-            }
-            result
+            strip_span(s, left, right, |cp| {
+                cp < 0x80 && bitmap[(cp >> 6) as usize] & (1u64 << (cp & 63)) != 0
+            })
         }
         Some(chars) => {
-            let mut result = s;
-            if chars.is_empty() {
-                // Nothing can be stripped.
-            } else if chars.len() == 1 {
-                // A one-byte UTF-8 string is necessarily ASCII. Keep this
-                // common case below the adaptive-set setup cost.
-                let needle = chars.as_bytes()[0] as char;
-                if left {
-                    result = result.trim_start_matches(needle);
-                }
-                if right {
-                    result = result.trim_end_matches(needle);
-                }
-            } else if chars.len() <= STRIP_LINEAR_SCAN_MAX
-                || chars.chars().nth(STRIP_LINEAR_SCAN_MAX).is_none()
-            {
-                if left {
-                    result = result.trim_start_matches(|c: char| chars.contains(c));
-                }
-                if right {
-                    result = result.trim_end_matches(|c: char| chars.contains(c));
-                }
-            } else if chars.is_ascii() {
-                let mut bitmap = [0u64; 2];
-                for byte in chars.bytes() {
-                    bitmap[(byte >> 6) as usize] |= 1u64 << (byte & 63);
-                }
-                let contains = |c: char| {
-                    c.is_ascii() && bitmap[(c as u8 >> 6) as usize] & (1u64 << (c as u8 & 63)) != 0
-                };
-                if left {
-                    result = result.trim_start_matches(contains);
-                }
-                if right {
-                    result = result.trim_end_matches(contains);
-                }
+            // Collect codepoints (not `char`s) so lone surrogates in `chars`
+            // are matchable members too.
+            let set: smallvec::SmallVec<[u32; STRIP_LINEAR_SCAN_MAX]> =
+                cesu8_codepoints(chars).collect();
+            if set.len() <= STRIP_LINEAR_SCAN_MAX {
+                strip_span(s, left, right, |cp| set.contains(&cp))
             } else {
-                let set: HashSet<char> = chars.chars().collect();
-                if left {
-                    result = result.trim_start_matches(|c: char| set.contains(&c));
-                }
-                if right {
-                    result = result.trim_end_matches(|c: char| set.contains(&c));
-                }
+                let set: HashSet<u32> = set.into_iter().collect();
+                strip_span(s, left, right, |cp| set.contains(&cp))
             }
-            result
         }
     };
-    if result.len() == s.len() {
+    if end - start == s.len() {
         return Ok(src.clone());
     }
-    let start = result.as_ptr() as usize - s.as_ptr() as usize;
-    Ok(src.string_slice(start, start + result.len()))
+    Ok(src.string_slice(start, end))
 }
 
 /// Parse (sep, maxsplit) from split/rsplit args.
@@ -157,7 +168,7 @@ fn byte_to_char_idx(s: &str, is_ascii: bool, byte_off: usize) -> usize {
     if prefix.is_ascii() {
         byte_off
     } else {
-        prefix.chars().count()
+        str_codepoint_count(prefix)
     }
 }
 
@@ -216,8 +227,9 @@ fn str_slice_args(s: &str, is_ascii: bool, args: &[Value]) -> Result<Option<(usi
         return Ok(Some((start_char.min(byte_len), end_char)));
     }
 
-    // Unicode: single scan for char_len + both byte positions
-    let char_len = s.chars().count();
+    // Unicode: count codepoints by their lead bytes (never decoding a `char`,
+    // so lone surrogates are safe, #3315), then one scan for both byte offsets.
+    let char_len = str_codepoint_count(s);
     let start_char = match args.get(1).map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => normalise_char_idx(i, char_len),
         Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, char_len),
@@ -248,10 +260,14 @@ fn str_slice_args(s: &str, is_ascii: bool, args: &[Value]) -> Result<Option<(usi
     }
     // Clamp start_char to char_len so the single-pass loop terminates correctly.
     let start_char = start_char.min(char_len);
-    // Single pass to find both byte positions
+    // Single pass over the codepoint lead bytes to find both byte positions.
     let mut start_byte = s.len();
     let mut end_byte = s.len();
-    for (i, (b, _)) in s.char_indices().enumerate() {
+    let mut i = 0usize;
+    for (b, &byte) in s.as_bytes().iter().enumerate() {
+        if byte & 0xC0 == 0x80 {
+            continue;
+        }
         if i == start_char {
             start_byte = b;
         }
@@ -259,6 +275,7 @@ fn str_slice_args(s: &str, is_ascii: bool, args: &[Value]) -> Result<Option<(usi
             end_byte = b;
             break;
         }
+        i += 1;
     }
     Ok(Some((start_byte, end_byte)))
 }

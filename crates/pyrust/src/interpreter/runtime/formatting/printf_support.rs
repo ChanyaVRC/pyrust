@@ -202,15 +202,33 @@ fn str_printf_to_float(v: &Value, _conv: char, bytes_mode: bool) -> Result<f64> 
     }
 }
 
-/// Truncate a string to `precision` Unicode chars (for `%s` and `%r`).
+/// The one-codepoint string for a `%c` integer argument.  `None` (a negative
+/// or too-large code) and codes past `0x10FFFF` raise CPython's
+/// OverflowError; lone surrogates are valid and are written without building
+/// a `char` (#3315).
+fn printf_char_code(code: Option<u32>) -> Result<String> {
+    match code {
+        Some(cp) if cp <= 0x10FFFF => {
+            let mut out = String::new();
+            pyrust_core::push_codepoint(&mut out, cp);
+            Ok(out)
+        }
+        _ => Err(pyrust_core::overflow_err!("%c arg not in range(0x110000)")),
+    }
+}
+
+/// Truncate a string to `precision` Unicode codepoints (for `%s` and `%r`).
+/// Works on codepoint byte offsets, so lone surrogates are never decoded into
+/// `char`s (#3315).
 fn apply_str_precision(s: String, precision: Option<usize>) -> String {
     match precision {
         None => s,
         Some(max_chars) => {
-            if s.chars().count() <= max_chars {
+            let keep = pyrust_core::str_codepoint_offset(&s, max_chars);
+            if keep == s.len() {
                 s
             } else {
-                s.chars().take(max_chars).collect()
+                s[..keep].to_string()
             }
         }
     }
@@ -228,7 +246,8 @@ fn apply_printf_width(
         None | Some(0) => return s,
         Some(w) => w,
     };
-    let char_len = s.chars().count();
+    // Lead-byte count: `s` may be a `%s`/`%c` value holding lone surrogates.
+    let char_len = pyrust_core::str_codepoint_count(&s);
     if char_len >= w {
         return s;
     }

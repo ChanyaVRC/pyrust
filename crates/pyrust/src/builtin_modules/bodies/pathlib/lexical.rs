@@ -40,45 +40,19 @@ impl ParsedPath {
     }
 }
 
-fn find_win_sep(chars: &[char], from: usize) -> Option<usize> {
-    chars
-        .iter()
-        .enumerate()
-        .skip(from)
-        .find(|&(_, &c)| c == '\\')
-        .map(|(i, _)| i)
-}
-
+/// `(drive, root, tail)` of the separator-normalised Windows path `p`.
+///
+/// Normalises `/` to `\` and splits at `ntpath.splitroot`'s byte offsets, so
+/// a lone surrogate in a path component is never decoded into an invalid
+/// `char` (#3315).
 fn win_splitroot(p: &str) -> (String, String, String) {
-    let normp: Vec<char> = p.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
-    let n = normp.len();
-    let take = |a: usize, b: usize| -> String { normp[a..b.min(n)].iter().collect() };
-
-    if normp.first() == Some(&'\\') {
-        if normp.get(1) == Some(&'\\') {
-            let upper8: String = normp.iter().take(8).collect::<String>().to_uppercase();
-            let start = if upper8 == "\\\\?\\UNC\\" { 8 } else { 2 };
-            let Some(index) = find_win_sep(&normp, start) else {
-                return (take(0, n), String::new(), String::new());
-            };
-            let Some(index2) = find_win_sep(&normp, index + 1) else {
-                return (take(0, n), String::new(), String::new());
-            };
-            return (
-                take(0, index2),
-                take(index2, index2 + 1),
-                take(index2 + 1, n),
-            );
-        }
-        return (String::new(), take(0, 1), take(1, n));
-    }
-    if normp.get(1) == Some(&':') {
-        if normp.get(2) == Some(&'\\') {
-            return (take(0, 2), take(2, 3), take(3, n));
-        }
-        return (take(0, 2), String::new(), take(2, n));
-    }
-    (String::new(), String::new(), take(0, n))
+    let normp = p.replace('/', "\\");
+    let (drive_end, root_end) = crate::builtin_modules::ntpath::ops::nt_splitroot_offsets(&normp);
+    (
+        normp[..drive_end].to_string(),
+        normp[drive_end..root_end].to_string(),
+        normp[root_end..].to_string(),
+    )
 }
 
 pub(super) fn parse_path(path: &str, flavor: PathFlavor) -> ParsedPath {

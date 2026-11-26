@@ -87,9 +87,10 @@ fn format_int_value(
         if !(0..=0x10FFFF).contains(&n) {
             return Err(pyrust_core::overflow_err!("%c arg not in range(0x110000)"));
         }
-        let ch = char::from_u32(n as u32)
-            .ok_or_else(|| pyrust_core::overflow_err!("%c arg not in range(0x110000)"))?;
-        let raw = ch.to_string();
+        // A surrogate code (0xD800..=0xDFFF) formats to a lone-surrogate str
+        // in CPython; `push_codepoint` writes it without a `char` (#3315).
+        let mut raw = String::new();
+        pyrust_core::push_codepoint(&mut raw, n as u32);
         return Ok(pad_value(&raw, fs, '<', fs.fill));
     }
 

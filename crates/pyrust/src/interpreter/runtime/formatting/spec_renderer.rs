@@ -96,15 +96,17 @@ fn format_as_string(value: &Value, fs: &FormatSpec, type_name: &str) -> Result<S
         ValueKind::Str(s) => s.to_string(),
         _ => value.to_py_str(),
     };
+    // Truncate to `precision` codepoints by byte offset: decoding `char`s
+    // would be UB on a lone surrogate (#3315).
     let raw = match fs.precision {
-        Some(p) => raw.chars().take(p).collect::<String>(),
+        Some(p) => pyrust_core::str_codepoint_prefix(&raw, p).to_string(),
         None => raw,
     };
     // CPython accepts the `0` zero-pad flag on strings (with a
     // DeprecationWarning) — it promotes the fill character to '0' but keeps
     // the default left-alignment.  We just match the run-time behavior.
     let effective_fill = if fs.zero_pad && !fs.fill_explicit {
-        '0'
+        FillChar::ZERO
     } else {
         fs.fill
     };

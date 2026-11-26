@@ -1,51 +1,115 @@
+/// Decode the codepoint starting at byte `i` (ASCII in one comparison).
+#[inline(always)]
+fn next_cp_at(s: &str, i: usize) -> Option<(u32, usize)> {
+    match s.as_bytes().get(i) {
+        Some(&b) if b < 0x80 => Some((u32::from(b), i + 1)),
+        Some(_) => cesu8_next_codepoint(s, i),
+        None => None,
+    }
+}
+
+/// Decode the codepoint ending at byte `i` (ASCII in one comparison).
+#[inline(always)]
+fn prev_cp_at(s: &str, i: usize) -> Option<(u32, usize)> {
+    match i.checked_sub(1).map(|p| s.as_bytes()[p]) {
+        Some(b) if b < 0x80 => Some((u32::from(b), i - 1)),
+        Some(_) => cesu8_prev_codepoint(s, i),
+        None => None,
+    }
+}
+
+/// `str.split()` / `str.split(None, maxsplit)`: CPython's `split_whitespace`.
+///
+/// Runs of `Py_UNICODE_ISSPACE` characters separate the parts; once
+/// `maxsplit` parts are taken, leading whitespace of the remainder is skipped
+/// and the rest (trailing whitespace included) is the final part.  Works on
+/// codepoints decoded with the surrogate-safe cursors, so lone surrogates are
+/// ordinary non-whitespace characters (#3315).
+fn split_on_whitespace(src: &Value, s: &str, maxsplit: i64) -> Vec<Value> {
+    let len = s.len();
+    let mut remaining = usize::try_from(maxsplit).unwrap_or(usize::MAX);
+    // Heuristic capacity (avg word ~4 chars) avoids Vec realloc in one pass.
+    let mut parts = Vec::with_capacity(if maxsplit < 0 { len / 4 + 1 } else { 0 });
+    let mut i = 0;
+    while remaining > 0 {
+        while let Some((cp, next)) = next_cp_at(s, i) {
+            if !is_python_space_cp(cp) {
+                break;
+            }
+            i = next;
+        }
+        if i == len {
+            break;
+        }
+        let start = i;
+        while let Some((cp, next)) = next_cp_at(s, i) {
+            if is_python_space_cp(cp) {
+                break;
+            }
+            i = next;
+        }
+        parts.push(src.string_slice(start, i));
+        remaining -= 1;
+    }
+    if i < len {
+        while let Some((cp, next)) = next_cp_at(s, i) {
+            if !is_python_space_cp(cp) {
+                break;
+            }
+            i = next;
+        }
+        if i < len {
+            parts.push(src.string_slice(i, len));
+        }
+    }
+    parts
+}
+
+/// `str.rsplit(None, maxsplit)` with `maxsplit >= 0`: CPython's
+/// `rsplit_whitespace`, the mirror image of [`split_on_whitespace`].
+fn rsplit_on_whitespace(src: &Value, s: &str, maxsplit: usize) -> Vec<Value> {
+    let mut remaining = maxsplit;
+    let mut parts = Vec::new();
+    let mut i = s.len();
+    while remaining > 0 {
+        while let Some((cp, prev)) = prev_cp_at(s, i) {
+            if !is_python_space_cp(cp) {
+                break;
+            }
+            i = prev;
+        }
+        if i == 0 {
+            break;
+        }
+        let end = i;
+        while let Some((cp, prev)) = prev_cp_at(s, i) {
+            if is_python_space_cp(cp) {
+                break;
+            }
+            i = prev;
+        }
+        parts.push(src.string_slice(i, end));
+        remaining -= 1;
+    }
+    if i > 0 {
+        while let Some((cp, prev)) = prev_cp_at(s, i) {
+            if !is_python_space_cp(cp) {
+                break;
+            }
+            i = prev;
+        }
+        if i > 0 {
+            parts.push(src.string_slice(0, i));
+        }
+    }
+    parts.reverse();
+    parts
+}
+
 fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
     let (sep, maxsplit) = split_args(args)?;
     let parts: Vec<Value> = match sep {
-        None => {
-            if maxsplit < 0 {
-                // Heuristic capacity (avg word ~4 chars) avoids Vec realloc in one pass
-                let mut parts = Vec::with_capacity(s.len() / 4 + 1);
-                for p in s.split_whitespace() {
-                    let off = subslice_offset(s, p);
-                    parts.push(src.string_slice(off, off + p.len()));
-                }
-                parts
-            } else {
-                let n = maxsplit as usize;
-                // Python's whitespace split: consecutive whitespace treated as one
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    return Ok(Value::list(vec![]));
-                }
-                let mut out = Vec::new();
-                let mut remaining = s;
-                for _ in 0..n {
-                    let t = remaining.trim_start();
-                    if t.is_empty() {
-                        break;
-                    }
-                    match t.find(char::is_whitespace) {
-                        None => {
-                            let off = subslice_offset(s, t);
-                            out.push(src.string_slice(off, off + t.len()));
-                            remaining = "";
-                            break;
-                        }
-                        Some(pos) => {
-                            let off = subslice_offset(s, t);
-                            out.push(src.string_slice(off, off + pos));
-                            remaining = &t[pos..];
-                        }
-                    }
-                }
-                let tail = remaining.trim_start();
-                if !tail.is_empty() {
-                    let off = subslice_offset(s, tail);
-                    out.push(src.string_slice(off, off + tail.len()));
-                }
-                return Ok(Value::list(out));
-            }
-        }
+        None => split_on_whitespace(src, s, maxsplit),
         Some(sep_str) => {
             if sep_str.is_empty() {
                 return Err(PyError::named("ValueError", "empty separator".to_string()));
@@ -74,48 +138,9 @@ fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
 fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
     let (sep, maxsplit) = split_args(args)?;
     let parts: Vec<Value> = match sep {
-        None => {
-            // No sep: rsplit with no maxsplit is identical to split (left-to-right).
-            if maxsplit < 0 {
-                let mut parts = Vec::with_capacity(s.len() / 4 + 1);
-                for p in s.split_whitespace() {
-                    let off = subslice_offset(s, p);
-                    parts.push(src.string_slice(off, off + p.len()));
-                }
-                parts
-            } else {
-                let n = maxsplit as usize;
-                let mut out = Vec::new();
-                let mut remaining = s;
-                for _ in 0..n {
-                    let t = remaining.trim_end();
-                    if t.is_empty() {
-                        break;
-                    }
-                    match t.rfind(char::is_whitespace) {
-                        None => {
-                            let off = subslice_offset(s, t);
-                            out.push(src.string_slice(off, off + t.len()));
-                            remaining = "";
-                            break;
-                        }
-                        Some(pos) => {
-                            let tail = &t[pos + 1..];
-                            let off = subslice_offset(s, tail);
-                            out.push(src.string_slice(off, off + tail.len()));
-                            remaining = &t[..pos];
-                        }
-                    }
-                }
-                let head = remaining.trim_end();
-                if !head.is_empty() {
-                    let off = subslice_offset(s, head);
-                    out.push(src.string_slice(off, off + head.len()));
-                }
-                out.reverse();
-                return Ok(Value::list(out));
-            }
-        }
+        // Without a limit, splitting from the right yields the same parts.
+        None if maxsplit < 0 => split_on_whitespace(src, s, maxsplit),
+        None => rsplit_on_whitespace(src, s, maxsplit as usize),
         Some(sep_str) => {
             if sep_str.is_empty() {
                 return Err(PyError::named("ValueError", "empty separator".to_string()));

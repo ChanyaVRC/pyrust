@@ -98,18 +98,21 @@ pub fn extract_optional_int(args: &[Value], idx: usize) -> Result<Option<i64>> {
     }
 }
 
-/// Extract a fill `char` from `args[1]`, defaulting to `' '`.
+/// Extract the fill character from `args[1]`, defaulting to `" "`.
+///
+/// Returned as the one-codepoint `&str` itself rather than a `char`: a lone
+/// surrogate is a valid Python fill character but not a Rust `char` (#3315).
 ///
 /// CPython 3.12 error messages for the fill-character argument:
 /// - Wrong type: `TypeError: The fill character must be a unicode character, not <typename>`
 /// - Multiple chars: `TypeError: The fill character must be exactly one character long`
-pub fn extract_fill_char(args: &[Value]) -> Result<char> {
+pub fn extract_fill_char(args: &[Value]) -> Result<&str> {
     match args.get(1).map(|v| v.kind()) {
-        None => Ok(' '),
+        None => Ok(" "),
         Some(ValueKind::Str(s)) => {
-            let mut chars = s.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) => Ok(c),
+            let mut codepoints = crate::object_model::cesu8_codepoints(s);
+            match (codepoints.next(), codepoints.next()) {
+                (Some(_), None) => Ok(s),
                 _ => Err(PyError::named(
                     "TypeError",
                     "The fill character must be exactly one character long",

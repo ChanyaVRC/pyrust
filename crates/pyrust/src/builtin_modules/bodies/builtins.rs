@@ -190,8 +190,9 @@ mod int_constructor {
     use super::{
         ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError, Result, Value,
         ValueKind, coerce_subclass_backing, float_to_bigint, int_parse_base_zero,
-        int_parse_bytes_like, int_strip_explicit_base, invoke_class_method,
-        lookup_value_special_method, normalize_int_slot_result, value_type_name_str,
+        int_parse_bytes_like, int_strip_explicit_base, invalid_int_literal_error,
+        invoke_class_method, lookup_value_special_method, normalize_int_slot_result,
+        str_literal_has_surrogates, value_type_name_str,
     };
     include!("builtins/int_constructor.rs");
 }
@@ -201,7 +202,8 @@ mod float_constructor {
         ExpandedCallArg, FN_PREFIX, MODULE_NAME, OptValueRef, OptionalArg, PyError, PyToPrimitive,
         Result, Value, ValueKind, coerce_subclass_backing, float_bytes_like,
         float_parse_bytes_like, invoke_class_method, lookup_value_special_method,
-        normalize_float_slot_result, pep515_strip_float, value_to_float, value_type_name_str,
+        normalize_float_slot_result, pep515_strip_float, str_literal_has_surrogates,
+        value_to_float, value_type_name_str,
     };
     include!("builtins/float_constructor.rs");
 }

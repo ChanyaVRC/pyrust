@@ -262,17 +262,16 @@ impl Interpreter {
                             (items[0].clone(), items[1].clone())
                         }
                         ValueKind::Str(s) => {
-                            let chars: Vec<char> = s.chars().collect();
-                            let len = chars.len();
+                            // Split at the codepoint boundary by byte offset:
+                            // a lone surrogate must not be decoded (#3315).
+                            let len = pyrust_core::str_codepoint_count(s);
                             if len != 2 {
                                 return Err(pyrust_core::value_err!(
                                     "dictionary update sequence element #{idx} has length {len}; 2 is required"
                                 ));
                             }
-                            (
-                                Value::string(chars[0].to_string()),
-                                Value::string(chars[1].to_string()),
-                            )
+                            let mid = pyrust_core::str_codepoint_offset(s, 1);
+                            (Value::string(&s[..mid]), Value::string(&s[mid..]))
                         }
                         _ => {
                             return Err(pyrust_core::type_err!(

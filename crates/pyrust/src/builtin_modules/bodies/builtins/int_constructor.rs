@@ -48,6 +48,9 @@ pyrust_module! {
                 }
                 ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
                 ValueKind::Str(s) => {
+                    if str_literal_has_surrogates(val, s) {
+                        return Err(invalid_int_literal_error(val, 10));
+                    }
                     let trimmed = s.trim();
                     let cleaned = int_strip_explicit_base(trimmed, 10).ok_or_else(|| {
                         PyError::named(
@@ -214,6 +217,9 @@ pyrust_module! {
                 }
                 match val.kind() {
                     ValueKind::Str(s) => {
+                        if str_literal_has_surrogates(val, s) {
+                            return Err(invalid_int_literal_error(val, base_arg));
+                        }
                         let trimmed = s.trim();
                         if base_arg == 0 {
                             let (base, digits) = int_parse_base_zero(trimmed).ok_or_else(|| {

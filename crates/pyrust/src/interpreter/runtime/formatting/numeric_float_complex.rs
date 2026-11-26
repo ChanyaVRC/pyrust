@@ -216,7 +216,7 @@ fn format_complex_value(value: &Value, fs: &FormatSpec) -> Result<String> {
     // assembled string, not the individual components).
     let make_component = |part: f64, sign: Option<char>| -> Result<String> {
         let sub = FormatSpec {
-            fill: ' ',
+            fill: FillChar::SPACE,
             align: None,
             fill_explicit: false,
             sign,

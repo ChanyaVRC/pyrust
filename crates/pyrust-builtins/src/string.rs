@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
 use pyrust_core::{
-    PyBigIntSign, PyDict, PyError, PyKey, Result, Value, ValueKind, builtin_type_name,
-    cesu8_codepoints, cp_is_printable, expect_arg_count, extract_fill_char, extract_int,
-    extract_optional_int, py_value_display_name,
+    PyBigIntSign, PyDict, PyError, PyKey, Result, StrSegment, Value, ValueKind, builtin_type_name,
+    cesu8_codepoints, cesu8_next_codepoint, cesu8_prev_codepoint, cp_is_printable,
+    expect_arg_count, extract_fill_char, extract_int, extract_optional_int, map_str_segments,
+    push_codepoint, py_value_display_name, str_codepoint_count, str_has_surrogates, str_segments,
 };
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
@@ -384,12 +385,12 @@ pub fn call_prevalidated(method: &str, src: &Value, args: &[Value]) -> Result<Va
         "upper" => Ok(Value::string(if src.str_is_ascii() {
             s.to_ascii_uppercase()
         } else {
-            s.to_uppercase()
+            unicode_upper(s)
         })),
         "lower" => Ok(Value::string(if src.str_is_ascii() {
             s.to_ascii_lowercase()
         } else {
-            s.to_lowercase()
+            unicode_lower(s)
         })),
         "casefold" => Ok(Value::string(unicode_casefold(s, src.str_is_ascii()))),
         "capitalize" => Ok(Value::string(capitalize(s))),

@@ -317,6 +317,29 @@ fn pep515_strip_float(s: &str) -> Option<String> {
     Some(s.chars().filter(|&c| c != '_').collect())
 }
 
+/// True when the str value `val` (with text `s`) holds a lone surrogate.
+///
+/// A surrogate is never whitespace, a digit, a sign, a prefix letter or an
+/// underscore, so such a string is always an invalid numeric literal.  The
+/// numeric constructors reject it up front, before `str::trim` decodes the
+/// surrogate into an invalid `char` (#3315).  The cached ASCII flag keeps the
+/// common ASCII input free of any scan.
+fn str_literal_has_surrogates(val: &Value, s: &str) -> bool {
+    !val.str_is_ascii() && pyrust_core::str_has_surrogates(s)
+}
+
+/// CPython's `int()` invalid-literal ValueError (`%.200R` of the argument).
+fn invalid_int_literal_error(val: &Value, base: i64) -> PyError {
+    let repr = val.repr_raw();
+    PyError::named(
+        "ValueError",
+        format!(
+            "invalid literal for int() with base {base}: {}",
+            pyrust_core::str_codepoint_prefix(&repr, 200)
+        ),
+    )
+}
+
 /// Strip the optional sign and matching base prefix from a string passed to
 /// `int(str, base)` with an explicit `base` (2 / 8 / 16 accept their prefix;
 /// other bases have none), validate PEP 515 underscore placement, and return
@@ -448,6 +471,11 @@ fn divmod_float_float(a: f64, b: f64) -> crate::error::Result<Value> {
 /// Internal whitespace (e.g. `"1 + 2j"`) is rejected (returns `None`).
 /// Returns `None` for any malformed input so the caller can raise `ValueError`.
 fn parse_complex_str(s: &str) -> Option<(f64, f64)> {
+    // A lone surrogate is never part of a complex literal; reject it before
+    // `str::trim` decodes it into an invalid `char` (#3315).
+    if !s.is_ascii() && pyrust_core::str_has_surrogates(s) {
+        return None;
+    }
     let s = s.trim();
 
     // Parenthesized form: "(1+2j)" — strip parens and recurse once.

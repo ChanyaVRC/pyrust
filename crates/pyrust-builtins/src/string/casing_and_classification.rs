@@ -4,17 +4,44 @@ fn unicode_casefold(s: &str, is_ascii: bool) -> String {
     if is_ascii {
         return s.to_ascii_lowercase();
     }
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        // CaseFolding.txt full folding: for most characters the fold equals the
-        // lowercase mapping, so use to_lowercase and override only the documented
-        // exceptions (µ→μ, ς→σ, ß→ss, ﬆ→st, Cherokee, …) where fold ≠ lowercase.
-        match unicode_data::casefold_exception(c) {
-            Some(folded) => out.push_str(folded),
-            None => out.extend(c.to_lowercase()),
+    // Lone surrogates fold to themselves; the surrogate-free runs between them
+    // go through the `char` path (one run covering all of `s` when it has no
+    // surrogates, #3315).
+    map_str_segments(s, |text, out| {
+        for c in text.chars() {
+            // CaseFolding.txt full folding: for most characters the fold equals
+            // the lowercase mapping, so use to_lowercase and override only the
+            // documented exceptions (µ→μ, ς→σ, ß→ss, ﬆ→st, Cherokee, …) where
+            // fold ≠ lowercase.
+            match unicode_data::casefold_exception(c) {
+                Some(folded) => out.push_str(folded),
+                None => out.extend(c.to_lowercase()),
+            }
         }
+    })
+}
+
+/// `str.upper()` for a non-ASCII receiver.  `str::to_uppercase` decodes
+/// `char`s, so lone surrogates (which CPython leaves unchanged) are copied
+/// around it rather than fed to it (#3315).
+fn unicode_upper(s: &str) -> String {
+    if str_has_surrogates(s) {
+        map_str_segments(s, |text, out| out.push_str(&text.to_uppercase()))
+    } else {
+        s.to_uppercase()
     }
-    out
+}
+
+/// `str.lower()` for a non-ASCII receiver.  A surrogate is neither cased nor
+/// case-ignorable, so for the Final_Sigma rule it ends the context scan
+/// exactly as a string boundary does: lowercasing each surrogate-free run on
+/// its own matches CPython's `handle_capital_sigma` (#3315).
+fn unicode_lower(s: &str) -> String {
+    if str_has_surrogates(s) {
+        map_str_segments(s, |text, out| out.push_str(&text.to_lowercase()))
+    } else {
+        s.to_lowercase()
+    }
 }
 
 fn swapcase(s: &str, is_ascii: bool) -> String {
@@ -32,17 +59,18 @@ fn swapcase(s: &str, is_ascii: bool) -> String {
             })
             .collect();
     }
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_uppercase() {
-            out.extend(c.to_lowercase());
-        } else if c.is_lowercase() {
-            out.extend(c.to_uppercase());
-        } else {
-            out.push(c);
+    // Surrogates are uncased: copied through unchanged (#3315).
+    map_str_segments(s, |text, out| {
+        for c in text.chars() {
+            if c.is_uppercase() {
+                out.extend(c.to_lowercase());
+            } else if c.is_lowercase() {
+                out.extend(c.to_uppercase());
+            } else {
+                out.push(c);
+            }
         }
-    }
-    out
+    })
 }
 
 fn titlecase(s: &str, is_ascii: bool) -> String {
@@ -64,22 +92,25 @@ fn titlecase(s: &str, is_ascii: bool) -> String {
         }
         return out;
     }
-    let mut out = String::with_capacity(s.len());
-    let mut prev_cased = false;
-    for c in s.chars() {
-        if c.is_alphabetic() {
-            if prev_cased {
-                out.extend(c.to_lowercase());
+    // A lone surrogate is not alphabetic, so it resets `prev_cased` exactly
+    // like the start of the string: each surrogate-free run is title-cased
+    // with fresh state and the surrogates are copied through (#3315).
+    map_str_segments(s, |text, out| {
+        let mut prev_cased = false;
+        for c in text.chars() {
+            if c.is_alphabetic() {
+                if prev_cased {
+                    out.extend(c.to_lowercase());
+                } else {
+                    push_titlecase(out, c);
+                }
+                prev_cased = true;
             } else {
-                push_titlecase(&mut out, c);
+                out.push(c);
+                prev_cased = false;
             }
-            prev_cased = true;
-        } else {
-            out.push(c);
-            prev_cased = false;
         }
-    }
-    out
+    })
 }
 
 /// Push the Unicode titlecase form of `c` onto `out`. Unlike `char::to_uppercase`,
@@ -262,8 +293,15 @@ fn is_python_space_ascii(b: u8) -> bool {
 /// `Py_UNICODE_ISSPACE` (Unicode 15.0). This differs from Rust's
 /// `char::is_whitespace`, which omits `\x1c`–`\x1f` and `\x85`.
 fn is_python_space(c: char) -> bool {
+    is_python_space_cp(c as u32)
+}
+
+/// [`is_python_space`] on a raw codepoint, so lone surrogates (never
+/// whitespace) can be classified without building a `char`.
+#[inline]
+fn is_python_space_cp(cp: u32) -> bool {
     matches!(
-        c as u32,
+        cp,
         0x09..=0x0D
             | 0x1C..=0x1F
             | 0x20

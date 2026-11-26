@@ -313,10 +313,20 @@ impl Interpreter {
                 Ok(Value::string(out))
             }
             ValueKind::Str(s) => {
-                let chars: Vec<char> = s.chars().collect();
-                let mut out = String::new();
+                // Record each codepoint's starting byte (its lead byte) and
+                // copy the selected codepoints as byte slices.  Decoding into
+                // `char`s would be UB on lone surrogates (#3315).  String
+                // lengths fit the u32 header field, so u32 offsets suffice.
+                let bytes = s.as_bytes();
+                let starts: Vec<u32> = (0..bytes.len())
+                    .filter(|&i| bytes[i] & 0xC0 != 0x80)
+                    .map(|i| i as u32)
+                    .collect();
+                let mut out = String::with_capacity(s.len().min(indices.len() * 4));
                 for ix in indices {
-                    out.push(chars[ix]);
+                    let begin = starts[ix] as usize;
+                    let end = starts.get(ix + 1).map_or(s.len(), |&next| next as usize);
+                    out.push_str(&s[begin..end]);
                 }
                 Ok(Value::string(out))
             }
