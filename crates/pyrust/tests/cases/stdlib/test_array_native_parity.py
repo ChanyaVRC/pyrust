@@ -25,7 +25,9 @@ def t(label, fn):
 
 
 # ── 1. Module and type surface ──────────────────────────────────────────────
-print("vars:", list(vars(array)))
+# CPython's Linux/macOS builds ship `array` as a shared extension, so the loader
+# adds `__file__`; pyrust's `array` is built in (like CPython on Windows).
+print("vars:", [name for name in vars(array) if name != "__file__"])
 print("doc:", array.__doc__.splitlines()[0])
 print("type doc:", A.__doc__.splitlines()[0])
 print("ArrayType:", array.ArrayType is A, repr(array.typecodes))
