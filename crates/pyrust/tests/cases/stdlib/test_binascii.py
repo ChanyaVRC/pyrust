@@ -297,3 +297,111 @@ print("a2b_qp edges:",
     binascii.a2b_qp("=61=62"),
     binascii.a2b_qp(b"hello_world=3D=0A", header=True),
 )
+
+
+# 9. Native module surface (issue #3308): names, metadata, exceptions
+print("dir:", sorted(n for n in dir(binascii) if not n.startswith("_")))
+print("module doc:", binascii.__doc__, binascii.__name__, hasattr(binascii, "__all__"))
+print("Error meta:", binascii.Error.__module__, binascii.Error.__qualname__, binascii.Error.__name__, binascii.Error.__doc__)
+print("Error mro:", [c.__name__ for c in binascii.Error.__mro__])
+print("Incomplete meta:", binascii.Incomplete.__module__, binascii.Incomplete.__qualname__, binascii.Incomplete.__doc__)
+print("Incomplete mro:", [c.__name__ for c in binascii.Incomplete.__mro__])
+print("exc repr:", repr(binascii.Error("x")), str(binascii.Error("x")), repr(binascii.Incomplete()))
+print("exc str type:", type(binascii.Error("x")).__name__, str(binascii.Error()), binascii.Error("a", "b").args)
+for fname in [
+    "b2a_hex", "hexlify", "a2b_hex", "unhexlify", "b2a_base64", "a2b_base64",
+    "crc32", "crc_hqx", "b2a_uu", "a2b_uu", "b2a_qp", "a2b_qp",
+]:
+    fobj = getattr(binascii, fname)
+    print("func meta:", fname, fobj.__name__, fobj.__module__, type(fobj).__name__, callable(fobj))
+print("not aliased:", binascii.hexlify is binascii.b2a_hex, binascii.unhexlify is binascii.a2b_hex)
+print("no private helpers:", [n for n in vars(binascii) if n.startswith("_") and not n.startswith("__")])
+
+caught = []
+for label, fn, args, kwargs in [
+    ("hex noargs", binascii.b2a_hex, (), {}),
+    ("a2b_hex kw", binascii.a2b_hex, (), {"hexstr": b"61"}),
+    ("b2a_base64 newline positional", binascii.b2a_base64, (b"a", True), {}),
+    ("a2b_base64 strict positional", binascii.a2b_base64, (b"YQ==", True), {}),
+    ("b2a_uu backtick positional", binascii.b2a_uu, (b"a", True), {}),
+    ("crc32 kw", binascii.crc32, (b"a",), {"crc": 1}),
+    ("crc_hqx one arg", binascii.crc_hqx, (b"a",), {}),
+    ("crc_hqx kw", binascii.crc_hqx, (b"a",), {"crc": 1}),
+    ("a2b_qp too many", binascii.a2b_qp, (b"a", True, 1), {}),
+    ("b2a_qp bad kw", binascii.b2a_qp, (b"a",), {"bogus": 1}),
+]:
+    try:
+        fn(*args, **kwargs)
+        caught.append((label, "OK"))
+    except Exception as exc:
+        caught.append((label, type(exc).__name__))
+print("arg errors:", caught)
+
+print("kw ok:", binascii.a2b_qp(b"=41_", header=True), binascii.b2a_qp(b"a b\n", quotetabs=True, istext=False, header=True))
+print("kw ok2:", binascii.b2a_base64(b"a", newline=False), binascii.a2b_base64(b"YQ==", strict_mode=False), binascii.b2a_uu(b"a", backtick=True))
+
+# Argument conversion order and type messages
+print("conv:",
+    expect_exc(binascii.b2a_hex, "str", ":", "x"),
+    expect_exc(binascii.b2a_hex, b"ab", sep=None),
+    expect_exc(binascii.b2a_hex, b"ab", ":", 2**31),
+    expect_exc(binascii.b2a_hex, b"ab", ":", -(2**31)),
+    expect_exc(binascii.b2a_hex, b"ab", ":", 2**100),
+    expect_exc(binascii.crc32, b"a", None),
+    expect_exc(binascii.crc32, b"a", 1.0),
+    expect_exc(binascii.crc32, b"a", 2**70 + 5),
+    expect_exc(binascii.crc32, b"a", -(2**70) - 5),
+    expect_exc(binascii.crc32, b"a", True),
+    expect_exc(binascii.crc_hqx, b"a", 2**70 + 5),
+    expect_exc(binascii.crc_hqx, b"a", "x"),
+)
+
+
+class _Idx:
+    def __index__(self):
+        return 3
+
+
+class _Str(str):
+    pass
+
+
+class _Bytes(bytes):
+    pass
+
+
+print("subclasses:",
+    expect_exc(binascii.a2b_hex, _Str("6162")),
+    expect_exc(binascii.b2a_hex, _Bytes(b"ab")),
+    expect_exc(binascii.b2a_hex, _Bytes(b"ab"), _Str(":"), 1),
+    expect_exc(binascii.b2a_hex, b"abcdef", ":", _Idx()),
+    expect_exc(binascii.crc32, b"a", _Idx()),
+)
+print("non-buffer inputs:",
+    expect_exc(binascii.b2a_hex, None),
+    expect_exc(binascii.b2a_hex, [1]),
+    expect_exc(binascii.b2a_base64, 5),
+    expect_exc(binascii.b2a_uu, "str"),
+    expect_exc(binascii.b2a_qp, 1.5),
+    expect_exc(binascii.crc32, "str"),
+    expect_exc(binascii.a2b_hex, 5),
+    expect_exc(binascii.a2b_base64, None),
+    expect_exc(binascii.a2b_uu, None),
+    expect_exc(binascii.a2b_qp, 1.5),
+    expect_exc(binascii.a2b_hex, "\u00e9"),
+    expect_exc(binascii.a2b_base64, "\u00e9"),
+)
+released = memoryview(bytearray(b"abc"))
+released.release()
+print("released memoryview:", expect_exc(binascii.b2a_hex, released))
+print("array inputs:",
+    binascii.b2a_hex(array.array("i", [1, 2])),
+    binascii.crc32(array.array("H", [1, 2])),
+    binascii.b2a_base64(array.array("B", [1, 2, 3]), newline=0),
+)
+print("truthy flags:", binascii.b2a_base64(b"a", newline=[]), binascii.b2a_qp(b"a b\n", 1, 0, 1))
+print("exc isinstance:",
+    expect_exc_type(binascii.a2b_hex, b"abc"),
+    expect_exc_type(binascii.a2b_base64, b"Y", strict_mode=True),
+    expect_exc_type(binascii.b2a_uu, b"a" * 46),
+)

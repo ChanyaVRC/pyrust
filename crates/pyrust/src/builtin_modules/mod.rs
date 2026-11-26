@@ -629,10 +629,10 @@ pyrust_builtin_modules! {
     // `datetime` (issue #2805): date/time/datetime/timedelta/tzinfo/timezone
     // types injected from `datetime_py.py` by the `@inject` post-load hook.
     datetime @inject,
-    // `binascii` (issue #3145): native hex, Base64, CRC-32, CRC-HQX, uu, and
-    // quoted-printable codecs in `binascii.rs` plus `Error`, `Incomplete`, and
-    // exact CPython 3.12 wrapper signatures injected from `binascii_py.py`.
-    binascii @inject,
+    // `binascii` (issues #3145, #3308): 100% native hex, Base64, CRC-32,
+    // CRC-HQX, uu, and quoted-printable codecs plus `Error` / `Incomplete`
+    // in `binascii.rs`; no Python-source injection.
+    binascii,
     // `base64` (issue #3145): pure-Python Base16, Base32, Base32hex, Base64,
     // Base85, Ascii85, and RFC 2045 encoders/decoders injected from
     // `base64_py.py` by the `@inject` post-load hook.
