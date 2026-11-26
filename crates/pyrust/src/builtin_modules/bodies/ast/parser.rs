@@ -474,6 +474,16 @@ impl<'a> AstParser<'a> {
         }
     }
 
+    /// Like `expect_exact`, but a stray token inside a pattern is CPython's
+    /// plain `invalid syntax` rather than `expected <what>`.
+    fn expect_pattern_exact(&mut self, exact: i64, what: &str) -> Result<LexToken, AstSyntaxError> {
+        if self.is_exact(exact) || self.at_eof() {
+            self.expect_exact(exact, what)
+        } else {
+            Err(self.err_here("invalid syntax"))
+        }
+    }
+
     fn expect_kw(&mut self, kw: &str) -> Result<LexToken, AstSyntaxError> {
         if self.is_kw(kw) {
             Ok(self.bump())
@@ -1921,7 +1931,16 @@ impl<'a> AstParser<'a> {
             } else {
                 Value::none()
             };
-            self.expect_exact(TOK_COLON, "':'")?;
+            if !self.is_exact(TOK_COLON) {
+                // CPython only reports `expected ':'` when the header ends at
+                // the newline; any other stray token is plain `invalid syntax`.
+                return Err(self.err_here(if self.is_exact(TOK_NEWLINE) {
+                    "expected ':'"
+                } else {
+                    "invalid syntax"
+                }));
+            }
+            self.bump();
             let (body_stmts, case_end) = self.parse_suite()?;
             end_sp = case_end;
             let body: Vec<Value> = body_stmts.into_iter().map(|s| s.node).collect();
@@ -2078,8 +2097,9 @@ impl<'a> AstParser<'a> {
             ));
         }
 
-        // String / bytes literal
-        if self.cur().tok_type == TOK_STRING {
+        // String / bytes literal (adjacent literals concatenate; f-strings parse
+        // here and are rejected later at compile time, as in CPython)
+        if matches!(self.cur().tok_type, TOK_STRING | TOK_FSTRING_START) {
             let expr = self.parse_string_or_fstring()?;
             let sp = expr.span;
             return Ok((
@@ -2102,7 +2122,7 @@ impl<'a> AstParser<'a> {
                     break;
                 }
             }
-            let end = Span::from_tok(&self.expect_exact(TOK_RSQB, "']'")?);
+            let end = Span::from_tok(&self.expect_pattern_exact(TOK_RSQB, "']'")?);
             let sp = start.merge(end);
             return Ok((
                 self.classes.make(
@@ -2140,7 +2160,7 @@ impl<'a> AstParser<'a> {
                     let (p, _, _) = self.parse_maybe_star_pattern()?;
                     pats.push(p);
                 }
-                let end = Span::from_tok(&self.expect_exact(TOK_RPAR, "')'")?);
+                let end = Span::from_tok(&self.expect_pattern_exact(TOK_RPAR, "')'")?);
                 let sp = start.merge(end);
                 return Ok((
                     self.classes.make(
@@ -2154,7 +2174,7 @@ impl<'a> AstParser<'a> {
             if first_star {
                 return Err(self.err_here("invalid syntax"));
             }
-            let _end = self.expect_exact(TOK_RPAR, "')'")?;
+            let _end = self.expect_pattern_exact(TOK_RPAR, "')'")?;
             return Ok((first, start.merge(Span::from_tok(self.prev()))));
         }
 
@@ -2178,7 +2198,7 @@ impl<'a> AstParser<'a> {
                     break;
                 }
                 let key_expr = self.parse_mapping_pattern_key()?;
-                self.expect_exact(TOK_COLON, "':'")?;
+                self.expect_pattern_exact(TOK_COLON, "':'")?;
                 let (val_pat, _) = self.parse_pattern()?;
                 keys.push(key_expr.node);
                 pats.push(val_pat);
@@ -2188,7 +2208,7 @@ impl<'a> AstParser<'a> {
                     break;
                 }
             }
-            let end = Span::from_tok(&self.expect_exact(TOK_RBRACE, "'}'")?);
+            let end = Span::from_tok(&self.expect_pattern_exact(TOK_RBRACE, "'}'")?);
             let sp = start.merge(end);
             return Ok((
                 self.classes.make(
@@ -2279,7 +2299,7 @@ impl<'a> AstParser<'a> {
                         break;
                     }
                 }
-                let end = Span::from_tok(&self.expect_exact(TOK_RPAR, "')'")?);
+                let end = Span::from_tok(&self.expect_pattern_exact(TOK_RPAR, "')'")?);
                 let sp = start.merge(end);
                 return Ok((
                     self.classes.make(
@@ -2308,14 +2328,36 @@ impl<'a> AstParser<'a> {
         Err(self.err_here("invalid syntax"))
     }
 
+    /// PEP 634 `signed_number` / `complex_number`:
+    /// `['-'] NUMBER [('+'|'-') imaginary NUMBER]`.  Mirrors CPython's
+    /// `ensure_real` / `ensure_imaginary` actions: the left operand of a complex
+    /// literal must be real and the right operand must be imaginary.
     fn parse_literal_pattern_expr(&mut self) -> Result<ParsedExpr, AstSyntaxError> {
+        if self.is_exact(TOK_MINUS) && self.peek(1).tok_type != TOK_NUMBER {
+            self.bump();
+            return Err(self.err_here("invalid syntax"));
+        }
+        if !self.is_exact(TOK_MINUS) && self.cur().tok_type != TOK_NUMBER {
+            return Err(self.err_here("invalid syntax"));
+        }
         let left = self.parse_signed_number_pattern()?;
+        let left_imaginary = self.prev().string.ends_with(['j', 'J']);
         if self.is_exact(TOK_PLUS) || self.is_exact(TOK_MINUS) {
+            if left_imaginary {
+                return Err(self.err_at_span(left.span, "real number required in complex literal"));
+            }
             let op_cls = if self.bump().exact_type == TOK_PLUS {
                 "Add"
             } else {
                 "Sub"
             };
+            if self.cur().tok_type != TOK_NUMBER {
+                return Err(self.err_here("invalid syntax"));
+            }
+            if !self.cur().string.ends_with(['j', 'J']) {
+                let sp = Span::from_tok(self.cur());
+                return Err(self.err_at_span(sp, "imaginary number required in complex literal"));
+            }
             let right = self.parse_number_constant()?;
             let sp = left.span.merge(right.span);
             return Ok(ParsedExpr {
@@ -2381,7 +2423,7 @@ impl<'a> AstParser<'a> {
         if self.cur().tok_type == TOK_NUMBER || self.is_exact(TOK_MINUS) {
             return self.parse_literal_pattern_expr();
         }
-        if self.cur().tok_type == TOK_STRING {
+        if matches!(self.cur().tok_type, TOK_STRING | TOK_FSTRING_START) {
             return self.parse_string_or_fstring();
         }
         if self.is_name() {
@@ -2397,9 +2439,7 @@ impl<'a> AstParser<'a> {
             );
             let mut sp = start;
             if !self.is_exact(TOK_DOT) {
-                return Err(self.err_here(
-                    "mapping pattern keys may only match literals and attribute lookups",
-                ));
+                return Err(self.err_here("invalid syntax"));
             }
             while self.is_exact(TOK_DOT) {
                 self.bump();

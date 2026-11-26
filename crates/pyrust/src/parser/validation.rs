@@ -183,9 +183,12 @@ fn check_duplicate_mapping_keys(pairs: &[(Expr, Pattern)]) -> Result<()> {
 /// A literal mapping-pattern key, normalised for Python value-equality
 /// comparison while retaining its source form for the error repr.
 enum MapKey {
-    /// Numeric keys compared by `f64` value (`1`, `1.0`, `True` all equal `1.0`).
+    /// Numeric keys compared by value (`1`, `1.0`, `True` and `1+0j` all equal).
+    /// Real keys have `im == 0.0`; `complex` selects the complex repr.
     Num {
-        value: f64,
+        re: f64,
+        im: f64,
+        complex: bool,
         repr: String,
     },
     Str(String),
@@ -194,32 +197,78 @@ enum MapKey {
 }
 
 impl MapKey {
+    fn real(value: f64, repr: String) -> MapKey {
+        MapKey::Num {
+            re: value,
+            im: 0.0,
+            complex: false,
+            repr,
+        }
+    }
+
     fn from_expr(e: &Expr) -> Option<MapKey> {
         match e {
-            Expr::Int(n) => Some(MapKey::Num {
-                value: *n as f64,
-                repr: n.to_string(),
-            }),
-            Expr::Float(f) => Some(MapKey::Num {
-                value: *f,
-                repr: pyrust_core::key_repr(&pyrust_core::PyKey::Float(f.to_bits())),
-            }),
-            Expr::Bool(b) => Some(MapKey::Num {
-                value: if *b { 1.0 } else { 0.0 },
-                repr: if *b { "True".into() } else { "False".into() },
-            }),
+            Expr::Int(n) => Some(MapKey::real(*n as f64, n.to_string())),
+            Expr::Float(f) => Some(MapKey::real(
+                *f,
+                pyrust_core::key_repr(&pyrust_core::PyKey::Float(f.to_bits())),
+            )),
+            Expr::Complex(re, im) => Some(MapKey::complex(*re, *im)),
+            Expr::Bool(b) => Some(MapKey::real(
+                if *b { 1.0 } else { 0.0 },
+                if *b { "True".into() } else { "False".into() },
+            )),
             Expr::None => Some(MapKey::None),
             Expr::Str(s) => Some(MapKey::Str(s.clone())),
             Expr::Bytes(b) => Some(MapKey::Bytes(b.clone())),
-            // Negative numeric literal: `-1` parses as Unary(Neg, Int/Float).
+            // Negative numeric literal: `-1` parses as Unary(Neg, Int/Float/Complex).
             Expr::Unary {
                 op: UnaryOp::Neg,
                 expr,
                 ..
             } => match MapKey::from_expr(expr) {
-                Some(MapKey::Num { value, repr }) => Some(MapKey::Num {
-                    value: -value,
+                Some(MapKey::Num {
+                    re,
+                    im,
+                    complex: false,
+                    repr,
+                }) => Some(MapKey::Num {
+                    re: -re,
+                    im,
+                    complex: false,
                     repr: format!("-{repr}"),
+                }),
+                Some(MapKey::Num {
+                    re,
+                    im,
+                    complex: true,
+                    ..
+                }) => Some(MapKey::complex(-re, -im)),
+                _ => None,
+            },
+            // Complex literal `real +/- imag`, folded the way CPython does.
+            Expr::Binary {
+                left,
+                op: op @ (BinaryOp::Add | BinaryOp::Sub),
+                right,
+                ..
+            } => match (MapKey::from_expr(left), MapKey::from_expr(right)) {
+                (
+                    Some(MapKey::Num {
+                        re: l_re,
+                        complex: false,
+                        ..
+                    }),
+                    Some(MapKey::Num {
+                        re: r_re,
+                        im: r_im,
+                        complex: true,
+                        ..
+                    }),
+                ) => Some(if matches!(op, BinaryOp::Add) {
+                    MapKey::complex(l_re + r_re, r_im)
+                } else {
+                    MapKey::complex(l_re - r_re, -r_im)
                 }),
                 _ => None,
             },
@@ -227,9 +276,25 @@ impl MapKey {
         }
     }
 
+    fn complex(re: f64, im: f64) -> MapKey {
+        MapKey::Num {
+            re,
+            im,
+            complex: true,
+            repr: pyrust_core::key_repr(&pyrust_core::PyKey::Complex(re, im)),
+        }
+    }
+
     fn eq_value(&self, other: &MapKey) -> bool {
         match (self, other) {
-            (MapKey::Num { value: a, .. }, MapKey::Num { value: b, .. }) => a == b,
+            (
+                MapKey::Num {
+                    re: a_re, im: a_im, ..
+                },
+                MapKey::Num {
+                    re: b_re, im: b_im, ..
+                },
+            ) => a_re == b_re && a_im == b_im,
             (MapKey::Str(a), MapKey::Str(b)) => a == b,
             (MapKey::Bytes(a), MapKey::Bytes(b)) => a == b,
             (MapKey::None, MapKey::None) => true,
