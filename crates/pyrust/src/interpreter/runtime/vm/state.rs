@@ -409,6 +409,41 @@ pub(crate) struct TrampFrame {
     /// Cache key owned by this callee evaluation. Boxed so plain `Insn::Call`
     /// frames pay 8 B (null niche) instead of a 48 B inline `MemoKey` (#2924).
     memo_key: Option<Box<MemoKey>>,
+    /// Index of the caller's loop-iterator slots on [`PARKED_ITER_SLOTS`] while
+    /// a callee that contains `for` loops runs on fresh slots of its own
+    /// (#3377), or [`NO_PARKED_ITER_SLOTS`] for a loop-free callee.  A
+    /// loop-free callee never touches an iterator slot, so it leaves the
+    /// dispatch loop's slots where they are and pays only this constant store
+    /// and one compare.  Kept to a 4-byte handle (it shares the padding after
+    /// `dst` / `saved_num_locals`) because the slots themselves are ~100 B:
+    /// stored inline they more than doubled the bytes every trampolined call
+    /// pushes and pops, which measurably slowed loop-free calls.
+    parked_iter_slots: u32,
+}
+
+/// [`TrampFrame::parked_iter_slots`] value for a callee without `for` loops.
+const NO_PARKED_ITER_SLOTS: u32 = u32::MAX;
+
+/// The dispatch loop's frame-local `iters` / `iter_next_cache` pair, moved out
+/// wholesale (the buffers are never copied element-wise) while a trampolined
+/// callee owns the live slots (#3377).
+struct ParkedIterSlots {
+    iters: ItersBuf,
+    next_cache: IterCacheBuf,
+}
+
+thread_local! {
+    /// Callers' loop-iterator slots parked by trampolined calls into
+    /// loop-bearing callees (#3377), innermost last.
+    ///
+    /// Thread-local like the call depth behind `CallDepthGuard`, and for the
+    /// same reason: trampolined frames nest strictly on one OS thread — across
+    /// nested VM entries and across interpreters alike — and can never be
+    /// suspended (a generator cannot yield while a call frame sits above it),
+    /// so one LIFO stack serves every dispatch loop on the thread.  Its buffer
+    /// is allocated once and reused, so parking never allocates per call.
+    static PARKED_ITER_SLOTS: std::cell::RefCell<Vec<ParkedIterSlots>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 impl TrampFrame {
