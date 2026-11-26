@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
-use crate::builtin_registry::BuiltinReg;
 use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{
     PyBool, PyBytesLike, PyCallable, PyFloat, PyIndex, PyInt, PyNumber, PyPath, PyStr, PyValue,
@@ -65,8 +64,7 @@ struct CounterState {
 mod fixture {
     use super::*;
 
-    pub(crate) const MODULE_NAME: &str = "_macro_test";
-    pub(crate) const FN_PREFIX: &str = "_macro_test.";
+    pyrust_module_identity!("_macro_test");
 
     pyrust_module! {
         constants {
@@ -379,9 +377,13 @@ mod fixture {
     }
 }
 
-pub(crate) fn fixture_regs() -> &'static [BuiltinReg] {
-    fixture::regs()
-}
+/// Registry row for the fixture module, so its callables resolve lazily
+/// like any other module's.
+pub(crate) static MODULE_REGS: &[crate::builtin_registry::ModuleRegs] =
+    &[crate::builtin_registry::ModuleRegs {
+        name: fixture::MODULE_NAME,
+        regs: fixture::REGS,
+    }];
 
 /// Build an `Interpreter` and globals dict with `_macro_test` installed in
 /// `sys.modules` and bound to `m`, including `DemoMode` (`IntEnum`) and

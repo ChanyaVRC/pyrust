@@ -11,8 +11,9 @@
 //! - sets a sibling `MODULE_NAME: &'static str` constant carrying the
 //!   Python-level name (so the body file never has to repeat it),
 //! - `include!`s the body file under `bodies/<ident>.rs`,
-//! - is wired into the function registry (via `all_regs`) and the
-//!   `import` path (via `load_builtin_module`).
+//! - contributes one row to the registry's module table (`MODULE_REGS`), so
+//!   its callables are registered lazily, the first time one is looked up,
+//! - is wired into the `import` path (via `load_builtin_module`).
 
 #[macro_use]
 pub(crate) mod macros;
@@ -25,7 +26,7 @@ pub(crate) mod encodings_codecs;
 pub(crate) mod internal_shims;
 pub(crate) mod ssl_engine;
 
-use crate::builtin_registry::BuiltinReg;
+use crate::builtin_registry::{BuiltinReg, ModuleRegs};
 use crate::value::Value;
 
 /// Build a fresh exec namespace dict for a built-in module's Python body file,
@@ -83,16 +84,18 @@ fn publish_exec_dunder_all(
 ///   name set to the Rust ident.
 ///
 /// For each entry the macro emits, in this file's scope:
-/// - `pub mod <ident> { … }` with two injected constants — `MODULE_NAME`
-///   (Python-level name for `PyModule.name` + `import`) and `FN_PREFIX`
-///   (prepended to each function's short name to form its registration
-///   name) — followed by `include!("bodies/<ident>.rs")`.
+/// - `pub mod <ident> { … }` with the module's identity injected by
+///   [`pyrust_module_identity!`] — `MODULE_NAME` (Python-level name for
+///   `PyModule.name` + `import`), `FN_PREFIX`, and `__pyrust_qualname!`
+///   (which prepends the prefix to a function's short name at compile time
+///   to form its registration name) — followed by
+///   `include!("bodies/<ident>.rs")`.
 /// - one branch of [`load_builtin_module`] keyed on the Python-level name,
-/// - one slice contribution to [`all_regs`].
+/// - one row of [`MODULE_REGS`] pointing at the module's `REGS` slice.
 ///
 /// Body files therefore never need to know their own module name — the
-/// macro injects `MODULE_NAME` / `FN_PREFIX` and the body's
-/// `pyrust_module!` reads them via the surrounding scope.
+/// macro injects the identity and the body's `pyrust_module!` reads it via
+/// the surrounding scope.
 /// Helper emitting one `pub mod <ident>` item per entry in
 /// [`pyrust_builtin_modules!`]. Expanding each entry independently keeps
 /// macro recursion depth O(1) regardless of how many built-in modules exist.
@@ -100,13 +103,7 @@ macro_rules! pyrust_builtin_mod_def {
     ($(#[cfg($($cfg:tt)*)])* @flat $ident:ident $(@inject)?) => {
         $(#[cfg($($cfg)*)])*
         pub mod $ident {
-            /// Python-level name of this built-in module.  Used for
-            /// `PyModule.name` and as the key for `import`.
-            pub(crate) const MODULE_NAME: &str = stringify!($ident);
-            /// Empty prefix for `@flat` modules whose functions live in the
-            /// global namespace (`abs`, `len`, …).
-            #[allow(dead_code)]
-            pub(crate) const FN_PREFIX: &str = "";
+            pyrust_module_identity!(@flat stringify!($ident));
 
             include!(concat!("bodies/", stringify!($ident), ".rs"));
         }
@@ -114,13 +111,7 @@ macro_rules! pyrust_builtin_mod_def {
     ($(#[cfg($($cfg:tt)*)])* $py_name:literal as $ident:ident $(@inject)?) => {
         $(#[cfg($($cfg)*)])*
         pub mod $ident {
-            /// Python-level name of this built-in module.  Used for
-            /// `PyModule.name` and as the key for `import`.
-            pub(crate) const MODULE_NAME: &str = $py_name;
-            /// Prefix prepended to every function's short name to form its
-            /// Python-level registration name.
-            #[allow(dead_code)]
-            pub(crate) const FN_PREFIX: &str = concat!($py_name, ".");
+            pyrust_module_identity!($py_name);
 
             include!(concat!("bodies/", stringify!($ident), ".rs"));
         }
@@ -128,13 +119,7 @@ macro_rules! pyrust_builtin_mod_def {
     ($(#[cfg($($cfg:tt)*)])* $ident:ident $(@inject)?) => {
         $(#[cfg($($cfg)*)])*
         pub mod $ident {
-            /// Python-level name of this built-in module.  Used for
-            /// `PyModule.name` and as the key for `import`.
-            pub(crate) const MODULE_NAME: &str = stringify!($ident);
-            /// Prefix prepended to every function's short name to form its
-            /// Python-level registration name.
-            #[allow(dead_code)]
-            pub(crate) const FN_PREFIX: &str = concat!(stringify!($ident), ".");
+            pyrust_module_identity!(stringify!($ident));
 
             include!(concat!("bodies/", stringify!($ident), ".rs"));
         }
@@ -148,6 +133,20 @@ macro_rules! pyrust_builtin_mod_name {
     };
     ($ident:ident) => {
         stringify!($ident)
+    };
+}
+
+/// Helper expanding one entry's lazily registered `REGS` slice.
+///
+/// A `@flat` module registers under bare names, which no module prefix can
+/// resolve; its callables belong to the registry's always-available tier
+/// instead (see [`TIER1_REG_FAMILIES`]), so its row here is empty.
+macro_rules! pyrust_builtin_mod_regs {
+    (@flat $ident:ident) => {
+        &[]
+    };
+    ($ident:ident) => {
+        $ident::REGS
     };
 }
 
@@ -176,24 +175,20 @@ macro_rules! pyrust_builtin_modules {
             pyrust_builtin_mod_def!($(#[cfg($($cfg)*)])* $(@$flat)? $($py_name as)? $ident $(@$inj)?);
         )*
 
-        /// Concatenate every per-module `regs()` slice — consumed by
-        /// `crate::builtin_registry::REGISTRY` on first use.
-        pub(crate) fn all_regs() -> Vec<BuiltinReg> {
-            let mut all: Vec<BuiltinReg> = Vec::new();
-            all.extend_from_slice(macros::structseq_regs());
-            #[cfg(test)]
-            all.extend_from_slice(macro_tests::fixture_regs());
+        /// One row per module declared here: its Python-level name and its
+        /// `REGS` slice.  The registry sorts these rows by name at compile
+        /// time and reads a module's slice only once one of its callables
+        /// is looked up, so a new entry in this macro is lazily registered
+        /// with no further wiring.
+        pub(crate) static MODULE_REGS: &[ModuleRegs] = &[
             $(
                 $(#[cfg($($cfg)*)])*
-                {
-                    all.extend_from_slice($ident::regs());
-                }
+                ModuleRegs {
+                    name: pyrust_builtin_mod_name!($($py_name as)? $ident),
+                    regs: pyrust_builtin_mod_regs!($(@$flat)? $ident),
+                },
             )*
-            all.extend(asyncio_submodules::all_regs());
-            all.extend(encodings_codecs::all_regs());
-            all.extend(internal_shims::all_regs());
-            all
-        }
+        ];
 
         /// Resolve `import name` to its built-in module value, if any.
         /// Replaces the hand-maintained `match name { "math" => …, … }`
@@ -1089,6 +1084,48 @@ pyrust_builtin_modules! {
 }
 
 pub(crate) use concurrent_futures_base as bodies_helpers_cf_base;
+
+/// Registrations available before any import: the `builtins` families.
+///
+/// This is the registry's first tier.  It is merged into one sorted table at
+/// compile time, so resolving `len` or `list.__getitem__` never reads another
+/// module's registrations.
+pub(crate) const TIER1_REG_FAMILIES: &[&[BuiltinReg]] = builtins::REG_FAMILIES;
+
+/// First-tier registrations that belong to no module: the shared
+/// `_structseq` hooks, reachable as soon as `sys` builds a struct sequence.
+pub(crate) const TIER1_EXTRA_REGS: &[BuiltinReg] = macros::STRUCTSEQ_REGS;
+
+/// Every module table that feeds the registry's lazy tier.  Each row names a
+/// module and points at its `REGS` slice; nothing here reads a slice.
+pub(crate) const MODULE_REG_TABLES: &[&[ModuleRegs]] = &[
+    MODULE_REGS,
+    asyncio_submodules::MODULE_REGS,
+    encodings_codecs::MODULE_REGS,
+    internal_shims::MODULE_REGS,
+    #[cfg(test)]
+    macro_tests::MODULE_REGS,
+];
+
+/// Every registration of every module, in declaration order.
+///
+/// Test-only: production code never materialises this list.  The registry's
+/// tests use it to check that names are globally unique and that each one
+/// resolves through the lazy lookup.
+#[cfg(test)]
+pub(crate) fn all_regs() -> Vec<BuiltinReg> {
+    let mut all: Vec<BuiltinReg> = Vec::new();
+    for family in TIER1_REG_FAMILIES {
+        all.extend_from_slice(family);
+    }
+    all.extend_from_slice(TIER1_EXTRA_REGS);
+    for table in MODULE_REG_TABLES {
+        for module in *table {
+            all.extend_from_slice(module.regs);
+        }
+    }
+    all
+}
 
 include!("finalization.rs");
 

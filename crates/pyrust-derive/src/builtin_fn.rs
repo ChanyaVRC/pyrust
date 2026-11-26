@@ -101,22 +101,34 @@ pub(crate) fn emit_native_state_helpers(ctx: Option<NativeStateCtx<'_>>) -> Toke
     }
 }
 
-/// Emit the module-scope `LazyLock<&'static str>` holding the leaked
-/// `FN_PREFIX + suffix` callable name.
+/// Emit the callable's qualified name as a compile-time constant.
+///
+/// The enclosing module supplies `__pyrust_qualname!`, which `concat!`s the
+/// module prefix onto the suffix, so the name is known while compiling: no
+/// heap allocation and no lazy initialisation.
+///
+/// The bytes live in their own `static` and the name is a `const` view of
+/// it.  A `static` has exactly one address, so the registry entry, the
+/// dispatch function's `FN_NAME`, and every `Value::builtin_function(..)`
+/// built from the name share one pointer.  A bare string literal would not
+/// guarantee that: the compiler may emit a separate copy of it for each
+/// codegen unit that mentions it.
 pub(crate) fn emit_name_static(
     name_static_ident: &Ident,
     suffix_lit: &LitStr,
     cfg_attrs: &[Attribute],
 ) -> TokenStream2 {
+    let bytes_ident = format_ident!("{}_BYTES", name_static_ident);
     quote! {
         #(#cfg_attrs)*
         #[allow(non_upper_case_globals)]
-        static #name_static_ident: std::sync::LazyLock<&'static str> =
-            std::sync::LazyLock::new(|| {
-                ::std::boxed::Box::leak(
-                    format!("{}{}", FN_PREFIX, #suffix_lit).into_boxed_str(),
-                )
-            });
+        static #bytes_ident: [u8; __pyrust_qualname!(#suffix_lit).len()] =
+            crate::builtin_registry::name_bytes(__pyrust_qualname!(#suffix_lit));
+
+        #(#cfg_attrs)*
+        #[allow(non_upper_case_globals)]
+        const #name_static_ident: &'static str =
+            crate::builtin_registry::name_str(&#bytes_ident);
     }
 }
 
@@ -153,7 +165,27 @@ pub(crate) fn emit_callable_metadata(
     }
 }
 
-/// Emit a `regs.push(BuiltinReg { … });` statement guarded by `cfg_attrs`.
+/// One element of a module's `REGS` slice, plus the key it sorts by.
+///
+/// Every name in a module shares the module prefix, so ordering the elements
+/// by `suffix` at expansion time yields a slice sorted by full registry name.
+/// The registry binary-searches that slice in place, which is what lets a
+/// module's registrations live in read-only data without a runtime index.
+pub(crate) struct RegEntry {
+    pub(crate) suffix: String,
+    pub(crate) tokens: TokenStream2,
+}
+
+/// Emit the `REGS` slice literal for a set of registry entries.
+pub(crate) fn emit_regs_slice(mut entries: Vec<RegEntry>) -> TokenStream2 {
+    // Stable, so `#[cfg]`-exclusive entries that share a name keep their
+    // declaration order.
+    entries.sort_by(|a, b| a.suffix.cmp(&b.suffix));
+    let elements = entries.iter().map(|entry| &entry.tokens);
+    quote! { &[ #(#elements,)* ] }
+}
+
+/// Emit a `BuiltinReg { … }` slice element guarded by `cfg_attrs`.
 pub(crate) fn emit_builtin_reg(
     name_static_ident: &Ident,
     dispatch_ident: &Ident,
@@ -162,20 +194,23 @@ pub(crate) fn emit_builtin_reg(
     is_method_descriptor: bool,
     fast_reg_fields: TokenStream2,
     cfg_attrs: &[Attribute],
-) -> TokenStream2 {
+) -> RegEntry {
     let metadata = emit_callable_metadata(name_suffix, suffix_lit, is_method_descriptor);
-    quote! {
-        #(#cfg_attrs)*
-        regs.push(crate::builtin_registry::BuiltinReg {
-            name: *#name_static_ident,
-            dispatch: #dispatch_ident,
-            metadata: #metadata,
-            #fast_reg_fields
-        });
+    RegEntry {
+        suffix: name_suffix.to_string(),
+        tokens: quote! {
+            #(#cfg_attrs)*
+            crate::builtin_registry::BuiltinReg {
+                name: #name_static_ident,
+                dispatch: #dispatch_ident,
+                metadata: #metadata,
+                #fast_reg_fields
+            }
+        },
     }
 }
 
-/// Emit `<map>.insert(<short>, Value::[fresh_]builtin_function(*<name_static>))`,
+/// Emit `<map>.insert(<short>, Value::[fresh_]builtin_function(<name_static>))`,
 /// guarded by `cfg_attrs`.
 pub(crate) fn emit_attr_insert_into(
     map_ident: &Ident,
@@ -188,9 +223,9 @@ pub(crate) fn emit_attr_insert_into(
         #map_ident.insert(
             #short_lit.to_string(),
             if FN_PREFIX.is_empty() {
-                crate::value::Value::builtin_function(*#name_static_ident)
+                crate::value::Value::builtin_function(#name_static_ident)
             } else {
-                crate::value::Value::fresh_builtin_function(*#name_static_ident)
+                crate::value::Value::fresh_builtin_function(#name_static_ident)
             },
         );
     }
@@ -257,12 +292,12 @@ pub(crate) fn expand_pyfunction(attr: TokenStream, item: TokenStream) -> TokenSt
 }
 
 /// Emit the per-fn artefacts for one single-body function or class method:
-/// - a module-scope `LazyLock<&'static str>` holding the leaked Python name
+/// - a module-scope `const` holding the qualified Python name
 /// - a dispatch `fn` named `__pyfn_<rust_ident_suffix>`
 /// - an optional vectorcall fast entry `__pyfn_<rust_ident_suffix>_fast`
-/// - a `regs.push(BuiltinReg { … });` statement for the registry
+/// - a `BuiltinReg { … }` element for the module's `REGS` slice
 ///
-/// Returns `(fn_item, reg_push, name_static_ident)`.
+/// Returns `(fn_item, reg_entry, name_static_ident)`.
 pub(crate) fn emit_fn_artefacts(
     f: &ModuleFn,
     name_suffix: &str,
@@ -270,7 +305,7 @@ pub(crate) fn emit_fn_artefacts(
     is_class_method: bool,
     extra_cfg_attrs: &[Attribute],
     native_state_ctx: Option<NativeStateCtx<'_>>,
-) -> (TokenStream2, TokenStream2, Ident) {
+) -> (TokenStream2, RegEntry, Ident) {
     let short = &f.short_name;
     let rust_fn_ident = format_ident!("__pyfn_{}", rust_ident_suffix, span = short.span());
     let name_static_ident = format_ident!("__pyfn_{}_NAME", rust_ident_suffix, span = short.span());
@@ -357,7 +392,7 @@ pub(crate) fn emit_fn_artefacts(
                     __pyrust_fast_args: &[Value],
                 ) -> Result<Value> {
                     #[allow(non_snake_case)]
-                    let FN_NAME: &'static str = *#name_static_ident;
+                    let FN_NAME: &'static str = #name_static_ident;
                     let _ = FN_NAME;
                     #state_helpers
                     #fast_prelude
@@ -388,7 +423,7 @@ pub(crate) fn emit_fn_artefacts(
             #args_binding: &[ExpandedCallArg],
         ) -> Result<Value> {
             #[allow(non_snake_case)]
-            let FN_NAME: &'static str = *#name_static_ident;
+            let FN_NAME: &'static str = #name_static_ident;
             let _ = FN_NAME; // suppress unused warning if body ignores it
             #state_helpers
             #typed_prelude

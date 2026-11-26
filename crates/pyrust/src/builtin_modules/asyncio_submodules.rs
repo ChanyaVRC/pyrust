@@ -15,7 +15,7 @@ use std::rc::Rc;
 use pyrust_derive::pyrust_module;
 
 use crate::builtin_modules::asyncio_rt;
-use crate::builtin_registry::BuiltinReg;
+use crate::builtin_registry::ModuleRegs;
 use crate::error::Result;
 use crate::interpreter::builtin_args::{OptValueRef, OptionalArg, PyValue};
 use crate::interpreter::{ExpandedCallArg, Interpreter, render_value_repr};
@@ -119,9 +119,7 @@ macro_rules! define_asyncio_reexport_submodules {
             pub mod $mod_ident {
                 use super::*;
 
-                pub(crate) const MODULE_NAME: &str = $py_name;
-                #[allow(dead_code)]
-                pub(crate) const FN_PREFIX: &str = concat!($py_name, ".");
+                pyrust_module_identity!($py_name);
 
                 pyrust_module! {
                     constants {
@@ -145,17 +143,31 @@ macro_rules! define_asyncio_reexport_submodules {
             }
         )*
 
-        pub(crate) fn all_regs() -> Vec<BuiltinReg> {
-            let mut all = Vec::new();
+        /// Registry rows for every `asyncio.*` submodule.
+        pub(crate) static MODULE_REGS: &[ModuleRegs] = &[
             $(
-                all.extend_from_slice($mod_ident::regs());
+                ModuleRegs {
+                    name: $mod_ident::MODULE_NAME,
+                    regs: $mod_ident::REGS,
+                },
             )*
-            all.extend_from_slice(asyncio_format_helpers::regs());
-            all.extend_from_slice(asyncio_base_futures::regs());
-            all.extend_from_slice(asyncio_base_tasks::regs());
-            all.extend_from_slice(asyncio_staggered::regs());
-            all
-        }
+            ModuleRegs {
+                name: asyncio_format_helpers::MODULE_NAME,
+                regs: asyncio_format_helpers::REGS,
+            },
+            ModuleRegs {
+                name: asyncio_base_futures::MODULE_NAME,
+                regs: asyncio_base_futures::REGS,
+            },
+            ModuleRegs {
+                name: asyncio_base_tasks::MODULE_NAME,
+                regs: asyncio_base_tasks::REGS,
+            },
+            ModuleRegs {
+                name: asyncio_staggered::MODULE_NAME,
+                regs: asyncio_staggered::REGS,
+            },
+        ];
 
         pub(crate) fn load_builtin_module(name: &str) -> Option<Value> {
             match name {
@@ -220,9 +232,7 @@ macro_rules! define_asyncio_reexport_submodules {
 pub mod asyncio_format_helpers {
     use super::*;
 
-    pub(crate) const MODULE_NAME: &str = "asyncio.format_helpers";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "asyncio.format_helpers.";
+    pyrust_module_identity!("asyncio.format_helpers");
 
     pyrust_module! {
         constants {
@@ -279,9 +289,7 @@ pub mod asyncio_format_helpers {
 pub mod asyncio_base_futures {
     use super::*;
 
-    pub(crate) const MODULE_NAME: &str = "asyncio.base_futures";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "asyncio.base_futures.";
+    pyrust_module_identity!("asyncio.base_futures");
 
     pyrust_module! {
         constants {
@@ -322,9 +330,7 @@ pub mod asyncio_base_futures {
 pub mod asyncio_base_tasks {
     use super::*;
 
-    pub(crate) const MODULE_NAME: &str = "asyncio.base_tasks";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "asyncio.base_tasks.";
+    pyrust_module_identity!("asyncio.base_tasks");
 
     pyrust_module! {
         constants {
@@ -377,9 +383,7 @@ pub mod asyncio_base_tasks {
 pub mod asyncio_staggered {
     use super::*;
 
-    pub(crate) const MODULE_NAME: &str = "asyncio.staggered";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "asyncio.staggered.";
+    pyrust_module_identity!("asyncio.staggered");
 
     pyrust_module! {
         constants {

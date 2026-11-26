@@ -1073,6 +1073,7 @@ fn main() {
         }
         std::process::exit(1);
     }
+    builtin_registry::report_stats_if_requested();
 }
 
 #[cfg(test)]

@@ -103,8 +103,9 @@ reference a single source of truth.
 The macro expands each `fn sqrt(args) -> Result<Value> { … }` to a
 real Rust fn with the canonical signature
 `fn __pyfn_sqrt(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value>`,
-adds it to a per-module `regs() -> &'static [BuiltinReg]` (whose
-names are leaked at first use from `MODULE_NAME + ".sqrt"`), and
+adds it to a per-module `static REGS: &[BuiltinReg]` (a constant
+sorted by name, whose names are built at compile time as
+`"<MODULE_NAME>.sqrt"`), and
 generates a `module() -> Value` returning a `PyModule` whose `attrs`
 are the declared constants plus each function bound to
 `Value::builtin_function("math.sqrt")`.
@@ -132,11 +133,17 @@ are the declared constants plus each function bound to
 That's it.  **The module name appears only on this one line.**  The
 `pyrust_builtin_modules!` macro:
 
-- creates `pub mod <ident> { … }` with an injected
-  `MODULE_NAME: &str = "<py.name>"` constant,
+- creates `pub mod <ident> { … }` with the module's identity injected
+  by `pyrust_module_identity!`: a `MODULE_NAME: &str = "<py.name>"`
+  constant plus the `__pyrust_qualname!` macro `pyrust_module!` uses to
+  build each registry name at compile time.  (A module defined by hand
+  outside this list calls `pyrust_module_identity!("<py.name>")` itself.)
 - `include!`s `bodies/<ident>.rs` into that module,
-- contributes the module's `regs()` to `all_regs()` (consumed by
-  `builtin_registry::REGISTRY`),
+- adds a row pointing at the module's `REGS` to `MODULE_REGS`, the
+  table `builtin_registry` resolves dotted names through.  The
+  module's registrations are not read until one of its callables is
+  first looked up, so a module that is never used costs nothing at
+  start-up,
 - adds a branch to `load_builtin_module` keyed on the Python-level
   name (consumed by `env.rs::load_module`).
 
@@ -144,6 +151,21 @@ After this single edit, `import <name>; <name>.foo()` resolves on
 both the import path and the call dispatch.  The body file never
 mentions its own module name — `FN_NAME` (per fn) and `MODULE_NAME`
 (once per module, in `mod.rs`) are the only source-of-truth.
+
+### Checking what a run registered
+
+Set `PYRUST_REGISTRY_STATS=1` and the CLI prints, on exit, how many
+callables are in the always-available tier (`builtins`) and which
+modules had their callables registered during the run:
+
+```console
+$ PYRUST_REGISTRY_STATS=1 pyrust -S -c "import math; math.sqrt(4.0)"
+pyrust-registry: tier1_callables=210 lazy_modules=1 lazy_callables=56 known_modules=213 known_callables=4522 modules=[math]
+```
+
+A module appears there once one of its callables has been looked up;
+importing it is not enough.  `pyrust -S -c "pass"` should report
+`lazy_modules=0`.
 
 ## When `pyrust_module!` doesn't fit
 
