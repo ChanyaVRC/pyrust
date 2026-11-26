@@ -34,8 +34,8 @@ const TRAMP_ARENA_CAPACITY: usize = 16 * 1024;
 ///
 /// Uses the precomputed `UserFunction::trampoline_arity` sentinel so callee
 /// eligibility (`Regular`, no `global` declarations, no variadic/keyword-only
-/// parameters, exact arity, and plain loop-free/handler-free/own-cell-free
-/// bytecode) reduces to a single integer comparison, then verifies the caller
+/// parameters, exact arity, and plain handler-free/own-cell-free bytecode)
+/// reduces to a single integer comparison, then verifies the caller
 /// is outside any `try` and that the fixed-capacity `tramp_arena` has room
 /// without reallocating (which would dangle live `RegSlice`s).
 #[inline(always)]
@@ -78,7 +78,6 @@ fn vm_tramp_check_gate<'a>(
     );
     debug_assert!(!callee_code.is_generator);
     debug_assert!(!callee_code.is_coroutine);
-    debug_assert_eq!(callee_code.num_iters, 0);
     debug_assert!(!callee_code.has_exc_handlers);
     debug_assert!(!callee_code.has_own_cells());
     let num_regs = callee_code.num_regs as usize;
@@ -111,6 +110,7 @@ impl Interpreter {
         num_regs: usize,
         callee_code_ptr: *const crate::bytecode::FnCode,
         callee_num_locals: u32,
+        callee_num_iters: u8,
         callee_is_class_method: bool,
         view_fn: Rc<pyrust_core::UserFunction>,
         depth_guard: CallDepthGuard,
@@ -147,6 +147,7 @@ impl Interpreter {
             saved_num_locals: *st.num_locals,
             saved_env,
             memo_key,
+            parked_iter_slots: NO_PARKED_ITER_SLOTS,
         });
         // Publish a frame view so `locals()` / `sys._getframe()` / tracebacks
         // observe this trampolined frame like a natively-called one.
@@ -162,6 +163,71 @@ impl Interpreter {
         *st.num_locals = callee_num_locals;
         *st.cells = callee_cells;
         *st.pc = 0;
+        // Last, so no frame state is live across the out-of-line call and the
+        // loop-free path keeps just this test.
+        if callee_num_iters != 0 {
+            self.vm_tramp_park_iter_slots(callee_num_iters as usize, st.iters, st.iter_next_cache);
+        }
+    }
+
+    /// Give the callee just entered, which contains `for` loops, its own
+    /// iterator slots, parking the caller's on [`PARKED_ITER_SLOTS`] and
+    /// recording their handle in the `TrampFrame` pushed for this call (#3377).
+    ///
+    /// Out of line so the inlined trampoline entries keep only a
+    /// `num_iters == 0` test on the loop-free path, and handed the two buffers
+    /// rather than the whole `UnwindState` so that struct of references is
+    /// never materialized in memory for the call. The fresh slot buffers stay
+    /// inline for shallow loop nesting, exactly as on a native frame entry.
+    #[inline(never)]
+    fn vm_tramp_park_iter_slots(
+        &mut self,
+        num_iters: usize,
+        iters: &mut ItersBuf,
+        iter_next_cache: &mut IterCacheBuf,
+    ) {
+        let parked = ParkedIterSlots {
+            iters: std::mem::replace(iters, smallvec::smallvec![None; num_iters]),
+            next_cache: std::mem::replace(iter_next_cache, smallvec::smallvec![None; num_iters]),
+        };
+        let handle = PARKED_ITER_SLOTS.with_borrow_mut(|stack| {
+            let handle = stack.len();
+            debug_assert!(handle < NO_PARKED_ITER_SLOTS as usize);
+            stack.push(parked);
+            handle as u32
+        });
+        if let Some(frame) = self.tramp_stack.last_mut() {
+            frame.parked_iter_slots = handle;
+        }
+    }
+
+    /// Hand the live iterator slots back to the caller of a returning or
+    /// unwinding trampolined callee that parked them under `handle` (#3377).
+    ///
+    /// Assigning over the live buffers drops whatever the callee still had in
+    /// flight (a `return` or an error from inside a `for` loop), so its
+    /// iterators and the source values they retain are released
+    /// deterministically. Callers do this before truncating the callee's
+    /// registers, matching the order in which a native frame is torn down.
+    #[inline(never)]
+    fn vm_tramp_unpark_iter_slots(
+        handle: u32,
+        iters: &mut ItersBuf,
+        iter_next_cache: &mut IterCacheBuf,
+    ) {
+        let parked = PARKED_ITER_SLOTS.with_borrow_mut(|stack| {
+            // Frames nest strictly, so this call's entry is the top one.
+            // Anything above it was abandoned by a Rust panic that tore down
+            // live frames without unwinding them; discard it rather than hand
+            // a caller someone else's slots.
+            stack.truncate(handle as usize + 1);
+            debug_assert_eq!(stack.len(), handle as usize + 1);
+            stack.pop()
+        });
+        if let Some(parked) = parked {
+            *iters = parked.iters;
+            *iter_next_cache = parked.next_cache;
+        }
     }
 
     /// Direct owned-`Rc<UserFunction>` trampoline entry used by `Insn::Call`
@@ -191,6 +257,7 @@ impl Interpreter {
         };
         let num_regs = callee_code.num_regs as usize;
         let callee_num_locals = callee_code.num_locals;
+        let callee_num_iters = callee_code.num_iters;
         let callee_is_class_method = callee_code.is_class_method;
         let callee_code_ptr: *const crate::bytecode::FnCode = callee_code;
         let Some(depth_guard) = CallDepthGuard::try_enter(max_call_depth(self)) else {
@@ -219,6 +286,7 @@ impl Interpreter {
             num_regs,
             callee_code_ptr,
             callee_num_locals,
+            callee_num_iters,
             callee_is_class_method,
             func,
             depth_guard,
@@ -257,6 +325,7 @@ impl Interpreter {
         };
         let num_regs = callee_code.num_regs as usize;
         let callee_num_locals = callee_code.num_locals;
+        let callee_num_iters = callee_code.num_iters;
         let callee_is_class_method = callee_code.is_class_method;
         let callee_code_ptr: *const crate::bytecode::FnCode = callee_code;
         let Some(depth_guard) = CallDepthGuard::try_enter(max_call_depth(self)) else {
@@ -285,6 +354,7 @@ impl Interpreter {
             num_regs,
             callee_code_ptr,
             callee_num_locals,
+            callee_num_iters,
             callee_is_class_method,
             Rc::clone(f),
             depth_guard,
@@ -323,6 +393,7 @@ impl Interpreter {
         };
         let num_regs = callee_code.num_regs as usize;
         let callee_num_locals = callee_code.num_locals;
+        let callee_num_iters = callee_code.num_iters;
         let callee_is_class_method = callee_code.is_class_method;
         let callee_code_ptr: *const crate::bytecode::FnCode = callee_code;
         let Some(depth_guard) = CallDepthGuard::try_enter(max_call_depth(self)) else {
@@ -350,6 +421,7 @@ impl Interpreter {
             num_regs,
             callee_code_ptr,
             callee_num_locals,
+            callee_num_iters,
             callee_is_class_method,
             Rc::clone(f),
             depth_guard,
@@ -446,6 +518,17 @@ impl Interpreter {
             return None;
         }
         if self.tramp_stack.len() > st.tramp_base {
+            // First, while nothing of the frame is live across the out-of-line
+            // call: the loop-free path keeps just this test.
+            if let Some(top) = self.tramp_stack.last()
+                && top.parked_iter_slots != NO_PARKED_ITER_SLOTS
+            {
+                Self::vm_tramp_unpark_iter_slots(
+                    top.parked_iter_slots,
+                    st.iters,
+                    st.iter_next_cache,
+                );
+            }
             let saved = self.tramp_stack.pop().unwrap();
             let detached_view = self.detach_vm_frame_view();
             let memo_key = saved.memo_key;

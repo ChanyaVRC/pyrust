@@ -82,7 +82,6 @@ impl Interpreter {
             && proto_global_names.is_empty()
             && !proto_code.is_generator
             && !proto_code.is_coroutine
-            && proto_code.num_iters == 0
             && !proto_code.has_exc_handlers
             && !proto_code.has_own_cells()
         {

@@ -1053,7 +1053,8 @@ assert out > 0
         }
         assert!(
             size_of::<TrampFrame>() <= 88,
-            "TrampFrame grew to {} B (guard <= 88 B)",
+            "TrampFrame grew to {} B (guard <= 88 B; park loop-iterator slots \
+             out of line, #3377)",
             size_of::<TrampFrame>()
         );
         assert_eq!(TRAMP_ARENA_CAPACITY, 16 * 1024);
@@ -1093,6 +1094,19 @@ def has_loop(xs):
     for x in xs:
         s += x
     return s
+def has_nested_loops(xs, ys):
+    out = []
+    for x in xs:
+        for y in ys:
+            out.append((x, y))
+    return out
+def has_loop_in_try(xs):
+    try:
+        for x in xs:
+            pass
+    finally:
+        pass
+    return xs
 def has_try(x):
     try:
         return 1 // x
@@ -1139,7 +1153,14 @@ cm_fn = C.__dict__['cm']
         assert_eq!(arity_of("uses_global"), UserFunction::TRAMPOLINE_INELIGIBLE);
         assert_eq!(arity_of("is_gen"), UserFunction::TRAMPOLINE_INELIGIBLE);
         assert_eq!(arity_of("is_coro"), UserFunction::TRAMPOLINE_INELIGIBLE);
-        assert_eq!(arity_of("has_loop"), UserFunction::TRAMPOLINE_INELIGIBLE);
+        // `for` loops no longer disqualify a callee (#3377); a loop wrapped in
+        // exception handling still does.
+        assert_eq!(arity_of("has_loop"), 1);
+        assert_eq!(arity_of("has_nested_loops"), 2);
+        assert_eq!(
+            arity_of("has_loop_in_try"),
+            UserFunction::TRAMPOLINE_INELIGIBLE
+        );
         assert_eq!(arity_of("has_try"), UserFunction::TRAMPOLINE_INELIGIBLE);
         assert_eq!(
             arity_of("has_own_cell"),
@@ -1416,6 +1437,246 @@ finally:
         assert!(interp.tramp_arena.is_empty());
         assert!(interp.tramp_stack.is_empty());
         assert!(interp.gen_drive_stack.is_empty());
+    }
+
+    /// #3377: a callee containing `for` loops runs on the trampoline with its
+    /// own iterator slots, and every exit (return, early return out of a live
+    /// loop, error unwind, generator-drive unwind) hands the caller's slots
+    /// back and leaves the shared stacks balanced.
+    #[test]
+    fn trampolined_for_loop_callees_swap_iterator_slots() {
+        use super::{PARKED_ITER_SLOTS, TRAMP_ARENA_CAPACITY};
+
+        // Every parked caller slot set must have been handed back by the time
+        // the outermost call has returned or unwound.
+        let parked_iter_slots = || PARKED_ITER_SLOTS.with_borrow(|stack| stack.len());
+
+        let mut interp = Interpreter::default();
+        assert_eq!(interp.tramp_arena.capacity(), 0);
+
+        // 1. The arena is reserved only once a call passes the trampoline
+        //    gate. The sole call here targets a loop-bearing callee, so a
+        //    reserved arena proves that callee was trampolined, not run on the
+        //    native fallback.
+        interp
+            .exec_source(
+                r#"
+def total(xs):
+    s = 0
+    for x in xs:
+        s += x
+    return s
+
+first = total([1, 2, 3])
+"#,
+                None,
+                None,
+            )
+            .expect("a loop-bearing callee must run on the trampoline");
+        assert_eq!(
+            interp.tramp_arena.capacity(),
+            TRAMP_ARENA_CAPACITY,
+            "a callee containing a for-loop must enter the call trampoline"
+        );
+        let first = interp
+            .lookup_name("first")
+            .expect("lookup succeeds")
+            .expect("first defined");
+        assert_eq!(first.as_int(), Some(6));
+        assert!(interp.tramp_stack.is_empty());
+        assert!(interp.tramp_arena.is_empty());
+        assert_eq!(parked_iter_slots(), 0);
+
+        // 2. Caller and callee both sit in iterator slot 0 (and the callee
+        //    spills to a second slot), so a missing hand-off would resume the
+        //    caller's loop on the callee's iterator or on an emptied slot.
+        interp
+            .exec_source(
+                r#"
+def pairs(xs, ys):
+    out = []
+    for x in xs:
+        for y in ys:
+            out.append((x, y))
+    return out
+
+def caller(rows):
+    out = []
+    for row in rows:
+        out.append(total(row))
+        for v in row:
+            out.append(len(pairs(row, range(v))))
+    return out
+
+assert caller([[1, 2], [], [3]]) == [3, 2, 4, 0, 3, 3], caller([[1, 2], [], [3]])
+
+def flatten(tree):
+    out = []
+    for node in tree:
+        if isinstance(node, list):
+            for leaf in flatten(node):
+                out.append(leaf)
+        else:
+            out.append(node)
+    return out
+
+assert flatten([1, [2, [3, [4]], 5], [[6]]]) == [1, 2, 3, 4, 5, 6]
+
+# Early return out of a live loop drops the callee's iterator and must not
+# disturb the caller's.
+def first_match(xs, want):
+    for x in xs:
+        for y in xs:
+            if x + y == want:
+                return (x, y)
+    return None
+
+def scan(targets):
+    out = []
+    for t in targets:
+        out.append(first_match([1, 2, 3], t))
+    return out
+
+assert scan([4, 9, 6]) == [(1, 3), None, (3, 3)], scan([4, 9, 6])
+
+# User-defined iterators exercise the per-slot `__next__` cache: caller and
+# callee iterate different classes through the same slot index.
+class Up:
+    def __init__(self, n):
+        self.i = 0
+        self.n = n
+    def __iter__(self):
+        return self
+    def __next__(self):
+        if self.i >= self.n:
+            raise StopIteration
+        self.i += 1
+        return self.i
+
+class Down:
+    def __init__(self, n):
+        self.n = n
+    def __iter__(self):
+        return self
+    def __next__(self):
+        if self.n <= 0:
+            raise StopIteration
+        self.n -= 1
+        return -self.n
+
+def drain_down(n):
+    out = []
+    for v in Down(n):
+        out.append(v)
+    return out
+
+def up_calling_down(n):
+    out = []
+    for v in Up(n):
+        out.append((v, drain_down(v)))
+    return out
+
+assert up_calling_down(3) == [(1, [0]), (2, [-1, 0]), (3, [-2, -1, 0])]
+"#,
+                None,
+                None,
+            )
+            .expect("caller loops must resume on their own iterator slots");
+        assert!(interp.tramp_stack.is_empty());
+        assert!(interp.tramp_arena.is_empty());
+        assert_eq!(parked_iter_slots(), 0);
+        assert!(interp.gen_drive_stack.is_empty());
+
+        // 3. Generators driven from inside a trampolined loop, and an error
+        //    that unwinds trampolined loop frames up to a generator consumer
+        //    which catches it and keeps iterating on its own slots.
+        interp
+            .exec_source(
+                r#"
+def countdown(n):
+    for i in range(n, 0, -1):
+        yield total([i, i])
+
+def drain(gen):
+    out = []
+    for v in gen:
+        out.append(v)
+    return out
+
+def drain_many(sizes):
+    out = []
+    for n in sizes:
+        out.append(drain(countdown(n)))
+    return out
+
+assert drain_many([0, 1, 3]) == [[], [2], [6, 4, 2]], drain_many([0, 1, 3])
+
+def explode_at(xs, bad):
+    for x in xs:
+        if x == bad:
+            raise ValueError(x)
+    return len(xs)
+
+def exploding_gen(rows, bad):
+    for row in rows:
+        yield explode_at(row, bad)
+
+def resume_after_unwind(rows):
+    log = []
+    for bad in (2, 99, 4):
+        try:
+            for n in exploding_gen(rows, bad):
+                log.append(n)
+        except ValueError as exc:
+            log.append(("caught", exc.args[0]))
+        log.append(total([bad, 1]))
+    return log
+
+expected = [1, ("caught", 2), 3, 1, 2, 1, 100, 1, 2, ("caught", 4), 5]
+assert resume_after_unwind([[1], [2, 3], [4]]) == expected
+
+def gen_that_raises(n):
+    for i in range(n):
+        yield i
+    raise KeyError(n)
+
+def drain_raising(n):
+    out = []
+    for v in gen_that_raises(n):
+        out.append(v)
+    return out
+
+def outer_over_raising(sizes):
+    out = []
+    for n in sizes:
+        out.append(drain_raising(n))
+    return out
+"#,
+                None,
+                None,
+            )
+            .expect("generator drives inside trampolined loops must keep slots straight");
+        assert!(interp.tramp_stack.is_empty());
+        assert!(interp.tramp_arena.is_empty());
+        assert_eq!(parked_iter_slots(), 0);
+        assert!(interp.gen_drive_stack.is_empty());
+
+        // 4. An error escaping every trampolined loop frame (two of them mid
+        //    loop, one of those a generator consumer) must unwind cleanly and
+        //    leave the interpreter reusable.
+        let escaped = interp.exec_source("outer_over_raising([1, 2])\n", None, None);
+        assert!(escaped.is_err());
+        assert!(interp.tramp_stack.is_empty());
+        assert!(interp.tramp_arena.is_empty());
+        assert_eq!(parked_iter_slots(), 0);
+        assert!(interp.gen_drive_stack.is_empty());
+        interp
+            .exec_source(
+                "assert caller([[4], [5, 6]]) == [4, 4, 11, 10, 12], caller([[4], [5, 6]])\n",
+                None,
+                None,
+            )
+            .expect("trampolined loop callees must still work after an escaped error");
     }
 
     #[test]

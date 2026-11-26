@@ -586,6 +586,17 @@ impl Interpreter {
                     self.capture_unwinding_traceback_frame(tb_lineno)
                 };
                 let view = self.detach_vm_frame_view();
+                // A loop-bearing callee ran on its own iterator slots (#3377):
+                // drop them and hand the caller's back, so the live slots
+                // always belong to the frame the unwind has reached (a
+                // gen-drive boundary below may resume in it).
+                if saved.parked_iter_slots != NO_PARKED_ITER_SLOTS {
+                    Self::vm_tramp_unpark_iter_slots(
+                        saved.parked_iter_slots,
+                        st.iters,
+                        st.iter_next_cache,
+                    );
+                }
                 self.tramp_arena.truncate(*st.tramp_active_base);
                 *st.tramp_active_base = saved.saved_base;
                 *st.cells = saved.saved_cells;
