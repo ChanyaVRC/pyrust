@@ -25,7 +25,11 @@ class URLError(OSError):
 class HTTPError(URLError, urllib.response.addinfourl):
     """Raised when HTTP error occurs, but also acts like non-error return."""
 
-    __super_init = urllib.response.addinfourl.__init__
+    # `urllib.response.addinfourl.__init__` is a native method now; an alias of
+    # it kept in the class dict is dispatched by name (`__init__`), so forward
+    # through a plain function instead.
+    def __super_init(self, fp, hdrs, url, code=None):
+        urllib.response.addinfourl.__init__(self, fp, hdrs, url, code)
 
     def __init__(self, url, code, msg, hdrs, fp):
         self.code = code

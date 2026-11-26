@@ -34,7 +34,7 @@ const TEMPFILE_PY_SOURCE: &str = include_str!("tempfile_py.py");
 const TEMPFILE_NATIVE_HELPERS: [&str; 2] = ["_mkstemp_open", "_open_native_temp"];
 
 /// Public attributes exported onto the `tempfile` module.
-const TEMPFILE_PY_EXPORTS: [&str; 14] = [
+const TEMPFILE_PY_EXPORTS: [&str; 16] = [
     "TMP_MAX",
     "template",
     "tempdir",
@@ -49,6 +49,8 @@ const TEMPFILE_PY_EXPORTS: [&str; 14] = [
     "TemporaryFile",
     "SpooledTemporaryFile",
     "TemporaryDirectory",
+    "_TemporaryFileCloser",
+    "_TemporaryFileWrapper",
 ];
 
 static NEXT_TEMP_FILENO: AtomicI64 = AtomicI64::new(1000);
