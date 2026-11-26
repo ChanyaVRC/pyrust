@@ -146,30 +146,68 @@ pub(crate) fn deferred_class_resolutions() -> usize {
     DEFERRED_CLASS_RESOLUTIONS.with(std::cell::Cell::get)
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: the class singletons themselves are thread-local, so
+//     the canonical `Value` wrapper that names each one must be too (a `Value`
+//     is thread-bound).
+// (b) Multi-interpreter / multi-threaded impact: every interpreter on a thread
+//     shares the same singleton classes, hence the same wrapper; another thread
+//     builds its own, exactly like the singletons.
+thread_local! {
+    static CLASS_VALUES: RefCell<Vec<(Box<str>, Value)>> = const { RefCell::new(Vec::new()) };
+}
+
 /// Resolve one deferred `builtins` class by name.
 ///
 /// Returns `None` without building anything for every other name, and always
 /// hands back the same per-GIL-group singleton, so a lookup needs no caching in
 /// the module and never invalidates a `LoadGlobal` cache.  Resolving a type
 /// leaves the exception hierarchy unbuilt, and vice versa.
+///
+/// The `Value` wrapper is canonical too: a class value is a weak-countable
+/// opaque slot, and the `LoadGlobal` cache only keeps a weak handle to the
+/// resolved value (so it never owns a global).  A wrapper built per call would
+/// die right after the call and the cache would miss on every lookup of `range`,
+/// `int`, `str`, ... (issue #3420).  Keeping one live wrapper per resolved name
+/// lets that handle upgrade without allocating.  The singleton class already
+/// lives as long as the thread, so the retained wrapper extends no lifetime.
 fn resolve_builtins_class(name: &str) -> Option<Value> {
-    let class = match name.as_bytes().first()? {
-        b'a'..=b'z' => match name {
-            "type" => type_class_singleton(),
-            "object" => crate::interpreter::object_class_singleton(),
-            _ => {
-                builtin_type_slot(name)?;
-                primitive_class_by_name(name)?
-            }
-        },
-        b'A'..=b'Z' if crate::interpreter::BUILTINS_EXCEPTION_NAMES.contains(&name) => {
-            crate::interpreter::lookup_exc_class(name)?
+    let retained = CLASS_VALUES.with(|values| {
+        values
+            .borrow()
+            .iter()
+            .find(|(known, _)| &**known == name)
+            .map(|(_, value)| value.clone())
+    });
+    let value = match retained {
+        Some(value) => value,
+        None => {
+            let value = Value::py_class(resolve_builtins_class_object(name)?);
+            CLASS_VALUES.with(|values| values.borrow_mut().push((name.into(), value.clone())));
+            value
         }
-        _ => return None,
     };
     #[cfg(test)]
     DEFERRED_CLASS_RESOLUTIONS.with(|count| count.set(count.get() + 1));
-    Some(Value::py_class(class))
+    Some(value)
+}
+
+/// The singleton class object behind one deferred `builtins` name.
+fn resolve_builtins_class_object(name: &str) -> Option<Rc<RefCell<PyClass>>> {
+    match name.as_bytes().first()? {
+        b'a'..=b'z' => match name {
+            "type" => Some(type_class_singleton()),
+            "object" => Some(crate::interpreter::object_class_singleton()),
+            _ => {
+                builtin_type_slot(name)?;
+                primitive_class_by_name(name)
+            }
+        },
+        b'A'..=b'Z' if crate::interpreter::BUILTINS_EXCEPTION_NAMES.contains(&name) => {
+            crate::interpreter::lookup_exc_class(name)
+        }
+        _ => None,
+    }
 }
 
 fn visit_startup_slots(visit: crate::value::LazyModuleSlotVisitor<'_>) {
