@@ -69,6 +69,18 @@ impl Parser {
         self.parse_expr_with_walrus(true)
     }
 
+    /// Parse an expression position that CPython's grammar fills with
+    /// `expression` rather than `star_expressions`/`yield_expr` (a `lambda`
+    /// body or parameter default): an unparenthesised `yield` / `yield from`
+    /// there is `SyntaxError: invalid syntax`, while `(yield)` is accepted
+    /// through the parenthesised-group path.
+    fn parse_expr_rejecting_yield(&mut self) -> Result<Expr> {
+        if self.is(&Token::Yield) {
+            return Err(PyError::parse("invalid syntax".to_string()));
+        }
+        self.parse_expr()
+    }
+
     fn parse_expr_no_walrus(&mut self) -> Result<Expr> {
         self.parse_expr_with_walrus(false)
     }
@@ -89,43 +101,55 @@ impl Parser {
         result
     }
 
-    fn parse_expr_inner(&mut self, allow_walrus: bool) -> Result<Expr> {
-        // Yield / yield from
-        if self.is(&Token::Yield) {
-            let kw_col = self.current_col();
-            let kw_lineno = self.current_lineno();
-            self.bump(); // consume `yield`
-            if self.is(&Token::From) {
-                self.bump(); // consume `from`
-                let iter = self.parse_expr()?;
-                let span = self.make_whole_span(kw_col, kw_lineno);
-                return Ok(Expr::YieldFrom {
-                    expr: Box::new(iter),
-                    span,
-                    lineno: kw_lineno,
-                });
-            }
-            // bare `yield` or `yield expr`
-            if self.at_stmt_end() {
-                let span = self.make_whole_span(kw_col, kw_lineno);
-                return Ok(Expr::Yield {
-                    value: None,
-                    span,
-                    lineno: kw_lineno,
-                });
-            }
-            let val = self.parse_expr_or_tuple()?;
-            if matches!(val, Expr::Starred(_)) {
-                return Err(PyError::parse(
-                    "can't use starred expression here".to_string(),
-                ));
-            }
+    /// Parse a `yield` / `yield from` expression starting at the `yield` keyword.
+    ///
+    /// `in_parens` is set when the expression is the sole content of a
+    /// parenthesised group (`(yield)`), where a bare `yield` is terminated by the
+    /// closing `)` rather than by a statement boundary (CPython's `group` rule,
+    /// `'(' (yield_expr | named_expression) ')'`).  Everywhere else a bare
+    /// `yield` still ends only at a statement boundary, so `f(yield)` and
+    /// `[yield]` stay `SyntaxError`s as in CPython.
+    fn parse_yield_expr(&mut self, in_parens: bool) -> Result<Expr> {
+        let kw_col = self.current_col();
+        let kw_lineno = self.current_lineno();
+        self.bump(); // consume `yield`
+        if self.is(&Token::From) {
+            self.bump(); // consume `from`
+            let iter = self.parse_expr()?;
             let span = self.make_whole_span(kw_col, kw_lineno);
-            return Ok(Expr::Yield {
-                value: Some(Box::new(val)),
+            return Ok(Expr::YieldFrom {
+                expr: Box::new(iter),
                 span,
                 lineno: kw_lineno,
             });
+        }
+        // bare `yield` or `yield expr`
+        if self.at_stmt_end() || (in_parens && self.is(&Token::RParen)) {
+            let span = self.make_whole_span(kw_col, kw_lineno);
+            return Ok(Expr::Yield {
+                value: None,
+                span,
+                lineno: kw_lineno,
+            });
+        }
+        let val = self.parse_expr_or_tuple()?;
+        if matches!(val, Expr::Starred(_)) {
+            return Err(PyError::parse(
+                "can't use starred expression here".to_string(),
+            ));
+        }
+        let span = self.make_whole_span(kw_col, kw_lineno);
+        Ok(Expr::Yield {
+            value: Some(Box::new(val)),
+            span,
+            lineno: kw_lineno,
+        })
+    }
+
+    fn parse_expr_inner(&mut self, allow_walrus: bool) -> Result<Expr> {
+        // Yield / yield from
+        if self.is(&Token::Yield) {
+            return self.parse_yield_expr(false);
         }
         // Lambda
         if self.is(&Token::Lambda) {
@@ -245,7 +269,7 @@ impl Parser {
                         let default = if self.is(&Token::Assign) {
                             self.bump();
                             seen_default = true;
-                            Some(self.parse_expr()?)
+                            Some(self.parse_expr_rejecting_yield()?)
                         } else {
                             if seen_default && !seen_star {
                                 return Err(PyError::parse(
@@ -307,7 +331,7 @@ impl Parser {
             self.parse_lambda_params()?
         };
         self.expect(&Token::Colon)?;
-        let body = self.parse_expr()?;
+        let body = self.parse_expr_rejecting_yield()?;
         Ok(Expr::Lambda {
             params,
             body: Box::new(body),

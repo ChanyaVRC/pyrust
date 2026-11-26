@@ -802,7 +802,9 @@ class _AstSerializer:
 
     def _node_Expr(self, node):
         self.newline()
-        self.emit(self._render_expr(node.value, _PREC_TUPLE))
+        # CPython sets YIELD precedence on an expression statement's value:
+        # a bare `yield` needs no parentheses but a tuple does.
+        self.emit(self._render_expr(node.value, _PREC_YIELD))
 
     def _node_Pass(self, node):
         self.newline('pass')
@@ -816,7 +818,7 @@ class _AstSerializer:
     def _node_Return(self, node):
         self.newline('return')
         if node.value is not None:
-            self.emit(' ' + self._render_expr(node.value, _PREC_TUPLE))
+            self.emit(' ' + self._render_expr(node.value, _PREC_TEST))
 
     def _node_Delete(self, node):
         self.newline('del ')
@@ -826,7 +828,7 @@ class _AstSerializer:
         self.newline()
         for t in node.targets:
             self.emit(self._render_expr(t, _PREC_TUPLE) + ' = ')
-        self.emit(self._render_expr(node.value, _PREC_TUPLE))
+        self.emit(self._render_expr(node.value, _PREC_TEST))
         if getattr(node, 'type_comment', None):
             self.emit(f'  # type: {node.type_comment}')
 
@@ -835,7 +837,7 @@ class _AstSerializer:
         self.newline()
         self.emit(
             f'{self._render_expr(node.target, _PREC_TEST)} {sym}= '
-            f'{self._render_expr(node.value, _PREC_TUPLE)}'
+            f'{self._render_expr(node.value, _PREC_TEST)}'
         )
 
     def _node_AnnAssign(self, node):
@@ -989,7 +991,7 @@ class _AstSerializer:
 
     def _emit_for(self, node, prefix):
         target = self._render_expr(node.target, _PREC_TUPLE)
-        it = self._render_expr(node.iter, _PREC_TUPLE)
+        it = self._render_expr(node.iter, _PREC_TEST)
         self.newline(f'{prefix}for {target} in {it}:')
         if getattr(node, 'type_comment', None):
             self.emit(f'  # type: {node.type_comment}')
@@ -1363,11 +1365,11 @@ class _AstSerializer:
             if node.value is None:
                 s = 'yield'
             else:
-                s = 'yield ' + self._render_expr(node.value, _PREC_TUPLE)
+                s = 'yield ' + self._render_expr(node.value, _PREC_ATOM)
             return self._wrap(s, _PREC_YIELD, prec)
 
         if isinstance(node, YieldFrom):
-            s = 'yield from ' + self._render_expr(node.value, _PREC_TEST)
+            s = 'yield from ' + self._render_expr(node.value, _PREC_ATOM)
             return self._wrap(s, _PREC_YIELD, prec)
 
         if isinstance(node, JoinedStr):
