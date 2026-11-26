@@ -385,7 +385,6 @@ else:
     print("winreg_ok")
 
     # ── 4. winsound (silent checks only) ─────────────────────────────────────
-    assert winsound.SND_SYNC == 0
     assert winsound.SND_ASYNC == 1
     assert winsound.SND_NODEFAULT == 2
     assert winsound.SND_MEMORY == 4
@@ -396,8 +395,13 @@ else:
     assert winsound.SND_NOWAIT == 8192
     assert winsound.SND_ALIAS == 65536
     assert winsound.SND_FILENAME == 131072
-    assert winsound.SND_SENTRY == 524288
-    assert winsound.SND_SYSTEM == 2097152
+    # Added in CPython 3.14 (also provided by PyRust): verify when present.
+    if hasattr(winsound, "SND_SYNC"):
+        assert winsound.SND_SYNC == 0
+    if hasattr(winsound, "SND_SENTRY"):
+        assert winsound.SND_SENTRY == 524288
+    if hasattr(winsound, "SND_SYSTEM"):
+        assert winsound.SND_SYSTEM == 2097152
 
     assert winsound.MB_OK == 0
     assert winsound.MB_ICONHAND == 16
