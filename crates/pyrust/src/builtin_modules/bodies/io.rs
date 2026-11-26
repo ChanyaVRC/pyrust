@@ -32,14 +32,53 @@ mod string_buffer;
 #[path = "io/string_io.rs"]
 mod string_io;
 
-pub(crate) use self::base_classes::inject_python_members;
+/// Post-build wiring for the `io` module (see `finalization.rs`).
+pub(crate) fn prepare_module(interp: &mut crate::interpreter::Interpreter, module: &Value) {
+    base_classes::prepare_module(interp, module);
+}
+
 use self::open_helpers::{
     get_pos, set_pos, stream_bool_query, stream_close, stream_closed, stream_enter, stream_exit,
     stream_fileno, stream_iter, stream_repr, stream_tell,
 };
 
 pyrust_module! {
-    class StringIO {
+    constants {
+        // Seek-whence constants.
+        "SEEK_SET" => Value::int(0),
+        "SEEK_CUR" => Value::int(1),
+        "SEEK_END" => Value::int(2),
+        // Default buffer size used by the buffered I/O classes (CPython: 8192).
+        "DEFAULT_BUFFER_SIZE" => Value::int(8192),
+    }
+
+    // The abstract base classes.  `prepare_io_module` (finalization.rs) tags
+    // them with `__module__ == "io"` and publishes `io.open`.
+    class IOBase {
+        constants {
+            "__doc__" => Value::string(base_classes::IOBASE_DOC),
+        }
+    }
+
+    class RawIOBase : "IOBase" {
+        constants {
+            "__doc__" => Value::string(base_classes::RAWIOBASE_DOC),
+        }
+    }
+
+    class BufferedIOBase : "IOBase" {
+        constants {
+            "__doc__" => Value::string(base_classes::BUFFEREDIOBASE_DOC),
+        }
+    }
+
+    class TextIOBase : "IOBase" {
+        constants {
+            "__doc__" => Value::string(base_classes::TEXTIOBASE_DOC),
+        }
+    }
+
+    class StringIO : "TextIOBase" {
         /// `StringIO(initial_value='', newline='\n')` — creates an in-memory text stream.
         /// <https://docs.python.org/3/library/io.html#io.StringIO>
         fn __init__(args) -> Result<Value> {
@@ -157,7 +196,7 @@ pyrust_module! {
         }
     }
 
-    class BytesIO {
+    class BytesIO : "BufferedIOBase" {
         /// `BytesIO(initial_bytes=b'')` — creates an in-memory bytes stream.
         /// <https://docs.python.org/3/library/io.html#io.BytesIO>
         fn __init__(args) -> Result<Value> {
