@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 use smallvec::smallvec;
 
 use crate::ast::{AssignTarget, BinaryOp, Expr, Stmt, UnaryOp};
-use crate::bytecode::{FnCode, GlobalCacheEntry};
+use crate::bytecode::{FnCode, GlobalCacheEntry, GlobalStoreCacheEntry};
 use crate::error::{PyError, Result};
 use crate::value::{
     EnvRef, Environment, GeneratorCell, GeneratorKind, InstanceAttrs, ModuleMutationState,

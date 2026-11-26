@@ -44,7 +44,8 @@ pub use class_epoch::{
 pub use cycle_guards::{CycleGuard, enter_repr_cycle_guard};
 pub use environment::{
     CellSlot, EnvRef, EnvValues, Environment, EnvironmentStorage, NameSet,
-    NamespaceFastLocalCacheSource, NamespaceMirrorGuard, namespace_name_interest_mask,
+    NamespaceFastLocalCacheSource, NamespaceMirrorGuard, NamespaceStoreOutcome, NamespaceStoreSlot,
+    namespace_name_interest_mask,
 };
 pub use errors::{PyError, PyErrorKind, Result};
 pub use gil_tls::{

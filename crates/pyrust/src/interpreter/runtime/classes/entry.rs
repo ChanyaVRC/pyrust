@@ -78,8 +78,11 @@ impl Interpreter {
             }
         }
         let memo_positional_parameter_count = u16::try_from(positional_count).unwrap_or(u16::MAX);
+        // A `global` declaration does not disqualify a callee (#3423): the
+        // trampoline swaps in the callee's defining env and publishes its
+        // function frame view exactly like a native call, which is all
+        // `active_frame_declares_global` consults.
         let trampoline_arity = if !has_non_plain_param
-            && proto_global_names.is_empty()
             && !proto_code.is_generator
             && !proto_code.is_coroutine
             && !proto_code.has_exc_handlers

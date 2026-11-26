@@ -101,6 +101,123 @@ impl Interpreter {
         env_assign_local(&self.env, name, value);
     }
 
+    /// Repeat a completed [`Self::assign_name`] as an in-place overwrite of the
+    /// root binding `slot` located (#3423).
+    ///
+    /// Returns `None`, having changed nothing, when the overwrite cannot be
+    /// proven equivalent to the full assignment; the caller then runs
+    /// [`Self::assign_name`]. On success the caller passes the outcome to
+    /// [`Self::finish_cached_global_store`] once it holds no cache borrow.
+    ///
+    /// A frame whose lexical environment is the root writes the same root
+    /// binding whether or not it declares the name `global`, so no declaration
+    /// check is needed there. Any other frame reaches the root only through a
+    /// `global` declaration, which `declared_in` proves.
+    #[inline]
+    pub(crate) fn overwrite_cached_global_slot(
+        &self,
+        name: &str,
+        name_mask: u64,
+        slot: &pyrust_core::NamespaceStoreSlot,
+        declared_in: Option<&pyrust_core::NameSet>,
+        value: &Value,
+    ) -> Option<pyrust_core::NamespaceStoreOutcome> {
+        let mut env = self.env.borrow_mut();
+        if env.parent.is_none() {
+            return env.overwrite_namespace_store_slot(slot, name, name_mask, value);
+        }
+        drop(env);
+        self.overwrite_declared_global_slot(name, name_mask, slot, declared_in?, value)
+    }
+
+    /// Non-root half of [`Self::overwrite_cached_global_slot`]: a function
+    /// defined inside a class body or a PEP 695 scope that declares the name
+    /// `global`.
+    ///
+    /// `declared_in` is the `global`-name set that contained `name` when the
+    /// cache entry was filled. The entry keeps that set alive, so finding the
+    /// same allocation on the active function proves the declaration without
+    /// hashing the name again. A temporary PEP 695 child scope
+    /// (`self.env != function.env`) declines, as in
+    /// [`Self::active_frame_declares_global`].
+    #[inline(never)]
+    fn overwrite_declared_global_slot(
+        &self,
+        name: &str,
+        name_mask: u64,
+        slot: &pyrust_core::NamespaceStoreSlot,
+        declared_in: &pyrust_core::NameSet,
+        value: &Value,
+    ) -> Option<pyrust_core::NamespaceStoreOutcome> {
+        let function = self.vm_frame_views.last()?.function()?;
+        if !Rc::ptr_eq(&self.env, &function.env) || !Rc::ptr_eq(&function.global_names, declared_in)
+        {
+            return None;
+        }
+        module_env(&self.env)
+            .borrow_mut()
+            .overwrite_namespace_store_slot(slot, name, name_mask, value)
+    }
+
+    /// Complete an in-place global overwrite after every borrow of the root
+    /// environment and of the bytecode cache has been released: mirror the
+    /// write into a filesystem module's shared globals dictionary, then drop
+    /// the displaced values.
+    #[inline]
+    pub(crate) fn finish_cached_global_store(
+        &self,
+        name: &str,
+        value: Value,
+        outcome: pyrust_core::NamespaceStoreOutcome,
+    ) {
+        if let Some(globals) = &outcome.globals {
+            // The name is normally already a key of the module dictionary, so
+            // replace its value without allocating an owned key. Both calls
+            // report the mutation at the dictionary-storage boundary.
+            match globals.dict_replace_existing(&StrKey(name), true, Some(name), value) {
+                Ok(Ok(_displaced)) => {}
+                Ok(Err(value)) => {
+                    let _ = globals.dict_insert(PyKey::str_from(name), value);
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// Decide whether the [`Self::assign_name`] that just completed for `name`
+    /// can be repeated as an in-place overwrite, and build its cache locator
+    /// (#3423).
+    ///
+    /// Only writes that reach the root namespace are cacheable: every store
+    /// from a frame whose lexical environment is the root, and a `global`
+    /// store from a function defined in a nested scope (for which the active
+    /// function's `global`-name set is returned as the declaration proof).
+    /// A class-body or type-parameter binding, and a generator frame nested in
+    /// one, stay on the full path.
+    pub(crate) fn global_store_cache_slot(
+        &self,
+        name: &str,
+    ) -> Option<(
+        pyrust_core::NamespaceStoreSlot,
+        Option<pyrust_core::NameSet>,
+    )> {
+        {
+            let env = self.env.borrow();
+            if env.parent.is_none() {
+                return env.namespace_store_slot(name).map(|slot| (slot, None));
+            }
+        }
+        let function = self.vm_frame_views.last()?.function()?;
+        if !Rc::ptr_eq(&self.env, &function.env) || !function.global_names.contains(name) {
+            return None;
+        }
+        let declared_in = Rc::clone(&function.global_names);
+        module_env(&self.env)
+            .borrow()
+            .namespace_store_slot(name)
+            .map(|slot| (slot, Some(declared_in)))
+    }
+
     /// Resolve `name` against the active scope, reporting an unbound binding as a
     /// plain local (`UnboundLocalError`).  Used by the interpreter unit tests'
     /// `lookup_name` assertions; the VM read opcodes call

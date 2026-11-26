@@ -215,6 +215,52 @@ impl EnvValues {
         }
     }
 
+    /// Locate an existing binding's storage slot: its insertion index and the
+    /// shared key that currently occupies it (#3423).
+    ///
+    /// Both representations keep a rebound name in place and append a
+    /// re-inserted one under a fresh key allocation, and the inline form
+    /// promotes without reordering. A slot is therefore identified by its
+    /// index together with the *identity* of its key: once the binding is
+    /// removed, no later binding can present the same key at that index.
+    #[inline]
+    pub fn slot_of(&self, name: &str) -> Option<(usize, &Rc<str>)> {
+        match self {
+            EnvValues::Inline(v) => v
+                .iter()
+                .position(|(k, _)| &**k == name)
+                .map(|index| (index, &v[index].0)),
+            EnvValues::Map(m) => m.get_full(name).map(|(index, key, _)| (index, key)),
+        }
+    }
+
+    /// Read the binding stored at `index`, provided `key` still occupies that
+    /// slot. A removed, re-inserted, or reordered binding yields `None`.
+    #[inline]
+    pub fn slot_value(&self, index: usize, key: &Rc<str>) -> Option<&Value> {
+        let (slot_key, value) = match self {
+            EnvValues::Inline(v) => {
+                let (slot_key, value) = v.get(index)?;
+                (slot_key, value)
+            }
+            EnvValues::Map(m) => m.get_index(index)?,
+        };
+        Rc::ptr_eq(slot_key, key).then_some(value)
+    }
+
+    /// Mutable counterpart of [`Self::slot_value`].
+    #[inline]
+    pub fn slot_value_mut(&mut self, index: usize, key: &Rc<str>) -> Option<&mut Value> {
+        let (slot_key, value) = match self {
+            EnvValues::Inline(v) => {
+                let (slot_key, value) = v.get_mut(index)?;
+                (&*slot_key, value)
+            }
+            EnvValues::Map(m) => m.get_index_mut(index)?,
+        };
+        Rc::ptr_eq(slot_key, key).then_some(value)
+    }
+
     #[inline]
     pub fn remove(&mut self, name: &str) -> Option<Value> {
         match self {

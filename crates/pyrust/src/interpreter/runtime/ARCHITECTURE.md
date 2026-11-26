@@ -121,6 +121,8 @@ namespace and hides which domain a caller depends on.
     Environment and canonical-builtins results are exclusive variants of that
     entry and are validated through one cache borrow against the root namespace
     snapshot. Do not restore parallel environment and builtins cache vectors.
+    The `StoreGlobal` slot table is not such a parallel vector: it caches the
+    target of a write, keeps different guards, and never answers a read.
 25. A filesystem-backed `PyModule`, its functions, and its `__dict__` share the
     root namespace's one globals dictionary. The module keeps that dictionary
     strongly but its loader environment weakly, avoiding a direct strong cycle
@@ -238,6 +240,33 @@ namespace and hides which domain a caller depends on.
     metadata generically and must not relist concrete APIs or briefly install a
     class/static descriptor as an ordinary method. Data-model slot exposure
     remains the separate typed policy in `builtin_methods/slot_tables`.
+
+38. `StoreGlobal` caches the root binding it overwrites as a *slot locator* —
+    the binding's index plus the identity of the key occupying it — and
+    rewrites that binding in place without advancing any cache generation.
+    That is sound only because no `LoadGlobal` cache may hold the *value* of
+    such a name. The first in-place overwrite of a name registers it in the
+    root's store-slot interest mask and advances the generations once, as a
+    full assignment would, which invalidates every value-backed entry; from
+    then on a `LoadGlobal` fill for a matching name must take the locator
+    lane, which reads the live binding through the same kind of locator. A
+    name that is assigned once (a module-level `def`, a constant) never
+    reaches that step and keeps its readers on the value lane. Do not add an
+    in-place overwrite that skips the registration, and do not add a
+    `LoadGlobal` lane that caches a value without consulting that mask. Every
+    other way a name's resolution can change (insertion, deletion,
+    re-insertion, a PEP 695 scope, exposure of the dictionary) must either
+    change the slot's key or advance the structure generation; a path that
+    inserts or removes a root binding without doing so is a bug in that path,
+    not a reason to add a per-store bump. A locator owns the key string only.
+    An in-place overwrite must still reproduce every other effect of the full
+    assignment: the one live Script register that mirrors the name, the
+    binding-order journal, and a filesystem module's dictionary and provider
+    generation. It declines, changing nothing, when that equivalence is not
+    provable — more than one live Script frame, an exposed or explicit
+    namespace, or a frame that reaches the root only through a `global`
+    declaration it cannot prove. The value form remains the default read lane
+    because its hit is one dependent load shorter.
 
 The `ownership_tests` module in `runtime.rs` follows each domain entry point's
 complete recursive `include!` graph, then scans the foundational call, VM, and

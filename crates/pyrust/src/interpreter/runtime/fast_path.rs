@@ -5,6 +5,7 @@
 include!("fast_path/unary.rs");
 include!("fast_path/call_cache_support.rs");
 include!("fast_path/global_load.rs");
+include!("fast_path/global_store.rs");
 include!("fast_path/loop_iteration.rs");
 include!("fast_path/binary_support.rs");
 include!("fast_path/control_flow.rs");

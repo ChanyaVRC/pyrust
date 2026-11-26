@@ -167,6 +167,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         comp_enclosing_locals: code.comp_enclosing_locals,
         attr_cache: RefCell::new(crate::bytecode::SiteCache::new()),
         global_cache: RefCell::new(Vec::new()),
+        global_store_cache: RefCell::new(Vec::new()),
         global_cache_interest_masks,
         binop_cache: RefCell::new(Vec::new()),
         kwcall_cache: RefCell::new(crate::bytecode::SparsePcCache::new()),

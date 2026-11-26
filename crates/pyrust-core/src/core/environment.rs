@@ -7,6 +7,7 @@
 // - lexical_scope: Environment construction, storage accessors, annotations, cache interest;
 // - fastlocal_mirrors: Script fast-local register mirrors, snapshots, binding-order journal;
 // - namespace_provider: globals/locals provider, module-write flags, explicit/filesystem setup;
+// - binding_slots: self-validating root binding locators for global-name inline caches;
 // - tests: invariants spanning those responsibilities.
 
 use std::cell::{Cell, RefCell};
@@ -26,4 +27,5 @@ include!("environment/env_values.rs");
 include!("environment/lexical_scope.rs");
 include!("environment/fastlocal_mirrors.rs");
 include!("environment/namespace_provider.rs");
+include!("environment/binding_slots.rs");
 include!("environment/tests.rs");

@@ -692,6 +692,340 @@ mod tests {
         assert!(root.borrow().needs_namespace_module_write_sync(0b1100));
     }
 
+    /// Issue #3423: an in-place overwrite reproduces a full global assignment
+    /// to an already-bound name — the root binding and the mirroring Script
+    /// register both change. The first overwrite of a name invalidates once
+    /// and moves its readers to the locator lane; a repeated one advances
+    /// neither cache generation.
+    #[test]
+    fn store_slot_overwrites_binding_and_register_and_invalidates_only_once() {
+        let root = Environment::new(None);
+        let mask = super::namespace_name_interest_mask("counter");
+        let local_index = Rc::new(HashMap::from([
+            ("other".to_string(), 0_u32),
+            ("counter".to_string(), 1_u32),
+        ]));
+        let mut regs = vec![Value::int(10), Value::int(0)];
+        let regs_ptr = NonNull::new(regs.as_mut_ptr()).expect("Vec storage is non-null");
+        let guard = unsafe {
+            root.borrow()
+                .register_namespace_fastlocals(regs_ptr, regs.len(), &local_index)
+        };
+        assert!(
+            root.borrow().namespace_store_slot("counter").is_none(),
+            "a name without a root binding has no overwrite locator"
+        );
+        assert!(
+            !root.borrow().namespace_store_slot_interested(mask),
+            "a declined locator must not move reads off the value lane"
+        );
+        root.borrow_mut()
+            .namespace_values_mut()
+            .insert("counter", Value::int(0));
+        let slot = root
+            .borrow()
+            .namespace_store_slot("counter")
+            .expect("a bound name in a private namespace is cacheable");
+        assert!(
+            !root.borrow().namespace_store_slot_interested(mask),
+            "a name assigned once keeps its readers on the value lane"
+        );
+        let before = root.borrow().namespace_cache_snapshot();
+
+        let outcome = root
+            .borrow_mut()
+            .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(7))
+            .expect("an unchanged namespace accepts the overwrite");
+        assert_eq!(outcome.displaced.as_int(), Some(0));
+        assert_eq!(
+            outcome.displaced_register.as_ref().and_then(Value::as_int),
+            Some(0)
+        );
+        assert!(
+            outcome.globals.is_none(),
+            "an ordinary script has no dictionary mirror"
+        );
+        assert_eq!(
+            root.borrow()
+                .namespace_values()
+                .get("counter")
+                .and_then(Value::as_int),
+            Some(7)
+        );
+        let read = |index: usize| unsafe { regs_ptr.add(index).as_ref() }.as_int();
+        assert_eq!(read(1), Some(7), "the mirroring register must follow");
+        assert_eq!(read(0), Some(10), "an unrelated register is untouched");
+        let first = root.borrow().namespace_cache_snapshot();
+        assert!(
+            first.1 > before.1 && first.2 > before.2,
+            "the first in-place overwrite must invalidate value-backed readers"
+        );
+        assert!(
+            root.borrow().namespace_store_slot_interested(mask),
+            "reads of an in-place overwritten name must take the locator lane"
+        );
+        assert!(
+            root.borrow().namespace_env_binding_may_overlap(mask),
+            "module fast-local writes must keep the overwritten binding current"
+        );
+        let outcome = root
+            .borrow_mut()
+            .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(6))
+            .expect("a repeated overwrite is accepted");
+        assert_eq!(outcome.displaced.as_int(), Some(7));
+        let outcome = root
+            .borrow_mut()
+            .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(7))
+            .expect("a repeated overwrite is accepted");
+        assert_eq!(outcome.displaced.as_int(), Some(6));
+        assert_eq!(read(1), Some(7));
+        assert_eq!(
+            root.borrow().namespace_cache_snapshot(),
+            first,
+            "a repeated overwrite needs no generation bump"
+        );
+
+        // Ending the Script frame changes which registers mirror the name.
+        drop(guard);
+        assert!(
+            root.borrow_mut()
+                .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(8))
+                .is_none(),
+            "a locator built under another mirror epoch must miss"
+        );
+        assert_eq!(
+            root.borrow()
+                .namespace_values()
+                .get("counter")
+                .and_then(Value::as_int),
+            Some(7),
+            "a miss must leave the namespace untouched"
+        );
+        assert_eq!(read(1), Some(7), "a dead mirror must not be written");
+
+        // Without a live mirror the locator carries no register.
+        let slot = root
+            .borrow()
+            .namespace_store_slot("counter")
+            .expect("still cacheable after the frame ended");
+        let outcome = root
+            .borrow_mut()
+            .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(9))
+            .expect("the refreshed locator accepts the overwrite");
+        assert!(outcome.displaced_register.is_none());
+        assert_eq!(read(1), Some(7));
+    }
+
+    /// Issue #3423: every way the located binding can stop being the
+    /// assignment target is a miss that changes nothing.
+    #[test]
+    fn store_slot_misses_after_delete_rebind_exposure_or_namespace_change() {
+        let mask = super::namespace_name_interest_mask("counter");
+        let bind = |root: &super::EnvRef| {
+            for name in ["first", "counter"] {
+                root.borrow_mut()
+                    .namespace_values_mut()
+                    .insert(name, Value::int(1));
+            }
+            root.borrow()
+                .namespace_store_slot("counter")
+                .expect("a bound name is cacheable")
+        };
+        let value_of = |root: &super::EnvRef| {
+            root.borrow()
+                .namespace_values()
+                .get("counter")
+                .and_then(Value::as_int)
+        };
+
+        // `del counter; counter = 1` re-inserts under a fresh key.
+        let root = Environment::new(None);
+        let slot = bind(&root);
+        root.borrow_mut().namespace_values_mut().remove("counter");
+        assert!(
+            root.borrow_mut()
+                .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(2))
+                .is_none()
+        );
+        root.borrow_mut()
+            .namespace_values_mut()
+            .insert("counter", Value::int(3));
+        assert!(
+            root.borrow_mut()
+                .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(4))
+                .is_none(),
+            "a re-inserted binding has a new key"
+        );
+        assert_eq!(value_of(&root), Some(3));
+
+        // Deleting an earlier name shifts the slot under the cached index.
+        let root = Environment::new(None);
+        let slot = bind(&root);
+        root.borrow_mut().namespace_values_mut().remove("first");
+        assert!(
+            root.borrow_mut()
+                .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(2))
+                .is_none()
+        );
+        assert_eq!(value_of(&root), Some(1));
+
+        // Once `globals()` exposes the dictionary it is authoritative.
+        let root = Environment::new(None);
+        let slot = bind(&root);
+        let _globals = root.borrow().expose_namespace_globals();
+        assert!(
+            root.borrow_mut()
+                .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(2))
+                .is_none()
+        );
+        assert!(root.borrow().namespace_store_slot("counter").is_none());
+        assert_eq!(value_of(&root), Some(1));
+
+        // Compiled code is shared between namespaces; a locator is not.
+        let root = Environment::new(None);
+        let other = Environment::new(None);
+        let slot = bind(&root);
+        bind(&other);
+        assert!(
+            other
+                .borrow_mut()
+                .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(2))
+                .is_none()
+        );
+        assert_eq!(value_of(&other), Some(1));
+
+        // A second live Script frame may also mirror the name.
+        let root = Environment::new(None);
+        bind(&root);
+        let layout = Rc::new(HashMap::from([("counter".to_string(), 0_u32)]));
+        let mut outer = vec![Value::int(1)];
+        let mut inner = vec![Value::int(1)];
+        let _outer_guard = unsafe {
+            root.borrow().register_namespace_fastlocals(
+                NonNull::new(outer.as_mut_ptr()).unwrap(),
+                outer.len(),
+                &layout,
+            )
+        };
+        let slot = root
+            .borrow()
+            .namespace_store_slot("counter")
+            .expect("one live mirror is cacheable");
+        let _inner_guard = unsafe {
+            root.borrow().register_namespace_fastlocals(
+                NonNull::new(inner.as_mut_ptr()).unwrap(),
+                inner.len(),
+                &layout,
+            )
+        };
+        assert!(root.borrow().namespace_store_slot("counter").is_none());
+        assert!(
+            root.borrow_mut()
+                .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(2))
+                .is_none()
+        );
+        assert_eq!(value_of(&root), Some(1));
+    }
+
+    /// Issue #3423: the store-slot interest set is a two-bit Bloom mask, so a
+    /// name can find both of its bits set by two *other* names. Its first
+    /// in-place overwrite then advances no generation, which is sound only
+    /// because the registration that completed its coverage already did.
+    #[test]
+    fn store_slot_interest_invalidates_on_every_mask_change() {
+        let mask_of = super::namespace_name_interest_mask;
+        let (first, second) = ("cover_0", "cover_10");
+        let union = mask_of(first) | mask_of(second);
+        assert_eq!(union.count_ones(), 4, "the two names must not share a bit");
+        let covered = (0..10_000)
+            .map(|index| format!("cover_{index}"))
+            .find(|name| {
+                let mask = mask_of(name);
+                mask & !union == 0 && mask != mask_of(first) && mask != mask_of(second)
+            })
+            .expect("some name takes one bit from each of the two masks");
+
+        let root = Environment::new(None);
+        for name in [first, second, covered.as_str()] {
+            root.borrow_mut()
+                .namespace_values_mut()
+                .insert(name, Value::int(0));
+        }
+        let overwrite = |name: &str| {
+            let slot = root
+                .borrow()
+                .namespace_store_slot(name)
+                .expect("a bound name is cacheable");
+            let before = root.borrow().namespace_cache_snapshot();
+            let _displaced = root
+                .borrow_mut()
+                .overwrite_namespace_store_slot(&slot, name, mask_of(name), &Value::int(1))
+                .expect("the overwrite is accepted");
+            let after = root.borrow().namespace_cache_snapshot();
+            (after.1 > before.1, after.2 > before.2)
+        };
+
+        assert!(
+            !root
+                .borrow()
+                .namespace_store_slot_interested(mask_of(&covered))
+        );
+        assert_eq!(overwrite(first), (true, true));
+        assert!(
+            !root
+                .borrow()
+                .namespace_store_slot_interested(mask_of(&covered)),
+            "one shared bit is not coverage: a value-backed read stays legal"
+        );
+        assert_eq!(
+            overwrite(second),
+            (true, true),
+            "completing another name's coverage must invalidate its cached values"
+        );
+        assert!(
+            root.borrow()
+                .namespace_store_slot_interested(mask_of(&covered)),
+            "a covered name must be read through a slot locator from now on"
+        );
+        assert_eq!(
+            overwrite(&covered),
+            (false, false),
+            "a covered name has no value-backed reader left to invalidate"
+        );
+        assert_eq!(overwrite(first), (false, false));
+    }
+
+    /// Issue #3423: a filesystem module's attribute surface reads the shared
+    /// globals dictionary, so an in-place overwrite still reports that
+    /// dictionary and advances the module's provider generation.
+    #[test]
+    fn store_slot_reports_filesystem_module_dictionary_and_bumps_its_generation() {
+        let root = Environment::new(None);
+        let mask = super::namespace_name_interest_mask("counter");
+        let module = PyModule::new("source_module".to_string(), ModuleAttrs::default());
+        let mutation = module.mutation_state();
+        let globals = root.borrow().namespace_globals();
+        root.borrow()
+            .configure_filesystem_module_namespace(mutation.clone());
+        root.borrow_mut()
+            .namespace_values_mut()
+            .insert("counter", Value::int(0));
+        let slot = root
+            .borrow()
+            .namespace_store_slot("counter")
+            .expect("a filesystem module namespace is cacheable before exposure");
+
+        let outcome = root
+            .borrow_mut()
+            .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(5))
+            .expect("the overwrite is accepted");
+        assert_eq!(mutation.version(), 1);
+        let target = outcome
+            .globals
+            .expect("the module dictionary must be mirrored");
+        assert!(target.is_identical_to(&globals));
+    }
+
     #[test]
     fn cell_slot_shares_mutable_state_and_tracks_identity() {
         let cell = super::CellSlot::new_empty();

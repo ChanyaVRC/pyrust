@@ -951,3 +951,137 @@ fn lazy_classes_materialized_before_primitive_dispatch_still_dispatch() {
     .join()
     .expect("test thread panicked");
 }
+
+/// Structure generation of the interpreter's root namespace, which every
+/// full (uncached) global assignment advances.
+fn root_structure_generation(interpreter: &Interpreter) -> u64 {
+    interpreter.env.borrow().namespace_cache_snapshot().2
+}
+
+/// The compiled body of a module-level function bound to `name`.
+fn function_code(interpreter: &Interpreter, name: &str) -> Rc<dyn std::any::Any> {
+    let value = interpreter
+        .lookup_name(name)
+        .unwrap()
+        .unwrap_or_else(|| panic!("missing binding {name}"));
+    let ValueKind::UserFunction(function) = value.kind() else {
+        panic!("{name} must be a user function");
+    };
+    function
+        .precompiled_code
+        .clone()
+        .expect("a compiled function keeps its code")
+}
+
+/// Issue #3423: a repeated `global G; G = i` overwrites the cached root
+/// binding in place. Only the first store of the loop runs the full
+/// assignment, so the namespace generations stay flat however long it runs.
+#[test]
+fn hot_global_store_overwrites_the_cached_root_slot() {
+    let interpreter = run_program(
+        "G = 0\n\
+         def loop(n):\n    global G\n    for i in range(n):\n        G = i\n\
+         loop(5000)\n\
+         seen = G\n",
+    );
+    assert_eq!(
+        interpreter.lookup_name("seen").unwrap(),
+        Some(Value::int(4999))
+    );
+    assert_eq!(
+        interpreter.lookup_name("G").unwrap(),
+        Some(Value::int(4999))
+    );
+    let generation = root_structure_generation(&interpreter);
+    assert!(
+        generation < 100,
+        "5000 cached stores must not each advance the structure generation: {generation}"
+    );
+    let code = function_code(&interpreter, "loop");
+    let code = code
+        .downcast_ref::<crate::bytecode::FnCode>()
+        .expect("function code");
+    assert!(
+        code.global_store_cache
+            .borrow()
+            .iter()
+            .any(|entry| matches!(entry, GlobalStoreCacheEntry::RootSlot { .. })),
+        "the store site must have cached its root slot"
+    );
+}
+
+/// Issue #3423: `global G; G += 1` reads the binding through a slot locator
+/// and writes it through one, so the read stays cached across every write —
+/// and an unrelated global callee in the same loop is not evicted either.
+#[test]
+fn hot_global_read_modify_write_keeps_load_caches_valid() {
+    let interpreter = run_program(
+        "G = 0\n\
+         def step(x):\n    return x + 1\n\
+         def loop(n):\n    global G\n    for i in range(n):\n        G += 1\n        G = step(G)\n\
+         loop(3000)\n\
+         seen = G\n",
+    );
+    assert_eq!(
+        interpreter.lookup_name("seen").unwrap(),
+        Some(Value::int(6000))
+    );
+    let generation = root_structure_generation(&interpreter);
+    assert!(
+        generation < 100,
+        "6000 cached stores must not each advance the structure generation: {generation}"
+    );
+    let code = function_code(&interpreter, "loop");
+    let code = code
+        .downcast_ref::<crate::bytecode::FnCode>()
+        .expect("function code");
+    let cache = code.global_cache.borrow();
+    let entry_for = |name: &str| {
+        let slot = code
+            .names
+            .iter()
+            .position(|candidate| candidate.as_str() == name)
+            .unwrap_or_else(|| panic!("{name} must be in the name pool"));
+        &cache[slot]
+    };
+    assert!(
+        matches!(entry_for("G"), GlobalCacheEntry::EnvironmentSlot { .. }),
+        "a global rebound through a cached store must be read by slot locator: {:?}",
+        entry_for("G")
+    );
+    assert!(
+        matches!(entry_for("step"), GlobalCacheEntry::Environment { .. }),
+        "a global no cached store rebinds keeps the cheaper value form: {:?}",
+        entry_for("step")
+    );
+}
+
+/// Issue #3423: a `global`-declaring callee runs on the call trampoline and
+/// still writes its own module's binding; the caller's cached load of the
+/// callee survives every one of those writes.
+#[test]
+fn trampolined_global_writer_updates_the_module_binding() {
+    let interpreter = run_program(
+        "TOTAL = 0\nLAST = None\n\
+         def tick(x):\n    global TOTAL, LAST\n    TOTAL += x\n    LAST = x\n\
+         def fact(n):\n    global TOTAL\n    TOTAL += 1\n    return 1 if n <= 1 else n * fact(n - 1)\n\
+         def run(n):\n    for i in range(n):\n        tick(i)\n\
+         run(1000)\n\
+         after_run = (TOTAL, LAST)\n\
+         TOTAL = 0\n\
+         result = (fact(10), TOTAL)\n",
+    );
+    assert_eq!(
+        interpreter.lookup_name("after_run").unwrap(),
+        Some(Value::tuple(vec![Value::int(499_500), Value::int(999)]))
+    );
+    assert_eq!(
+        interpreter.lookup_name("result").unwrap(),
+        Some(Value::tuple(vec![Value::int(3_628_800), Value::int(10)]))
+    );
+    let generation = root_structure_generation(&interpreter);
+    assert!(
+        generation < 100,
+        "trampolined global stores must stay on the cached slot: {generation}"
+    );
+}

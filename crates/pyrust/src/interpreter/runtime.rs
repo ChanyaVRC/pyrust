@@ -217,12 +217,12 @@ mod fast_path {
     use super::execution::{VM_HOOK_PROFILE, VM_HOOK_TRACE, vm_read};
     use super::{
         BigRangeState, BinaryOp, CallBuiltinCacheEntry, CellSlice, ExpandedCallArg, GeneratorKind,
-        GlobalCacheEntry, GlobalResolutionCache, Interpreter, IterState, LiveDictViewItem, MemoKey,
-        NativeClassMethodCachePlan, OrderedIterationWatch, PyDict, PyError, PyKey, Rc,
-        ReadAttributeCachePlan, ReadMethodCachePlan, RegSlice, Result, StrKey, UserFunction, Value,
-        ValueKind, WriteAttributeCachePlan, active_live_class_namespace, bind_builtin_attribute,
-        bind_cached_native_class_method, comp_read_is_free, float_divmod, indexed_sequence_item,
-        invoke_class_method, live_collection_len, live_dict_view_item,
+        GlobalCacheEntry, GlobalResolutionCache, GlobalStoreCacheEntry, Interpreter, IterState,
+        LiveDictViewItem, MemoKey, NativeClassMethodCachePlan, OrderedIterationWatch, PyDict,
+        PyError, PyKey, Rc, ReadAttributeCachePlan, ReadMethodCachePlan, RegSlice, Result, StrKey,
+        UserFunction, Value, ValueKind, WriteAttributeCachePlan, active_live_class_namespace,
+        bind_builtin_attribute, bind_cached_native_class_method, comp_read_is_free, float_divmod,
+        indexed_sequence_item, invoke_class_method, live_collection_len, live_dict_view_item,
         ordered_mapping_guard_outcome, py_mod_i64, read_attribute_cache_plan,
         read_method_cache_plan, unbound_binding_error, value_from_bigint,
         write_attribute_cache_plan,

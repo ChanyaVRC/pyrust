@@ -76,6 +76,7 @@ pub fn lower_mir_to_fncode(func: &MirFn) -> FnCode {
         comp_enclosing_locals: func.comp_enclosing_locals.clone(),
         attr_cache: RefCell::new(SiteCache::new()),
         global_cache: RefCell::new(Vec::new()),
+        global_store_cache: RefCell::new(Vec::new()),
         global_cache_interest_masks,
         binop_cache: RefCell::new(Vec::new()),
         kwcall_cache: RefCell::new(SparsePcCache::new()),
