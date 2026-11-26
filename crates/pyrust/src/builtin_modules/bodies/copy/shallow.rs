@@ -8,7 +8,7 @@ use super::protocol::{
     restore_state, unpicklable_error,
 };
 use super::reconstruct::{
-    rebuild_getitem_reduction, rebuild_reduced_iterator, reconstruct_reduction_shallow,
+    rebuild_getitem_reduction, rebuild_reduced_iterator, reconstruct_reduction,
 };
 use crate::error::Result;
 use crate::interpreter::{ExpandedCallArg, Interpreter, is_exception_class};
@@ -16,11 +16,7 @@ use crate::value::{InstanceAttrs, PyDict, PyInstance, PySet, Value, ValueKind};
 
 /// Produce a shallow copy of `obj`.  Immutable types are returned as-is;
 /// mutable containers get a new top-level allocation with shared elements.
-pub(super) fn shallow_copy_with_reconstruct(
-    obj: Value,
-    reconstruct: Option<&Value>,
-    interp: &mut Interpreter,
-) -> Result<Value> {
+pub(super) fn shallow_copy(obj: Value, interp: &mut Interpreter) -> Result<Value> {
     match obj.kind() {
         // Immutable scalars & immutable sequences — return the same value.
         ValueKind::None
@@ -106,7 +102,7 @@ pub(super) fn shallow_copy_with_reconstruct(
         //   3. `copy.Error` when both reducers are disabled (`None`/missing)
         ValueKind::PyInstance(rc) => {
             let rc = Rc::clone(rc);
-            shallow_copy_instance(&rc, &obj, reconstruct, interp)
+            shallow_copy_instance(&rc, &obj, interp)
         }
 
         // Anything else (functions, classes, modules, …) — return as-is.
@@ -117,7 +113,6 @@ pub(super) fn shallow_copy_with_reconstruct(
 fn shallow_copy_instance(
     rc: &Rc<RefCell<PyInstance>>,
     obj: &Value,
-    reconstruct: Option<&Value>,
     interp: &mut Interpreter,
 ) -> Result<Value> {
     let class = Rc::clone(&rc.borrow().class);
@@ -138,23 +133,7 @@ fn shallow_copy_instance(
     }
     match resolve_instance_copy_reduction(obj, &class, false, interp)? {
         InstanceReduction::Reduced(reduction) => {
-            if let Some(reconstruct) = reconstruct {
-                interp.call_function_expanded(
-                    reconstruct.clone(),
-                    &[
-                        ExpandedCallArg {
-                            name: None,
-                            value: obj.clone(),
-                        },
-                        ExpandedCallArg {
-                            name: None,
-                            value: reduction,
-                        },
-                    ],
-                )
-            } else {
-                reconstruct_reduction_shallow(obj, reduction, interp)
-            }
+            reconstruct_reduction(obj, reduction, None, interp)
         }
         InstanceReduction::DefaultProtocol => {
             if let crate::interpreter::IteratorCopy::GetItemReduction {
@@ -185,12 +164,6 @@ fn shallow_copy_instance(
             }
         }
     }
-}
-
-/// Preserve the pre-#2958 shallow-copy implementation for recursive storage
-/// detachment, which never needs the module-generation reconstruction helper.
-fn shallow_copy(obj: Value, interp: &mut Interpreter) -> Result<Value> {
-    shallow_copy_with_reconstruct(obj, None, interp)
 }
 
 /// Default shallow-copy path for an instance: capture state, build a bare

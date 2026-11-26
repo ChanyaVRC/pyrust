@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::deep::{deep_copy_key, deep_copy_storage_elements, deep_copy_with_reconstruct};
+use super::deep::{deep_copy, deep_copy_key, deep_copy_storage_elements};
 use super::memo::memo_insert_obj;
 use super::protocol::{capture_state, restore_state};
 use crate::error::Result;
@@ -47,7 +47,6 @@ pub(super) fn deep_copy_via_protocol(
     rc: &Rc<RefCell<PyInstance>>,
     obj: &Value,
     memo: &Value,
-    reconstruct: Option<&Value>,
     interp: &mut Interpreter,
 ) -> Result<Value> {
     let (class, builtin_data, native_slots) = {
@@ -91,8 +90,8 @@ pub(super) fn deep_copy_via_protocol(
                     let mut new_map =
                         PyDict::with_capacity_and_hasher(pairs.len(), Default::default());
                     for (k, v) in pairs {
-                        let deep_k = deep_copy_key(k, memo, reconstruct, interp)?;
-                        let deep_v = deep_copy_with_reconstruct(v, memo, reconstruct, interp)?;
+                        let deep_k = deep_copy_key(k, memo, interp)?;
+                        let deep_v = deep_copy(v, memo, interp)?;
                         new_map.insert(deep_k, deep_v);
                     }
                     new_rc
@@ -114,8 +113,7 @@ pub(super) fn deep_copy_via_protocol(
             _ => {
                 // `set`/`tuple`/`frozenset` subclasses, `bytearray`, and scalar
                 // immutable backings (`int`, `float`, `str`, `bytes`, …).
-                let deep_backing =
-                    deep_copy_with_reconstruct(backing.clone(), memo, reconstruct, interp)?;
+                let deep_backing = deep_copy(backing.clone(), memo, interp)?;
                 new_rc.borrow_mut().attrs.set_builtin_data(deep_backing);
             }
         }
@@ -139,14 +137,14 @@ pub(super) fn deep_copy_via_protocol(
             && ops.is_internal_storage()
         {
             if let Some(copied_cursor) = ops.copy_storage(state) {
-                deep_copy_storage_elements(ops, state, &copied_cursor, memo, reconstruct, interp)?;
+                deep_copy_storage_elements(ops, state, &copied_cursor, memo, interp)?;
                 new_rc
                     .borrow_mut()
                     .attrs
                     .insert_slot(slot_name.as_ref(), copied_cursor);
             }
         } else {
-            let copied_slot = deep_copy_with_reconstruct(slot_value, memo, reconstruct, interp)?;
+            let copied_slot = deep_copy(slot_value, memo, interp)?;
             new_rc
                 .borrow_mut()
                 .attrs
@@ -160,7 +158,7 @@ pub(super) fn deep_copy_via_protocol(
 
     // 4. Capture state from the original, deep-copy it, then restore.
     let state = capture_state(rc, interp)?;
-    let deep_state = deep_copy_with_reconstruct(state, memo, reconstruct, interp)?;
+    let deep_state = deep_copy(state, memo, interp)?;
     restore_state(&new_rc, deep_state, interp)?;
 
     // 5. Populate post-memo mutable container backings in place.
@@ -168,21 +166,21 @@ pub(super) fn deep_copy_via_protocol(
         PostMemoBacking::None => {}
         PostMemoBacking::List { target, items } => {
             for item in items {
-                let copied = deep_copy_with_reconstruct(item, memo, reconstruct, interp)?;
+                let copied = deep_copy(item, memo, interp)?;
                 target.list_push(copied)?;
             }
         }
         PostMemoBacking::Dict { target, pairs } => {
             for (k, v) in pairs {
-                let deep_k = deep_copy_key(k, memo, reconstruct, interp)?;
-                let deep_v = deep_copy_with_reconstruct(v, memo, reconstruct, interp)?;
+                let deep_k = deep_copy_key(k, memo, interp)?;
+                let deep_v = deep_copy(v, memo, interp)?;
                 let _ = target.dict_insert(deep_k, deep_v);
             }
         }
         PostMemoBacking::Deque { target, items } => {
             if let Some(data) = pyrust_builtins::deque_storage::data(&target) {
                 for item in items {
-                    let copied = deep_copy_with_reconstruct(item, memo, reconstruct, interp)?;
+                    let copied = deep_copy(item, memo, interp)?;
                     data.borrow_mut().push_back(copied);
                 }
             }

@@ -131,3 +131,18 @@ pub(super) fn memo_insert_obj(memo: &Value, obj: &Value, copy: &Value) {
         memo_insert(memo, id, copy.clone());
     }
 }
+
+/// CPython's `_keep_alive(x, memo)`: append `x` to the list stored at
+/// `memo[id(memo)]`, creating it on first use, so a temporary copy cannot be
+/// recycled (and its `id` reused) while the memo is alive.
+pub(super) fn memo_keep_alive(memo: &Value, obj: &Value) {
+    let Some(memo_id) = value_identity(memo) else {
+        return;
+    };
+    match memo_get(memo, memo_id) {
+        Some(kept) if matches!(kept.kind(), ValueKind::List(_)) => {
+            let _ = kept.list_push(obj.clone());
+        }
+        _ => memo_insert(memo, memo_id, Value::list(vec![obj.clone()])),
+    }
+}
