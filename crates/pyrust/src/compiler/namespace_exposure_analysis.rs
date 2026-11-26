@@ -181,6 +181,10 @@ fn expr_may_expose_module_namespace(expr: &Expr) -> bool {
                 || expr_may_expose_module_namespace(target);
             target_exposed || expr_may_expose_module_namespace(index)
         }
+        Expr::SliceLit { lower, upper, step } => [lower, upper, step]
+            .iter()
+            .flat_map(|bound| bound.as_deref())
+            .any(expr_may_expose_module_namespace),
         Expr::Slice {
             target,
             lower,

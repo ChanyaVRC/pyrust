@@ -234,6 +234,10 @@ fn expr_contains_assignment_expression(expr: &Expr) -> bool {
             expr_contains_assignment_expression(target)
                 || expr_contains_assignment_expression(index)
         }
+        Expr::SliceLit { lower, upper, step } => [lower, upper, step]
+            .iter()
+            .flat_map(|bound| bound.as_deref())
+            .any(expr_contains_assignment_expression),
         Expr::Slice {
             target,
             lower,

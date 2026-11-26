@@ -137,7 +137,9 @@ fn is_pure_expr(expr: &Expr, context: &MemoPurityContext<'_>) -> bool {
         // `sys.exc_info()[2].tb_lineno`), so caching the result by argument
         // value would serve stale data. Recursing into the operands is unsound
         // because the operation itself is the external read.
-        Expr::Attr { .. } | Expr::Index { .. } | Expr::Slice { .. } => false,
+        Expr::Attr { .. } | Expr::Index { .. } | Expr::Slice { .. } | Expr::SliceLit { .. } => {
+            false
+        }
         // Comprehensions involve iteration (GetIter, ForIter) which may call
         // __iter__/__next__ — conservatively treat as impure.
         Expr::ListComp { .. }

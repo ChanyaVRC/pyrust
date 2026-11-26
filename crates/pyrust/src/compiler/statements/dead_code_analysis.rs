@@ -275,6 +275,11 @@ impl Compiler {
                 self.check_dead_expr(target);
                 self.check_dead_expr(index);
             }
+            Expr::SliceLit { lower, upper, step } => {
+                for bound in [lower, upper, step].into_iter().flatten() {
+                    self.check_dead_expr(bound);
+                }
+            }
             Expr::Slice {
                 target,
                 lower,

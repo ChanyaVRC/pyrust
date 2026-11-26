@@ -27,6 +27,11 @@ fn expr_contains_await(expr: &Expr) -> bool {
         Expr::Index { target, index, .. } => {
             expr_contains_await(target) || expr_contains_await(index)
         }
+        Expr::SliceLit { lower, upper, step } => {
+            lower.as_deref().is_some_and(expr_contains_await)
+                || upper.as_deref().is_some_and(expr_contains_await)
+                || step.as_deref().is_some_and(expr_contains_await)
+        }
         Expr::Slice {
             target,
             lower,
@@ -177,6 +182,11 @@ fn expr_has_async_collection_comp(expr: &Expr) -> bool {
         Expr::Attr { target, .. } => expr_has_async_collection_comp(target),
         Expr::Index { target, index, .. } => {
             expr_has_async_collection_comp(target) || expr_has_async_collection_comp(index)
+        }
+        Expr::SliceLit { lower, upper, step } => {
+            lower.as_deref().is_some_and(expr_has_async_collection_comp)
+                || upper.as_deref().is_some_and(expr_has_async_collection_comp)
+                || step.as_deref().is_some_and(expr_has_async_collection_comp)
         }
         Expr::Slice {
             target,

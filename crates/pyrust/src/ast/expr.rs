@@ -205,6 +205,13 @@ pub enum Expr {
         upper: Option<Box<Expr>>,
         step: Option<Box<Expr>>,
     },
+    /// Standalone slice `lo:hi:step` appearing as an element of a tuple
+    /// subscript (`a[1:2, 3]`, #3316).  Evaluates to a `slice` object.
+    SliceLit {
+        lower: Option<Box<Expr>>,
+        upper: Option<Box<Expr>>,
+        step: Option<Box<Expr>>,
+    },
     /// Walrus operator: `target := value`
     Named {
         target: Symbol,
@@ -323,6 +330,14 @@ impl Expr {
                 step,
             } => {
                 target.visit_enclosing_walrus_targets(visitor);
+                for bound in [lower, upper, step]
+                    .iter()
+                    .flat_map(|bound| bound.as_deref())
+                {
+                    bound.visit_enclosing_walrus_targets(visitor);
+                }
+            }
+            Expr::SliceLit { lower, upper, step } => {
                 for bound in [lower, upper, step]
                     .iter()
                     .flat_map(|bound| bound.as_deref())

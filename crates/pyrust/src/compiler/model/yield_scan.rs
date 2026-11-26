@@ -95,6 +95,11 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         Expr::Index { target, index, .. } => {
             expr_contains_yield(target) || expr_contains_yield(index)
         }
+        Expr::SliceLit { lower, upper, step } => {
+            lower.as_deref().is_some_and(expr_contains_yield)
+                || upper.as_deref().is_some_and(expr_contains_yield)
+                || step.as_deref().is_some_and(expr_contains_yield)
+        }
         Expr::Slice {
             target,
             lower,

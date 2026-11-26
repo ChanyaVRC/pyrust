@@ -3170,6 +3170,10 @@ impl<'a> AstParser<'a> {
             if !self.is_exact(TOK_COLON) {
                 return Ok(first);
             }
+            // `a[*x:1]` — a starred expression cannot be a slice bound.
+            if first.kind == ExprTag::Starred {
+                return Err(self.err_at_span(first.span, "invalid syntax"));
+            }
             (first.node, first.span)
         };
 

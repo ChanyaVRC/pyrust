@@ -162,6 +162,10 @@ fn pep695_expression_violation(
         Expr::Attr { target, .. } => pep695_expression_violation(target, context),
         Expr::Index { target, index, .. } => pep695_expression_violation(target, context)
             .or_else(|| pep695_expression_violation(index, context)),
+        Expr::SliceLit { lower, upper, step } => [lower, upper, step]
+            .iter()
+            .flat_map(|bound| bound.as_deref())
+            .find_map(|bound| pep695_expression_violation(bound, context)),
         Expr::Slice {
             target,
             lower,
