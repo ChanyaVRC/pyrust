@@ -97,7 +97,7 @@ pub(crate) use threading_rt::{
 mod calls {
     use super::classes::{PrimitiveLayout, classify_primitive_layout, primitive_layout_for_class};
     use super::execution::{
-        VM_HOOK_FINALIZER_ARMED, VM_HOOK_PROFILE, VM_HOOK_TRACE, VM_HOOK_WEAKREF,
+        VM_HOOK_FINALIZER_ARMED, VM_HOOK_PROFILE, VM_HOOK_TRACE, VM_HOOK_WEAKREF, vm_read,
     };
     use super::{
         CallDepthGuard, CellSlice, CellsBuf, ExpandedArgBuf, ExpandedCallArg, FnCode,

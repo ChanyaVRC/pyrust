@@ -316,6 +316,19 @@ impl Interpreter {
             return self.run_bound_user_frame_inline(&function, &code, &mut regs, &mut cells);
         }
 
+        // `*args`-only callee called positionally (#3422): bind directly,
+        // skipping the general variadic binder's intermediate vectors.
+        if has_args_param
+            && !has_kwargs_param
+            && !has_kwonly_param
+            && bound_prefix.len() <= 1
+            && args.iter().all(|a| a.name.is_none())
+        {
+            let values: smallvec::SmallVec<[Value; 8]> =
+                args.iter().map(|a| a.value.clone()).collect();
+            return self.call_varargs_positional(&function, bound_prefix.first(), &values);
+        }
+
         // Variadic path (*args / **kwargs) lives in a helper to keep this
         // function focused on the common no-variadic fast path above.
         self.call_user_function_variadic(function, args, bound_prefix, has_args_param)

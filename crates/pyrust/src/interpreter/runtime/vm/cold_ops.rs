@@ -62,8 +62,9 @@ impl Interpreter {
                 regs[*dst as usize] = self.load_class_deref(code, cells, *cell_idx)?;
             }
             Insn::GetAttrForWith(dst, obj, name_idx, proto) => {
-                regs[*dst as usize] =
-                    self.exec_get_attr_for_with(regs, *obj, *name_idx, *proto, code, num_locals)?;
+                self.exec_get_attr_for_with(
+                    regs, *dst, *obj, *name_idx, *proto, code, pc, num_locals,
+                )?;
             }
             Insn::ImportFromAttr(dst, mod_reg, name_idx) => {
                 regs[*dst as usize] =
@@ -516,18 +517,35 @@ impl Interpreter {
         Ok(())
     }
 
+    /// `GetAttrForWith`: resolve a `with` / `async with` / `async for` protocol
+    /// method.  Shares `GetAttr`'s per-site inline cache (the site is an
+    /// attr-cache site, #3422), so a warm `with cm:` rebinds the cached
+    /// `__enter__` / `__exit__` without the generic lookup.  Any lookup failure
+    /// becomes the protocol's `TypeError`, exactly as before; an unset `obj`
+    /// register still reports its own error.
+    #[allow(clippy::too_many_arguments)]
     fn exec_get_attr_for_with(
         &mut self,
-        regs: &RegSlice,
+        regs: &mut RegSlice,
+        dst: crate::bytecode::Reg,
         obj: crate::bytecode::Reg,
         name_idx: u16,
         proto: u8,
         code: &crate::bytecode::FnCode,
+        pc: usize,
         num_locals: crate::bytecode::Reg,
-    ) -> Result<Value> {
-        let obj_val = vm_read(regs, obj, num_locals)?;
-        let name = vm_pool_get(&code.names, name_idx, "name")?;
-        self.get_required_protocol_attr(&obj_val, name, proto)
+    ) -> Result<()> {
+        vm_pool_get(&code.names, name_idx, "name")?;
+        if self
+            .exec_get_attr(regs, code, pc, dst, obj, name_idx, num_locals)
+            .is_err()
+        {
+            // A failed lookup never writes `dst`, so `obj` is intact here (an
+            // unset register raises its own error from this read).
+            let obj_val = vm_read(regs, obj, num_locals)?;
+            return Err(Self::protocol_attr_type_error(&obj_val, proto));
+        }
+        Ok(())
     }
 
     fn exec_import_from_attr(

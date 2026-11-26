@@ -1,4 +1,185 @@
+/// Positional-only fast bind for a `*args`-only callee (#3422).
+///
+/// The positional argument sequence is `receiver` (a bound method's `self`,
+/// when present) followed by `args`; `function` must satisfy
+/// [`Interpreter::is_varargs_positional_callee`] and the call supplies no
+/// keywords.  Each bound value is cloned once out of `args`, which may be
+/// borrowed straight from the caller's argument registers: the borrow ends when
+/// this returns, before the callee frame runs.
+///
+/// That shape has exactly one possible binding error — a missing required
+/// positional — so the general variadic binder's `positional_vals` /
+/// `keyword_vals` / `param_vals` vectors, its keyword matching and its
+/// unexpected-keyword diagnostics are all skipped: the fixed parameters bind
+/// straight into their register/cell slots (missing trailing ones from the
+/// override-aware defaults), and the surplus is packed into one fresh tuple for
+/// `*args` (the shared empty singleton when there is none, inline storage for 2
+/// or 3 elements).  CPython 3.12 reports missing positionals before building
+/// `*args`, and so does this.
+#[inline(always)]
+pub(crate) fn bind_varargs_positional(
+    function: &Rc<UserFunction>,
+    num_regs: usize,
+    regs: &mut RegsBuf,
+    cells: &CellsBuf,
+    receiver: Option<&Value>,
+    args: &[Value],
+) -> Result<()> {
+    debug_assert!(Interpreter::is_varargs_positional_callee(function));
+    let nfixed = function.params.len() - 1;
+    let offset = usize::from(receiver.is_some());
+    let nbound = (offset + args.len()).min(nfixed);
+    if let Some(receiver) = receiver
+        && nfixed > 0
+    {
+        bind_param_direct(function, num_regs, regs, cells, 0, receiver.clone())?;
+    }
+    // Positionals from `args` that land in fixed parameters.
+    let args_bound = nbound.saturating_sub(offset);
+    for (i, value) in args[..args_bound].iter().enumerate() {
+        bind_param_direct(function, num_regs, regs, cells, offset + i, value.clone())?;
+    }
+    if nbound < nfixed {
+        bind_varargs_missing_defaults(function, num_regs, regs, cells, nbound)?;
+    }
+    // Surplus positionals → `*args`.  Only a receiver bound to a method with
+    // no fixed parameter (`def m(*args)`) lands in the tuple itself.
+    let star_args = match receiver {
+        Some(receiver) if nfixed == 0 => {
+            let mut items = Vec::with_capacity(1 + args.len());
+            items.push(receiver.clone());
+            items.extend_from_slice(args);
+            Value::tuple(items)
+        }
+        _ => Value::tuple_from_slice(&args[args_bound..]),
+    };
+    bind_param_direct(function, num_regs, regs, cells, nfixed, star_args)
+}
+
+/// Fill the fixed parameters `nbound..` of a `*args`-only callee that the call
+/// left unsupplied from their (override-aware, #2395) defaults, raising CPython's
+/// grouped "missing N required positional argument(s)" `TypeError` otherwise.
+/// Out of line: an exact-or-surplus call never reaches it.
+#[inline(never)]
+fn bind_varargs_missing_defaults(
+    function: &Rc<UserFunction>,
+    num_regs: usize,
+    regs: &mut RegsBuf,
+    cells: &CellsBuf,
+    nbound: usize,
+) -> Result<()> {
+    let nfixed = function.params.len() - 1;
+    let mut missing: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
+    for pi in nbound..nfixed {
+        match function.positional_default(pi) {
+            Some(default) => bind_param_direct(function, num_regs, regs, cells, pi, default)?,
+            None => missing.push(&function.params[pi].name),
+        }
+    }
+    check_missing_args(&function.effective_qualname(), &missing, &[])
+}
+
 impl Interpreter {
+    /// Is `function` a positional-`*args`-only callee (#3422): its LAST
+    /// parameter is `*args`?  Python's parameter order (positional-only,
+    /// positional-or-keyword, `*args`, keyword-only, `**kwargs`) makes that one
+    /// check equivalent to "has `*args`, no keyword-only parameter, no
+    /// `**kwargs`" — the shape [`bind_varargs_positional`] binds.
+    #[inline(always)]
+    pub(crate) fn is_varargs_positional_callee(function: &UserFunction) -> bool {
+        function.params.last().is_some_and(|p| p.is_args)
+    }
+
+    /// `Insn::Call` into a `*args`-only callee (#3422): a plain function
+    /// (`receiver` = `None`) or a bound method such as the `__exit__` a `with`
+    /// statement fetched (`receiver` = its `self`), whose `argc` positional
+    /// arguments sit in the caller's registers `func_reg + 1 ..`.
+    ///
+    /// Binds straight from those registers into the callee frame, skipping the
+    /// `ExpandedCallArg` buffer, the builtin call-site cache probe and the
+    /// generic callable dispatch that `call_positional_cached` would run before
+    /// reaching the same binder.  An unset argument register is reported exactly
+    /// as that path does (via `vm_read`); the caller's line is published on
+    /// `call_site_lines` for the callee's frame introspection, as there.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_varargs_positional_from_regs(
+        &mut self,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        func_reg: crate::bytecode::Reg,
+        argc: u8,
+        function: &Rc<UserFunction>,
+        receiver: Option<&Value>,
+        code: &crate::bytecode::FnCode,
+        call_site: usize,
+    ) -> Result<Value> {
+        let base = func_reg as usize + 1;
+        let end = base + argc as usize;
+        if let Some(offset) = (**regs)[base..end].iter().position(Value::is_unset) {
+            vm_read(
+                regs,
+                func_reg + 1 + offset as crate::bytecode::Reg,
+                num_locals,
+            )?;
+        }
+        let Some(callee_code) = self.get_or_compile_bytecode(function) else {
+            return Err(PyError::runtime(format!(
+                "no bytecode for '{}'",
+                function.name
+            )));
+        };
+        let num_regs = callee_code.num_regs as usize;
+        let mut callee_regs: RegsBuf = smallvec![Value::unset(); num_regs];
+        let mut cells = allocate_frame_cells(&callee_code, &function.closure_cells);
+        // The borrow of the caller's argument registers ends here, before the
+        // callee runs (it may write caller frames through frame views).
+        bind_varargs_positional(
+            function,
+            num_regs,
+            &mut callee_regs,
+            &cells,
+            receiver,
+            &(**regs)[base..end],
+        )?;
+        let line = code.line_at(call_site);
+        if line != 0 {
+            self.cold
+                .call_site_lines
+                .push((regs.non_null_ptr().as_ptr(), line));
+        }
+        let result =
+            self.run_bound_user_frame_inline(function, &callee_code, &mut callee_regs, &mut cells);
+        if line != 0 {
+            self.cold.call_site_lines.pop();
+        }
+        result
+    }
+
+    /// Run a `*args`-only callee called positionally (see
+    /// [`bind_varargs_positional`]) — the #3422 fast path of
+    /// `call_user_function_expanded` and of the `CallMethod` inline-cache hit.
+    /// `args` must not borrow a live VM register file (it is a parameter of the
+    /// frame run), so callers pass an owned argument buffer.
+    pub(crate) fn call_varargs_positional(
+        &mut self,
+        function: &Rc<UserFunction>,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<Value> {
+        let Some(code) = self.get_or_compile_bytecode(function) else {
+            return Err(PyError::runtime(format!(
+                "no bytecode for '{}'",
+                function.name
+            )));
+        };
+        let code = &code;
+        let num_regs = code.num_regs as usize;
+        let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+        let mut cells = allocate_frame_cells(code, &function.closure_cells);
+        bind_varargs_positional(function, num_regs, &mut regs, &cells, receiver, args)?;
+        self.run_bound_user_frame_inline(function, code, &mut regs, &mut cells)
+    }
+
     /// Variadic argument-binding + execution path for
     /// `call_user_function_expanded` — the `*args` / `**kwargs` case.
     /// Extracted verbatim (size reduction); the fast no-variadic path stays
