@@ -40,78 +40,24 @@ impl Compiler {
     /// - `RaiseValue`/`RaiseFrom` don't pop, but `handle_vm_error` checks for
     ///   a duplicate top-of-stack entry and removes it automatically.
     ///
-    /// So for `raise` we only need to: delete any `as VAR` binding (PEP 3110),
-    /// then inline any `finally` stmts.  `TryBody` entries don't need compile-time
-    /// cleanup — the VM's `exc_handlers` stack still covers them.
-    /// `pending_exc_reg`: when a non-bare `raise X` is in progress, the
-    /// register holding the to-be-raised exception value.  If `Some`, it is
-    /// pushed onto `handled_exc_stack` before inlining the innermost
-    /// ExceptBody's finally block, so that any raise inside the finally sees
-    /// the correct implicit context (the to-be-raised exception, not the
-    /// currently-handled one).  The push is undone by a `PopExcContext` after
-    /// the finally block completes normally.
-    fn emit_raise_cleanups(&mut self, pending_exc_reg: Option<Reg>) {
-        let total = self.except_cleanups.len();
-        // Track whether we have already processed the innermost ExceptBody.
-        // The PushExcContext is only needed for that first one.
-        let mut innermost_except_body_done = false;
-        for i in (0..total).rev() {
-            if self.failed {
-                return;
-            }
-            let cleanup = self.except_cleanups[i].clone();
-            match cleanup {
-                EarlyExitCleanup::TryBody { .. } | EarlyExitCleanup::WithBody { .. } => {
-                    // A TryBody/WithBody entry means this `raise` site is inside a
-                    // try/with body whose SetupExcept is still live on the VM's
-                    // exc_handlers stack.  The VM will dispatch the exception to
-                    // that handler at runtime (for `with`, the exception-path
-                    // `__exit__` call); no compile-time inlining is needed for
-                    // this entry or any outer entries (also covered by their own
-                    // SetupExcept).
-                    return;
-                }
-                EarlyExitCleanup::ExceptBody {
-                    finally_stmts,
-                    as_var_delete,
-                } => {
+    /// So for `raise` we only delete the `as VAR` binding (PEP 3110) of every
+    /// except-handler body the exception leaves, innermost first.  The walk
+    /// stops at the first `TryBody`/`WithBody` entry: its `SetupExcept` is live,
+    /// so the VM dispatches the exception to that handler at runtime — this
+    /// includes an enclosing `finally`, whose handler stays live across the
+    /// `except` bodies of its own `try` statement (#3357).
+    fn emit_raise_cleanups(&mut self) {
+        for i in (0..self.except_cleanups.len()).rev() {
+            match &self.except_cleanups[i] {
+                EarlyExitCleanup::TryBody { .. } | EarlyExitCleanup::WithBody { .. } => return,
+                EarlyExitCleanup::ExceptBody { as_var_delete } => {
                     // PEP 3110: delete the `as VAR` binding (matches the normal
-                    // handler exit path).  Also clear def_set so that any
-                    // reference to the variable inside the inlined finally block
-                    // correctly emits CheckLocal → UnboundLocalError, matching
-                    // CPython's behaviour (the `as` binding is gone before the
-                    // finally clause runs).
+                    // handler exit path).  This also clears `def_set`, so a
+                    // reference to the variable inside the `finally` block that
+                    // the exception reaches next emits `CheckLocal` and raises
+                    // UnboundLocalError, as in CPython.
+                    let as_var_delete = as_var_delete.clone();
                     self.emit_except_as_delete(as_var_delete);
-                    // Inline the finally block (if any) without EndExcept.
-                    // The raise instruction propagates the exception; any further
-                    // enclosing ExceptBody entries (outer except handlers whose
-                    // SetupExcept was also popped) are processed by the remaining
-                    // loop iterations.  TryBody entries at outer scopes still have
-                    // live SetupExcept handlers and are handled by the VM.
-                    if let Some(stmts) = finally_stmts {
-                        // For the innermost ExceptBody: if we have a pending
-                        // exception (non-bare raise), temporarily install it as
-                        // the active context so that any raise inside the finally
-                        // sees it as __context__ rather than the currently-handled
-                        // exception on the stack.  This matches CPython, where the
-                        // finally runs with the new exception as the active one.
-                        let push_exc_ctx = !innermost_except_body_done && pending_exc_reg.is_some();
-                        if let (true, Some(r)) = (push_exc_ctx, pending_exc_reg) {
-                            self.emit(Insn::PushExcContext(r));
-                        }
-                        let saved_tail: Vec<EarlyExitCleanup> =
-                            self.except_cleanups.drain(i..).collect();
-                        self.compile_block(&stmts);
-                        self.except_cleanups.extend(saved_tail);
-                        if push_exc_ctx {
-                            self.emit(Insn::PopExcContext);
-                        }
-                    }
-                    innermost_except_body_done = true;
-                    // Continue the loop: there may be enclosing ExceptBody entries
-                    // (from outer except handlers) whose finallys also need inlining,
-                    // because their outer SetupExcept was likewise popped when the
-                    // outer handler was entered.
                 }
             }
         }
@@ -153,17 +99,13 @@ impl Compiler {
                         self.compile_block(&stmts);
                     }
                 }
-                EarlyExitCleanup::ExceptBody {
-                    finally_stmts,
-                    as_var_delete,
-                } => {
+                EarlyExitCleanup::ExceptBody { as_var_delete } => {
                     // PEP 3110: delete the `as VAR` binding before EndExcept,
                     // matching the normal (non-early-exit) handler exit path.
+                    // An enclosing `finally` is unwound by the `TryBody` entry
+                    // beneath this one (PopExcept, then the inlined block).
                     self.emit_except_as_delete(as_var_delete);
                     self.emit(Insn::EndExcept);
-                    if let Some(stmts) = finally_stmts {
-                        self.compile_block(&stmts);
-                    }
                 }
                 EarlyExitCleanup::WithBody { ctx_reg, is_async } => {
                     // `with`/`async with` is `try: BODY finally: __exit__(...)`.

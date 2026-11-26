@@ -32,9 +32,10 @@ enum EarlyExitCleanup {
     TryBody { finally_stmts: Option<Vec<Stmt>> },
     /// Inside an except-handler body where `active_exception` is set.
     /// Early exit must emit the PEP 3110 as-var delete (if any), then
-    /// `EndExcept`, then optionally inline the finally block.
+    /// `EndExcept`.  An enclosing `finally` is not part of this entry: its
+    /// handler stays live across the handler body and is tracked by a
+    /// `TryBody` entry beneath this one (#3357).
     ExceptBody {
-        finally_stmts: Option<Vec<Stmt>>,
         /// PEP 3110: how to delete the `except E as var` binding on early exit.
         /// `Local` clears the register and, at module scope, its live globals
         /// dictionary entry.

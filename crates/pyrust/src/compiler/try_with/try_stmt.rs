@@ -162,15 +162,24 @@ impl Compiler {
                     }
                 }
 
-                // Pop outer finally handler before running handler body
-                // (so that exceptions in the handler don't double-run finally)
-                if outer_finally_patch.is_some() {
-                    self.emit(Insn::PopExcept);
+                // The outer finally handler stays live across the handler body
+                // (CPython's exception table covers the whole `except` clause):
+                // any exception escaping the body — an explicit `raise`, one
+                // raised by a call, or one injected at a suspended `yield` by
+                // `generator.throw()` / `close()` — reaches the finally handler,
+                // which runs the finally block and re-raises (#3357).  It is
+                // popped only on the handler's normal exit below.
+                //
+                // Register the cleanups for early exits from the handler body
+                // (break/continue/return), innermost last: the PEP 3110 as-var
+                // deletion plus EndExcept, then — for the live finally handler —
+                // PopExcept and the inlined finally block.  A `raise` stops at
+                // the `TryBody` entry because the finally handler catches it.
+                if let Some(finally_stmts) = finally_branch {
+                    self.except_cleanups.push(EarlyExitCleanup::TryBody {
+                        finally_stmts: Some(finally_stmts.to_vec()),
+                    });
                 }
-
-                // Register an except-body cleanup so that early exits from the
-                // handler body (break/continue/return) emit the PEP 3110 as-var
-                // deletion, EndExcept, and the inlined finally block before jumping.
                 let as_var_delete = if let Some(var_name) = &handler.name {
                     if let Some(reg) = self.local_reg(var_name) {
                         let name_index = self.intern_name(var_name);
@@ -189,14 +198,17 @@ impl Compiler {
                     None
                 };
                 self.except_cleanups.push(EarlyExitCleanup::ExceptBody {
-                    finally_stmts: finally_branch.map(|s| s.to_vec()),
                     as_var_delete: as_var_delete.clone(),
                 });
 
                 self.compile_block_with_linenos(&handler.body, &handler.body_linenos);
 
-                // Remove the except-body cleanup before emitting normal handler exit.
+                // Remove the handler-body cleanups before emitting the normal
+                // handler exit.
                 self.except_cleanups.pop();
+                if outer_finally_patch.is_some() {
+                    self.except_cleanups.pop();
+                }
 
                 if self.failed {
                     return;
@@ -208,8 +220,11 @@ impl Compiler {
                 self.emit_except_as_delete(as_var_delete);
                 self.emit(Insn::EndExcept);
 
-                // Run finally (inline) after successful handler
+                // Run finally (inline) after successful handler, outside the
+                // finally handler's protected region so an exception raised by
+                // the finally block itself does not run it a second time.
                 if let Some(finally_stmts) = finally_branch {
+                    self.emit(Insn::PopExcept);
                     self.compile_block_with_linenos(finally_stmts, finally_linenos);
                     if self.failed {
                         return;
@@ -238,9 +253,9 @@ impl Compiler {
                 // No handlers: patch the inner SetupExcept → this finally handler
                 self.patch_jump(outer_idx);
             }
-            // If has_handlers, outer_finally_patch was patched when? Actually not yet.
-            // For try/except/finally: the outer SetupExcept should catch exceptions
-            // that escape the handlers (or re-raised). We patch it here.
+            // For try/except/finally the outer SetupExcept catches exceptions
+            // that escape the try body's dispatch (no handler matched) and the
+            // handler bodies themselves, so it is patched here too.
             if has_handlers {
                 self.patch_jump(outer_idx);
             }

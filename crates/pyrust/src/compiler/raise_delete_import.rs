@@ -6,53 +6,14 @@ impl Compiler {
         // PEP 657 whole-statement caret anchor for `raise <expr>` (#2411).
         raise_span: Option<crate::ast::CaretSpan>,
     ) {
-        // If we are inside an except handler body and that handler's enclosing
-        // try/except/finally has a finally clause, the compiler already popped the
-        // outer SetupExcept from the VM's exc_handlers stack (to avoid double-running
-        // finally on exceptions from the handler body).  A `raise` statement exits the
-        // handler body, so we must inline the finally block here before emitting the
-        // raise instruction — the VM won't see the outer handler on exc_handlers.
-        // True only when we're in an except-handler body that has a finally
-        // clause to inline.  The finally clause is the only reason we need
-        // `LoadExc` before the cleanup: without it, `RaiseReRaise` can rely
-        // on `active_exception` directly.
-        let in_except_body_with_finally = self.except_cleanups.iter().any(|c| {
-            matches!(
-                c,
-                EarlyExitCleanup::ExceptBody {
-                    finally_stmts: Some(_),
-                    ..
-                }
-            )
-        });
-
         // Compile the raise expressions BEFORE any cleanup, so that references
         // to `except ... as var` bindings resolve (e.g. `raise TypeError() from e`).
         //
-        // For bare `raise` when inside an except handler body:
-        //   `emit_raise_cleanups` inlines the finally block, which may contain
-        //   a try/except that catches an exception.  If that inner exception
-        //   matches the outer handler's context entry, `handle_vm_error`'s
-        //   de-duplication logic removes it from `handled_exc_stack`, leaving
-        //   `active_exception = None` by the time `RaiseReRaise` runs.
-        //   Fix: save the current exception via `LoadExc` into a temp before
-        //   the cleanup and re-raise it as `RaiseValue` (which doesn't rely on
-        //   `active_exception` at the raise site).
-        let bare_reraise_tmp: Option<Reg> = if expr.is_none() && in_except_body_with_finally {
-            let tmp = self.alloc_temp();
-            self.emit(Insn::LoadExc(tmp));
-            Some(tmp)
-        } else {
-            None
-        };
-
-        // Compile the raise expressions (for non-bare raise forms).
-        //
-        // `emit_raise_cleanups` will delete the `as VAR` binding (PEP 3110)
-        // before inlining the finally block.  If the cause expression happens
-        // to BE the deleted local variable register, we must copy its value
-        // into a fresh temp *before* the deletion occurs.  We therefore call
-        // `ensure_temp` on both `r` and `c` after evaluating them.
+        // `emit_raise_cleanups` deletes the `as VAR` binding (PEP 3110) of each
+        // except-handler body the raise leaves.  If the raised value or the
+        // cause expression happens to BE that local variable register, we must
+        // copy its value into a fresh temp *before* the deletion occurs, so we
+        // call `ensure_temp` on both `r` and `c` after evaluating them.
         let compiled = match expr {
             None => None,
             Some(e) => {
@@ -67,9 +28,6 @@ impl Compiler {
             }
         };
         if self.failed {
-            if let Some(tmp) = bare_reraise_tmp {
-                self.free_temp(tmp);
-            }
             if let Some((r, c)) = compiled {
                 if let Some(c) = c {
                     self.free_temp(c);
@@ -79,50 +37,27 @@ impl Compiler {
             return;
         }
 
-        // For a non-bare raise inside an except handler with a finally: pass the
-        // register holding the to-be-raised exception so that emit_raise_cleanups
-        // can temporarily install it as the active context before inlining the
-        // finally block.  Bare raises don't need this because the active exception
-        // (which is already on handled_exc_stack) is the one being re-raised.
-        let pending_exc_reg = compiled.as_ref().map(|(r, _)| *r);
-        self.emit_raise_cleanups(pending_exc_reg);
-        if self.failed {
-            if let Some(tmp) = bare_reraise_tmp {
-                self.free_temp(tmp);
-            }
-            if let Some((r, c)) = compiled {
-                if let Some(c) = c {
-                    self.free_temp(c);
-                }
-                self.free_temp(r);
-            }
-            return;
-        }
+        // No `finally` block is inlined here: an enclosing `finally` handler is
+        // live across the handler body, so it runs the block with the raised
+        // exception active (#3357).
+        self.emit_raise_cleanups();
         // PEP 657 caret anchor (#2411): `raise <expr>` underlines the whole
         // raise statement (CPython behaviour).  The RaiseValue/RaiseFrom
         // instruction is what raises, so arm the statement span onto it; the
         // formatter omits it when it covers the whole dedented line (a bare
         // `raise name` at statement scope).
-        match (compiled, bare_reraise_tmp) {
-            // Bare `raise` inside an except handler body with a finally: use the
-            // saved exception value so the re-raise is independent of
-            // `active_exception`, which may have been cleared by the inlined
-            // finally block's own exception handling.
-            (None, Some(tmp)) => {
-                self.emit(Insn::RaiseValue(tmp));
-                self.free_temp(tmp);
-            }
-            // Bare `raise` outside any except body: rely on `active_exception`.
-            (None, None) => {
+        match compiled {
+            // Bare `raise`: re-raise `active_exception`.
+            None => {
                 self.emit(Insn::RaiseReRaise);
             }
-            (Some((r, Some(c))), _) => {
+            Some((r, Some(c))) => {
                 self.set_col_span_for_next(raise_span);
                 self.emit(Insn::RaiseFrom(r, c));
                 self.free_temp(c);
                 self.free_temp(r);
             }
-            (Some((r, None)), _) => {
+            Some((r, None)) => {
                 self.set_col_span_for_next(raise_span);
                 self.emit(Insn::RaiseValue(r));
                 self.free_temp(r);
