@@ -605,26 +605,37 @@ impl Interpreter {
         num_locals: u32,
     ) {
         if pyrust_core::has_live_weakrefs() {
-            let start = num_locals as usize;
             // SAFETY: `regs_ptr`/`regs_len` come directly from the active
-            // `RegSlice` of the suspended VM loop frame; no aliasing `&mut [Value]`
-            // exists concurrently.
+            // `RegSlice` of the suspended VM loop frame; no aliasing
+            // `&mut [Value]` exists concurrently.
             let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr.as_ptr(), regs_len) };
-            for (idx, v) in regs.iter_mut().enumerate().skip(start) {
-                if !v.is_unset()
-                    && !matches!(
-                        v.kind(),
-                        ValueKind::None
-                            | ValueKind::Bool(_)
-                            | ValueKind::Int(_)
-                            | ValueKind::Float(_)
-                            | ValueKind::Str(_)
-                    )
-                    && !is_temp_reg_live_at(code, pc, idx as u32)
-                {
-                    *v = Value::unset();
+            // Values are moved out here and dropped only after the memo borrow
+            // ends, so a drop can never observe the borrow.
+            let mut released: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::new();
+            if let Ok(mut memo) = code.dead_temps.try_borrow_mut() {
+                // Every dead temporary at `pc` (not just those the previous
+                // instruction touched): this hook keeps no per-frame state, and
+                // a jump target's textual predecessor is not the instruction
+                // that actually ran before it. The per-`pc` answer is computed
+                // once per code object and shared with `vm_finalizer_step`.
+                let table = &mut memo.at;
+                if table.len() != code.insns.len() {
+                    table.resize(code.insns.len(), None);
+                }
+                if let Some(entry) = table.get_mut(pc) {
+                    let dead = entry.get_or_insert_with(|| {
+                        dead_temps(code, pc, num_locals as usize, regs_len, false)
+                    });
+                    for &reg in dead.iter() {
+                        if let Some(v) = regs.get_mut(reg as usize)
+                            && !v.is_unset()
+                        {
+                            released.push(std::mem::replace(v, Value::unset()));
+                        }
+                    }
                 }
             }
+            drop(released);
         }
         if pyrust_core::has_pending_weakref_callbacks() {
             self.drain_pending_weakref_callbacks();
