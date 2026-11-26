@@ -793,10 +793,11 @@ pyrust_builtin_modules! {
     // BOM constants, incremental/stream/recoder classes, and standard text +
     // binary/text transform codecs.
     codecs @inject,
-    // `token`, `tokenize`, and `ast` (issue #3204): Python 3.12 token constants,
-    // stateful native PEP 701 tokenizer (`tokenize/lexer.rs`), and full Python
-    // 3.12 AST parser, class hierarchy, visitors, literal_eval, and unparser.
-    token @inject,
+    // `token` (issues #3204, #3348): 100% native Rust token constants in
+    // `token.rs`.  `tokenize` and `ast` (issue #3204): stateful native PEP 701
+    // tokenizer (`tokenize/lexer.rs`) and full Python 3.12 AST parser, class
+    // hierarchy, visitors, literal_eval, and unparser.
+    token,
     tokenize @inject,
     ast @inject,
     // `ipaddress`, `socket`, and `selectors` (issue #3205): Python 3.12
