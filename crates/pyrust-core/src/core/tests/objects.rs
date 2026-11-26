@@ -239,7 +239,13 @@ fn lazy_module_attrs_materialize_in_startup_order_after_earlier_mutations() {
     let listed = module_attr_names(&module);
     assert_eq!(
         listed[..5],
-        ["__name__", "__doc__", "__package__", "__loader__", "__spec__"]
+        [
+            "__name__",
+            "__doc__",
+            "__package__",
+            "__loader__",
+            "__spec__"
+        ]
     );
     assert_eq!(listed[5..], expected);
     assert_eq!(module.get_attr_value("second"), Some(Value::int(22)));
@@ -253,7 +259,10 @@ fn rebinding_a_lazy_module_attr_wins_over_the_deferred_value() {
 
     let previous = module.insert_attr("lazy_a".to_string(), Value::int(99));
     assert_eq!(previous, Some(Value::int(10)));
-    assert!(state.version() > 0, "rebinding must invalidate provider caches");
+    assert!(
+        state.version() > 0,
+        "rebinding must invalidate provider caches"
+    );
     assert!(!module.has_pending_lazy_attrs());
     assert_eq!(module.get_attr_value("lazy_a"), Some(Value::int(99)));
     assert_eq!(module.get_attr_value("lazy_b"), Some(Value::int(20)));
@@ -269,7 +278,10 @@ fn deleting_a_lazy_module_attr_never_rematerializes_it() {
     let state = module.mutation_state();
 
     assert_eq!(module.remove_attr("lazy_a"), Some(Value::int(10)));
-    assert!(state.version() > 0, "deletion must invalidate provider caches");
+    assert!(
+        state.version() > 0,
+        "deletion must invalidate provider caches"
+    );
     assert_eq!(module.get_attr_value("lazy_a"), None);
     assert_eq!(module.remove_attr("lazy_a"), None);
     assert_eq!(module_attr_names(&module), ["first", "second", "lazy_b"]);

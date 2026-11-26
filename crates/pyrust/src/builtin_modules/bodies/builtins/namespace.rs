@@ -193,8 +193,10 @@ const DEFERRED_CLASSES: crate::value::LazyModuleAttrSource = crate::value::LazyM
 /// Insertion-ordered (issue #2918): the family list and the name tables are
 /// fixed at compile time, so `vars(builtins)` is stable across runs.
 pub(crate) fn module() -> Value {
-    let mut attrs =
-        crate::value::ModuleAttrs::with_capacity_and_hasher(EAGER_SLOT_CAPACITY, Default::default());
+    let mut attrs = crate::value::ModuleAttrs::with_capacity_and_hasher(
+        EAGER_SLOT_CAPACITY,
+        Default::default(),
+    );
     visit_startup_namespace(&mut |name, slot| {
         let value = match slot {
             BuiltinsSlot::Function(registry_name) => Value::builtin_function(registry_name),
@@ -203,9 +205,7 @@ pub(crate) fn module() -> Value {
         };
         attrs.insert(name.to_string(), value);
     });
-    Value::py_module(Rc::new(RefCell::new(crate::value::PyModule::with_lazy_attrs(
-        MODULE_NAME.to_string(),
-        attrs,
-        DEFERRED_CLASSES,
-    ))))
+    Value::py_module(Rc::new(RefCell::new(
+        crate::value::PyModule::with_lazy_attrs(MODULE_NAME.to_string(), attrs, DEFERRED_CLASSES),
+    )))
 }

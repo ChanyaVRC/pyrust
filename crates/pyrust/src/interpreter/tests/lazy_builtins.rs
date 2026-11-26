@@ -155,7 +155,13 @@ fn pass_leaves_exception_hierarchy_and_deferred_builtin_classes_unbuilt() {
                 "builtins.{name} was stored as a class at startup"
             );
         }
-        for deferred in ["ValueError", "BaseException", "memoryview", "bytearray", "int"] {
+        for deferred in [
+            "ValueError",
+            "BaseException",
+            "memoryview",
+            "bytearray",
+            "int",
+        ] {
             assert!(!builtins.attrs.contains_key(deferred));
         }
     });
@@ -290,7 +296,10 @@ fn builtins_mutations_before_materialization_follow_dict_ordering() {
              names = ','.join(vars(builtins))\n\
              del builtins.added_first\n",
         );
-        assert_eq!(global_str(&interpreter, "pending"), "ValueError,added_first");
+        assert_eq!(
+            global_str(&interpreter, "pending"),
+            "ValueError,added_first"
+        );
         let expected: Vec<&str> = STARTUP_BUILTINS_HEAD
             .iter()
             .chain(BUILTINS_EXCEPTION_NAMES)
