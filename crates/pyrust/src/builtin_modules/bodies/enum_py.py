@@ -11,8 +11,9 @@
 #
 # Reference: <https://docs.python.org/3/library/enum.html>
 
+import builtins as _builtins
 import sys as _sys
-from types import DynamicClassAttribute, FunctionType as _FunctionType
+from types import DynamicClassAttribute, FunctionType as _FunctionType, MappingProxyType
 
 __all__ = [
     "EnumType",
@@ -343,6 +344,8 @@ class EnumType(type):
                 enum_class._member_names_.append(name)
                 enum_class._value2member_map_[value] = member_obj
             enum_class._member_map_[name] = member_obj
+            if member_obj.__dict__.get("__objclass__") is None:
+                member_obj.__objclass__ = enum_class
             # Do not shadow an `enum.property` / `DynamicClassAttribute` on a
             # base class (such as `Enum.name` or `Enum.value`): accessing
             # `MyEnum.value` routes through the descriptor's `__get__(None, cls)`
@@ -359,6 +362,18 @@ class EnumType(type):
         if is_flag:
             enum_class._flag_mask_ = flag_mask
             enum_class._all_bits_ = (1 << flag_mask.bit_length()) - 1 if flag_mask else 0
+
+        # A mixed-in data type's (or `object`'s) `__format__` / `__reduce_ex__`
+        # must not shadow `Enum`'s; user overrides are kept (CPython does the
+        # same for `__repr__` / `__str__` too, which already behave here).
+        if bases:
+            first_enum = bases[-1]
+            member_type = enum_class._member_type_
+            for name in ("__format__", "__reduce_ex__"):
+                if name not in ns:
+                    found_method = getattr(enum_class, name)
+                    if found_method in (getattr(object, name), getattr(member_type, name)):
+                        setattr(enum_class, name, getattr(first_enum, name))
 
         return enum_class
 
@@ -452,6 +467,36 @@ class EnumType(type):
     def __len__(cls):
         return len(cls._member_names_)
 
+    @_builtins.property
+    def __members__(cls):
+        """Read-only mapping of member name -> member, including aliases."""
+        return MappingProxyType(cls._member_map_)
+
+    def __dir__(cls):
+        interesting = set(
+            [
+                "__class__",
+                "__contains__",
+                "__doc__",
+                "__getitem__",
+                "__iter__",
+                "__len__",
+                "__members__",
+                "__module__",
+                "__name__",
+                "__qualname__",
+                "__init_subclass__",
+            ]
+            + cls._member_names_
+        )
+        for klass in cls.__mro__:
+            if klass is not object and klass is not cls._member_type_ and "__new__" in klass.__dict__:
+                interesting.add("__new__")
+                break
+        if cls._member_type_ is object:
+            return sorted(interesting)
+        return sorted(set(dir(cls._member_type_)) | interesting)
+
     def __contains__(cls, member):
         if isinstance(member, cls):
             return True
@@ -513,8 +558,43 @@ class Enum(metaclass=EnumType):
     def __str__(self):
         return "%s.%s" % (self.__class__.__name__, self._name_)
 
+    def __dir__(self):
+        interesting = set()
+        if self.__class__._member_type_ is not object:
+            interesting = set(object.__dir__(self))
+        for name in getattr(self, "__dict__", []):
+            if name[0] != "_" and name not in self._member_map_:
+                interesting.add(name)
+        for klass in self.__class__.mro():
+            for name, obj in klass.__dict__.items():
+                if name[0] == "_":
+                    continue
+                if isinstance(obj, property):
+                    # an enum.property
+                    if obj.fget is not None or name not in self._member_map_:
+                        interesting.add(name)
+                    else:
+                        interesting.discard(name)
+                elif name not in self._member_map_:
+                    interesting.add(name)
+        return sorted(
+            set(["__class__", "__doc__", "__eq__", "__hash__", "__module__"]) | interesting
+        )
+
+    def __format__(self, format_spec):
+        return str.__format__(str(self), format_spec)
+
     def __hash__(self):
         return hash(self._name_)
+
+    def __reduce_ex__(self, proto):
+        return self.__class__, (self._value_,)
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __copy__(self):
+        return self
 
 
 class ReprEnum(Enum):

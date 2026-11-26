@@ -507,6 +507,15 @@ pyrust_module! {
                 format!("'{}' object is not reversible", class.borrow().name),
             ));
         }
+        // A class whose metaclass defines `__reversed__` (e.g. an `Enum`
+        // subclass under `EnumType`): `reversed(Color)` dispatches the
+        // metaclass slot with the class as the receiver (#3339).
+        if let ValueKind::PyClass(cls) = seq.0.kind()
+            && let Some(method_val) =
+                crate::interpreter::metaclass_dunder_for_call(cls, "__reversed__")
+        {
+            return invoke_class_method(_interp, method_val?, seq.0.clone(), &[]);
+        }
         // dict / dict views are reversible by insertion order (CPython 3.8+,
         // issue #2093).  The backing IndexMap preserves insertion order, so the
         // iterator is a cursor descending the live entry positions, carrying a
