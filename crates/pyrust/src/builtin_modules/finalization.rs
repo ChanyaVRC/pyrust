@@ -14,7 +14,7 @@ pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, 
         }
         "abc" => abc::prepare_module(module),
         "collections" => prepare_collections_module(module),
-        "contextlib" => prepare_contextlib_module(module),
+        "contextlib" => contextlib::prepare_module(interpreter, module),
         "functools" => prepare_functools_module(module),
         "itertools" => prepare_itertools_module(module),
         "io" => io::prepare_module(interpreter, module),
@@ -150,10 +150,6 @@ fn prepare_collections_module(module: &Value) {
 
 fn prepare_functools_module(module: &Value) {
     functools::prepare_module_classes(module);
-}
-
-fn prepare_contextlib_module(module: &Value) {
-    contextlib::prepare_module_classes(module);
 }
 
 fn prepare_itertools_module(module: &Value) {

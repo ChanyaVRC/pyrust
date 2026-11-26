@@ -131,6 +131,32 @@ impl Interpreter {
         }
     }
 
+    /// Resume an awaitable's iterator (as returned by [`Self::get_awaitable`])
+    /// by one `YieldFrom` step on behalf of a native coroutine.
+    ///
+    /// Sends `sent_value`, or throws `inject_exc` into the iterator when one is
+    /// supplied, using exactly the machinery the VM's `await` uses.  A
+    /// `StopIteration` raised by the iterator becomes
+    /// [`CoroStep::Returned`] carrying its value (`None` when absent).
+    pub(crate) fn await_step(
+        &mut self,
+        iterator: &Value,
+        sent_value: Value,
+        inject_exc: Option<PyError>,
+    ) -> Result<CoroStep> {
+        let stepped = match inject_exc {
+            Some(exc) => self.yield_from_throw_forward(iterator, exc),
+            None => self.yield_from_advance(iterator, sent_value),
+        };
+        match stepped {
+            Ok(yielded) => Ok(CoroStep::Yielded(yielded)),
+            Err(error) if is_stop_iteration_error(&error) => Ok(CoroStep::Returned(
+                extract_stop_iteration_value(&error).unwrap_or_else(Value::none),
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Advance a `yield from` sub-iterator by one step, forwarding `sent_val`
     /// to the sub-iterator's `send()` method if it is a generator.
     ///

@@ -33,8 +33,23 @@ pub(crate) struct NativeCoroState {
     pub(crate) done: bool,
 }
 
+/// Coroutine body supplied by another native module (for example `contextlib`).
+///
+/// `step` is resumed exactly like the built-in bodies: with the value sent into
+/// the coroutine, or with an exception to throw into it.
+pub(crate) trait ExternalCoroBody {
+    fn step(
+        &mut self,
+        interp: &mut Interpreter,
+        sent_value: Value,
+        inject_exc: Option<PyError>,
+    ) -> Result<CoroStep>;
+}
+
 /// All native async operations in `asyncio`.
 pub(crate) enum CoroBody {
+    /// A body implemented by another native module.
+    External(Box<dyn ExternalCoroBody>),
     /// `Future.__await__()`
     AwaitFuture {
         fut: Value,
@@ -615,6 +630,8 @@ fn step_body(
     inject_exc: Option<PyError>,
 ) -> Result<CoroStep> {
     match body {
+        CoroBody::External(external) => external.step(interp, sent_value, inject_exc),
+
         // ── Future.__await__ ─────────────────────────────────────────────
         CoroBody::AwaitFuture { fut, yielded } => {
             if let Some(exc) = inject_exc {
