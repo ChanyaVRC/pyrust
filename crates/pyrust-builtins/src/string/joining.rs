@@ -124,24 +124,30 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
         ),
         ValueKind::Str(s) => {
             // Iterating a str yields single codepoints; join them with `sep`
-            // between each, allocating the result once.  Codepoints are
-            // copied as byte slices at their lead bytes, so lone surrogates
-            // never become `char`s (#3315).
+            // between each, allocating the result once.
             let n = str_codepoint_count(s);
             if n == 0 {
                 return Ok(Value::string(String::new()));
             }
             let total = s.len() + sep.len() * (n - 1);
             let mut out = String::with_capacity(total);
-            let mut last = 0usize;
-            for (i, &b) in s.as_bytes().iter().enumerate().skip(1) {
-                if b & 0xC0 != 0x80 {
-                    out.push_str(&s[last..i]);
-                    out.push_str(sep);
-                    last = i;
+            if !iterable.str_is_ascii() && str_has_surrogates(s) {
+                // Lone surrogates are not `char`s (decoding one is UB,
+                // #3315): walk raw codepoints and re-push them as CESU-8.
+                for (i, cp) in cesu8_codepoints(s).enumerate() {
+                    if i != 0 {
+                        out.push_str(sep);
+                    }
+                    push_codepoint(&mut out, cp);
+                }
+            } else {
+                for (i, c) in s.chars().enumerate() {
+                    if i != 0 {
+                        out.push_str(sep);
+                    }
+                    out.push(c);
                 }
             }
-            out.push_str(&s[last..]);
             Ok(Value::string(out))
         }
         _ => Err(PyError::named(

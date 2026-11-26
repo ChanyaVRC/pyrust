@@ -18,42 +18,37 @@
 /// Lead byte of every CESU-8 surrogate sequence (and of U+D000..=U+D7FF).
 const SURROGATE_LEAD: u8 = 0xED;
 
-/// Position of the first `0xED` byte in `bytes`: a word-at-a-time scan so the
-/// surrogate check stays cheap on long non-ASCII text.
-#[inline]
-fn find_surrogate_lead(bytes: &[u8]) -> Option<usize> {
-    const LO: u64 = 0x0101_0101_0101_0101;
-    const HI: u64 = 0x8080_8080_8080_8080;
-    const PATTERN: u64 = LO * SURROGATE_LEAD as u64;
-    let mut i = 0;
-    while let Some(chunk) = bytes.get(i..i + 8) {
-        let word = u64::from_le_bytes(chunk.try_into().expect("8-byte chunk")) ^ PATTERN;
-        // Exact "some byte of `word` is zero" test, i.e. some byte was 0xED.
-        if word.wrapping_sub(LO) & !word & HI != 0 {
-            break;
-        }
-        i += 8;
-    }
-    bytes[i..]
-        .iter()
-        .position(|&b| b == SURROGATE_LEAD)
-        .map(|off| i + off)
-}
-
 /// Byte offset of the first CESU-8 surrogate at or after `from`.
+///
+/// A surrogate is the byte pair `ED [A0-BF]`; `ED [80-9F]` is valid UTF-8
+/// (Hangul U+D000..=U+D7FF), so the pair, not the lead byte alone, is what
+/// must be matched.  The hot loop tests 32-byte windows with a branch-free
+/// compare that LLVM vectorises, stepping 31 bytes so every adjacent pair
+/// falls inside some window; Hangul-heavy text therefore costs no more than
+/// any other text.  Only a window that contains a hit is rescanned bytewise.
 #[inline]
 fn find_surrogate_from(bytes: &[u8], from: usize) -> Option<usize> {
-    let mut i = from;
-    while let Some(off) = find_surrogate_lead(&bytes[i..]) {
-        let pos = i + off;
-        // `ED 80..=9F` is valid UTF-8 (U+D000..=U+D7FF); `ED A0..=BF` is a
-        // surrogate.
-        if bytes.get(pos + 1).is_some_and(|&b| b >= 0xA0) {
-            return Some(pos);
-        }
-        i = pos + 1;
+    const WINDOW: usize = 32;
+    #[inline(always)]
+    fn is_pair(lead: u8, next: u8) -> bool {
+        (lead == SURROGATE_LEAD) & (next >= 0xA0)
     }
-    None
+    let mut i = from;
+    while let Some(window) = bytes.get(i..i + WINDOW) {
+        let window: &[u8; WINDOW] = window.try_into().expect("32-byte window");
+        let mut any = false;
+        for k in 0..WINDOW - 1 {
+            any |= is_pair(window[k], window[k + 1]);
+        }
+        if any {
+            break;
+        }
+        i += WINDOW - 1;
+    }
+    let tail = bytes.get(i..)?;
+    tail.windows(2)
+        .position(|pair| is_pair(pair[0], pair[1]))
+        .map(|off| i + off)
 }
 
 /// Returns `true` when `s` holds at least one lone surrogate.
@@ -164,11 +159,24 @@ pub fn str_codepoint_offset(s: &str, n: usize) -> usize {
     if n == 0 {
         return 0;
     }
+    let bytes = s.as_bytes();
     let mut seen = 0usize;
-    for (i, &b) in s.as_bytes().iter().enumerate() {
+    let mut i = 0usize;
+    // Skip whole 8-byte words while the target boundary lies beyond them,
+    // counting codepoint lead bytes word-at-a-time.
+    while let Some(chunk) = bytes.get(i..i + 8) {
+        let starts =
+            utf8_starts_in_word(u64::from_ne_bytes(chunk.try_into().expect("8-byte chunk")));
+        if seen + starts > n {
+            break;
+        }
+        seen += starts;
+        i += 8;
+    }
+    for (j, &b) in bytes[i..].iter().enumerate() {
         if b & 0xC0 != 0x80 {
             if seen == n {
-                return i;
+                return i + j;
             }
             seen += 1;
         }

@@ -109,6 +109,8 @@ pub fn extract_optional_int(args: &[Value], idx: usize) -> Result<Option<i64>> {
 pub fn extract_fill_char(args: &[Value]) -> Result<&str> {
     match args.get(1).map(|v| v.kind()) {
         None => Ok(" "),
+        // A one-byte string is a single ASCII codepoint.
+        Some(ValueKind::Str(s)) if s.len() == 1 => Ok(s),
         Some(ValueKind::Str(s)) => {
             let mut codepoints = crate::object_model::cesu8_codepoints(s);
             match (codepoints.next(), codepoints.next()) {

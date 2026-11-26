@@ -317,6 +317,96 @@ fn is_python_space_cp(cp: u32) -> bool {
     )
 }
 
+/// Bit `b` is set for every ASCII byte `b` in `Py_UNICODE_ISSPACE`:
+/// `\t\n\x0b\x0c\r`, `\x1c`–`\x1f` and the space.
+const PY_ASCII_SPACE_MASK: u64 = (0b1_1111 << 0x09) | (0b1111 << 0x1C) | (1 << 0x20);
+
+/// Byte length of the `Py_UNICODE_ISSPACE` codepoint that starts at byte `i`
+/// of `b`, or 0 when it is not whitespace (or `i` is mid-codepoint).
+///
+/// Works on raw bytes: the only non-ASCII whitespace lead bytes are `C2`
+/// (U+0085, U+00A0), `E1` (U+1680), `E2` (U+2000..=U+200A, U+2028, U+2029,
+/// U+202F, U+205F) and `E3` (U+3000), so nothing is decoded and a lone
+/// surrogate (`ED ..`) is simply non-whitespace (#3315).
+#[inline(always)]
+fn py_space_len_at(b: &[u8], i: usize) -> usize {
+    let c = b[i];
+    if c < 0x80 {
+        return usize::from(c <= 0x20 && (PY_ASCII_SPACE_MASK >> c) & 1 != 0);
+    }
+    // Dispatch on the lead byte first so continuation bytes and every other
+    // lead byte return without reading ahead.
+    match c {
+        0xC2 => 2 * usize::from(matches!(b.get(i + 1), Some(0x85 | 0xA0))),
+        0xE1..=0xE3 => {
+            let tail = (b.get(i + 1).copied(), b.get(i + 2).copied());
+            let space = match c {
+                0xE1 => tail == (Some(0x9A), Some(0x80)),
+                0xE2 => matches!(
+                    tail,
+                    (Some(0x80), Some(0x80..=0x8A | 0xA8 | 0xA9 | 0xAF)) | (Some(0x81), Some(0x9F))
+                ),
+                _ => tail == (Some(0x80), Some(0x80)),
+            };
+            3 * usize::from(space)
+        }
+        _ => 0,
+    }
+}
+
+/// Width in bytes of the codepoint whose lead byte is `lead`.
+#[inline(always)]
+fn codepoint_width(lead: u8) -> usize {
+    match lead {
+        0x00..=0x7F => 1,
+        0x80..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        _ => 4,
+    }
+}
+
+/// Byte length of the whitespace codepoint that ends at byte `end` (> 0), or
+/// 0.  A match is always a complete lead-plus-continuation sequence, so it
+/// only occurs when `end` is a codepoint boundary.
+#[inline(always)]
+fn py_space_len_before(b: &[u8], end: usize) -> usize {
+    let c = b[end - 1];
+    if c < 0x80 {
+        return usize::from(c <= 0x20 && (PY_ASCII_SPACE_MASK >> c) & 1 != 0);
+    }
+    if end >= 2 && py_space_len_at(b, end - 2) == 2 {
+        2
+    } else if end >= 3 && py_space_len_at(b, end - 3) == 3 {
+        3
+    } else {
+        0
+    }
+}
+
+/// First byte at or after `i` that does not start a whitespace codepoint.
+#[inline(always)]
+fn skip_py_spaces(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() {
+        match py_space_len_at(b, i) {
+            0 => break,
+            k => i += k,
+        }
+    }
+    i
+}
+
+/// Last byte boundary at or before `end` not preceded by whitespace.
+#[inline(always)]
+fn skip_py_spaces_back(b: &[u8], mut end: usize) -> usize {
+    while end > 0 {
+        match py_space_len_before(b, end) {
+            0 => break,
+            k => end -= k,
+        }
+    }
+    end
+}
+
 /// Python's `str.isalnum()`: a character is alphanumeric when it is alphabetic
 /// (`isalpha`), or has Numeric_Type Decimal (`isdecimal`), Digit (`isdigit`), or
 /// Numeric (`isnumeric`). Symbol categories such as circled letters (So) are

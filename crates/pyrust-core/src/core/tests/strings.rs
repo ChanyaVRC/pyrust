@@ -229,3 +229,36 @@ fn push_codepoint_writes_scalars_and_lone_surrogates() {
         b"A\xC3\xA9\xF4\x8F\xBF\xBF\xED\xA0\x80\xED\xBF\xBF"
     );
 }
+
+#[test]
+fn surrogate_scan_and_offsets_cover_every_window_alignment() {
+    // A surrogate at each byte offset exercises every lane of the 7-byte-step
+    // window scan, after both ASCII and Hangul (0xED-led, non-surrogate) text.
+    for filler in ['a', '\u{D55C}', '\u{E9}'] {
+        for count in 0..24 {
+            let prefix: String = std::iter::repeat_n(filler, count).collect();
+            assert!(!str_has_surrogates(&prefix), "{filler:?} x {count}");
+            let mut text = prefix.clone();
+            push_codepoint(&mut text, 0xDC80);
+            text.push_str(&prefix);
+            assert!(str_has_surrogates(&text), "{filler:?} x {count}");
+            let first = str_segments(&text).find_map(|seg| match seg {
+                StrSegment::Surrogate { cp, .. } => Some(cp),
+                StrSegment::Text(_) => None,
+            });
+            assert_eq!(first, Some(0xDC80));
+        }
+    }
+
+    // Word-at-a-time codepoint offsets agree with `char_indices` on long
+    // mixed-width text at every index, including the end boundary.
+    let text = "ab\u{E9}\u{65E5}\u{1F642}cd\u{D55C}".repeat(7);
+    let expected: Vec<usize> = text
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    for (n, &offset) in expected.iter().enumerate() {
+        assert_eq!(str_codepoint_offset(&text, n), offset, "index {n}");
+    }
+}

@@ -15,6 +15,7 @@ fn repr_quote(s: &str) -> char {
 /// undefined-behaviour precondition check and aborts when the decoded value is
 /// a surrogate.  This iterator decodes the bytes manually and yields `u32`
 /// values directly, avoiding `char` entirely for the surrogate range.
+#[inline]
 pub fn cesu8_codepoints(s: &str) -> impl Iterator<Item = u32> + '_ {
     let mut byte_offset = 0;
     std::iter::from_fn(move || {
@@ -28,6 +29,7 @@ pub fn cesu8_codepoints(s: &str) -> impl Iterator<Item = u32> + '_ {
 /// byte offset.  This is the cursor form of [`cesu8_codepoints`], used by lazy
 /// string iterators so they do not materialise every one-character `Value`
 /// before yielding the first item.
+#[inline]
 pub fn cesu8_next_codepoint(s: &str, byte_offset: usize) -> Option<(u32, usize)> {
     let bytes = s.as_bytes();
     let b0 = *bytes.get(byte_offset)?;

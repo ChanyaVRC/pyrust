@@ -127,7 +127,7 @@ pub fn str_maketrans(args: &[Value]) -> Result<Value> {
 /// - `None`  → delete character
 /// - `int`   → replace with `chr(int)`
 /// - `str`   → replace with that string
-fn str_translate(s: &str, args: &[Value]) -> Result<Value> {
+fn str_translate(s: &str, is_ascii: bool, args: &[Value]) -> Result<Value> {
     if args.len() != 1 {
         return Err(PyError::named(
             "TypeError",
@@ -151,50 +151,61 @@ fn str_translate(s: &str, args: &[Value]) -> Result<Value> {
     };
 
     let mut out = String::with_capacity(s.len());
-    // Walk codepoints with the surrogate-safe cursor: a lone surrogate in the
-    // receiver is looked up (and kept) like any other codepoint (#3315).
-    let mut pos = 0usize;
-    while let Some((cp, next)) = cesu8_next_codepoint(s, pos) {
-        let original = &s[pos..next];
-        pos = next;
-        match dict.get(&PyKey::Int(i64::from(cp))) {
-            None => out.push_str(original),
-            Some(v) => match v.kind() {
-                ValueKind::None => { /* delete */ }
-                ValueKind::Int(n) => {
-                    if !(0..=0x10FFFF).contains(&n) {
-                        return Err(PyError::named(
-                            "ValueError",
-                            "character mapping must be in range(0x110000)".to_string(),
-                        ));
-                    }
-                    // CPython's str freely stores lone surrogates, so a
-                    // surrogate mapping value is written as its CESU-8 bytes.
-                    push_codepoint(&mut out, n as u32);
-                }
-                ValueKind::BigInt(_) => {
-                    // A BigInt is always outside the valid codepoint range
-                    // 0..=0x10FFFF, so it can never be a legal mapping value.
-                    return Err(PyError::named(
-                        "ValueError",
-                        "character mapping must be in range(0x110000)".to_string(),
-                    ));
-                }
-                ValueKind::Bool(b) => {
-                    // bool is a subclass of int; False=0 (NUL), True=1 (SOH)
-                    push_codepoint(&mut out, u32::from(b));
-                }
-                ValueKind::Str(repl) => {
-                    out.push_str(repl);
-                }
-                _ => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "character mapping must return integer, None or str".to_string(),
-                    ));
-                }
-            },
+    if !is_ascii && str_has_surrogates(s) {
+        // Lone surrogates are not `char`s (decoding one is UB, #3315): look
+        // up raw codepoints and re-push unmapped ones as CESU-8.
+        for cp in cesu8_codepoints(s) {
+            match dict.get(&PyKey::Int(i64::from(cp))) {
+                None => push_codepoint(&mut out, cp),
+                Some(v) => push_translation(v, &mut out)?,
+            }
+        }
+    } else {
+        for c in s.chars() {
+            match dict.get(&PyKey::Int(c as i64)) {
+                None => out.push(c),
+                Some(v) => push_translation(v, &mut out)?,
+            }
         }
     }
     Ok(Value::string(out))
+}
+
+/// Write the `str.translate` replacement `v` (a found `table[cp]` value) to
+/// `out`.
+fn push_translation(v: &Value, out: &mut String) -> Result<()> {
+    match v.kind() {
+        ValueKind::None => { /* delete */ }
+        ValueKind::Int(n) => {
+            if !(0..=0x10FFFF).contains(&n) {
+                return Err(PyError::named(
+                    "ValueError",
+                    "character mapping must be in range(0x110000)".to_string(),
+                ));
+            }
+            // CPython's str freely stores lone surrogates, so a surrogate
+            // mapping value is written as its CESU-8 bytes.
+            push_codepoint(out, n as u32);
+        }
+        ValueKind::BigInt(_) => {
+            // A BigInt is always outside the valid codepoint range
+            // 0..=0x10FFFF, so it can never be a legal mapping value.
+            return Err(PyError::named(
+                "ValueError",
+                "character mapping must be in range(0x110000)".to_string(),
+            ));
+        }
+        ValueKind::Bool(b) => {
+            // bool is a subclass of int; False=0 (NUL), True=1 (SOH)
+            push_codepoint(out, u32::from(b));
+        }
+        ValueKind::Str(repl) => out.push_str(repl),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "character mapping must return integer, None or str".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }

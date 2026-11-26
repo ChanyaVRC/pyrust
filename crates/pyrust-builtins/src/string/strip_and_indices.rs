@@ -76,7 +76,21 @@ fn strip_chars(
     let (start, end) = match chars_arg {
         // CPython strips `Py_UNICODE_ISSPACE` characters, the same set as
         // `str.isspace()` (it includes `\x1c`–`\x1f`, unlike Rust's `trim`).
-        None => strip_span(s, left, right, is_python_space_cp),
+        // Scanned on raw bytes, like `split()`.
+        None => {
+            let b = s.as_bytes();
+            let start = if left { skip_py_spaces(b, 0) } else { 0 };
+            let mut end = b.len();
+            if right {
+                while end > start {
+                    match py_space_len_before(b, end) {
+                        0 => break,
+                        k => end -= k,
+                    }
+                }
+            }
+            (start, end)
+        }
         // Nothing can be stripped.
         Some("") => (0, s.len()),
         Some(chars) if chars.len() == 1 => {
@@ -260,23 +274,10 @@ fn str_slice_args(s: &str, is_ascii: bool, args: &[Value]) -> Result<Option<(usi
     }
     // Clamp start_char to char_len so the single-pass loop terminates correctly.
     let start_char = start_char.min(char_len);
-    // Single pass over the codepoint lead bytes to find both byte positions.
-    let mut start_byte = s.len();
-    let mut end_byte = s.len();
-    let mut i = 0usize;
-    for (b, &byte) in s.as_bytes().iter().enumerate() {
-        if byte & 0xC0 == 0x80 {
-            continue;
-        }
-        if i == start_char {
-            start_byte = b;
-        }
-        if i == end_char {
-            end_byte = b;
-            break;
-        }
-        i += 1;
-    }
+    // Resolve both bounds by counting codepoint lead bytes word-at-a-time,
+    // the second scan resuming where the first stopped.
+    let start_byte = str_codepoint_offset(s, start_char);
+    let end_byte = start_byte + str_codepoint_offset(&s[start_byte..], end_char - start_char);
     Ok(Some((start_byte, end_byte)))
 }
 

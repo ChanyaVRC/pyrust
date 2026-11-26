@@ -313,20 +313,19 @@ impl Interpreter {
                 Ok(Value::string(out))
             }
             ValueKind::Str(s) => {
-                // Record each codepoint's starting byte (its lead byte) and
-                // copy the selected codepoints as byte slices.  Decoding into
-                // `char`s would be UB on lone surrogates (#3315).  String
-                // lengths fit the u32 header field, so u32 offsets suffice.
-                let bytes = s.as_bytes();
-                let starts: Vec<u32> = (0..bytes.len())
-                    .filter(|&i| bytes[i] & 0xC0 != 0x80)
-                    .map(|i| i as u32)
-                    .collect();
-                let mut out = String::with_capacity(s.len().min(indices.len() * 4));
-                for ix in indices {
-                    let begin = starts[ix] as usize;
-                    let end = starts.get(ix + 1).map_or(s.len(), |&next| next as usize);
-                    out.push_str(&s[begin..end]);
+                let mut out = String::new();
+                if pyrust_core::str_has_surrogates(s) {
+                    // Decoding a lone surrogate into a `char` is UB (#3315):
+                    // collect raw codepoints and re-push them as CESU-8.
+                    let codepoints: Vec<u32> = pyrust_core::cesu8_codepoints(s).collect();
+                    for ix in indices {
+                        pyrust_core::push_codepoint(&mut out, codepoints[ix]);
+                    }
+                } else {
+                    let chars: Vec<char> = s.chars().collect();
+                    for ix in indices {
+                        out.push(chars[ix]);
+                    }
                 }
                 Ok(Value::string(out))
             }

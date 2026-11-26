@@ -98,10 +98,17 @@ fn str_zfill(src: &Value, s: &str, is_ascii: bool, width: i64) -> Result<Value> 
     try_reserve_str(&mut out, total)?;
     // Preserve a leading sign character.  The sign test is a byte comparison,
     // so a leading lone surrogate is never decoded into a `char` (#3315).
-    let sign_len = usize::from(matches!(s.as_bytes().first(), Some(b'+' | b'-')));
-    out.push_str(&s[..sign_len]);
-    out.extend(std::iter::repeat_n('0', pad));
-    out.push_str(&s[sign_len..]);
+    let rest = match s.as_bytes().first() {
+        Some(&sign @ (b'+' | b'-')) => {
+            out.push(char::from(sign));
+            &s[1..]
+        }
+        _ => s,
+    };
+    for _ in 0..pad {
+        out.push('0');
+    }
+    out.push_str(rest);
     Ok(Value::string(out))
 }
 
@@ -112,22 +119,33 @@ fn str_expandtabs(src: &Value, s: &str, tabsize: i64) -> Value {
     let tabsize = tabsize.max(0) as usize;
     let mut out = String::with_capacity(s.len());
     let mut col: usize = 0;
-    // Scan bytes: tabs and line breaks are ASCII (always codepoint
+    if src.str_is_ascii() || !str_has_surrogates(s) {
+        for c in s.chars() {
+            match c {
+                '\t' => push_tab_expansion(&mut out, &mut col, tabsize),
+                '\n' | '\r' => {
+                    out.push(c);
+                    col = 0;
+                }
+                _ => {
+                    out.push(c);
+                    col += 1;
+                }
+            }
+        }
+        return Value::string(out);
+    }
+    // Lone surrogates are not `char`s (decoding one is UB, #3315): scan
+    // bytes instead.  Tabs and line breaks are ASCII (always codepoint
     // boundaries), every other codepoint advances the column once at its lead
-    // byte, and the runs between tabs are copied as slices.  No `char` is
-    // decoded, so lone surrogates are safe (#3315).
+    // byte, and the runs between tabs are copied as slices.
     let mut run_start = 0usize;
     for (i, &b) in s.as_bytes().iter().enumerate() {
         match b {
             b'\t' => {
                 out.push_str(&s[run_start..i]);
                 run_start = i + 1;
-                // A tab with size 0 is removed.
-                if tabsize != 0 {
-                    let spaces = tabsize - (col % tabsize);
-                    out.extend(std::iter::repeat_n(' ', spaces));
-                    col += spaces;
-                }
+                push_tab_expansion(&mut out, &mut col, tabsize);
             }
             b'\n' | b'\r' => col = 0,
             _ if b & 0xC0 != 0x80 => col += 1,
@@ -136,4 +154,14 @@ fn str_expandtabs(src: &Value, s: &str, tabsize: i64) -> Value {
     }
     out.push_str(&s[run_start..]);
     Value::string(out)
+}
+
+/// Expand one tab at column `col`; a tab with size 0 is removed.
+#[inline]
+fn push_tab_expansion(out: &mut String, col: &mut usize, tabsize: usize) {
+    if tabsize != 0 {
+        let spaces = tabsize - (*col % tabsize);
+        out.extend(std::iter::repeat_n(' ', spaces));
+        *col += spaces;
+    }
 }

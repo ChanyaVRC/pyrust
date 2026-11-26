@@ -4,7 +4,8 @@ use pyrust_core::{
     PyBigIntSign, PyDict, PyError, PyKey, Result, StrSegment, Value, ValueKind, builtin_type_name,
     cesu8_codepoints, cesu8_next_codepoint, cesu8_prev_codepoint, cp_is_printable,
     expect_arg_count, extract_fill_char, extract_int, extract_optional_int, map_str_segments,
-    push_codepoint, py_value_display_name, str_codepoint_count, str_has_surrogates, str_segments,
+    push_codepoint, py_value_display_name, str_codepoint_count, str_codepoint_offset,
+    str_has_surrogates, str_segments,
 };
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
@@ -480,7 +481,7 @@ pub fn call_prevalidated(method: &str, src: &Value, args: &[Value]) -> Result<Va
             cesu8_codepoints(s).all(cp_is_printable)
         })),
         "encode" => str_encode(s, args),
-        "translate" => str_translate(s, args),
+        "translate" => str_translate(s, src.str_is_ascii(), args),
         // `format` is intercepted by the interpreter's builtin-method domain
         // and routed through `format_str_template` (which handles kwargs).
         // This arm exists solely to satisfy the drift-guard test that verifies
