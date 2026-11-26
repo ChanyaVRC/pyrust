@@ -16,6 +16,8 @@
 
 #[macro_use]
 pub(crate) mod macros;
+pub(crate) mod asyncio_rt;
+pub(crate) mod asyncio_submodules;
 pub(crate) mod encodings_codecs;
 pub(crate) mod internal_shims;
 pub(crate) mod ssl_engine;
@@ -184,6 +186,7 @@ macro_rules! pyrust_builtin_modules {
                     all.extend_from_slice($ident::regs());
                 }
             )*
+            all.extend(asyncio_submodules::all_regs());
             all.extend(encodings_codecs::all_regs());
             all.extend(internal_shims::all_regs());
             all
@@ -201,6 +204,9 @@ macro_rules! pyrust_builtin_modules {
                     }
                 }
             )*
+            if let Some(m) = asyncio_submodules::load_builtin_module(name) {
+                return Some(m);
+            }
             if let Some(m) = encodings_codecs::load_builtin_module(name) {
                 return Some(m);
             }
@@ -218,7 +224,8 @@ macro_rules! pyrust_builtin_modules {
                     }
                 }
             )*
-            encodings_codecs::is_builtin_module(name)
+            asyncio_submodules::is_builtin_module(name)
+                || encodings_codecs::is_builtin_module(name)
                 || internal_shims::is_builtin_module(name)
         }
 
@@ -375,7 +382,11 @@ macro_rules! pyrust_builtin_modules {
                 "xml.etree.cElementTree" => {
                     return xml_etree_celementtree::post_load_init(interp, module);
                 }
+                "asyncio" => return asyncio::post_load_init(interp, module),
                 _ => {}
+            }
+            if asyncio_submodules::post_load_init(name, interp, module)? {
+                return Ok(());
             }
             if encodings_codecs::post_load_init(name, interp, module)? {
                 return Ok(());
@@ -462,10 +473,10 @@ pyrust_builtin_modules! {
     // `pyrust_module!` plus `json_py.py` injected by the `@inject` post-load
     // hook.
     json @inject,
-    // Minimal async/await support (issue #1039): `asyncio.run` is native;
-    // `sleep` / `gather` are injected from `asyncio_py.py` by the `@inject`
-    // post-load hook.
-    asyncio @inject,
+    // 100% native-Rust Python 3.12 `asyncio` (issues #2281, #3154, #3254):
+    // event loop, streams, transports/protocols, TLS, Runner, subprocesses,
+    // and 26 `asyncio.*` submodules (no `@inject`).
+    asyncio,
     // `abc` (issue #2612): the whole surface (`ABCMeta`, `ABC`,
     // `abstractmethod`, …) is defined in `abc_py.py` and injected by the
     // `@inject` post-load hook; the native body is empty.
