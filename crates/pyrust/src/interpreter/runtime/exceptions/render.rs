@@ -257,22 +257,22 @@ pub(super) fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> R
 /// or `\UNNNNNNNN` notation.  This is the pure string-transformation step
 /// used by `ascii_repr_interp`.
 fn ascii_escape_str(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| {
-            if c.is_ascii() {
-                vec![c]
-            } else {
-                let cp = c as u32;
-                if cp <= 0xFF {
-                    format!("\\x{cp:02x}").chars().collect()
-                } else if cp <= 0xFFFF {
-                    format!("\\u{cp:04x}").chars().collect()
-                } else {
-                    format!("\\U{cp:08x}").chars().collect()
-                }
-            }
-        })
-        .collect()
+    use std::fmt::Write as _;
+    // Raw codepoints, not `char`s: a user `__repr__` may return a lone
+    // surrogate, which escapes as `\udcXX` like any other BMP codepoint (#3315).
+    let mut out = String::with_capacity(s.len());
+    for cp in pyrust_core::cesu8_codepoints(s) {
+        if cp < 0x80 {
+            out.push(char::from(cp as u8));
+        } else if cp <= 0xFF {
+            let _ = write!(out, "\\x{cp:02x}");
+        } else if cp <= 0xFFFF {
+            let _ = write!(out, "\\u{cp:04x}");
+        } else {
+            let _ = write!(out, "\\U{cp:08x}");
+        }
+    }
+    out
 }
 
 /// Interpreter-aware `ascii()` implementation.  Dispatches user `__repr__` for

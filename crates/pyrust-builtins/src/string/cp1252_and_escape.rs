@@ -91,11 +91,25 @@ fn encode_cp1252(source: &str, errors: &str) -> Result<Value> {
                 out.extend_from_slice(format!("&#{};", cp).as_bytes());
                 idx += 1;
             }
-            "strict" => {
+            // CPython's charmap codec hands the whole run of unencodable
+            // codepoints to the error handler.  surrogateescape writes each
+            // surrogate-escaped byte (U+DC80..=U+DCFF) back as the raw byte
+            // when the entire run is escaped bytes, and otherwise re-raises the
+            // run's strict error; surrogatepass always fails like strict
+            // (#3315).
+            "strict" | "surrogateescape" | "surrogatepass" => {
                 let run_start = idx;
                 let mut run_end = idx + 1;
                 while run_end < cps.len() && cp1252_encode_byte(cps[run_end]).is_none() {
                     run_end += 1;
+                }
+                let run = &cps[run_start..run_end];
+                if errors == "surrogateescape"
+                    && run.iter().all(|cp| (0xDC80..=0xDCFF).contains(cp))
+                {
+                    out.extend(run.iter().map(|&cp| (cp - 0xDC00) as u8));
+                    idx = run_end;
+                    continue;
                 }
                 return Err(PyError::new(pyrust_core::PyErrorKind::UnicodeEncodeError {
                     encoding: "charmap".to_string(),

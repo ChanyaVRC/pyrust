@@ -36,6 +36,15 @@ pyrust_module! {
                     )
                 }),
             ValueKind::Str(s) => {
+                // A lone surrogate is never part of a float literal: report it
+                // with CPython's `%R` message before `str::trim` decodes it
+                // into an invalid `char` (#3315).
+                if str_literal_has_surrogates(arg, s) {
+                    return Err(PyError::named(
+                        "ValueError",
+                        format!("could not convert string to float: {}", arg.repr_raw()),
+                    ));
+                }
                 let err = || {
                     PyError::named(
                         "ValueError",

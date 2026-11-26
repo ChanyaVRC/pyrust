@@ -175,14 +175,19 @@ impl Interpreter {
             // Materialise chars and reserve capacity under a narrow borrow so
             // that the &str from receiver.kind() drops before eval_index needs
             // a &mut self borrow (they are separate but keep scopes explicit).
-            let (chars, out_capacity) = match receiver.kind() {
-                ValueKind::Str(s) => (s.chars().collect::<Vec<char>>(), s.len()),
+            // Raw codepoints, not `char`s, so a lone surrogate in the
+            // receiver is looked up and kept like any other codepoint (#3315).
+            let (codepoints, out_capacity) = match receiver.kind() {
+                ValueKind::Str(s) => (
+                    pyrust_core::cesu8_codepoints(s).collect::<Vec<u32>>(),
+                    s.len(),
+                ),
                 _ => return Err(pyrust_core::descriptor_requires!("translate", "str")),
             };
             let table = args.into_iter().next().unwrap();
             let mut out = String::with_capacity(out_capacity);
-            for c in chars {
-                let cp = Value::int(c as i64);
+            for c in codepoints {
+                let cp = Value::int(i64::from(c));
                 match self.eval_index(&table, cp) {
                     Ok(v) => {
                         // Resolve int/str subclass instances to their backing
@@ -200,33 +205,27 @@ impl Interpreter {
                                         "character mapping must be in range(0x110000)".to_string()
                                     ));
                                 }
-                                let replacement = char::from_u32(n as u32).ok_or_else(|| {
-                                    pyrust_core::value_err!(
-                                        "character mapping must be in range(0x110000)".to_string()
-                                    )
-                                })?;
-                                out.push(replacement);
+                                // Surrogate mapping values are legal (CPython
+                                // stores lone surrogates); no `char` is built.
+                                pyrust_core::push_codepoint(&mut out, n as u32);
                             }
                             ValueKind::Bool(b) => {
-                                let replacement =
-                                    char::from_u32(b as u32).expect("0 and 1 are valid codepoints");
-                                out.push(replacement);
+                                pyrust_core::push_codepoint(&mut out, u32::from(b));
                             }
                             ValueKind::BigInt(n) => {
-                                // Use ToPrimitive::to_u32 then char::from_u32 to
-                                // validate the range [0, 0x10FFFF] in one step.
-                                // A negative or > u32::MAX BigInt yields None from
-                                // to_u32(); char::from_u32 rejects surrogates and
-                                // values > 0x10FFFF. Both map to the same ValueError.
+                                // A negative or > u32::MAX BigInt yields None
+                                // from to_u32(); values > 0x10FFFF are filtered
+                                // out. Both map to the same ValueError, while a
+                                // surrogate value is kept (CPython parity).
                                 use crate::value::PyToPrimitive;
                                 let replacement =
-                                    n.to_u32().and_then(char::from_u32).ok_or_else(|| {
+                                    n.to_u32().filter(|&n| n <= 0x10FFFF).ok_or_else(|| {
                                         pyrust_core::value_err!(
                                             "character mapping must be in range(0x110000)"
                                                 .to_string()
                                         )
                                     })?;
-                                out.push(replacement);
+                                pyrust_core::push_codepoint(&mut out, replacement);
                             }
                             ValueKind::Str(repl) => {
                                 out.push_str(repl);
@@ -244,7 +243,7 @@ impl Interpreter {
                             || e.class_name_is("IndexError")
                             || e.class_name_is("LookupError") =>
                     {
-                        out.push(c);
+                        pyrust_core::push_codepoint(&mut out, c);
                     }
                     Err(e) => return Err(e),
                 }

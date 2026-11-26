@@ -66,7 +66,9 @@ fn assemble_numeric(
     default_align: char,
     group_size: usize,
 ) -> String {
-    let raw_len = sign_prefix.chars().count() + alt_prefix.chars().count() + body.chars().count();
+    let raw_len = pyrust_core::str_codepoint_count(sign_prefix)
+        + pyrust_core::str_codepoint_count(alt_prefix)
+        + pyrust_core::str_codepoint_count(&body);
 
     // Determine effective alignment.  If zero-pad is set and no explicit
     // align was given, alignment becomes '=' (pad between sign/prefix and
@@ -81,7 +83,7 @@ fn assemble_numeric(
     // Zero-pad promotes fill to '0' unless the user explicitly supplied a
     // fill character via the two-character `[fill]align` form.
     let effective_fill = if fs.zero_pad && !fs.fill_explicit {
-        '0'
+        FillChar::ZERO
     } else {
         fs.fill
     };
@@ -90,24 +92,24 @@ fn assemble_numeric(
         return format!("{sign_prefix}{alt_prefix}{body}");
     }
     let pad = fs.width - raw_len;
-    let fill_str: String = std::iter::repeat_n(effective_fill, pad).collect();
+    let fill_str = effective_fill.repeat(pad);
 
     match effective_align {
         '=' => {
             // sign + prefix + fill + body
-            let body_grouped = if let (true, Some(grouping)) = (effective_fill == '0', fs.grouping)
-            {
-                // CPython interleaves the grouping separator with the zero
-                // pad characters so the resulting body still groups in
-                // threes-or-fours.  Apply by left-padding the body with
-                // zeros first, then re-grouping the integer portion.
-                regroup_with_zero_pad(&body, pad, grouping, group_size, alt_prefix)
-            } else {
-                let mut s = String::with_capacity(pad + body.len());
-                s.push_str(&fill_str);
-                s.push_str(&body);
-                s
-            };
+            let body_grouped =
+                if let (true, Some(grouping)) = (effective_fill == FillChar::ZERO, fs.grouping) {
+                    // CPython interleaves the grouping separator with the zero
+                    // pad characters so the resulting body still groups in
+                    // threes-or-fours.  Apply by left-padding the body with
+                    // zeros first, then re-grouping the integer portion.
+                    regroup_with_zero_pad(&body, pad, grouping, group_size, alt_prefix)
+                } else {
+                    let mut s = String::with_capacity(pad + body.len());
+                    s.push_str(&fill_str);
+                    s.push_str(&body);
+                    s
+                };
             format!("{sign_prefix}{alt_prefix}{body_grouped}")
         }
         '>' => format!("{fill_str}{sign_prefix}{alt_prefix}{body}"),
@@ -115,8 +117,8 @@ fn assemble_numeric(
         '^' => {
             let left = pad / 2;
             let right = pad - left;
-            let left_fill: String = std::iter::repeat_n(effective_fill, left).collect();
-            let right_fill: String = std::iter::repeat_n(effective_fill, right).collect();
+            let left_fill = effective_fill.repeat(left);
+            let right_fill = effective_fill.repeat(right);
             format!("{left_fill}{sign_prefix}{alt_prefix}{body}{right_fill}")
         }
         _ => format!("{sign_prefix}{alt_prefix}{body}"),
@@ -220,22 +222,23 @@ fn ensure_alt_float(s: String, alt: bool, precision: Option<usize>) -> String {
 }
 
 /// Pad a string-typed value per the format spec.
-fn pad_value(raw: &str, fs: &FormatSpec, default_align: char, fill: char) -> String {
-    let raw_len = raw.chars().count();
+fn pad_value(raw: &str, fs: &FormatSpec, default_align: char, fill: FillChar) -> String {
+    // Count codepoints by lead byte: `raw` may hold lone surrogates (#3315).
+    let raw_len = pyrust_core::str_codepoint_count(raw);
     if fs.width == 0 || raw_len >= fs.width {
         return raw.to_string();
     }
     let pad = fs.width - raw_len;
     let align = fs.align.unwrap_or(default_align);
-    let fill_str: String = std::iter::repeat_n(fill, pad).collect();
+    let fill_str = fill.repeat(pad);
     match align {
         '>' => format!("{fill_str}{raw}"),
         '<' => format!("{raw}{fill_str}"),
         '^' => {
             let left = pad / 2;
             let right = pad - left;
-            let left_fill: String = std::iter::repeat_n(fill, left).collect();
-            let right_fill: String = std::iter::repeat_n(fill, right).collect();
+            let left_fill = fill.repeat(left);
+            let right_fill = fill.repeat(right);
             format!("{left_fill}{raw}{right_fill}")
         }
         _ => format!("{raw}{fill_str}"),

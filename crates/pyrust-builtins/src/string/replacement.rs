@@ -71,6 +71,9 @@ fn str_replace(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
 /// would need.  Semantics are identical to `s.replacen(from, to, max)`
 /// (`max == usize::MAX` for replace-all), including empty-`from` behaviour.
 fn replace_fill(s: &str, from: &str, to: &str, max: usize) -> Option<String> {
+    if from.is_empty() {
+        return replace_empty_fill(s, to, max);
+    }
     let mut matches = s.match_indices(from).take(max);
     let (first_start, first_part) = matches.next()?;
     let mut result = String::with_capacity(s.len());
@@ -83,5 +86,39 @@ fn replace_fill(s: &str, from: &str, to: &str, max: usize) -> Option<String> {
         last_end = start + part.len();
     }
     result.push_str(&s[last_end..]);
+    Some(result)
+}
+
+/// `s.replace("", to, max)`: insert `to` at up to `max` codepoint boundaries,
+/// starting before the first codepoint (`"ab".replace("", "-") == "-a-b-"`).
+///
+/// Walks codepoint lead bytes instead of std's empty-needle `match_indices`,
+/// which decodes every `char` and so is UB on lone surrogates (#3315).
+fn replace_empty_fill(s: &str, to: &str, max: usize) -> Option<String> {
+    if max == 0 {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut result = String::with_capacity(s.len() + to.len().saturating_mul(2));
+    result.push_str(to);
+    let mut inserted = 1usize;
+    let mut last = 0usize;
+    for (i, &b) in bytes.iter().enumerate().skip(1) {
+        if inserted == max {
+            break;
+        }
+        if b & 0xC0 != 0x80 {
+            result.push_str(&s[last..i]);
+            result.push_str(to);
+            last = i;
+            inserted += 1;
+        }
+    }
+    if !s.is_empty() && inserted < max {
+        result.push_str(&s[last..]);
+        result.push_str(to);
+    } else {
+        result.push_str(&s[last..]);
+    }
     Some(result)
 }

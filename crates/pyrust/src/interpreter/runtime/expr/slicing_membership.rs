@@ -313,10 +313,19 @@ impl Interpreter {
                 Ok(Value::string(out))
             }
             ValueKind::Str(s) => {
-                let chars: Vec<char> = s.chars().collect();
                 let mut out = String::new();
-                for ix in indices {
-                    out.push(chars[ix]);
+                if pyrust_core::str_has_surrogates(s) {
+                    // Decoding a lone surrogate into a `char` is UB (#3315):
+                    // collect raw codepoints and re-push them as CESU-8.
+                    let codepoints: Vec<u32> = pyrust_core::cesu8_codepoints(s).collect();
+                    for ix in indices {
+                        pyrust_core::push_codepoint(&mut out, codepoints[ix]);
+                    }
+                } else {
+                    let chars: Vec<char> = s.chars().collect();
+                    for ix in indices {
+                        out.push(chars[ix]);
+                    }
                 }
                 Ok(Value::string(out))
             }

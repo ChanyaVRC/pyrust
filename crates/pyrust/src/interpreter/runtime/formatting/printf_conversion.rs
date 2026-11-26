@@ -330,29 +330,25 @@ impl Interpreter {
                 let coerced_char = self.coerce_printf_int_arg(arg)?;
                 match coerced_char.kind() {
                     ValueKind::Str(s) => {
-                        let mut cs = s.chars();
-                        let c = cs
-                            .next()
-                            .ok_or_else(|| pyrust_core::type_err!("%c requires int or char"))?;
-                        if cs.next().is_some() {
-                            return Err(pyrust_core::type_err!("%c requires a single character"));
+                        // Count codepoints, not `char`s: a lone surrogate is a
+                        // valid `%c` argument and must not be decoded (#3315).
+                        // CPython 3.12's `formatchar` rejects every other
+                        // length with the same message.
+                        let mut cps = pyrust_core::cesu8_codepoints(s);
+                        if cps.next().is_none() || cps.next().is_some() {
+                            return Err(pyrust_core::type_err!("%c requires int or char"));
                         }
-                        c.to_string()
+                        s.to_string()
                     }
-                    ValueKind::Int(n) => char::from_u32(n as u32)
-                        .ok_or_else(|| pyrust_core::overflow_err!("%c arg not in range(0x110000)"))?
-                        .to_string(),
-                    ValueKind::Bool(b) => char::from_u32(b as u32)
-                        .ok_or_else(|| pyrust_core::overflow_err!("%c arg not in range(0x110000)"))?
-                        .to_string(),
+                    // Any code in range(0x110000) is valid, surrogates
+                    // included (`"%c" % 0xdce9 == "\udce9"`); `push_codepoint`
+                    // writes them without building a `char`.
+                    ValueKind::Int(n) => printf_char_code(u32::try_from(n).ok())?,
+                    ValueKind::Bool(b) => printf_char_code(Some(u32::from(b)))?,
                     ValueKind::BigInt(b) => {
                         // A BigInt may be in range [0, 0x10ffff] or not.
                         use crate::value::PyToPrimitive;
-                        let n = b.to_u32();
-                        let c = n.and_then(char::from_u32).ok_or_else(|| {
-                            pyrust_core::overflow_err!("%c arg not in range(0x110000)")
-                        })?;
-                        c.to_string()
+                        printf_char_code(b.to_u32())?
                     }
                     _ => {
                         return Err(pyrust_core::type_err!("%c requires int or char"));

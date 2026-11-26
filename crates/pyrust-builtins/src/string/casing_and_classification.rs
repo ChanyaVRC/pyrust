@@ -4,17 +4,44 @@ fn unicode_casefold(s: &str, is_ascii: bool) -> String {
     if is_ascii {
         return s.to_ascii_lowercase();
     }
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        // CaseFolding.txt full folding: for most characters the fold equals the
-        // lowercase mapping, so use to_lowercase and override only the documented
-        // exceptions (µ→μ, ς→σ, ß→ss, ﬆ→st, Cherokee, …) where fold ≠ lowercase.
-        match unicode_data::casefold_exception(c) {
-            Some(folded) => out.push_str(folded),
-            None => out.extend(c.to_lowercase()),
+    // Lone surrogates fold to themselves; the surrogate-free runs between them
+    // go through the `char` path (one run covering all of `s` when it has no
+    // surrogates, #3315).
+    map_str_segments(s, |text, out| {
+        for c in text.chars() {
+            // CaseFolding.txt full folding: for most characters the fold equals
+            // the lowercase mapping, so use to_lowercase and override only the
+            // documented exceptions (µ→μ, ς→σ, ß→ss, ﬆ→st, Cherokee, …) where
+            // fold ≠ lowercase.
+            match unicode_data::casefold_exception(c) {
+                Some(folded) => out.push_str(folded),
+                None => out.extend(c.to_lowercase()),
+            }
         }
+    })
+}
+
+/// `str.upper()` for a non-ASCII receiver.  `str::to_uppercase` decodes
+/// `char`s, so lone surrogates (which CPython leaves unchanged) are copied
+/// around it rather than fed to it (#3315).
+fn unicode_upper(s: &str) -> String {
+    if str_has_surrogates(s) {
+        map_str_segments(s, |text, out| out.push_str(&text.to_uppercase()))
+    } else {
+        s.to_uppercase()
     }
-    out
+}
+
+/// `str.lower()` for a non-ASCII receiver.  A surrogate is neither cased nor
+/// case-ignorable, so for the Final_Sigma rule it ends the context scan
+/// exactly as a string boundary does: lowercasing each surrogate-free run on
+/// its own matches CPython's `handle_capital_sigma` (#3315).
+fn unicode_lower(s: &str) -> String {
+    if str_has_surrogates(s) {
+        map_str_segments(s, |text, out| out.push_str(&text.to_lowercase()))
+    } else {
+        s.to_lowercase()
+    }
 }
 
 fn swapcase(s: &str, is_ascii: bool) -> String {
@@ -32,17 +59,18 @@ fn swapcase(s: &str, is_ascii: bool) -> String {
             })
             .collect();
     }
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_uppercase() {
-            out.extend(c.to_lowercase());
-        } else if c.is_lowercase() {
-            out.extend(c.to_uppercase());
-        } else {
-            out.push(c);
+    // Surrogates are uncased: copied through unchanged (#3315).
+    map_str_segments(s, |text, out| {
+        for c in text.chars() {
+            if c.is_uppercase() {
+                out.extend(c.to_lowercase());
+            } else if c.is_lowercase() {
+                out.extend(c.to_uppercase());
+            } else {
+                out.push(c);
+            }
         }
-    }
-    out
+    })
 }
 
 fn titlecase(s: &str, is_ascii: bool) -> String {
@@ -64,22 +92,25 @@ fn titlecase(s: &str, is_ascii: bool) -> String {
         }
         return out;
     }
-    let mut out = String::with_capacity(s.len());
-    let mut prev_cased = false;
-    for c in s.chars() {
-        if c.is_alphabetic() {
-            if prev_cased {
-                out.extend(c.to_lowercase());
+    // A lone surrogate is not alphabetic, so it resets `prev_cased` exactly
+    // like the start of the string: each surrogate-free run is title-cased
+    // with fresh state and the surrogates are copied through (#3315).
+    map_str_segments(s, |text, out| {
+        let mut prev_cased = false;
+        for c in text.chars() {
+            if c.is_alphabetic() {
+                if prev_cased {
+                    out.extend(c.to_lowercase());
+                } else {
+                    push_titlecase(out, c);
+                }
+                prev_cased = true;
             } else {
-                push_titlecase(&mut out, c);
+                out.push(c);
+                prev_cased = false;
             }
-            prev_cased = true;
-        } else {
-            out.push(c);
-            prev_cased = false;
         }
-    }
-    out
+    })
 }
 
 /// Push the Unicode titlecase form of `c` onto `out`. Unlike `char::to_uppercase`,
@@ -262,8 +293,15 @@ fn is_python_space_ascii(b: u8) -> bool {
 /// `Py_UNICODE_ISSPACE` (Unicode 15.0). This differs from Rust's
 /// `char::is_whitespace`, which omits `\x1c`–`\x1f` and `\x85`.
 fn is_python_space(c: char) -> bool {
+    is_python_space_cp(c as u32)
+}
+
+/// [`is_python_space`] on a raw codepoint, so lone surrogates (never
+/// whitespace) can be classified without building a `char`.
+#[inline]
+fn is_python_space_cp(cp: u32) -> bool {
     matches!(
-        c as u32,
+        cp,
         0x09..=0x0D
             | 0x1C..=0x1F
             | 0x20
@@ -277,6 +315,96 @@ fn is_python_space(c: char) -> bool {
             | 0x205F
             | 0x3000
     )
+}
+
+/// Bit `b` is set for every ASCII byte `b` in `Py_UNICODE_ISSPACE`:
+/// `\t\n\x0b\x0c\r`, `\x1c`–`\x1f` and the space.
+const PY_ASCII_SPACE_MASK: u64 = (0b1_1111 << 0x09) | (0b1111 << 0x1C) | (1 << 0x20);
+
+/// Byte length of the `Py_UNICODE_ISSPACE` codepoint that starts at byte `i`
+/// of `b`, or 0 when it is not whitespace (or `i` is mid-codepoint).
+///
+/// Works on raw bytes: the only non-ASCII whitespace lead bytes are `C2`
+/// (U+0085, U+00A0), `E1` (U+1680), `E2` (U+2000..=U+200A, U+2028, U+2029,
+/// U+202F, U+205F) and `E3` (U+3000), so nothing is decoded and a lone
+/// surrogate (`ED ..`) is simply non-whitespace (#3315).
+#[inline(always)]
+fn py_space_len_at(b: &[u8], i: usize) -> usize {
+    let c = b[i];
+    if c < 0x80 {
+        return usize::from(c <= 0x20 && (PY_ASCII_SPACE_MASK >> c) & 1 != 0);
+    }
+    // Dispatch on the lead byte first so continuation bytes and every other
+    // lead byte return without reading ahead.
+    match c {
+        0xC2 => 2 * usize::from(matches!(b.get(i + 1), Some(0x85 | 0xA0))),
+        0xE1..=0xE3 => {
+            let tail = (b.get(i + 1).copied(), b.get(i + 2).copied());
+            let space = match c {
+                0xE1 => tail == (Some(0x9A), Some(0x80)),
+                0xE2 => matches!(
+                    tail,
+                    (Some(0x80), Some(0x80..=0x8A | 0xA8 | 0xA9 | 0xAF)) | (Some(0x81), Some(0x9F))
+                ),
+                _ => tail == (Some(0x80), Some(0x80)),
+            };
+            3 * usize::from(space)
+        }
+        _ => 0,
+    }
+}
+
+/// Width in bytes of the codepoint whose lead byte is `lead`.
+#[inline(always)]
+fn codepoint_width(lead: u8) -> usize {
+    match lead {
+        0x00..=0x7F => 1,
+        0x80..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        _ => 4,
+    }
+}
+
+/// Byte length of the whitespace codepoint that ends at byte `end` (> 0), or
+/// 0.  A match is always a complete lead-plus-continuation sequence, so it
+/// only occurs when `end` is a codepoint boundary.
+#[inline(always)]
+fn py_space_len_before(b: &[u8], end: usize) -> usize {
+    let c = b[end - 1];
+    if c < 0x80 {
+        return usize::from(c <= 0x20 && (PY_ASCII_SPACE_MASK >> c) & 1 != 0);
+    }
+    if end >= 2 && py_space_len_at(b, end - 2) == 2 {
+        2
+    } else if end >= 3 && py_space_len_at(b, end - 3) == 3 {
+        3
+    } else {
+        0
+    }
+}
+
+/// First byte at or after `i` that does not start a whitespace codepoint.
+#[inline(always)]
+fn skip_py_spaces(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() {
+        match py_space_len_at(b, i) {
+            0 => break,
+            k => i += k,
+        }
+    }
+    i
+}
+
+/// Last byte boundary at or before `end` not preceded by whitespace.
+#[inline(always)]
+fn skip_py_spaces_back(b: &[u8], mut end: usize) -> usize {
+    while end > 0 {
+        match py_space_len_before(b, end) {
+            0 => break,
+            k => end -= k,
+        }
+    }
+    end
 }
 
 /// Python's `str.isalnum()`: a character is alphanumeric when it is alphabetic

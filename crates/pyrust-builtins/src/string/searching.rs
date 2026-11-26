@@ -26,8 +26,7 @@ fn str_index(s: &str, is_ascii: bool, args: &[Value]) -> Result<Value> {
             "substring not found".to_string(),
         ));
     };
-    let haystack = &s[start..end];
-    match haystack.find(sub) {
+    match find_in(&s[start..end], sub) {
         Some(byte_pos) => Ok(Value::int(
             byte_to_char_idx(s, is_ascii, start + byte_pos) as i64
         )),
@@ -35,6 +34,28 @@ fn str_index(s: &str, is_ascii: bool, args: &[Value]) -> Result<Value> {
             "ValueError",
             "substring not found".to_string(),
         )),
+    }
+}
+
+/// First byte offset of `sub` in `haystack`.  The empty needle matches at the
+/// window start without asking std: its empty-needle searcher decodes the
+/// `char` at the match position, which is UB on a lone surrogate (#3315).
+#[inline]
+fn find_in(haystack: &str, sub: &str) -> Option<usize> {
+    if sub.is_empty() {
+        Some(0)
+    } else {
+        haystack.find(sub)
+    }
+}
+
+/// Last byte offset of `sub` in `haystack`; see [`find_in`].
+#[inline]
+fn rfind_in(haystack: &str, sub: &str) -> Option<usize> {
+    if sub.is_empty() {
+        Some(haystack.len())
+    } else {
+        haystack.rfind(sub)
     }
 }
 
@@ -51,7 +72,7 @@ fn str_count(s: &str, is_ascii: bool, args: &[Value]) -> Result<Value> {
         let count = if is_ascii || haystack.is_ascii() {
             haystack.len()
         } else {
-            haystack.chars().count()
+            str_codepoint_count(haystack)
         };
         return Ok(Value::int((count + 1) as i64));
     }
@@ -71,8 +92,7 @@ fn str_find(s: &str, is_ascii: bool, args: &[Value], raise_on_miss: bool) -> Res
         }
         return Ok(Value::int(-1));
     };
-    let haystack = &s[start..end];
-    match haystack.find(sub) {
+    match find_in(&s[start..end], sub) {
         Some(byte_pos) => Ok(Value::int(
             byte_to_char_idx(s, is_ascii, start + byte_pos) as i64
         )),
@@ -100,8 +120,7 @@ fn str_rfind(s: &str, is_ascii: bool, args: &[Value], raise_on_miss: bool) -> Re
         }
         return Ok(Value::int(-1));
     };
-    let haystack = &s[start..end];
-    match haystack.rfind(sub) {
+    match rfind_in(&s[start..end], sub) {
         Some(byte_pos) => Ok(Value::int(
             byte_to_char_idx(s, is_ascii, start + byte_pos) as i64
         )),

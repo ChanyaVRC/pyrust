@@ -5,3 +5,4 @@ include!("value_helpers/type_names.rs");
 include!("value_helpers/primitive_repr.rs");
 include!("value_helpers/exception_display.rs");
 include!("value_helpers/string_escape.rs");
+include!("value_helpers/surrogate_text.rs");

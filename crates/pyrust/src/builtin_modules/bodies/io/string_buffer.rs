@@ -3,9 +3,16 @@
 //! The `io` module facade owns Python argument validation and closed-stream
 //! errors. This module owns Unicode-character cursor semantics and mutations of
 //! the `_buf` / `_pos` instance state.
+//!
+//! Character cursors are resolved to byte offsets by counting codepoint lead
+//! bytes, never by decoding `char`s: the buffer may hold lone surrogates (e.g.
+//! `surrogateescape`-decoded text that `email` feeds through a StringIO), and
+//! a surrogate is not a valid `char` (#3315).
 
 use std::cell::RefCell;
 use std::rc::Rc;
+
+use pyrust_core::{str_codepoint_count, str_codepoint_offset, str_codepoint_prefix};
 
 use crate::error::{PyError, Result};
 use crate::value::{PyInstance, Value, ValueKind};
@@ -41,12 +48,24 @@ fn character_len(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<usize>
         .get_slot("_buf")
         .map(|value| value.kind())
     {
-        Some(ValueKind::Str(buffer)) => Ok(buffer.chars().count()),
+        Some(ValueKind::Str(buffer)) => Ok(str_codepoint_count(buffer)),
         _ => Err(PyError::named(
             "TypeError",
             format!("{fn_name}() StringIO object is not initialized"),
         )),
     }
+}
+
+/// The line at the start of `rest`: through the first `\n` (inclusive), or
+/// all of `rest`.  `\n` is ASCII, so the byte search lands on a codepoint
+/// boundary.
+fn line_prefix(rest: &str) -> &str {
+    let end = rest
+        .as_bytes()
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(rest.len(), |i| i + 1);
+    &rest[..end]
 }
 
 pub(super) fn read(
@@ -55,15 +74,15 @@ pub(super) fn read(
     fn_name: &str,
 ) -> Result<String> {
     let buffer = contents(inst, fn_name)?;
-    let chars: Vec<char> = buffer.chars().collect();
-    let total = chars.len();
+    let total = str_codepoint_count(&buffer);
     let position = get_pos(inst);
     let start = usize::try_from(position).unwrap_or(usize::MAX).min(total);
     let end = match size {
         None => total,
         Some(size) => start.saturating_add(size).min(total),
     };
-    let result = chars[start..end].iter().collect();
+    let rest = &buffer[str_codepoint_offset(&buffer, start)..];
+    let result = str_codepoint_prefix(rest, end - start).to_string();
     if position <= total as i64 {
         set_pos(inst, end as i64);
     }
@@ -76,23 +95,17 @@ pub(super) fn read_line(
     fn_name: &str,
 ) -> Result<String> {
     let buffer = contents(inst, fn_name)?;
-    let chars: Vec<char> = buffer.chars().collect();
-    let total = chars.len();
+    let total = str_codepoint_count(&buffer);
     let position = get_pos(inst);
     let start = usize::try_from(position).unwrap_or(usize::MAX).min(total);
-    let max_read = size_limit.unwrap_or(total - start);
-    let mut count = 0;
-    for character in &chars[start..] {
-        count += 1;
-        if count > max_read {
-            count -= 1;
-            break;
-        }
-        if *character == '\n' {
-            break;
-        }
-    }
-    let result = chars[start..start + count].iter().collect();
+    let rest = &buffer[str_codepoint_offset(&buffer, start)..];
+    let window = match size_limit {
+        Some(limit) => str_codepoint_prefix(rest, limit),
+        None => rest,
+    };
+    let line = line_prefix(window);
+    let count = str_codepoint_count(line);
+    let result = line.to_string();
     if position <= total as i64 {
         set_pos(inst, (start + count) as i64);
     }
@@ -101,29 +114,19 @@ pub(super) fn read_line(
 
 pub(super) fn read_lines(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<Vec<String>> {
     let buffer = contents(inst, fn_name)?;
-    let chars: Vec<char> = buffer.chars().collect();
-    let total = chars.len();
+    let total = str_codepoint_count(&buffer);
     let position = get_pos(inst);
     let start = usize::try_from(position).unwrap_or(usize::MAX).min(total);
     if position <= total as i64 {
         set_pos(inst, total as i64);
     }
 
-    let remaining: String = chars[start..].iter().collect();
-    if remaining.is_empty() {
-        return Ok(Vec::new());
-    }
-
+    let mut remaining = &buffer[str_codepoint_offset(&buffer, start)..];
     let mut lines = Vec::new();
-    let mut current = String::new();
-    for character in remaining.chars() {
-        current.push(character);
-        if character == '\n' {
-            lines.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
+    while !remaining.is_empty() {
+        let line = line_prefix(remaining);
+        lines.push(line.to_string());
+        remaining = &remaining[line.len()..];
     }
     Ok(lines)
 }
@@ -136,7 +139,7 @@ pub(super) fn write(inst: &Rc<RefCell<PyInstance>>, text: &str) -> Result<usize>
     if text.is_empty() {
         return Ok(0);
     }
-    let written_len = text.chars().count();
+    let written_len = str_codepoint_count(text);
     let written_len_i64 = i64::try_from(written_len)
         .map_err(|_| PyError::named("OverflowError", "new position too large".to_string()))?;
     let pos_i64 = get_pos(inst);
@@ -156,7 +159,7 @@ pub(super) fn write(inst: &Rc<RefCell<PyInstance>>, text: &str) -> Result<usize>
         Some(ValueKind::Str(buffer)) => buffer.to_string(),
         _ => String::new(),
     };
-    let total = buffer.chars().count();
+    let total = str_codepoint_count(&buffer);
 
     // Resolve character cursor positions to byte offsets before allocating.
     // StringIO indexes characters, while the Rust backing is UTF-8 bytes.
@@ -164,15 +167,8 @@ pub(super) fn write(inst: &Rc<RefCell<PyInstance>>, text: &str) -> Result<usize>
     let mut end_byte = buffer.len();
     if pos <= total {
         let end = new_pos.min(total);
-        for (character_index, (byte_index, _)) in buffer.char_indices().enumerate() {
-            if character_index == pos {
-                prefix_byte = byte_index;
-            }
-            if character_index == end {
-                end_byte = byte_index;
-                break;
-            }
-        }
+        prefix_byte = str_codepoint_offset(&buffer, pos);
+        end_byte = prefix_byte + str_codepoint_offset(&buffer[prefix_byte..], end - pos);
     }
 
     let capacity = if pos > total {
@@ -266,7 +262,7 @@ pub(super) fn truncate(inst: &Rc<RefCell<PyInstance>>, size: i64, fn_name: &str)
     if size < char_len as i64 {
         let buffer = contents(inst, fn_name)?;
         let new_len = usize::try_from(size).expect("truncate size is validated as non-negative");
-        let new_buffer: String = buffer.chars().take(new_len).collect();
+        let new_buffer = str_codepoint_prefix(&buffer, new_len).to_string();
         inst.borrow_mut()
             .attrs
             .insert_slot("_buf", Value::string(new_buffer));
@@ -278,8 +274,7 @@ pub(super) fn truncate(inst: &Rc<RefCell<PyInstance>>, size: i64, fn_name: &str)
 
 pub(super) fn next_line(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<Option<String>> {
     let buffer = contents(inst, fn_name)?;
-    let chars: Vec<char> = buffer.chars().collect();
-    let total = chars.len();
+    let total = str_codepoint_count(&buffer);
     let start = usize::try_from(get_pos(inst))
         .unwrap_or(usize::MAX)
         .min(total);
@@ -287,14 +282,8 @@ pub(super) fn next_line(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result
         return Ok(None);
     }
 
-    let mut count = 0;
-    for character in &chars[start..] {
-        count += 1;
-        if *character == '\n' {
-            break;
-        }
-    }
-    let line = chars[start..start + count].iter().collect();
+    let line = line_prefix(&buffer[str_codepoint_offset(&buffer, start)..]);
+    let count = str_codepoint_count(line);
     set_pos(inst, (start + count) as i64);
-    Ok(Some(line))
+    Ok(Some(line.to_string()))
 }

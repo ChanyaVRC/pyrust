@@ -15,15 +15,6 @@ use crate::builtin_modules::genericpath::ops::{
 
 // ── Pure NT string algorithms ────────────────────────────────────────────────
 
-fn find_sep_chars(chars: &[char], from: usize) -> Option<usize> {
-    chars
-        .iter()
-        .enumerate()
-        .skip(from)
-        .find(|&(_, &c)| c == '\\')
-        .map(|(i, _)| i)
-}
-
 fn find_sep_bytes(bytes: &[u8], from: usize) -> Option<usize> {
     bytes
         .iter()
@@ -33,39 +24,66 @@ fn find_sep_bytes(bytes: &[u8], from: usize) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// Byte offsets `(drive_end, root_end)` splitting `p` into the
+/// `(drive, root, tail)` of CPython 3.12 `ntpath.splitroot(p)`.
+///
+/// Every structural character (both separators, `:`, `?`, `UNC`) is ASCII,
+/// so the split points are found on bytes and land on codepoint boundaries;
+/// lone surrogates, which a `char` cannot hold, pass through intact (#3315).
+/// The drive test still inspects the second *character*, like CPython's
+/// `normp[1:2] == ':'`.
+pub(crate) fn nt_splitroot_offsets(p: &str) -> (usize, usize) {
+    let b = p.as_bytes();
+    let n = b.len();
+    let is_sep = |i: usize| matches!(b.get(i), Some(b'\\' | b'/'));
+    if is_sep(0) {
+        if is_sep(1) {
+            // UNC or device path, e.g. \\server\share or \\?\UNC\server\share.
+            // The prefix is ASCII, so the upper-cased first 8 characters equal
+            // it exactly when the first 8 bytes do after ASCII upper-casing.
+            let unc = n >= 8
+                && b[..8]
+                    .iter()
+                    .map(|&c| {
+                        if c == b'/' {
+                            b'\\'
+                        } else {
+                            c.to_ascii_uppercase()
+                        }
+                    })
+                    .eq(b"\\\\?\\UNC\\".iter().copied());
+            let start = if unc { 8 } else { 2 };
+            let next_sep = |from: usize| (from..n).find(|&i| is_sep(i));
+            let Some(index) = next_sep(start) else {
+                return (n, n);
+            };
+            let Some(index2) = next_sep(index + 1) else {
+                return (n, n);
+            };
+            return (index2, index2 + 1);
+        }
+        return (0, 1);
+    }
+    let colon = pyrust_core::str_codepoint_offset(p, 1);
+    if b.get(colon) == Some(&b':') {
+        let drive_end = colon + 1;
+        return if is_sep(drive_end) {
+            (drive_end, drive_end + 1)
+        } else {
+            (drive_end, drive_end)
+        };
+    }
+    (0, 0)
+}
+
 /// CPython 3.12 `ntpath.splitroot(p)` -> `(drive, root, tail)`.
 pub(crate) fn nt_splitroot_str(p: &str) -> (String, String, String) {
-    let normp: Vec<char> = p.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
-    let orig: Vec<char> = p.chars().collect();
-    let n = orig.len();
-    let take = |a: usize, b: usize| -> String { orig[a..b.min(n)].iter().collect() };
-
-    if normp.first() == Some(&'\\') {
-        if normp.get(1) == Some(&'\\') {
-            // UNC or device path, e.g. \\server\share or \\?\UNC\server\share
-            let upper8: String = normp.iter().take(8).collect::<String>().to_uppercase();
-            let start = if upper8 == "\\\\?\\UNC\\" { 8 } else { 2 };
-            let Some(index) = find_sep_chars(&normp, start) else {
-                return (p.to_string(), String::new(), String::new());
-            };
-            let Some(index2) = find_sep_chars(&normp, index + 1) else {
-                return (p.to_string(), String::new(), String::new());
-            };
-            return (
-                take(0, index2),
-                take(index2, index2 + 1),
-                take(index2 + 1, n),
-            );
-        }
-        return (String::new(), take(0, 1), take(1, n));
-    }
-    if normp.get(1) == Some(&':') {
-        if normp.get(2) == Some(&'\\') {
-            return (take(0, 2), take(2, 3), take(3, n));
-        }
-        return (take(0, 2), String::new(), take(2, n));
-    }
-    (String::new(), String::new(), p.to_string())
+    let (drive_end, root_end) = nt_splitroot_offsets(p);
+    (
+        p[..drive_end].to_string(),
+        p[drive_end..root_end].to_string(),
+        p[root_end..].to_string(),
+    )
 }
 
 pub(crate) fn nt_splitroot_bytes(p: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
