@@ -503,10 +503,10 @@ pyrust_builtin_modules! {
     // Generation-bound factory callables and dynamic helper classes are
     // installed after the fresh module enters this Interpreter's import cache.
     functools @inject,
-    // `operator` is a pure-Python module (issue #2514): an empty native
-    // `pyrust_module!` plus `operator_py.py` injected by the `@inject`
-    // post-load hook (`post_load_inject` → `inject_python_members`).
-    operator @inject,
+    // `operator` (issues #2514, #3364): 100% native Rust in `bodies/operator.rs`;
+    // dunder aliases, `index` and `__module__` are wired by its
+    // `prepare_module` hook, with no Python-source injection.
+    operator,
     itertools,
     // `collections` Python-source members (issue #1884) are injected by the
     // `@inject` hook; `inject_python_members` also tags the public classes
