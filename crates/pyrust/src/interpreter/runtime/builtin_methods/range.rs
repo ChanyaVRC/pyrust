@@ -18,6 +18,42 @@ pub(super) fn i64_range_contains(start: i64, stop: i64, step: i64, x: i64) -> bo
     in_bounds && ((x as i128 - start as i128) % step as i128 == 0)
 }
 
+/// Read a `range()` argument that is already a native `i64` (tagged small int
+/// or `bool`).  Anything else — `BigInt`, `__index__` objects, floats — returns
+/// `None` so the caller falls back to the general `__index__` path.
+#[inline(always)]
+fn range_arg_i64(value: &Value) -> Option<i64> {
+    match value.kind() {
+        ValueKind::Int(n) => Some(n),
+        ValueKind::Bool(flag) => Some(i64::from(flag)),
+        _ => None,
+    }
+}
+
+/// Zero-`BigInt` construction for the common all-`i64` argument shapes.
+///
+/// Returns `None` when any argument is not a plain int/bool (the general path
+/// then owns the `__index__` protocol, `BigInt` support and error wording).  A
+/// zero step is *not* special-cased here: it falls through to the general path
+/// so the `range() arg 3 must not be zero` error has a single source.
+#[inline(always)]
+fn range_from_i64_args(a: &Value, b: Option<&Value>, c: Option<&Value>) -> Option<Value> {
+    let (start, stop, step) = match (b, c) {
+        (None, None) => (0, range_arg_i64(a)?, 1),
+        (Some(stop), None) => (range_arg_i64(a)?, range_arg_i64(stop)?, 1),
+        (Some(stop), Some(step)) => (
+            range_arg_i64(a)?,
+            range_arg_i64(stop)?,
+            range_arg_i64(step)?,
+        ),
+        (None, Some(_)) => return None,
+    };
+    if step == 0 {
+        return None;
+    }
+    Some(Value::range(start, stop, step))
+}
+
 impl Interpreter {
     pub(crate) fn call_range_values(
         &mut self,
@@ -25,6 +61,9 @@ impl Interpreter {
         b: Option<&Value>,
         c: Option<&Value>,
     ) -> Result<Value> {
+        if let Some(range) = range_from_i64_args(a, b, c) {
+            return Ok(range);
+        }
         let (start, stop, step) = match (b, c) {
             (None, None) => (
                 PyBigInt::from(0),

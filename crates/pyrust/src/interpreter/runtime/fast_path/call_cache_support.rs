@@ -362,8 +362,16 @@ impl Interpreter {
                     Ok(tag) => tag,
                     Err(_) => return dispatch(self, arguments),
                 };
-                let fast = builtin_type_tag.and_then(|tag| {
-                    let name = super::BuiltinTypeClass::from_tag(tag).class_name();
+                // `range` is an untagged singleton class (no
+                // `BuiltinTypeClassTag`), so it is matched by identity; cold
+                // miss only, so the thread-local clone is off the hot path.
+                let registration_name = builtin_type_tag
+                    .map(|tag| super::BuiltinTypeClass::from_tag(tag).class_name())
+                    .or_else(|| {
+                        std::rc::Rc::ptr_eq(&class, &crate::interpreter::range_class_singleton())
+                            .then_some("range")
+                    });
+                let fast = registration_name.and_then(|name| {
                     crate::builtin_registry::lookup_registration(name).and_then(|registration| {
                         registration
                             .fast
