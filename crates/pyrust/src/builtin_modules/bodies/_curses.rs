@@ -13,7 +13,7 @@ use crate::builtin_modules::curses_engine::{self as eng, Cell};
 use crate::builtin_modules::macros::native_state::{set_native_state, with_native_state};
 use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{
-    OptValueRef, OptionalArg, PyBytesLike, PyIndex, PyStr, PyValue, PyValueRef,
+    OptValueRef, OptionalArg, PyBytesLike, PyIndex, PyStr, PyValue,
 };
 use crate::interpreter::{ExpandedCallArg, Interpreter, value_type_name_str};
 use crate::value::{InstanceAttrs, PyInstance, Value, ValueKind};
@@ -566,7 +566,7 @@ pyrust_module! {
 
         #[setter("encoding")]
         fn set_encoding(#[state] h: &WindowHandle, val: PyStr<'_>) -> Result<Value> {
-            let enc = val.as_str().to_string();
+            let enc = val.0.to_string();
             eng::with_state_mut(|st| {
                 if let Some(w) = st.windows.get_mut(&h.id) {
                     w.encoding = enc;
@@ -1166,7 +1166,7 @@ pyrust_module! {
         ) -> Result<Value> {
             let (c, emb) = parse_ch_arg(&ch.0)?;
             let extra = match attr {
-                OptionalArg::Present(v) => as_u32_attr(v.0, "attr")?,
+                OptionalArg::Provided(v) => as_u32_attr(v.0, "attr")?,
                 OptionalArg::Omitted => 0,
             };
             let bg = Cell {
@@ -1188,7 +1188,7 @@ pyrust_module! {
         ) -> Result<Value> {
             let (c, emb) = parse_ch_arg(&ch.0)?;
             let extra = match attr {
-                OptionalArg::Present(v) => as_u32_attr(v.0, "attr")?,
+                OptionalArg::Provided(v) => as_u32_attr(v.0, "attr")?,
                 OptionalArg::Omitted => 0,
             };
             let bg = Cell {
@@ -1360,7 +1360,7 @@ pyrust_module! {
                     ));
                 }
             };
-            let res = eng::with_state_mut(|st| {
+            let res: std::result::Result<(), String> = eng::with_state_mut(|st| {
                 st.win_noutrefresh(h.id, pad_rect)?;
                 st.doupdate();
                 Ok(())
@@ -1407,7 +1407,7 @@ pyrust_module! {
             let s = start.expect_i64(FN_NAME, "start")?;
             let c = count.expect_i64(FN_NAME, "count")?;
             let flag = match changed {
-                OptionalArg::Present(v) => _interp.truthy_value(v.0)?,
+                OptionalArg::Provided(v) => _interp.truthy_value(v.0)?,
                 OptionalArg::Omitted => true,
             };
             if s < 0 || c < 0 {
@@ -1429,7 +1429,7 @@ pyrust_module! {
                     .get(&h.id)
                     .is_some_and(|w| w.touched.iter().any(|&t| t))
             });
-            Ok(Value::bool(touched))
+            Ok(Value::bool_(touched))
         }
 
         fn is_linetouched(#[state] h: &WindowHandle, line: PyIndex) -> Result<Value> {
@@ -1442,7 +1442,7 @@ pyrust_module! {
                 Some(w.touched[ln as usize])
             });
             match res {
-                Some(b) => Ok(Value::bool(b)),
+                Some(b) => Ok(Value::bool_(b)),
                 None => Err(raise_curses_error(_interp, "is_linetouched: line out of range")),
             }
         }
@@ -1673,7 +1673,7 @@ pyrust_module! {
             #[default(OptionalArg::Omitted)] lines: OptValueRef<'_>,
         ) -> Result<Value> {
             let n = match lines {
-                OptionalArg::Present(v) => as_i64_arg(v.0, "lines")? as i32,
+                OptionalArg::Provided(v) => as_i64_arg(v.0, "lines")? as i32,
                 OptionalArg::Omitted => 1,
             };
             let res = eng::with_state_mut(|st| st.win_scroll(h.id, n));
@@ -1837,10 +1837,10 @@ pyrust_module! {
         #[default(OptionalArg::Omitted)] fd: OptValueRef<'_>,
     ) -> Result<Value> {
         let fd_val = match fd {
-            OptionalArg::Present(v) => as_i64_arg(v.0, "fd")? as i32,
+            OptionalArg::Provided(v) => as_i64_arg(v.0, "fd")? as i32,
             OptionalArg::Omitted => -1,
         };
-        let term_ref = term.as_ref().map(|s| s.as_str());
+        let term_ref = term.as_ref().map(|s| s.0);
         let res = eng::with_state_mut(|st| st.setupterm(term_ref, fd_val));
         if let Err(msg) = res {
             return Err(raise_curses_error(_interp, msg));
@@ -1869,7 +1869,7 @@ pyrust_module! {
     fn isendwin() -> Result<Value> {
         require_initscr(_interp)?;
         let ended = eng::with_state(|st| st.ended);
-        Ok(Value::bool(ended))
+        Ok(Value::bool_(ended))
     }
 
     fn newwin(#[varargs] args: &[Value]) -> Result<Value> {
@@ -1922,19 +1922,19 @@ pyrust_module! {
 
     fn tigetflag(#[positional_only] capname: PyStr<'_>) -> Result<Value> {
         require_setupterm(_interp)?;
-        let v = eng::with_state(|st| eng::tigetflag(&st.term, capname.as_str()));
+        let v = eng::with_state(|st| eng::tigetflag(&st.term, capname.0));
         Ok(Value::int(v))
     }
 
     fn tigetnum(#[positional_only] capname: PyStr<'_>) -> Result<Value> {
         require_setupterm(_interp)?;
-        let v = eng::with_state(|st| eng::tigetnum(&st.term, capname.as_str(), st.lines, st.cols));
+        let v = eng::with_state(|st| eng::tigetnum(&st.term, capname.0, st.lines, st.cols));
         Ok(Value::int(v))
     }
 
     fn tigetstr(#[positional_only] capname: PyStr<'_>) -> Result<Value> {
         require_setupterm(_interp)?;
-        let v = eng::with_state(|st| eng::tigetstr(&st.term, capname.as_str()));
+        let v = eng::with_state(|st| eng::tigetstr(&st.term, capname.0));
         Ok(match v {
             Some(bytes) => Value::bytes(bytes.to_vec()),
             None => Value::none(),
@@ -1962,7 +1962,7 @@ pyrust_module! {
     fn cbreak(#[default(OptionalArg::Omitted)] flag: OptValueRef<'_>) -> Result<Value> {
         require_initscr(_interp)?;
         let on = match flag {
-            OptionalArg::Present(v) => _interp.truthy_value(v.0)?,
+            OptionalArg::Provided(v) => _interp.truthy_value(v.0)?,
             OptionalArg::Omitted => true,
         };
         eng::with_state_mut(|st| {
@@ -1984,7 +1984,7 @@ pyrust_module! {
     fn raw(#[default(OptionalArg::Omitted)] flag: OptValueRef<'_>) -> Result<Value> {
         require_initscr(_interp)?;
         let on = match flag {
-            OptionalArg::Present(v) => _interp.truthy_value(v.0)?,
+            OptionalArg::Provided(v) => _interp.truthy_value(v.0)?,
             OptionalArg::Omitted => true,
         };
         eng::with_state_mut(|st| {
@@ -2006,7 +2006,7 @@ pyrust_module! {
     fn echo(#[default(OptionalArg::Omitted)] flag: OptValueRef<'_>) -> Result<Value> {
         require_initscr(_interp)?;
         let on = match flag {
-            OptionalArg::Present(v) => _interp.truthy_value(v.0)?,
+            OptionalArg::Provided(v) => _interp.truthy_value(v.0)?,
             OptionalArg::Omitted => true,
         };
         eng::with_state_mut(|st| {
@@ -2028,7 +2028,7 @@ pyrust_module! {
     fn nl(#[default(OptionalArg::Omitted)] flag: OptValueRef<'_>) -> Result<Value> {
         require_initscr(_interp)?;
         let on = match flag {
-            OptionalArg::Present(v) => _interp.truthy_value(v.0)?,
+            OptionalArg::Provided(v) => _interp.truthy_value(v.0)?,
             OptionalArg::Omitted => true,
         };
         eng::with_state_mut(|st| {
@@ -2089,13 +2089,13 @@ pyrust_module! {
     fn has_colors() -> Result<Value> {
         require_initscr(_interp)?;
         let has = eng::with_state(|st| st.max_colors > 0);
-        Ok(Value::bool(has))
+        Ok(Value::bool_(has))
     }
 
     fn can_change_color() -> Result<Value> {
         require_initscr(_interp)?;
         let can = eng::with_state(|st| eng::tigetflag(&st.term, "ccc") == 1);
-        Ok(Value::bool(can))
+        Ok(Value::bool_(can))
     }
 
     fn init_pair(
@@ -2282,19 +2282,19 @@ pyrust_module! {
                 .and_then(|&(_, cap)| eng::tigetstr(&st.term, cap))
                 .is_some()
         });
-        Ok(Value::bool(found))
+        Ok(Value::bool_(found))
     }
 
     fn has_ic() -> Result<Value> {
         require_initscr(_interp)?;
         let has = eng::with_state(|st| eng::tigetstr(&st.term, "ich1").is_some());
-        Ok(Value::bool(has))
+        Ok(Value::bool_(has))
     }
 
     fn has_il() -> Result<Value> {
         require_initscr(_interp)?;
         let has = eng::with_state(|st| eng::tigetstr(&st.term, "il1").is_some());
-        Ok(Value::bool(has))
+        Ok(Value::bool_(has))
     }
 
     fn baudrate() -> Result<Value> {
@@ -2467,7 +2467,7 @@ pyrust_module! {
         let nl = nlines.expect_i64(FN_NAME, "nlines")?;
         let nc = ncols.expect_i64(FN_NAME, "ncols")?;
         let resized = eng::with_state(|st| nl != st.lines as i64 || nc != st.cols as i64);
-        Ok(Value::bool(resized))
+        Ok(Value::bool_(resized))
     }
 }
 

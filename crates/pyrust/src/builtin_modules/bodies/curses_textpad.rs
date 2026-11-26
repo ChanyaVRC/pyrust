@@ -253,8 +253,8 @@ pyrust_module! {
             #[default(OptionalArg::Omitted)] insert_mode: OptValueRef<'_>,
         ) -> Result<Value> {
             let ins = match insert_mode {
-                OptionalArg::Present(v) => v.0.clone(),
-                OptionalArg::Omitted => Value::bool(false),
+                OptionalArg::Provided(v) => v.0.clone(),
+                OptionalArg::Omitted => Value::bool_(false),
             };
             _interp.assign_attr(self_val.0.clone(), "win", win.0.clone())?;
             _interp.assign_attr(self_val.0.clone(), "insert_mode", ins)?;

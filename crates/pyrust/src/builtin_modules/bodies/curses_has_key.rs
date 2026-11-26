@@ -54,13 +54,13 @@ pyrust_module! {
             }
             ValueKind::Int(n) => n,
             ValueKind::Bool(b) => i64::from(b),
-            _ => return Ok(Value::bool(false)),
+            _ => return Ok(Value::bool_(false)),
         };
         let Some(&(_, cap_name)) = eng::KEY_CAPABILITY_TABLE
             .iter()
             .find(|&&(k, _)| k == code)
         else {
-            return Ok(Value::bool(false));
+            return Ok(Value::bool_(false));
         };
         let c_mod = _interp.load_module("_curses")?;
         let tigetstr_fn = _interp.get_attr(&c_mod, "tigetstr")?;
@@ -71,6 +71,6 @@ pyrust_module! {
                 value: Value::string(cap_name),
             }],
         )?;
-        Ok(Value::bool(_interp.truthy_value(&res)?))
+        Ok(Value::bool_(_interp.truthy_value(&res)?))
     }
 }

@@ -138,7 +138,7 @@ pyrust_module! {
                     .find(|p| p.id == h.id)
                     .is_some_and(|p| p.hidden)
             });
-            Ok(Value::bool(is_hidden))
+            Ok(Value::bool_(is_hidden))
         }
 
         fn hide(#[state] h: &PanelHandle) -> Result<Value> {

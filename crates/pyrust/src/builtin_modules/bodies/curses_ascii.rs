@@ -8,6 +8,7 @@
 use pyrust_derive::pyrust_module;
 
 use crate::error::{PyError, Result};
+use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::PyValue;
 use crate::interpreter::value_type_name_str;
 use crate::value::{Value, ValueKind};
@@ -115,71 +116,71 @@ pyrust_module! {
     }
 
     fn isalnum(c: PyValue) -> Result<Value> {
-        Ok(Value::bool(is_alnum_i(ctoi(&c.0)?)))
+        Ok(Value::bool_(is_alnum_i(ctoi(&c.0)?)))
     }
 
     fn isalpha(c: PyValue) -> Result<Value> {
-        Ok(Value::bool(is_alpha_i(ctoi(&c.0)?)))
+        Ok(Value::bool_(is_alpha_i(ctoi(&c.0)?)))
     }
 
     fn isascii(c: PyValue) -> Result<Value> {
-        Ok(Value::bool((0..=127).contains(&ctoi(&c.0)?)))
+        Ok(Value::bool_((0..=127).contains(&ctoi(&c.0)?)))
     }
 
     fn isblank(c: PyValue) -> Result<Value> {
         let n = ctoi(&c.0)?;
-        Ok(Value::bool(n == 9 || n == 32))
+        Ok(Value::bool_(n == 9 || n == 32))
     }
 
     fn iscntrl(c: PyValue) -> Result<Value> {
         let n = ctoi(&c.0)?;
-        Ok(Value::bool((0..=31).contains(&n) || n == 127))
+        Ok(Value::bool_((0..=31).contains(&n) || n == 127))
     }
 
     fn isdigit(c: PyValue) -> Result<Value> {
-        Ok(Value::bool(is_digit_i(ctoi(&c.0)?)))
+        Ok(Value::bool_(is_digit_i(ctoi(&c.0)?)))
     }
 
     fn isgraph(c: PyValue) -> Result<Value> {
-        Ok(Value::bool(is_graph_i(ctoi(&c.0)?)))
+        Ok(Value::bool_(is_graph_i(ctoi(&c.0)?)))
     }
 
     fn islower(c: PyValue) -> Result<Value> {
-        Ok(Value::bool(is_lower_i(ctoi(&c.0)?)))
+        Ok(Value::bool_(is_lower_i(ctoi(&c.0)?)))
     }
 
     fn isprint(c: PyValue) -> Result<Value> {
-        Ok(Value::bool(is_print_i(ctoi(&c.0)?)))
+        Ok(Value::bool_(is_print_i(ctoi(&c.0)?)))
     }
 
     fn ispunct(c: PyValue) -> Result<Value> {
         let n = ctoi(&c.0)?;
-        Ok(Value::bool(is_graph_i(n) && !is_alnum_i(n)))
+        Ok(Value::bool_(is_graph_i(n) && !is_alnum_i(n)))
     }
 
     fn isspace(c: PyValue) -> Result<Value> {
         let n = ctoi(&c.0)?;
-        Ok(Value::bool(matches!(n, 9 | 10 | 11 | 12 | 13 | 32)))
+        Ok(Value::bool_(matches!(n, 9 | 10 | 11 | 12 | 13 | 32)))
     }
 
     fn isupper(c: PyValue) -> Result<Value> {
-        Ok(Value::bool(is_upper_i(ctoi(&c.0)?)))
+        Ok(Value::bool_(is_upper_i(ctoi(&c.0)?)))
     }
 
     fn isxdigit(c: PyValue) -> Result<Value> {
         let n = ctoi(&c.0)?;
-        Ok(Value::bool(
+        Ok(Value::bool_(
             is_digit_i(n) || (65..=70).contains(&n) || (97..=102).contains(&n),
         ))
     }
 
     fn isctrl(c: PyValue) -> Result<Value> {
         let n = ctoi(&c.0)?;
-        Ok(Value::bool((0..32).contains(&n)))
+        Ok(Value::bool_((0..32).contains(&n)))
     }
 
     fn ismeta(c: PyValue) -> Result<Value> {
-        Ok(Value::bool(ctoi(&c.0)? > 127))
+        Ok(Value::bool_(ctoi(&c.0)? > 127))
     }
 
     fn ascii(c: PyValue) -> Result<Value> {

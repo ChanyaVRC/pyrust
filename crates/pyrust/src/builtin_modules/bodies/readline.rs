@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use pyrust_derive::pyrust_module;
 
 use crate::error::{PyError, Result};
+use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyCallable, PyIndex, PyPath, PyStr, PyValue};
 use crate::value::Value;
 
@@ -155,7 +156,7 @@ pyrust_module! {
     /// Execute the init line provided in the string argument.
     fn parse_and_bind(#[positional_only] string: PyStr<'_>) -> Result<Value> {
         READLINE_STATE.with(|cell| {
-            cell.borrow_mut().bindings.push(string.as_str().to_string());
+            cell.borrow_mut().bindings.push(string.0.to_string());
         });
         Ok(Value::none())
     }
@@ -191,7 +192,7 @@ pyrust_module! {
     /// Insert text into the line buffer at the cursor position.
     fn insert_text(#[positional_only] string: PyStr<'_>) -> Result<Value> {
         READLINE_STATE.with(|cell| {
-            cell.borrow_mut().line_buffer.push_str(string.as_str());
+            cell.borrow_mut().line_buffer.push_str(string.0);
         });
         Ok(Value::none())
     }
@@ -369,7 +370,7 @@ pyrust_module! {
                     format!("No history item at position {p}"),
                 ));
             }
-            st.history[p as usize] = line.as_str().to_string();
+            st.history[p as usize] = line.0.to_string();
             Ok(Value::none())
         })
     }
@@ -377,7 +378,7 @@ pyrust_module! {
     /// Add an item to the history buffer.
     fn add_history(#[positional_only] string: PyStr<'_>) -> Result<Value> {
         READLINE_STATE.with(|cell| {
-            cell.borrow_mut().history.push(string.as_str().to_string());
+            cell.borrow_mut().history.push(string.0.to_string());
         });
         Ok(Value::none())
     }
@@ -457,7 +458,7 @@ pyrust_module! {
     /// Set the word delimiters for completion.
     fn set_completer_delims(#[positional_only] string: PyStr<'_>) -> Result<Value> {
         READLINE_STATE.with(|cell| {
-            cell.borrow_mut().completer_delims = string.as_str().to_string();
+            cell.borrow_mut().completer_delims = string.0.to_string();
         });
         Ok(Value::none())
     }
