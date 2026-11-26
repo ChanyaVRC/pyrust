@@ -41,7 +41,8 @@ print(
 
 # ── 2. EnvBuilder.ensure_directories, replace_variables, create_configuration ─
 
-with tempfile.TemporaryDirectory() as tmp:
+with tempfile.TemporaryDirectory() as _tmp:
+    tmp = os.path.realpath(_tmp)
     # Reject path containing os.pathsep
     bad_dir = os.path.join(tmp, f"bad{os.pathsep}dir")
     try:
@@ -158,7 +159,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # ── 3. EnvBuilder subclassing, context SimpleNamespace, install_scripts ──────
 
-with tempfile.TemporaryDirectory() as tmp:
+with tempfile.TemporaryDirectory() as _tmp:
+    tmp = os.path.realpath(_tmp)
     events = []
 
     class CustomBuilder(venv.EnvBuilder):
@@ -201,7 +203,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # ── 4. venv.main() CLI parsing & multiple ENV_DIRs ───────────────────────────
 
-with tempfile.TemporaryDirectory() as tmp:
+with tempfile.TemporaryDirectory() as _tmp:
+    tmp = os.path.realpath(_tmp)
     d1 = os.path.join(tmp, "cli_a")
     d2 = os.path.join(tmp, "cli_b")
     venv.main(["--without-pip", "--prompt", "multi", d1, d2])
@@ -233,7 +236,8 @@ print("ensurepip_pkg_names:", ensurepip._PACKAGE_NAMES)
 pkgs = ensurepip._get_packages()
 print("ensurepip_get_packages:", "pip" in pkgs, pkgs["pip"].version == ver)
 
-with tempfile.TemporaryDirectory() as tmp:
+with tempfile.TemporaryDirectory() as _tmp:
+    tmp = os.path.realpath(_tmp)
     with open(os.path.join(tmp, "pip-9.8.7-py3-none-any.whl"), "wb") as f:
         f.write(b"")
     with open(os.path.join(tmp, "other-1.0-py3-none-any.whl"), "wb") as f:
@@ -280,15 +284,19 @@ except ValueError as e:
 
 # CLI --version for ensurepip and ensurepip._uninstall
 buf = io.StringIO()
+ep_code = None
 with contextlib.redirect_stdout(buf):
     try:
         ensurepip._main(["--version"])
     except SystemExit as e:
-        print("ensurepip_cli_code:", e.code, buf.getvalue().strip() == f"pip {ver}")
+        ep_code = e.code
+print("ensurepip_cli_code:", ep_code, buf.getvalue().strip() == f"pip {ver}")
 
 buf2 = io.StringIO()
+un_code = None
 with contextlib.redirect_stdout(buf2):
     try:
         ensurepip._uninstall._main(["--version"])
     except SystemExit as e:
-        print("uninstall_cli_code:", e.code, buf2.getvalue().strip() == f"pip {ver}")
+        un_code = e.code
+print("uninstall_cli_code:", un_code, buf2.getvalue().strip() == f"pip {ver}")
