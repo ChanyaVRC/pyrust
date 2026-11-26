@@ -67,6 +67,21 @@ pub struct SlotAttrCacheEntry {
     pub slot_id: pyrust_core::MemberSlotId,
 }
 
+/// Boxed payload for [`AttrCacheEntry::PropertyGet`].
+///
+/// `fget` is a [`pyrust_core::WeakValueCache`] rather than an owning `Rc`: the
+/// getter function can reference the very `FnCode` that owns this cache
+/// (`function -> code -> cache -> function`), so a strong handle would form a
+/// reference cycle.  The property object on the class keeps `fget` alive; a
+/// failed upgrade is an ordinary cache miss.
+#[derive(Clone)]
+pub struct PropertyGetCacheEntry {
+    pub class_ptr: std::rc::Weak<std::cell::RefCell<pyrust_core::PyClass>>,
+    pub class_version: u64,
+    pub epoch: u64,
+    pub fget: pyrust_core::WeakValueCache,
+}
+
 #[derive(Clone)]
 pub enum AttrCacheEntry {
     /// No observation yet — slot is uninitialised.
@@ -154,6 +169,16 @@ pub enum AttrCacheEntry {
     /// `__setattr__` / MRO lookups and descriptor dispatch.  Reuses the boxed
     /// [`SlotAttrCacheEntry`] payload so the enum does not grow.
     SetSlotAttr(Box<SlotAttrCacheEntry>),
+    /// Monomorphic plain-`@property` getter read cache (issue #3382).  Filled
+    /// when a `GetAttr` site on a `PyInstance` resolves to an exact built-in
+    /// `property` whose `fget` is a regular Python function, and the class
+    /// has no custom `__getattribute__` / `__getattr__`.  `property` is a data
+    /// descriptor, so it always wins over the instance `__dict__`; a hit (same
+    /// class pointer + version + epoch) therefore skips the MRO walk and
+    /// descriptor dispatch and calls the cached `fget` with the receiver.
+    /// Replacing / deleting the property, or adding `__getattribute__` /
+    /// `__getattr__`, bumps the class version / epoch and invalidates the entry.
+    PropertyGet(Box<PropertyGetCacheEntry>),
     /// More than one class seen at this site — disable caching.
     Megamorphic,
 }
@@ -235,6 +260,15 @@ impl std::fmt::Debug for AttrCacheEntry {
                 write!(
                     f,
                     "SetSlotAttr({:?}, v{}, e{})",
+                    entry.class_ptr.as_ptr(),
+                    entry.class_version,
+                    entry.epoch
+                )
+            }
+            AttrCacheEntry::PropertyGet(entry) => {
+                write!(
+                    f,
+                    "PropertyGet({:?}, v{}, e{})",
                     entry.class_ptr.as_ptr(),
                     entry.class_version,
                     entry.epoch
