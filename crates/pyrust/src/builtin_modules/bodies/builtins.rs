@@ -304,41 +304,45 @@ mod typing_protocols {
     include!("builtins/typing_protocols.rs");
 }
 
-/// Combined registry for the independently maintained builtin families.
-pub(crate) fn regs() -> &'static [crate::builtin_registry::BuiltinReg] {
-    static REGS_CELL: std::sync::LazyLock<Vec<crate::builtin_registry::BuiltinReg>> =
-        std::sync::LazyLock::new(|| {
-            let mut regs = Vec::new();
-            regs.extend_from_slice(scalar::regs());
-            regs.extend_from_slice(identity_and_repr::regs());
-            regs.extend_from_slice(numeric_functions::regs());
-            regs.extend_from_slice(aggregation::regs());
-            regs.extend_from_slice(iteration::regs());
-            regs.extend_from_slice(reflection::regs());
-            regs.extend_from_slice(length::regs());
-            regs.extend_from_slice(ordering::regs());
-            regs.extend_from_slice(rounding::regs());
-            regs.extend_from_slice(sequence_constructors::regs());
-            regs.extend_from_slice(bytes_constructors::regs());
-            regs.extend_from_slice(complex_constructor::regs());
-            regs.extend_from_slice(collection_constructors::regs());
-            regs.extend_from_slice(text_constructor::regs());
-            regs.extend_from_slice(int_constructor::regs());
-            regs.extend_from_slice(float_constructor::regs());
-            regs.extend_from_slice(services::regs());
-            regs.extend_from_slice(container_protocols::regs());
-            regs.extend_from_slice(object_basics::regs());
-            regs.extend_from_slice(type_protocols::regs());
-            regs.extend_from_slice(primitive_construction_protocols::regs());
-            regs.extend_from_slice(object_comparison::regs());
-            regs.extend_from_slice(operators::regs());
-            regs.extend_from_slice(object_protocols::regs());
-            regs.extend_from_slice(exception_protocols::regs());
-            regs.extend_from_slice(importing::regs());
-            regs.extend_from_slice(typing_protocols::regs());
-            regs
-        });
-    REGS_CELL.as_slice()
+/// The registration slice of every independently maintained builtin family.
+///
+/// A slice of slices, so composing the families copies nothing: each family's
+/// `REGS` stays where its `pyrust_module!` emitted it.  The registry merges
+/// them into its always-available tier at compile time.
+pub(crate) static REG_FAMILIES: &[&[crate::builtin_registry::BuiltinReg]] = &[
+    scalar::REGS,
+    identity_and_repr::REGS,
+    numeric_functions::REGS,
+    aggregation::REGS,
+    iteration::REGS,
+    reflection::REGS,
+    length::REGS,
+    ordering::REGS,
+    rounding::REGS,
+    sequence_constructors::REGS,
+    bytes_constructors::REGS,
+    complex_constructor::REGS,
+    collection_constructors::REGS,
+    text_constructor::REGS,
+    int_constructor::REGS,
+    float_constructor::REGS,
+    services::REGS,
+    container_protocols::REGS,
+    object_basics::REGS,
+    type_protocols::REGS,
+    primitive_construction_protocols::REGS,
+    object_comparison::REGS,
+    operators::REGS,
+    object_protocols::REGS,
+    exception_protocols::REGS,
+    importing::REGS,
+    typing_protocols::REGS,
+];
+
+/// Every builtin registration, family by family.
+#[cfg(test)]
+fn regs() -> impl Iterator<Item = &'static crate::builtin_registry::BuiltinReg> {
+    REG_FAMILIES.iter().flat_map(|family| family.iter())
 }
 
 include!("builtins/namespace.rs");
@@ -536,14 +540,14 @@ mod family_boundary_tests {
             "int",
             "float",
         ];
-        let actual = super::regs()
-            .iter()
-            .filter_map(|registration| {
-                EXPECTED
-                    .contains(&registration.name)
-                    .then_some(registration.name)
-            })
-            .collect::<Vec<_>>();
+        // A family's `REGS` slice is sorted for lookup, so the order that
+        // Python can observe is the order the namespace walk exports names.
+        let mut actual = Vec::new();
+        super::visit_startup_namespace(&mut |name, _| {
+            if EXPECTED.contains(&name) {
+                actual.push(name);
+            }
+        });
 
         assert_eq!(actual, EXPECTED);
     }

@@ -11,7 +11,7 @@ use std::rc::Rc;
 use pyrust_derive::pyrust_module;
 
 use crate::builtin_modules::macros::link_class_bases;
-use crate::builtin_registry::BuiltinReg;
+use crate::builtin_registry::ModuleRegs;
 use crate::error::Result;
 use crate::interpreter::builtin_args::{PyStr, PyValueRef};
 use crate::interpreter::{ExpandedCallArg, Interpreter};
@@ -75,9 +75,7 @@ macro_rules! define_encoding_codec_submodules {
             pub mod $mod_ident {
                 use super::*;
 
-                pub(crate) const MODULE_NAME: &str = $py_name;
-                #[allow(dead_code)]
-                pub(crate) const FN_PREFIX: &str = concat!($py_name, ".");
+                pyrust_module_identity!($py_name);
                 const CANONICAL_NAME: &str = $canonical;
 
                 pyrust_module! {
@@ -118,13 +116,15 @@ macro_rules! define_encoding_codec_submodules {
             }
         )*
 
-        pub(crate) fn all_regs() -> Vec<BuiltinReg> {
-            let mut all = Vec::new();
+        /// Registry rows for the generated codec submodules.
+        pub(crate) static MODULE_REGS: &[ModuleRegs] = &[
             $(
-                all.extend_from_slice($mod_ident::regs());
+                ModuleRegs {
+                    name: $mod_ident::MODULE_NAME,
+                    regs: $mod_ident::REGS,
+                },
             )*
-            all
-        }
+        ];
 
         pub(crate) fn load_builtin_module(name: &str) -> Option<Value> {
             match name {

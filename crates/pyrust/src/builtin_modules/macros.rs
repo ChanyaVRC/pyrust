@@ -20,6 +20,56 @@ use crate::error::{PyError, Result};
 use crate::interpreter::{ExpandedCallArg, Interpreter, value_type_name_str};
 use crate::value::{InstanceAttrs, ModuleAttrs, PyClass, PyInstance, PyKey, Value, ValueKind};
 
+// ─── Module Identity ─────────────────────────────────────────────────────────
+
+/// Declare the identity a `pyrust_module!` body reads from its enclosing
+/// module: `MODULE_NAME`, `FN_PREFIX`, and the `__pyrust_qualname!` macro that
+/// turns a callable's short name into its registry name.
+///
+/// `__pyrust_qualname!` is a `concat!`, so every registry name is a string
+/// literal in read-only data rather than a string built and leaked at run
+/// time.  A plain `const` prefix cannot do this: `concat!` only accepts
+/// literals.
+///
+/// - `pyrust_module_identity!("os.path")` — callables register as
+///   `"os.path.<name>"`.
+/// - `pyrust_module_identity!(@flat "builtins")` — callables register under
+///   their short name only.
+macro_rules! pyrust_module_identity {
+    (@flat $name:expr) => {
+        /// Python-level name of this built-in module.  Used for
+        /// `PyModule.name` and as the key for `import`.
+        pub(crate) const MODULE_NAME: &str = $name;
+        /// Empty prefix: this module's functions live in the global
+        /// namespace (`abs`, `len`, …).
+        #[allow(dead_code)]
+        pub(crate) const FN_PREFIX: &str = "";
+
+        #[allow(unused_macros)]
+        macro_rules! __pyrust_qualname {
+            ($suffix:expr) => {
+                $suffix
+            };
+        }
+    };
+    ($name:expr) => {
+        /// Python-level name of this built-in module.  Used for
+        /// `PyModule.name` and as the key for `import`.
+        pub(crate) const MODULE_NAME: &str = $name;
+        /// Prefix prepended to every function's short name to form its
+        /// Python-level registration name.
+        #[allow(dead_code)]
+        pub(crate) const FN_PREFIX: &str = concat!($name, ".");
+
+        #[allow(unused_macros)]
+        macro_rules! __pyrust_qualname {
+            ($suffix:expr) => {
+                concat!($name, ".", $suffix)
+            };
+        }
+    };
+}
+
 // ─── Class & Exception Base Resolution ───────────────────────────────────────
 
 /// Trait implemented for values accepted as a base class in `pyrust_module!`
@@ -387,8 +437,15 @@ impl StructSeqSpec {
     }
 }
 
-const STRUCTSEQ_NEW_NAME: &str = "_structseq.__new__";
-const STRUCTSEQ_REPR_NAME: &str = "_structseq.__repr__";
+// Each name's bytes live in a `static`, so the registry entry and the
+// function objects built from the name share one pointer (see
+// `crate::builtin_registry::name_str`).
+static STRUCTSEQ_NEW_NAME_BYTES: [u8; 18] =
+    crate::builtin_registry::name_bytes("_structseq.__new__");
+static STRUCTSEQ_REPR_NAME_BYTES: [u8; 19] =
+    crate::builtin_registry::name_bytes("_structseq.__repr__");
+const STRUCTSEQ_NEW_NAME: &str = crate::builtin_registry::name_str(&STRUCTSEQ_NEW_NAME_BYTES);
+const STRUCTSEQ_REPR_NAME: &str = crate::builtin_registry::name_str(&STRUCTSEQ_REPR_NAME_BYTES);
 
 // Thread-local justification:
 // (a) Why `thread_local!`: Maps `!Send` weak `PyClass` pointers created by
@@ -688,29 +745,27 @@ fn structseq_repr(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result
     Ok(Value::string(out))
 }
 
-/// Builtin registrations for the shared `_structseq` runtime hooks, included
-/// once in `crate::builtin_modules::all_regs`.
-pub(crate) fn structseq_regs() -> &'static [BuiltinReg] {
-    static REGS: [BuiltinReg; 2] = [
-        BuiltinReg {
-            name: STRUCTSEQ_NEW_NAME,
-            dispatch: structseq_new,
-            metadata: BuiltinCallableMetadata::method_descriptor("builtins", STRUCTSEQ_NEW_NAME),
-            fast: None,
-            min_arity: 0,
-            max_arity: 0,
-        },
-        BuiltinReg {
-            name: STRUCTSEQ_REPR_NAME,
-            dispatch: structseq_repr,
-            metadata: BuiltinCallableMetadata::method_descriptor("builtins", STRUCTSEQ_REPR_NAME),
-            fast: None,
-            min_arity: 0,
-            max_arity: 0,
-        },
-    ];
-    &REGS
-}
+/// Builtin registrations for the shared `_structseq` runtime hooks.  Part of
+/// the registry's always-available tier: a struct sequence can be built by
+/// `sys` before any module is imported.
+pub(crate) static STRUCTSEQ_REGS: &[BuiltinReg] = &[
+    BuiltinReg {
+        name: STRUCTSEQ_NEW_NAME,
+        dispatch: structseq_new,
+        metadata: BuiltinCallableMetadata::method_descriptor("builtins", STRUCTSEQ_NEW_NAME),
+        fast: None,
+        min_arity: 0,
+        max_arity: 0,
+    },
+    BuiltinReg {
+        name: STRUCTSEQ_REPR_NAME,
+        dispatch: structseq_repr,
+        metadata: BuiltinCallableMetadata::method_descriptor("builtins", STRUCTSEQ_REPR_NAME),
+        fast: None,
+        min_arity: 0,
+        max_arity: 0,
+    },
+];
 
 // ─── IntEnum & IntFlag Runtime Builders ──────────────────────────────────────
 

@@ -5,14 +5,14 @@ use quote::{format_ident, quote};
 use syn::{Attribute, Ident, LitStr};
 
 use crate::builtin_fn::{
-    NativeStateCtx, emit_builtin_reg, emit_name_static, emit_native_state_helpers,
+    NativeStateCtx, RegEntry, emit_builtin_reg, emit_name_static, emit_native_state_helpers,
 };
 use crate::clinic::{KW_ONLY_POS_SENTINEL, emit_msg_name_binding, emit_validation_phase};
 use crate::signature::{ModuleFn, ModuleFnArgs, TypedParam, params_all_positional_only};
 
-/// Emit a multi-fn overload group's artefacts: one shared name static,
+/// Emit a multi-fn overload group's artefacts: one shared name constant,
 /// N typed-arg body fns, one dispatcher (plus optional vectorcall fast
-/// dispatcher), and one `regs.push(BuiltinReg { … });` statement.
+/// dispatcher), and one `BuiltinReg { … }` element for the `REGS` slice.
 pub(crate) fn emit_overload_set_artefacts(
     group: &[&ModuleFn],
     name_suffix: &str,
@@ -20,7 +20,7 @@ pub(crate) fn emit_overload_set_artefacts(
     is_class_method: bool,
     extra_cfg_attrs: &[Attribute],
     native_state_ctx: Option<NativeStateCtx<'_>>,
-) -> (Vec<TokenStream>, TokenStream, Ident) {
+) -> (Vec<TokenStream>, RegEntry, Ident) {
     let head = group[0];
     let head_span = head.short_name.span();
     let suffix_lit = LitStr::new(name_suffix, head_span);
@@ -68,7 +68,7 @@ pub(crate) fn emit_overload_set_artefacts(
             __pyrust_args: &[ExpandedCallArg],
         ) -> crate::error::Result<crate::value::Value> {
             #[allow(non_snake_case)]
-            let FN_NAME: &'static str = *#name_static_ident;
+            let FN_NAME: &'static str = #name_static_ident;
             let _ = FN_NAME;
             #msg_name_binding
 
@@ -106,7 +106,7 @@ pub(crate) fn emit_overload_set_artefacts(
                     __pyrust_fast_args: &[Value],
                 ) -> crate::error::Result<crate::value::Value> {
                     #[allow(non_snake_case)]
-                    let FN_NAME: &'static str = *#name_static_ident;
+                    let FN_NAME: &'static str = #name_static_ident;
                     let _ = FN_NAME;
                     #msg_name_binding
                     #(#fast_locate)*
@@ -227,7 +227,7 @@ fn emit_overload_bodies_and_branches(
                 #(#body_typed_params),*
             ) -> crate::error::Result<crate::value::Value> {
                 #[allow(non_snake_case)]
-                let FN_NAME: &'static str = *#name_static_ident;
+                let FN_NAME: &'static str = #name_static_ident;
                 let _ = FN_NAME;
                 #state_helpers
                 #(#body_stmts)*

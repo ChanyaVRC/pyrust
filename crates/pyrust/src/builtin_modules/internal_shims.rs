@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use pyrust_derive::pyrust_module;
 
-use crate::builtin_registry::BuiltinReg;
+use crate::builtin_registry::ModuleRegs;
 use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{PyBool, PyIndex, PyNumber, PyStr, PyValue, PyValueRef};
 use crate::interpreter::{ExpandedCallArg, Interpreter, lookup_exc_class};
@@ -310,9 +310,7 @@ fn json_scanstring(s: &str, end_idx: usize, strict: bool) -> Result<(String, usi
 
 pub mod _thread {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_thread";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_thread.";
+    pyrust_module_identity!("_thread");
 
     pyrust_module! {
         fn _count() -> Result<Value> {
@@ -447,9 +445,7 @@ pub mod _thread {
 
 pub mod _abc {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_abc";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_abc.";
+    pyrust_module_identity!("_abc");
 
     pyrust_module! {
         fn _reset_caches(#[positional_only] _cls: PyValueRef<'_>) -> Result<Value> {
@@ -473,9 +469,7 @@ pub mod _abc {
 
 pub mod _collections {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_collections";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_collections.";
+    pyrust_module_identity!("_collections");
 
     pyrust_module! {
         fn _count_elements(
@@ -515,9 +509,7 @@ pub mod _collections {
 
 pub mod _weakref {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_weakref";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_weakref.";
+    pyrust_module_identity!("_weakref");
 
     pyrust_module! {
         fn _remove_dead_weakref(
@@ -554,9 +546,7 @@ pub mod _weakref {
 
 pub mod _struct {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_struct";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_struct.";
+    pyrust_module_identity!("_struct");
 
     pyrust_module! {
         fn _clearcache() -> Result<Value> {
@@ -575,9 +565,7 @@ pub mod _struct {
 
 pub mod _json {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_json";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_json.";
+    pyrust_module_identity!("_json");
 
     pyrust_module! {
         fn encode_basestring(#[positional_only] string: PyStr<'_>) -> Result<Value> {
@@ -615,9 +603,7 @@ pub mod _json {
 
 pub mod _sre {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_sre";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_sre.";
+    pyrust_module_identity!("_sre");
 
     pyrust_module! {
         constants {
@@ -685,9 +671,7 @@ pub mod _sre {
 
 pub mod _warnings {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_warnings";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_warnings.";
+    pyrust_module_identity!("_warnings");
 
     pyrust_module! {
         constants {
@@ -716,9 +700,7 @@ pub mod _warnings {
 
 pub mod _hashlib {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_hashlib";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_hashlib.";
+    pyrust_module_identity!("_hashlib");
 
     pyrust_module! {
         exception UnsupportedDigestmodError(ValueError);
@@ -790,9 +772,7 @@ pub mod _hashlib {
 
 pub mod _typing {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_typing";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_typing.";
+    pyrust_module_identity!("_typing");
 
     pyrust_module! {
         fn _idfunc(#[positional_only] x: PyValueRef<'_>) -> Result<Value> {
@@ -824,9 +804,7 @@ pub mod _typing {
 
 pub mod _opcode {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_opcode";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_opcode.";
+    pyrust_module_identity!("_opcode");
 
     pyrust_module! {
         fn get_specialization_stats() -> Result<Value> {
@@ -845,9 +823,7 @@ pub mod _opcode {
 
 pub mod _statistics {
     use super::*;
-    pub(crate) const MODULE_NAME: &str = "_statistics";
-    #[allow(dead_code)]
-    pub(crate) const FN_PREFIX: &str = "_statistics.";
+    pyrust_module_identity!("_statistics");
 
     pyrust_module! {
         fn _normal_dist_inv_cdf(
@@ -885,9 +861,7 @@ macro_rules! define_reexport_shims {
                 #[allow(unused_imports)]
                 use super::*;
 
-                pub(crate) const MODULE_NAME: &str = stringify!($mod_ident);
-                #[allow(dead_code)]
-                pub(crate) const FN_PREFIX: &str = concat!(stringify!($mod_ident), ".");
+                pyrust_module_identity!(stringify!($mod_ident));
 
                 pyrust_module! {
                     $(
@@ -1287,13 +1261,15 @@ define_reexport_shims! {
 
 macro_rules! register_shim_dispatch {
     ($($mod_ident:ident),* $(,)?) => {
-        pub(crate) fn all_regs() -> Vec<BuiltinReg> {
-            let mut all = Vec::new();
+        /// Registry rows for every internal shim module.
+        pub(crate) static MODULE_REGS: &[ModuleRegs] = &[
             $(
-                all.extend_from_slice($mod_ident::regs());
+                ModuleRegs {
+                    name: $mod_ident::MODULE_NAME,
+                    regs: $mod_ident::REGS,
+                },
             )*
-            all
-        }
+        ];
 
         pub(crate) fn load_builtin_module(name: &str) -> Option<Value> {
             match name {

@@ -8,7 +8,7 @@ use syn::punctuated::Punctuated;
 use syn::{Attribute, Expr, Ident, LitStr, Token, parse_macro_input};
 
 use crate::attrs::{ExceptionAttrs, parse_exception_attrs, peek_contextual_kw};
-use crate::builtin_fn::emit_fn_artefacts;
+use crate::builtin_fn::{RegEntry, emit_fn_artefacts, emit_regs_slice};
 use crate::class_macro::{
     ClassArtefacts, ClassConst, ModuleClass, emit_class_artefacts, parse_class,
     parse_constants_block,
@@ -195,7 +195,7 @@ pub(crate) fn expand_pyrust_module(input: TokenStream) -> TokenStream {
     };
 
     let mut fn_items: Vec<TokenStream2> = Vec::new();
-    let mut reg_entries: Vec<TokenStream2> = Vec::new();
+    let mut reg_entries: Vec<RegEntry> = Vec::new();
     let mut export_entries: Vec<TokenStream2> = Vec::new();
     let mut type_items: Vec<TokenStream2> = Vec::new();
 
@@ -217,7 +217,7 @@ pub(crate) fn expand_pyrust_module(input: TokenStream) -> TokenStream {
         let cfg_attrs = &head.cfg_attrs;
         export_entries.push(quote! {
             #(#cfg_attrs)*
-            visit(#short_lit, *#name_static_ident);
+            visit(#short_lit, #name_static_ident);
         });
     }
 
@@ -252,33 +252,18 @@ pub(crate) fn expand_pyrust_module(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let reg_capacity = reg_entries.len();
+    let regs_slice = emit_regs_slice(reg_entries);
     let map_capacity = const_entries.len() + export_entries.len() + type_items.len();
 
     quote! {
         // Per-function bodies.
         #(#fn_items)*
 
-        /// The per-module registry slice.  Composed at first call by
-        /// leaking `FN_PREFIX + short_name` into a `'static` string for
-        /// each entry.  Consumed by `crate::builtin_modules::all_regs`.
-        pub(crate) fn regs() -> &'static [crate::builtin_registry::BuiltinReg] {
-            static REGS_CELL: std::sync::LazyLock<Vec<crate::builtin_registry::BuiltinReg>> =
-                std::sync::LazyLock::new(|| {
-                    #[allow(unused_mut)]
-                    let mut regs: Vec<crate::builtin_registry::BuiltinReg> =
-                        Vec::with_capacity(#reg_capacity);
-                    #(#reg_entries)*
-                    regs
-                });
-            REGS_CELL.as_slice()
-        }
-
-        // Back-compat thin shim for callers referencing `REGS()`.
-        #[doc(hidden)]
-        pub(crate) fn REGS() -> &'static [crate::builtin_registry::BuiltinReg] {
-            regs()
-        }
+        /// The per-module registry slice: a constant in read-only data,
+        /// sorted by registry name so `crate::builtin_registry` can
+        /// binary-search it in place.  Nothing is built or copied at run time,
+        /// and the slice is not read until the module is first used.
+        pub(crate) static REGS: &[crate::builtin_registry::BuiltinReg] = #regs_slice;
 
         /// Visit every top-level callable as `(short name, registry name)`
         /// in declaration order, without building any value.

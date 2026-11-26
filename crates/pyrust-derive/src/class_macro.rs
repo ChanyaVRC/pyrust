@@ -12,7 +12,7 @@ use crate::attrs::{
     ArityStyle, ClassAttrs, ConstAttrs, MethodKind, cfg_key, parse_class_attrs, parse_const_attrs,
     peek_contextual_kw,
 };
-use crate::builtin_fn::{NativeStateCtx, emit_attr_insert_into, emit_fn_artefacts};
+use crate::builtin_fn::{NativeStateCtx, RegEntry, emit_attr_insert_into, emit_fn_artefacts};
 use crate::overload::emit_overload_set_artefacts;
 use crate::signature::{
     ModuleFn, ModuleFnArgs, group_funcs_by_name, has_state_param, parse_module_fn,
@@ -48,7 +48,7 @@ pub(crate) struct ModuleClass {
 /// Generated items for one `ModuleClass`.
 pub(crate) struct ClassArtefacts {
     pub(crate) fn_items: Vec<TokenStream>,
-    pub(crate) reg_entries: Vec<TokenStream>,
+    pub(crate) reg_entries: Vec<RegEntry>,
     pub(crate) class_item: TokenStream,
 }
 
@@ -359,9 +359,9 @@ pub(crate) fn emit_class_artefacts(class: &ModuleClass) -> ClassArtefacts {
                     #(#m_cfg)*
                     {
                         let __sm_fn = if FN_PREFIX.is_empty() {
-                            crate::value::Value::builtin_function(*#name_static_ident)
+                            crate::value::Value::builtin_function(#name_static_ident)
                         } else {
-                            crate::value::Value::fresh_builtin_function(*#name_static_ident)
+                            crate::value::Value::fresh_builtin_function(#name_static_ident)
                         };
                         __class_attrs.insert(
                             #short_lit.to_string(),
@@ -375,9 +375,9 @@ pub(crate) fn emit_class_artefacts(class: &ModuleClass) -> ClassArtefacts {
                     #(#m_cfg)*
                     {
                         let __cm_fn = if FN_PREFIX.is_empty() {
-                            crate::value::Value::builtin_function(*#name_static_ident)
+                            crate::value::Value::builtin_function(#name_static_ident)
                         } else {
-                            crate::value::Value::fresh_builtin_function(*#name_static_ident)
+                            crate::value::Value::fresh_builtin_function(#name_static_ident)
                         };
                         let __cm_desc =
                             pyrust_builtins::classmethod::native_class_method_descriptor(
@@ -482,9 +482,9 @@ pub(crate) fn emit_class_artefacts(class: &ModuleClass) -> ClassArtefacts {
                     #(#g_cfg)*
                     {
                         __fget = if FN_PREFIX.is_empty() {
-                            crate::value::Value::builtin_function(*#ident)
+                            crate::value::Value::builtin_function(#ident)
                         } else {
-                            crate::value::Value::fresh_builtin_function(*#ident)
+                            crate::value::Value::fresh_builtin_function(#ident)
                         };
                     }
                 }
@@ -498,9 +498,9 @@ pub(crate) fn emit_class_artefacts(class: &ModuleClass) -> ClassArtefacts {
                     #(#s_cfg)*
                     {
                         __fset = if FN_PREFIX.is_empty() {
-                            crate::value::Value::builtin_function(*#ident)
+                            crate::value::Value::builtin_function(#ident)
                         } else {
-                            crate::value::Value::fresh_builtin_function(*#ident)
+                            crate::value::Value::fresh_builtin_function(#ident)
                         };
                     }
                 }

@@ -66,7 +66,7 @@ fn visit_startup_namespace(visit: &mut dyn FnMut(&'static str, BuiltinsSlot)) {
     let mut family_export = |short_name: &'static str, registry_name: &'static str| {
         // Dotted names (`list.__init__`, `BaseException.add_note`, …) are
         // method-descriptor registry keys.  They stay reachable through
-        // `regs()` but are not Python-visible `builtins` names (issue #2971).
+        // the registry but are not Python-visible `builtins` names (issue #2971).
         if short_name.contains('.') {
             return;
         }

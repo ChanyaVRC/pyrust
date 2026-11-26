@@ -11,8 +11,8 @@ scripts or manual class/finalization boilerplate.
 ### Module-level gating (`pyrust_builtin_modules!` in `builtin_modules/mod.rs`)
 
 Gate platform-specific modules directly on their entry line. On non-matching
-targets the module is excluded from compilation, `all_regs()`,
-`is_builtin_module()`, and `load_builtin_module()` (raising
+targets the module is excluded from compilation, the registry's
+`MODULE_REGS` table, `is_builtin_module()`, and `load_builtin_module()` (raising
 `ModuleNotFoundError` at import time):
 
 ```rust
