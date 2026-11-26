@@ -454,6 +454,14 @@ fn mktime_local(tm: &Tm) -> Result<i64> {
         .ok_or_else(|| PyError::named("OverflowError", "mktime argument out of range".to_string()))
 }
 
+/// `tm_zone` reported by `gmtime`: glibc names the UTC zone "GMT", every other
+/// supported platform (macOS, Windows) "UTC" — matching CPython on each.
+const GMT_ZONE_NAME: &str = if cfg!(target_os = "linux") {
+    "GMT"
+} else {
+    "UTC"
+};
+
 /// Build a `time.struct_time` instance from broken-down time.  `local`
 /// selects the `tm_zone` / `tm_gmtoff` extras: the platform standard-time zone
 /// name and offset for local time, `UTC` / 0 for `gmtime`.
@@ -462,7 +470,7 @@ fn make_struct_time(tm: &Tm, local: bool) -> Value {
         let tz = tz_info();
         (tz.std_name, -tz.timezone)
     } else {
-        ("UTC".to_string(), 0)
+        (GMT_ZONE_NAME.to_string(), 0)
     };
     struct_time::make_with_extra(
         tm_to_fields(tm).iter().map(|&n| Value::int(n)).collect(),
