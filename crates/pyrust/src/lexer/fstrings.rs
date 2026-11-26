@@ -128,11 +128,26 @@ fn lex_fstring(
                 .get(pos)
                 .copied()
                 .ok_or_else(|| PyError::lex("unterminated escape in f-string".to_string()))?;
-            if raw {
-                // Raw mode: pass backslash and the following character verbatim.
+            if next_ch == '{' || next_ch == '}' {
+                // `\` before a brace never escapes it (#3374): the backslash is
+                // a literal character and the brace keeps its f-string meaning
+                // (field start, or half of `{{` / `}}`).  In a non-raw f-string
+                // `\{` is just an invalid escape sequence, kept as `\`.
                 literal.push('\\');
-                literal.push(next_ch);
-                pos += 1;
+            } else if raw {
+                // Raw mode: pass backslash and the following character verbatim
+                // (a CR / CRLF line ending is still normalized to `\n`).
+                literal.push('\\');
+                if next_ch == '\r' {
+                    literal.push('\n');
+                    pos += 1;
+                    if chars.get(pos) == Some(&'\n') {
+                        pos += 1;
+                    }
+                } else {
+                    literal.push(next_ch);
+                    pos += 1;
+                }
             } else {
                 // \<newline>: line continuation — consume backslash and newline, add nothing.
                 // Also handle CRLF: \<CR><LF> drops all three characters.
@@ -149,6 +164,18 @@ fn lex_fstring(
                     literal.push_str(&s);
                     pos = next_pos;
                 }
+            }
+            continue;
+        }
+
+        if c == '\r' {
+            // CPython's tokenizer translates `\r\n` / lone `\r` to `\n` in
+            // source text, so a multi-line f-string checked out with CRLF
+            // endings must still yield `\n` in its literal pieces.
+            literal.push('\n');
+            pos += 1;
+            if chars.get(pos) == Some(&'\n') {
+                pos += 1;
             }
             continue;
         }
@@ -556,11 +583,9 @@ fn lex_format_spec(
                     Some('{' | '}') => {
                         literal.push('\\');
                     }
-                    Some(next_ch) if raw => {
-                        literal.push('\\');
-                        literal.push(next_ch);
-                        *pos += 1;
-                    }
+                    // CPython 3.12 decodes escapes in a format spec even for a
+                    // raw f-string (`rf"{x:\n}"` has a real newline in its
+                    // spec), so `raw` is deliberately ignored here.
                     Some('\n') => {
                         *pos += 1;
                     }
