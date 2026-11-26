@@ -306,6 +306,7 @@ macro_rules! pyrust_builtin_modules {
             match name {
                 "os" => return os::post_load_init(interp, module),
                 "numbers" => return numbers::post_load_init(interp, module),
+                "array" => return array::post_load_init(interp, module),
                 #[cfg(unix)]
                 "posix" => return posix::post_load_init(interp, module),
                 "importlib.abc" => return importlib_abc::post_load_init(interp, module),
@@ -614,11 +615,11 @@ pyrust_builtin_modules! {
     // functions in `struct_mod.rs`.  The Rust ident is `struct_mod` because
     // `struct` is a keyword.
     "struct" as struct_mod,
-    // `array` (issue #2809): native typed-element binary encoding/decoding and
-    // byteswap helpers in `array.rs` plus the `array` class, `ArrayType` alias,
-    // and `typecodes` constant injected from `array_py.py` by the `@inject`
-    // post-load hook.
-    array @inject,
+    // `array` (issues #2809, #3389): 100% native Rust in `bodies/array.rs` —
+    // the `array` type, the hidden `arrayiterator`, `typecodes` and
+    // `_array_reconstructor`; `post_load_init` wires `ArrayType`, the CPython
+    // namespace order and the `MutableSequence` registration.
+    array,
     // `datetime` (issue #2805): date/time/datetime/timedelta/tzinfo/timezone
     // types injected from `datetime_py.py` by the `@inject` post-load hook.
     datetime @inject,
