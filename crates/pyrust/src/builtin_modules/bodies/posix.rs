@@ -17,7 +17,9 @@ use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{
     FromValue, PyBool, PyBytes, PyIndex, PyPath, PyValue, PyValueRef,
 };
-use crate::interpreter::{Interpreter, NativeIterFrame, lookup_exc_class, value_type_name_str};
+use crate::interpreter::{
+    ExpandedCallArg, Interpreter, NativeIterFrame, lookup_exc_class, value_type_name_str,
+};
 use crate::value::{InstanceAttrs, PyDict, PyInstance, PyKey, PyModule, Value, ValueKind};
 
 pyrust_struct_seq! {
@@ -189,7 +191,7 @@ fn resolve_conf_name(
         ValueKind::Bool(b) => Ok(libc::c_int::from(b)),
         ValueKind::Str(s) => entries
             .iter()
-            .find(|&&(k, _)| k == s.as_ref())
+            .find(|&&(k, _)| k == s)
             .map(|&(_, v)| v)
             .ok_or_else(|| {
                 PyError::named("ValueError", "unrecognized configuration name".to_string())

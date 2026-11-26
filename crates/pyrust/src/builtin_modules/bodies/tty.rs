@@ -9,6 +9,7 @@ use pyrust_derive::pyrust_module;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{PyIndex, PyValue};
+use crate::interpreter::{ExpandedCallArg, Interpreter};
 use crate::value::{Value, ValueKind};
 
 use super::termios::{tcgetattr_value, tcsetattr_value};

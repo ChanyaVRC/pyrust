@@ -8,7 +8,7 @@ use pyrust_derive::pyrust_module;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{PyIndex, PyValue};
-use crate::interpreter::{Interpreter, lookup_exc_class};
+use crate::interpreter::{ExpandedCallArg, Interpreter, lookup_exc_class};
 use crate::value::Value;
 
 pyrust_struct_seq! {
