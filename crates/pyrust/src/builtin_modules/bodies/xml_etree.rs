@@ -1,11 +1,5 @@
-// `xml.etree` package module — exposes `ElementPath` and `ElementTree`
-// (issue #3210).
-//
-// Declaring `ElementPath` and `ElementTree` as `PyModule` constants lets
-// `Interpreter::load_module` stitch them to the cached
-// `sys.modules["xml.etree.ElementPath"]` and
-// `sys.modules["xml.etree.ElementTree"]` objects so all import forms share
-// exact module identity.
+// `xml.etree` package module — exposes `ElementPath`, `ElementTree`,
+// `ElementInclude`, and `cElementTree` (issues #3210, #3260).
 //
 // Reference: <https://docs.python.org/3/library/xml.etree.elementtree.html>
 

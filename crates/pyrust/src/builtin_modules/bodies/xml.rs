@@ -1,10 +1,5 @@
-// `xml` package module — exposes `xml.etree` (issue #3210).
-//
-// Follows PyRust's built-in package/submodule pattern (`urllib`, `html`,
-// `importlib`): declaring `"etree"` as a `PyModule` constant lets
-// `Interpreter::load_module` stitch it to the cached `sys.modules["xml.etree"]`
-// object so `import xml`, `import xml.etree`, `from xml import etree`, and
-// `import xml.etree.ElementTree` all share exact module identity.
+// `xml` package module — exposes `dom`, `parsers`, `sax`, and `etree`
+// (issues #3210, #3260).
 //
 // Reference: <https://docs.python.org/3/library/xml.html>
 
@@ -21,5 +16,8 @@ pyrust_module! {
             Value::string("etree"),
         ]),
         "etree" => super::xml_etree::module(),
+        "parsers" => super::xml_parsers::module(),
+        "sax" => super::xml_sax::module(),
+        "dom" => super::xml_dom::module(),
     }
 }
