@@ -56,7 +56,7 @@ impl Interpreter {
                 regs[*dst as usize] = self.load_class_name(code, regs, *local, *name_idx)?;
             }
             Insn::DeleteCell(cell_idx, raise_if_missing) => {
-                self.exec_delete_cell(code, regs, cells, *cell_idx, *raise_if_missing)?;
+                self.exec_delete_cell(code, cells, *cell_idx, *raise_if_missing)?;
             }
             Insn::LoadClassDeref(dst, cell_idx) => {
                 regs[*dst as usize] = self.load_class_deref(code, cells, *cell_idx)?;
@@ -76,7 +76,7 @@ impl Interpreter {
                 Self::exec_set_typevar_attr(regs, *obj, *name_idx, *val, code, num_locals)?;
             }
             Insn::DeleteName(name_idx) => {
-                self.exec_delete_name(code, regs, *name_idx)?;
+                self.exec_delete_name(code, *name_idx)?;
             }
             Insn::PushTypeParamEnv => self.push_type_parameter_scope(),
             Insn::PopTypeParamEnv => self.pop_type_parameter_scope(),
@@ -87,7 +87,7 @@ impl Interpreter {
                 self.sync_module_global_binding(code, regs, *reg, *name_idx)?;
             }
             Insn::DeleteModuleGlobal(name_idx) => {
-                self.delete_module_global_binding(code, regs, *name_idx)?;
+                self.delete_module_global_binding(code, *name_idx)?;
             }
 
             // ── Keyword / splat calls ────────────────────────────────────

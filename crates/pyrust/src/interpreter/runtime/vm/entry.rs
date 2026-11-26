@@ -288,6 +288,9 @@ impl Interpreter {
                 if frame.has_frame_cache() {
                     self.link_finished_generator_frame_back(frame);
                 }
+                if self.vm_hooks_flags & VM_HOOK_FINALIZER_ARMED != 0 {
+                    frame.release_locals();
+                }
                 // CPython synthesises `StopIteration()` with *empty* args when a
                 // generator returns `None` (falls off the end or `return`/`return
                 // None`); only a non-None return value is passed as the single
@@ -303,6 +306,9 @@ impl Interpreter {
             Err(e) => {
                 // Propagating exception or other error.
                 frame.done = true;
+                if self.vm_hooks_flags & VM_HOOK_FINALIZER_ARMED != 0 {
+                    frame.release_locals();
+                }
                 // PEP 479 (enforced since Python 3.7): if a StopIteration (or
                 // any subclass) escapes from a generator frame, convert it to
                 // RuntimeError("generator raised StopIteration").  The original
@@ -405,10 +411,8 @@ impl Interpreter {
         self.exc_saved_active.truncate(exc_saved_active_entry_depth);
         self.active_exception = saved_active;
         self.cold.push_exc_ctx_marks = saved_push_exc_ctx_marks;
-        if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0
-            && pyrust_core::has_pending_weakref_callbacks()
-        {
-            self.drain_pending_weakref_callbacks();
+        if self.vm_hooks_flags & (VM_HOOK_WEAKREF | VM_HOOK_FINALIZER_ARMED) != 0 {
+            self.drain_frame_exit_hooks();
         }
         result
     }

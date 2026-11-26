@@ -7,7 +7,8 @@
 //    `UserFunction`, `SetInner`, `PyModule`, and `GeneratorCell`.
 // 2. Zero hot-path cost when no weakrefs exist: every `Drop` hook tests a
 //    single thread-local `Cell<usize>` (`LIVE_WEAKREF_COUNT == 0`) before
-//    entering the `#[cold] #[inline(never)]` registry lookup.
+//    entering the `#[cold] #[inline(never)]` registry lookup. The word's high
+//    bit doubles as the `__del__` gate (`finalizer_support.rs`).
 // 3. Re-entrancy safe: `LIVE_WEAKREF_REGISTRY` borrows are always released
 //    before dropping or enqueuing any Python `Value`.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -166,10 +167,32 @@ pub fn weakref_target_addr(value: &Value) -> Option<usize> {
     }
 }
 
+/// High bit of `LIVE_WEAKREF_COUNT`: some class defines `__del__`, so dying
+/// instances must be offered to the finalizer queue (`finalizer_support.rs`).
+/// Sharing the weakref counter's word keeps every `Drop` hook at one load and
+/// one branch whether or not finalizers are in use (#3341).
+const FINALIZERS_ARMED_BIT: usize = 1 << (usize::BITS - 1);
+
+/// Fast gate for every `Drop` hook: live weakrefs exist or finalizers are
+/// armed.
+#[inline(always)]
+fn drop_hooks_active() -> bool {
+    LIVE_WEAKREF_COUNT.try_with(Cell::get).unwrap_or(0) != 0
+}
+
 /// Fast check: whether any live weakrefs exist on the current thread.
 #[inline(always)]
 pub fn has_live_weakrefs() -> bool {
-    LIVE_WEAKREF_COUNT.try_with(Cell::get).unwrap_or(0) != 0
+    LIVE_WEAKREF_COUNT.try_with(Cell::get).unwrap_or(0) & !FINALIZERS_ARMED_BIT != 0
+}
+
+/// Subtract `n` live weakrefs, leaving `FINALIZERS_ARMED_BIT` untouched.
+fn sub_live_weakrefs(n: usize) {
+    let _ = LIVE_WEAKREF_COUNT.try_with(|c| {
+        let raw = c.get();
+        let count = (raw & !FINALIZERS_ARMED_BIT).saturating_sub(n);
+        c.set((raw & FINALIZERS_ARMED_BIT) | count);
+    });
 }
 
 /// Fast check: whether any live weakrefs with callbacks exist on the current
@@ -252,7 +275,7 @@ pub fn unregister_weakref(target_addr: usize, handle_id: u64) {
         .ok()
         .flatten();
     if let Some(entry) = removed {
-        let _ = LIVE_WEAKREF_COUNT.try_with(|c| c.set(c.get().saturating_sub(1)));
+        sub_live_weakrefs(1);
         entry.alive.set(false);
         let cb = entry.callback.borrow_mut().take();
         if cb.is_some() {
@@ -340,6 +363,9 @@ pub fn take_pending_weakref_callbacks() -> Vec<(Value, Value)> {
 #[cold]
 #[inline(never)]
 pub(crate) fn notify_object_dropped(addr: usize) {
+    if !has_live_weakrefs() {
+        return;
+    }
     let entries = LIVE_WEAKREF_REGISTRY
         .try_with(|reg| reg.borrow_mut().remove(&addr))
         .ok()
@@ -347,8 +373,7 @@ pub(crate) fn notify_object_dropped(addr: usize) {
     let Some(entries) = entries else {
         return;
     };
-    let count = entries.len();
-    let _ = LIVE_WEAKREF_COUNT.try_with(|c| c.set(c.get().saturating_sub(count)));
+    sub_live_weakrefs(entries.len());
 
     let mut dropped_cbs: Vec<Value> = Vec::new();
     let mut queued: Vec<(Value, Value)> = Vec::new();
@@ -382,7 +407,14 @@ pub(crate) fn notify_object_dropped(addr: usize) {
 unsafe fn notify_opaque_slot_dropping(ptr: *mut OpaqueSlot) {
     let opaque = unsafe { &*std::ptr::addr_of!((*ptr).value).cast::<Opaque>() };
     match opaque {
-        Opaque::BoundMethod { .. } | Opaque::ClassBoundMethod { .. } => {
+        // The last reference to an instance is going away: hand the instance
+        // to the finalizer queue first, so `__del__` sees the same object.
+        Opaque::PyInstance(rc) => queue_finalizer_for_last_ref(rc),
+        Opaque::BoundMethod { receiver, .. } => {
+            notify_object_dropped(ptr as usize);
+            queue_finalizer_for_last_ref(receiver);
+        }
+        Opaque::ClassBoundMethod { .. } => {
             notify_object_dropped(ptr as usize);
         }
         Opaque::BuiltinObject { state, .. } if Rc::strong_count(state) == 1 => {
@@ -418,7 +450,7 @@ impl<T> std::ops::DerefMut for WeakrefNotifyingField<T> {
 impl<T> Drop for WeakrefNotifyingField<T> {
     #[inline]
     fn drop(&mut self) {
-        if has_live_weakrefs() {
+        if drop_hooks_active() {
             notify_object_dropped(self as *const Self as usize);
         }
     }
@@ -427,8 +459,8 @@ impl<T> Drop for WeakrefNotifyingField<T> {
 impl Drop for PyInstance {
     #[inline]
     fn drop(&mut self) {
-        if has_live_weakrefs() {
-            notify_object_dropped(self as *const Self as usize);
+        if drop_hooks_active() {
+            instance_dropping(self);
         }
     }
 }
@@ -436,7 +468,7 @@ impl Drop for PyInstance {
 impl Drop for UserFunction {
     #[inline]
     fn drop(&mut self) {
-        if has_live_weakrefs() {
+        if drop_hooks_active() {
             notify_object_dropped(self as *const Self as usize);
         }
     }
@@ -445,7 +477,7 @@ impl Drop for UserFunction {
 impl Drop for SetInner {
     #[inline]
     fn drop(&mut self) {
-        if has_live_weakrefs() {
+        if drop_hooks_active() {
             notify_object_dropped(self as *const Self as usize);
         }
     }
@@ -454,7 +486,7 @@ impl Drop for SetInner {
 impl Drop for PyModule {
     #[inline]
     fn drop(&mut self) {
-        if has_live_weakrefs() {
+        if drop_hooks_active() {
             notify_object_dropped(self as *const Self as usize);
         }
     }
@@ -463,7 +495,7 @@ impl Drop for PyModule {
 impl Drop for GeneratorCell {
     #[inline]
     fn drop(&mut self) {
-        if has_live_weakrefs() {
+        if drop_hooks_active() {
             notify_object_dropped(self as *const Self as usize);
         }
     }

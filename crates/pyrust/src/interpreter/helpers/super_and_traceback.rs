@@ -490,30 +490,12 @@ fn format_single_exc_line(interp: &mut crate::Interpreter, value: &Value) -> Str
     }
 }
 
-/// Call `__del__` on `val` if it is a `PyInstance` with a `__del__` method
-/// AND no other Python-visible binding to the same instance still exists.
-///
-/// "Python-visible" bindings are:
-///   - Named local-variable registers (indices `0..num_locals`).  Compiler
-///     temporaries (index `>= num_locals`) are not Python names and must
-///     not prevent `__del__` from firing.  The deleted register has already
-///     been cleared to `Value::unset()` by the caller, so it naturally
-///     produces no match during the scan.
-///   - `interp.env.borrow().values`: global / nonlocal / cell-var bindings.
-///
-/// This deliberately ignores interpreter-internal state (reusable argument
-/// buffers, inline caches, etc.) because those are implementation details
-/// invisible to Python code, mirroring CPython's refcount semantics where
-/// only Python-level references keep an object alive.
-///
-/// If `__del__` raises an exception, a CPython-format warning is printed to
-/// stderr but the exception is not propagated to the caller (issue #1797).
-/// Resolve the `__del__` class slot using `PyClass::del_slot_cache` so
-/// scope-exit on the overwhelming majority of classes without `__del__` skips
-/// the MRO hash walk completely (issue #2987).  When a `__del__` slot *is*
-/// present, any slot value (plain function, staticmethod, classmethod,
-/// property, cached_property, user descriptor, callable instance, or
-/// non-callable) is returned so `invoke_class_method` binds/dispatches it.
+/// Resolve the `__del__` class slot using `PyClass::del_slot_cache` so the
+/// overwhelming majority of classes without `__del__` skip the MRO hash walk
+/// completely (issue #2987).  When a `__del__` slot *is* present, any slot
+/// value (plain function, staticmethod, classmethod, property,
+/// cached_property, user descriptor, callable instance, or non-callable) is
+/// returned so `invoke_class_method` binds/dispatches it.
 #[inline]
 fn resolve_del_slot(class: &Rc<RefCell<PyClass>>) -> Option<Value> {
     {
@@ -542,396 +524,244 @@ fn resolve_del_slot_slow(class: &Rc<RefCell<PyClass>>) -> Option<Value> {
     method
 }
 
-pub(crate) fn call_del_if_last_binding(
-    interp: &mut Interpreter,
-    val: Value,
-    regs: &RegSlice,
-    num_locals: usize,
-) {
-    // Uninitialised register slots (Value::unset()) are not Python values.
-    if val.is_unset() {
-        return;
-    }
-    let del_rc = match val.as_py_instance_rc() {
-        Some(rc) => rc,
-        None => return,
-    };
-    // Look up __del__ via the class-level fast gate before the binding scan so
-    // classes without __del__ exit immediately with zero MRO walk.
-    let Some(method) = resolve_del_slot(&del_rc.borrow().class) else {
-        return;
-    };
-    // Scan named local-variable registers (0..num_locals) for another binding.
-    // Registers >= num_locals are compiler temporaries — not Python variables.
-    let scan_limit = num_locals.min(regs.len());
-    for i in 0..scan_limit {
-        // Skip uninitialised register slots — Value::unset() is not a Python value.
-        let r = &regs[i];
-        if r.is_unset() {
-            continue;
-        }
-        if let Some(other_rc) = r.as_py_instance_rc()
-            && Rc::ptr_eq(other_rc, del_rc)
-        {
-            return; // another named local still holds the instance
-        }
-    }
-    // Scan env namespace bindings and active frame cells for another binding.
-    for v in interp.env.borrow().namespace_values().values() {
-        if let Some(other_rc) = v.as_py_instance_rc()
-            && Rc::ptr_eq(other_rc, del_rc)
-        {
-            return; // a global/namespace binding still holds the instance
-        }
-    }
-    if let Some(top_view) = interp.vm_frame_views.last() {
-        for slot in top_view.cells.as_slice() {
-            if slot.with_value(|opt| {
-                opt.and_then(Value::as_py_instance_rc)
-                    .is_some_and(|other_rc| Rc::ptr_eq(other_rc, del_rc))
-            }) {
-                return; // an active cell slot still holds the instance
-            }
-        }
-    }
-    // No other Python-visible binding — invoke __del__.
-    let class_name = del_rc.borrow().class.borrow().name.clone();
-    let instance = Value::py_instance(Rc::clone(del_rc));
-    drop(val); // release our reference before calling __del__
-    // CPython prints a warning to stderr but does not propagate __del__
-    // exceptions to the caller (issue #1797).
-    if let Err(e) = invoke_class_method(interp, method, instance, &[]) {
-        eprintln!("Exception ignored in: <function {}.__del__>", class_name);
-        // For a Raised instance, format as "ClassName: msg" (CPython parity)
-        // using format_single_exc_line, which calls to_py_str() on the
-        // instance — matching CPython's `ValueError: oops` output.
-        // For other PyError variants, Display already formats as "ClassName: msg".
-        match e.kind() {
-            crate::error::PyErrorKind::Raised(v) => {
-                eprintln!("{}", format_single_exc_line(interp, v))
-            }
-            _ => eprintln!("{}", e),
-        }
+/// Release a binding removed by `del`, then run any `__del__` that became due.
+///
+/// Dropping `val` may free the last reference to an instance whose class
+/// defines `__del__`; the core drop hook queues such instances instead of
+/// freeing them (issue #3341), and the queue is run here so the finalizer
+/// fires before the statement after `del`, as in CPython.
+#[inline]
+pub(crate) fn drop_deleted_binding(interp: &mut Interpreter, val: Value) {
+    drop(val);
+    if pyrust_core::has_pending_finalizers() {
+        interp.run_pending_finalizers();
     }
 }
 
-/// Call `__del__` after deleting a binding from an enclosing function cell.
-///
-/// Unlike [`call_del_if_last_binding`], the active `regs` belong to the inner
-/// function executing `nonlocal del`, not to the activation that owns the
-/// deleted cell. Check the target environment and every live frame's named
-/// registers and environment chain: a caller outside the cell-owning frame may
-/// still hold the same instance. A closed-over environment has no live frame,
-/// so the target environment must also be checked directly.
-pub(crate) fn call_del_if_last_binding_in_env(
-    interp: &mut Interpreter,
-    val: Value,
-    target_env: &EnvRef,
-    regs: &RegSlice,
-    num_locals: usize,
-) {
-    if val.is_unset() {
-        return;
-    }
-    let del_rc = match val.as_py_instance_rc() {
-        Some(rc) => rc,
-        None => return,
-    };
-    if resolve_del_slot(&del_rc.borrow().class).is_none() {
-        return;
+impl Interpreter {
+    /// Note that a class gained a `__del__` attribute: from now on dying
+    /// instances are offered to the finalizer queue. Instances of the class
+    /// may already exist (`Cls.__del__ = f`), uncounted and possibly held by
+    /// a dead temporary, so the per-step safepoint runs at least once.
+    #[cold]
+    pub(crate) fn arm_finalizers(&mut self) {
+        pyrust_core::arm_finalizers();
+        self.sync_vm_hooks_flags();
+        self.start_finalizer_polling();
     }
 
-    fn observe_direct_binding(
-        value: &Value,
-        del_rc: &Rc<RefCell<PyInstance>>,
-        target_alias_is_visible: &mut bool,
-        visible_owner_worklist: &mut Vec<Rc<GeneratorCell>>,
-        discovered_owner_ids: &mut HashSet<*const GeneratorCell>,
-        visited_functions: &mut HashSet<*const pyrust_core::UserFunction>,
-    ) {
-        if value.is_unset() {
+    /// Switch the per-step `__del__` safepoint on. When it was off, dead
+    /// temporaries were not being released, so it starts by releasing the
+    /// current frame's.
+    fn start_finalizer_polling(&mut self) {
+        let polling = crate::interpreter::execution::VM_HOOK_FINALIZER;
+        if self.vm_hooks_flags & polling == 0 {
+            self.cold.finalizer_scrubbed_regs = 0;
+            self.vm_hooks_flags |= polling;
+        }
+    }
+
+    /// A class without a cached construction plan is being instantiated: when
+    /// it defines `__del__`, count the instance and start polling the
+    /// finalizer queue before every instruction, so its `__del__` runs as
+    /// soon as the last reference goes away.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn note_possible_finalizable_instance(&mut self, class: &Rc<RefCell<PyClass>>) {
+        if pyrust_core::finalizers_armed() && resolve_del_slot(class).is_some() {
+            pyrust_core::note_finalizable_instance();
+            self.start_finalizer_polling();
+        }
+    }
+
+    /// Call `__del__` on every instance queued by the core drop hooks.
+    ///
+    /// Runs until the queue is empty: a finalizer may drop further instances.
+    /// Each queued instance is already marked finalized, so a finalizer that
+    /// resurrects its instance is not called again (PEP 442).
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn run_pending_finalizers(&mut self) {
+        while pyrust_core::has_pending_finalizers() {
+            for instance in pyrust_core::take_pending_finalizers() {
+                self.run_finalizer(instance);
+            }
+        }
+    }
+
+    /// Interpreter shutdown: finalize what is still alive, as CPython does when
+    /// it tears down `__main__`.
+    ///
+    /// The globals of `__main__` are rebound to `None` in CPython's
+    /// `_PyModule_ClearDict` order (names with a single leading underscore
+    /// first, then the rest, each in definition order) and the finalizers that
+    /// become due run after each one. Nothing happens, and no global is
+    /// touched, unless some class defined `__del__`. Afterwards finalizers are
+    /// switched off, so objects freed during process teardown stay silent.
+    pub fn run_exit_finalizers(&mut self) {
+        if !pyrust_core::finalizers_armed() {
             return;
         }
-        if value
-            .as_py_instance_rc()
-            .is_some_and(|other_rc| Rc::ptr_eq(other_rc, del_rc))
-        {
-            *target_alias_is_visible = true;
-        }
-        match value.kind() {
-            ValueKind::Generator(owner) => {
-                if discovered_owner_ids.insert(Rc::as_ptr(owner)) {
-                    visible_owner_worklist.push(Rc::clone(owner));
-                }
-            }
-            ValueKind::UserFunction(func) => {
-                if !func.closure_cells.is_empty() && visited_functions.insert(Rc::as_ptr(func)) {
-                    for slot in &func.closure_cells {
-                        slot.with_value(|opt| {
-                            if let Some(cell_val) = opt {
-                                observe_direct_binding(
-                                    cell_val,
-                                    del_rc,
-                                    target_alias_is_visible,
-                                    visible_owner_worklist,
-                                    discovered_owner_ids,
-                                    visited_functions,
-                                );
-                            }
-                        });
+        self.run_pending_finalizers();
+        if let Ok(main_module) = self.load_module("__main__") {
+            let names = self.module_global_names(&main_module);
+            for private_pass in [true, false] {
+                for name in &names {
+                    let is_dunder = name.starts_with("__");
+                    let is_private = name.starts_with('_') && !is_dunder;
+                    if is_dunder || is_private != private_pass {
+                        continue;
                     }
+                    let _ = self.assign_attr(main_module.clone(), name, Value::none());
+                    self.run_pending_finalizers();
                 }
             }
-            ValueKind::BoundMethod { function, receiver } => {
-                if Rc::ptr_eq(receiver, del_rc) {
-                    *target_alias_is_visible = true;
-                }
-                if !function.closure_cells.is_empty()
-                    && visited_functions.insert(Rc::as_ptr(function))
-                {
-                    for slot in &function.closure_cells {
-                        slot.with_value(|opt| {
-                            if let Some(cell_val) = opt {
-                                observe_direct_binding(
-                                    cell_val,
-                                    del_rc,
-                                    target_alias_is_visible,
-                                    visible_owner_worklist,
-                                    discovered_owner_ids,
-                                    visited_functions,
-                                );
-                            }
-                        });
-                    }
-                }
-            }
-            _ => {}
         }
+        self.run_pending_finalizers();
+        pyrust_core::disarm_finalizers();
+        self.sync_vm_hooks_flags();
     }
 
-    fn scan_environment_chain(
-        root: &EnvRef,
-        del_rc: &Rc<RefCell<PyInstance>>,
-        target_alias_is_visible: &mut bool,
-        visible_owner_worklist: &mut Vec<Rc<GeneratorCell>>,
-        discovered_owner_ids: &mut HashSet<*const GeneratorCell>,
-        visited_environments: &mut HashSet<*const RefCell<Environment>>,
-        visited_functions: &mut HashSet<*const pyrust_core::UserFunction>,
-    ) {
-        let mut current = Some(Rc::clone(root));
-        while let Some(env) = current {
-            if !visited_environments.insert(Rc::as_ptr(&env)) {
-                // This environment and its complete parent chain were already
-                // visited from another root.
-                break;
-            }
-            let bindings = env.borrow();
-            for value in bindings.namespace_values().values() {
-                observe_direct_binding(
-                    value,
-                    del_rc,
-                    target_alias_is_visible,
-                    visible_owner_worklist,
-                    discovered_owner_ids,
-                    visited_functions,
-                );
-            }
-            current = bindings.parent.clone();
-        }
-    }
-
-    // Collect the direct Python binding roots once. PyRust can retain a
-    // generator Rc in unnamed compiler temporaries after `del generator`; that
-    // implementation-only reference must not make its suspended registers
-    // visible. Generator/coroutine objects found in direct named bindings form
-    // a bounded work queue: each visible suspended frame contributes its own
-    // named registers and environment cells, which may reveal another frame.
-    // Container/item reachability remains outside this binding-based model.
-    let mut target_alias_is_visible = false;
-    let mut visible_owner_worklist = Vec::new();
-    let mut discovered_owner_ids = HashSet::new();
-    let mut visited_environments = HashSet::new();
-    let mut visited_functions = HashSet::new();
-
-    scan_environment_chain(
-        target_env,
-        del_rc,
-        &mut target_alias_is_visible,
-        &mut visible_owner_worklist,
-        &mut discovered_owner_ids,
-        &mut visited_environments,
-        &mut visited_functions,
-    );
-    scan_environment_chain(
-        &interp.env,
-        del_rc,
-        &mut target_alias_is_visible,
-        &mut visible_owner_worklist,
-        &mut discovered_owner_ids,
-        &mut visited_environments,
-        &mut visited_functions,
-    );
-    for view in &interp.vm_frame_views {
-        if let Some(env) = view.env() {
-            scan_environment_chain(
-                env,
-                del_rc,
-                &mut target_alias_is_visible,
-                &mut visible_owner_worklist,
-                &mut discovered_owner_ids,
-                &mut visited_environments,
-                &mut visited_functions,
-            );
-        }
-        if let Some(gen_frame) = view.gen_frame() {
-            // SAFETY: this is the same shared-reference reconstruction used by
-            // `with_frame_cache`. `VmFrameView::gen_frame()` is heap-stable while
-            // the live view remains on the stack and is popped before the
-            // GeneratorFrame can move or be dropped.
-            let gen_frame = unsafe { gen_frame.as_ref() };
-            scan_environment_chain(
-                &gen_frame.function.env,
-                del_rc,
-                &mut target_alias_is_visible,
-                &mut visible_owner_worklist,
-                &mut discovered_owner_ids,
-                &mut visited_environments,
-                &mut visited_functions,
-            );
-        }
-    }
-
-    let scan_limit = num_locals.min(regs.len());
-    for value in regs.iter().take(scan_limit) {
-        observe_direct_binding(
-            value,
-            del_rc,
-            &mut target_alias_is_visible,
-            &mut visible_owner_worklist,
-            &mut discovered_owner_ids,
-            &mut visited_functions,
-        );
-    }
-    for view in &interp.vm_frame_views {
-        for slot in view.cells.as_slice() {
-            slot.with_value(|opt| {
-                if let Some(value) = opt {
-                    observe_direct_binding(
-                        value,
-                        del_rc,
-                        &mut target_alias_is_visible,
-                        &mut visible_owner_worklist,
-                        &mut discovered_owner_ids,
-                        &mut visited_functions,
-                    );
-                }
-            });
-        }
-        for register in view.local_index().values() {
-            let index = *register as usize;
-            if index >= view.regs_len {
-                continue;
-            }
-            // SAFETY: a live VmFrameView owns a pointer valid for `regs_len`
-            // slots until the view is popped. This helper only reads named
-            // registers while the corresponding frame is active.
-            observe_direct_binding(
-                unsafe { &*view.regs_ptr.as_ptr().add(index) },
-                del_rc,
-                &mut target_alias_is_visible,
-                &mut visible_owner_worklist,
-                &mut discovered_owner_ids,
-                &mut visited_functions,
-            );
-        }
-    }
-
-    if target_alias_is_visible {
-        return;
-    }
-    while let Some(owner) = visible_owner_worklist.pop() {
-        let Ok(state) = owner.try_borrow() else {
-            // Active frames are represented by VmFrameView and were scanned
-            // above; the checked-out cell itself has no frame to inspect.
-            continue;
+    /// Names bound in `module`'s namespace, in definition order.
+    fn module_global_names(&mut self, module: &Value) -> Vec<String> {
+        let Ok(namespace) = self.get_attr(module, "__dict__") else {
+            return Vec::new();
         };
-        if let Some(asend) = state.downcast_ref::<AsyncGenASend>() {
-            if discovered_owner_ids.insert(Rc::as_ptr(&asend.agen)) {
-                visible_owner_worklist.push(Rc::clone(&asend.agen));
-            }
-            continue;
+        let arg = [ExpandedCallArg {
+            name: None,
+            value: namespace,
+        }];
+        let Ok(keys) = self.call_function_expanded(Value::builtin_function("list"), &arg) else {
+            return Vec::new();
+        };
+        let Some(keys) = keys.as_list() else {
+            return Vec::new();
+        };
+        keys.iter()
+            .filter_map(|key| key.as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Call `instance.__del__()`, reporting an exception through
+    /// `sys.unraisablehook` instead of propagating it (CPython's
+    /// `slot_tp_finalize`).
+    fn run_finalizer(&mut self, instance: Value) {
+        let Some(class) = instance
+            .as_py_instance_rc()
+            .map(|rc| Rc::clone(&rc.borrow().class))
+        else {
+            return;
+        };
+        let Some(method) = resolve_del_slot(&class) else {
+            return;
+        };
+        // A finalizer runs between two instructions of unrelated code, and
+        // possibly while an exception is unwinding: keep that code's traceback
+        // state out of the finalizer's reach, and restore it afterwards.
+        let outer_frames = pyrust_core::take_captured_error_frames();
+        let outer_line = pyrust_core::get_current_vm_line();
+        let outer_pc = pyrust_core::get_current_vm_pc();
+        let outer_span = pyrust_core::get_current_vm_col_span();
+        if let Err(err) = invoke_class_method(self, method.clone(), instance, &[]) {
+            let frames = pyrust_core::take_captured_error_frames().unwrap_or_default();
+            self.report_unraisable(err, &frames, None, method);
         }
-        if let Some(anext_aw) = state.downcast_ref::<AnextAwaitable>() {
-            observe_direct_binding(
-                &anext_aw.wrapped,
-                del_rc,
-                &mut target_alias_is_visible,
-                &mut visible_owner_worklist,
-                &mut discovered_owner_ids,
-                &mut visited_functions,
-            );
-            observe_direct_binding(
-                &anext_aw.default_value,
-                del_rc,
-                &mut target_alias_is_visible,
-                &mut visible_owner_worklist,
-                &mut discovered_owner_ids,
-                &mut visited_functions,
-            );
-            if target_alias_is_visible {
+        pyrust_core::reset_captured_error_frames();
+        for frame in outer_frames.into_iter().flatten().rev() {
+            pyrust_core::record_traceback_frame(frame);
+        }
+        pyrust_core::set_current_vm_line(outer_line);
+        pyrust_core::set_current_vm_pc(outer_pc);
+        pyrust_core::set_current_vm_col_span(outer_span);
+    }
+
+    /// Report an exception that cannot be raised to any caller, as CPython's
+    /// `PyErr_WriteUnraisable` does: build the `sys.unraisablehook` argument
+    /// and call the hook. `frames` are the traceback frames of `err`.
+    pub(crate) fn report_unraisable(
+        &mut self,
+        err: PyError,
+        frames: &[pyrust_core::FrameInfo],
+        err_msg: Option<&str>,
+        object: Value,
+    ) {
+        let error_line = self.format_error_line(&err);
+        let Ok(exc_value) = self.materialize_pyerror(err) else {
+            return;
+        };
+        let exc_type = match exc_value.as_py_instance_rc() {
+            Some(rc) => Value::py_class(Rc::clone(&rc.borrow().class)),
+            None => Value::none(),
+        };
+        let exc_traceback = match self.get_attr(&exc_value, "__traceback__") {
+            Ok(traceback) if !traceback.is_none() => traceback,
+            _ if frames.is_empty() => Value::none(),
+            _ => self.build_traceback_nodes_from_frames(frames, Value::none()),
+        };
+        let mut attrs = pyrust_core::InstanceAttrs::new();
+        attrs.insert("exc_type", exc_type);
+        attrs.insert("exc_value", exc_value);
+        attrs.insert("exc_traceback", exc_traceback);
+        attrs.insert("err_msg", err_msg.map_or_else(Value::none, Value::string));
+        attrs.insert("object", object.clone());
+        let class = PyClass {
+            name: "UnraisableHookArgs".to_string(),
+            qualname: "UnraisableHookArgs".to_string(),
+            ..Default::default()
+        };
+        let unraisable = Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::new(RefCell::new(class)),
+            attrs,
+        })));
+
+        let hook = self
+            .load_module("sys")
+            .and_then(|sys_mod| self.get_attr(&sys_mod, "unraisablehook"));
+        if let Ok(hook) = hook
+            && !matches!(hook.kind(), ValueKind::BuiltinFunction(_))
+        {
+            let arg = [ExpandedCallArg {
+                name: None,
+                value: unraisable,
+            }];
+            if self.call_function_expanded(hook, &arg).is_ok() {
                 return;
             }
-            continue;
-        }
-        let Some(frame) = state.downcast_ref::<GeneratorFrame>() else {
-            continue;
-        };
-        if frame.done {
-            continue;
+            // A failing custom hook must not hide the original report.
+            let _ = pyrust_core::take_captured_error_frames();
         }
 
-        scan_environment_chain(
-            &frame.function.env,
-            del_rc,
-            &mut target_alias_is_visible,
-            &mut visible_owner_worklist,
-            &mut discovered_owner_ids,
-            &mut visited_environments,
-            &mut visited_functions,
-        );
-        for slot in &frame.cells {
-            slot.with_value(|opt| {
-                if let Some(value) = opt {
-                    observe_direct_binding(
-                        value,
-                        del_rc,
-                        &mut target_alias_is_visible,
-                        &mut visible_owner_worklist,
-                        &mut discovered_owner_ids,
-                        &mut visited_functions,
-                    );
-                }
-            });
-        }
-        for register in frame.function.local_index.values() {
-            if let Some(value) = frame.regs.get(*register as usize) {
-                observe_direct_binding(
-                    value,
-                    del_rc,
-                    &mut target_alias_is_visible,
-                    &mut visible_owner_worklist,
-                    &mut discovered_owner_ids,
-                    &mut visited_functions,
-                );
+        let object_repr = crate::interpreter::render_value_repr(self, &object)
+            .unwrap_or_else(|_| object.repr_raw());
+        let header = match err_msg {
+            Some(msg) => format!("{msg}: {object_repr}"),
+            None => format!("Exception ignored in: {object_repr}"),
+        };
+        let body = if frames.is_empty() {
+            format!("{error_line}\n")
+        } else {
+            let mut text = pyrust_core::format_traceback(frames, &error_line);
+            if !text.ends_with('\n') {
+                text.push('\n');
             }
-        }
-        if target_alias_is_visible {
-            return;
+            text
+        };
+        let message = format!("{header}\n{body}");
+        let wrote = if let Ok(sys_mod) = self.load_module("sys")
+            && let Ok(stream) = self.get_attr(&sys_mod, "stderr")
+            && !stream.is_none()
+            && let Ok(write_fn) = self.get_attr(&stream, "write")
+        {
+            let arg = [ExpandedCallArg {
+                name: None,
+                value: Value::string(message.as_str()),
+            }];
+            self.call_function_expanded(write_fn, &arg).is_ok()
+        } else {
+            false
+        };
+        if !wrote {
+            eprint!("{message}");
         }
     }
-
-    // The deleting inner frame may itself hold another binding (for example a
-    // parameter alias).  Preserve the established current-frame/env scan and
-    // the single shared finalizer invocation after the live-frame checks.
-    call_del_if_last_binding(interp, val, regs, num_locals);
 }

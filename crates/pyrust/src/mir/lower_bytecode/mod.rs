@@ -84,5 +84,6 @@ pub fn lower_mir_to_fncode(func: &MirFn) -> FnCode {
         cached_code_object: RefCell::new(None),
         exc_table: Vec::new(),
         has_exc_handlers: true,
+        dead_temps: Default::default(),
     }
 }

@@ -340,6 +340,12 @@ pyrust_module! {
         let callbacks = current_callbacks_snapshot(_interp);
         invoke_gc_callbacks(_interp, &callbacks, "start", generation_num, 0, 0);
 
+        // Reference counting already queued every unreachable instance with a
+        // `__del__`; run the finalizers that have not fired yet (#3341).
+        if pyrust_core::has_pending_finalizers() {
+            _interp.run_pending_finalizers();
+        }
+
         {
             let mut state = _interp.features().gc_mut();
             let gen_idx = generation_num as usize;

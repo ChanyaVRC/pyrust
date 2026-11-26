@@ -135,7 +135,7 @@ impl Drop for Value {
                 // implicit weak reference keeps the slab alive until payload
                 // destruction finishes.
                 (*ptr).strong.set(0);
-                if has_live_weakrefs() {
+                if drop_hooks_active() {
                     notify_opaque_slot_dropping(ptr);
                 }
                 std::ptr::drop_in_place(std::ptr::addr_of_mut!((*ptr).value).cast::<Opaque>());

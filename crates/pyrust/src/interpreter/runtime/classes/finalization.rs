@@ -22,6 +22,9 @@ impl Interpreter {
         });
         let qualname =
             make_class_finalize_attrs(&mut attrs, name.clone(), class_docstring.as_deref())?;
+        if attrs.contains_key("__del__") {
+            self.arm_finalizers();
+        }
         let slots = make_class_extract_slots(&mut attrs)?;
         let class = Rc::new(RefCell::new(PyClass {
             extra_bases: extra_bases.clone(),

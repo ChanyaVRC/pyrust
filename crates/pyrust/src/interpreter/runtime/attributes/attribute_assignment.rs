@@ -558,6 +558,9 @@ impl Interpreter {
                 cls.new_slot_wrapped.set(true);
             }
         }
+        if name == "__del__" {
+            self.arm_finalizers();
+        }
         // Bump the global epoch so that caches keyed on subclasses of
         // this class (which only check their own mutation_version) also
         // invalidate — the epoch guard catches ancestor mutations that

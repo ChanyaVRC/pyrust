@@ -493,6 +493,9 @@ impl Interpreter {
         *st.iter_next_cache = gd.saved_iter_cache;
         *st.exc_handlers = gd.saved_exc_handlers;
         *st.tramp_active_base = gd.saved_base;
+        if self.vm_hooks_flags & VM_HOOK_FINALIZER_ARMED != 0 {
+            gd.gframe.release_locals();
+        }
         let boxed: Box<dyn std::any::Any> = gd.gframe;
         *gd.state_rc.borrow_mut() = boxed;
     }

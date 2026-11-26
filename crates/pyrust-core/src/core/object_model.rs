@@ -54,4 +54,5 @@ include!("value_equality.rs");
 include!("value_helpers.rs");
 include!("weak_value_cache.rs");
 include!("weakref_support.rs");
+include!("finalizer_support.rs");
 include!("tests/mod.rs");

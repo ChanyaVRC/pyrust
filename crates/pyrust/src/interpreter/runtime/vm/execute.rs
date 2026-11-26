@@ -256,7 +256,7 @@ impl Interpreter {
                 }
                 return Err(err);
             };
-            if self.vm_hooks_flags != 0 {
+            if self.vm_hooks_flags & VM_HOOK_STEP_MASK != 0 {
                 vm_try!(self.vm_dispatch_step_hooks(
                     code,
                     pc,

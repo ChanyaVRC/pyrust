@@ -796,17 +796,21 @@ fn finish_cli_interpreter(
         }
         run_repl_loop(interp)?;
         interp.run_atexit_callbacks();
+        interp.run_exit_finalizers();
         pyrust_builtins::file::flush_open_files_at_exit();
         return Ok(());
     }
     if let Err(err) = result {
-        if interp.features().atexit_len() != 0 {
+        // CPython prints the traceback before it runs exit callbacks and
+        // finalizers, so do the same whenever either could produce output.
+        if interp.features().atexit_len() != 0 || pyrust_core::finalizers_armed() {
             match err.kind() {
                 crate::error::PyErrorKind::Runtime(msg) => eprintln!("{msg}"),
                 other => eprintln!("{other}"),
             }
             let _ = std::io::Write::flush(&mut std::io::stderr());
             interp.run_atexit_callbacks();
+            interp.run_exit_finalizers();
             pyrust_builtins::file::flush_open_files_at_exit();
             let _ = std::io::Write::flush(&mut std::io::stdout());
             let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -815,6 +819,7 @@ fn finish_cli_interpreter(
         pyrust_builtins::file::flush_open_files_at_exit();
         return Err(err);
     }
+    interp.run_exit_finalizers();
     pyrust_builtins::file::flush_open_files_at_exit();
     Ok(())
 }
@@ -1010,6 +1015,7 @@ fn run_repl(config: RuntimeConfig) -> Result<()> {
         interpreter.initialize_cli_startup()?;
         run_repl_loop(&mut interpreter)?;
         interpreter.run_atexit_callbacks();
+        interpreter.run_exit_finalizers();
         pyrust_builtins::file::flush_open_files_at_exit();
         Ok(())
     })

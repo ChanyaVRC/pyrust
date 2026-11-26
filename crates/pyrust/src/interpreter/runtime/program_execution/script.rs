@@ -303,6 +303,7 @@ impl Interpreter {
                     None => 0,
                 };
                 self.run_atexit_callbacks();
+                self.run_exit_finalizers();
                 pyrust_builtins::file::flush_open_files_at_exit();
                 let _ = std::io::Write::flush(&mut std::io::stdout());
                 let _ = std::io::Write::flush(&mut std::io::stderr());
