@@ -192,7 +192,7 @@ pyrust_module! {
     /// Insert text into the line buffer at the cursor position.
     fn insert_text(#[positional_only] string: PyStr<'_>) -> Result<Value> {
         READLINE_STATE.with(|cell| {
-            cell.borrow_mut().line_buffer.push_str(string.0);
+            cell.borrow_mut().line_buffer.push_str(&string.0);
         });
         Ok(Value::none())
     }

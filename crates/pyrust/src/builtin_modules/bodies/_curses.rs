@@ -1840,7 +1840,7 @@ pyrust_module! {
             OptionalArg::Provided(v) => as_i64_arg(v.0, "fd")? as i32,
             OptionalArg::Omitted => -1,
         };
-        let term_ref = term.as_ref().map(|s| s.0);
+        let term_ref = term.as_deref();
         let res = eng::with_state_mut(|st| st.setupterm(term_ref, fd_val));
         if let Err(msg) = res {
             return Err(raise_curses_error(_interp, msg));
@@ -1922,19 +1922,19 @@ pyrust_module! {
 
     fn tigetflag(#[positional_only] capname: PyStr<'_>) -> Result<Value> {
         require_setupterm(_interp)?;
-        let v = eng::with_state(|st| eng::tigetflag(&st.term, capname.0));
+        let v = eng::with_state(|st| eng::tigetflag(&st.term, &capname.0));
         Ok(Value::int(v))
     }
 
     fn tigetnum(#[positional_only] capname: PyStr<'_>) -> Result<Value> {
         require_setupterm(_interp)?;
-        let v = eng::with_state(|st| eng::tigetnum(&st.term, capname.0, st.lines, st.cols));
+        let v = eng::with_state(|st| eng::tigetnum(&st.term, &capname.0, st.lines, st.cols));
         Ok(Value::int(v))
     }
 
     fn tigetstr(#[positional_only] capname: PyStr<'_>) -> Result<Value> {
         require_setupterm(_interp)?;
-        let v = eng::with_state(|st| eng::tigetstr(&st.term, capname.0));
+        let v = eng::with_state(|st| eng::tigetstr(&st.term, &capname.0));
         Ok(match v {
             Some(bytes) => Value::bytes(bytes.to_vec()),
             None => Value::none(),
