@@ -6,6 +6,23 @@
 /// `make_class_resolve_bases`.
 type ResolvedBases = (Option<Rc<RefCell<PyClass>>>, Vec<Rc<RefCell<PyClass>>>);
 
+/// Runtime service run for every new class just before `__init_subclass__`
+/// dispatch: CPython's `Generic.__init_subclass__` step, which records
+/// `__parameters__` on `typing.Generic` subclasses (issue #3326).
+///
+/// The runtime owns only the typed signature; `typing` installs its
+/// implementation on import, which necessarily precedes the creation of any
+/// `Generic` subclass.
+pub(crate) type GenericSubclassHook = fn(&mut Interpreter, &Rc<RefCell<PyClass>>) -> Result<()>;
+
+/// Process-wide because the hook is a plain function pointer with no state.
+static GENERIC_SUBCLASS_HOOK: std::sync::OnceLock<GenericSubclassHook> = std::sync::OnceLock::new();
+
+/// Install the `Generic` subclass hook (idempotent: the first install wins).
+pub(crate) fn install_generic_subclass_hook(hook: GenericSubclassHook) {
+    let _ = GENERIC_SUBCLASS_HOOK.set(hook);
+}
+
 /// Products of executing one class body. Keeping the annotation-scope handles
 /// beside the namespace and `__class__` environment prevents either caller
 /// from forgetting the PEP 695 finalization step.

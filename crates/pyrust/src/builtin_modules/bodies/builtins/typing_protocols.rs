@@ -570,7 +570,10 @@ pyrust_module! {
         })?;
         let typing_mod = _interp.load_module("typing")?;
         let generic = _interp.get_attr(&typing_mod, "Generic")?;
-        let unpack = _interp.get_attr(&typing_mod, "Unpack")?;
+        // `Unpack` is resolved only when a `TypeVarTuple` needs it: `typing`'s
+        // own PEP 695 classes (`SupportsAbs[T]`) are built while the module is
+        // still initializing, before its Python-source members are published.
+        let mut unpack: Option<Value> = None;
         let items: Vec<Value> = match params_val.kind() {
             ValueKind::Tuple(ts) => ts.to_vec(),
             _ => vec![params_val.clone()],
@@ -583,6 +586,14 @@ pyrust_module! {
                     if crate::interpreter::is_typevartuple_class(&inst.borrow().class)
             );
             if is_tvt {
+                let unpack = match &unpack {
+                    Some(unpack) => unpack.clone(),
+                    None => {
+                        let resolved = _interp.get_attr(&typing_mod, "Unpack")?;
+                        unpack = Some(resolved.clone());
+                        resolved
+                    }
+                };
                 generic_args.push(_interp.eval_index(&unpack, item)?);
             } else {
                 generic_args.push(item);

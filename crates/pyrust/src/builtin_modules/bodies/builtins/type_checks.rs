@@ -235,7 +235,11 @@ fn isinstance_check(
         }
         // Legacy ABC path: ABC classes store `__instancecheck__` directly in
         // their own attrs dict (not on a metaclass).
-        let has_ic = cls_rc.borrow().attrs.contains_key("__instancecheck__");
+        let has_ic = cls_rc
+            .borrow()
+            .attrs
+            .get("__instancecheck__")
+            .is_some_and(is_class_level_check_hook);
         if has_ic {
             let cls_val = Value::py_class(Rc::clone(cls_rc));
             let ic_fn = interp.get_attr(&cls_val, "__instancecheck__")?;
@@ -544,7 +548,8 @@ fn issubclass_check(
         let has_sc = classinfo_rc
             .borrow()
             .attrs
-            .contains_key("__subclasscheck__");
+            .get("__subclasscheck__")
+            .is_some_and(is_class_level_check_hook);
         if has_sc {
             let classinfo_val = Value::py_class(Rc::clone(classinfo_rc));
             let sc_fn = interp.get_attr(&classinfo_val, "__subclasscheck__")?;
@@ -627,6 +632,22 @@ fn issubclass_check(
             "TypeError",
             format!("{fn_name}() arg 2 must be a class, a tuple of classes, or a union"),
         )),
+    }
+}
+
+/// True when a class's *own* `__instancecheck__` / `__subclasscheck__` entry is
+/// a class-level hook (the `collections.abc` classmethods) rather than a plain
+/// method. A plain function in a class namespace only answers checks against
+/// that class's *instances* (`isinstance(x, typing.Iterable)`), never
+/// `isinstance(x, TheClass)` itself (issue #3326).
+fn is_class_level_check_hook(hook: &Value) -> bool {
+    match hook.kind() {
+        ValueKind::BuiltinFunction(_) => false,
+        ValueKind::UserFunction(function) => matches!(
+            function.kind,
+            UserFunctionKind::ClassMethod | UserFunctionKind::StaticMethod
+        ),
+        _ => true,
     }
 }
 

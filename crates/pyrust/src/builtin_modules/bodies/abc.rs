@@ -369,6 +369,19 @@ fn compute_abstract_methods(interp: &mut Interpreter, class: &ClassRc) -> Result
     )
 }
 
+/// Compute `__abstractmethods__` for a `typing.Protocol` subclass.
+///
+/// CPython builds every protocol class through `_ProtocolMeta`, an `ABCMeta`
+/// subclass, so `@abstractmethod` members block instantiation. PyRust's
+/// native `Protocol` has no metaclass, so `typing` asks for the same
+/// bookkeeping from its `Generic` subclass hook (issue #3326).
+pub(crate) fn compute_protocol_abstract_methods(
+    interp: &mut Interpreter,
+    class: &ClassRc,
+) -> Result<()> {
+    compute_abstract_methods(interp, class)
+}
+
 /// CPython's `_abc._abc_init`: compute the abstract methods of a freshly
 /// created ABC and give it its own `_abc_impl`.
 fn abc_init(interp: &mut Interpreter, class_value: &Value) -> Result<()> {

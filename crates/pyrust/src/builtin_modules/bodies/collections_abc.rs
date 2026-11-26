@@ -51,7 +51,8 @@ pyrust_module! {
         "AsyncIterable"    => Value::py_class(Abc::AsyncIterable.class()),
         "AsyncIterator"    => Value::py_class(Abc::AsyncIterator.class()),
         "AsyncGenerator"   => Value::py_class(Abc::AsyncGenerator.class()),
-        "Buffer"           => Value::py_class(Abc::Buffer.class())
+        "Buffer"           => Value::py_class(Abc::Buffer.class()),
+        "ByteString"       => Value::py_class(Abc::ByteString.class())
     }
 
     #[py_name = "__instancecheck__"]

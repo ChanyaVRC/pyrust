@@ -257,6 +257,11 @@ impl Interpreter {
         class: &Rc<RefCell<PyClass>>,
         kwarg_args: &[ExpandedCallArg],
     ) -> Result<()> {
+        // CPython runs `Generic.__init_subclass__` as part of this step; it
+        // records `__parameters__` from `__orig_bases__` (issue #3326).
+        if let Some(hook) = GENERIC_SUBCLASS_HOOK.get() {
+            hook(self, class)?;
+        }
         let lookup_base = class
             .borrow()
             .base

@@ -5,12 +5,132 @@
 # are copied onto the module by `inject_python_members`.  The native special
 # forms (`List`, `Optional`, `Union`, `Generic`, `Protocol`, `TypeVar`, …) are
 # already present on the module before this source runs, so the helpers below
-# may reference them via the names the exec namespace is pre-seeded with.
+# may reference them via the names the exec namespace is pre-seeded with
+# (`TYPING_PY_SEEDS` in `typing/python_members.rs`).  That includes the native
+# `_SpecialGenericAlias` class used to build `Iterable`, `Mapping`, … below
+# (issue #3326).
 
 import collections as _collections
 import collections.abc as _collections_abc
+import contextlib as _contextlib
+import re as _stdlib_re
 import sys as _sys
 import types as _types
+from abc import abstractmethod as _abstractmethod
+
+# Please keep __all__ alphabetized within each category (CPython 3.12.3).
+__all__ = [
+    # Super-special typing primitives.
+    'Annotated',
+    'Any',
+    'Callable',
+    'ClassVar',
+    'Concatenate',
+    'Final',
+    'ForwardRef',
+    'Generic',
+    'Literal',
+    'Optional',
+    'ParamSpec',
+    'Protocol',
+    'Tuple',
+    'Type',
+    'TypeVar',
+    'TypeVarTuple',
+    'Union',
+
+    # ABCs (from collections.abc).
+    'AbstractSet',  # collections.abc.Set.
+    'ByteString',
+    'Container',
+    'ContextManager',
+    'Hashable',
+    'ItemsView',
+    'Iterable',
+    'Iterator',
+    'KeysView',
+    'Mapping',
+    'MappingView',
+    'MutableMapping',
+    'MutableSequence',
+    'MutableSet',
+    'Sequence',
+    'Sized',
+    'ValuesView',
+    'Awaitable',
+    'AsyncIterator',
+    'AsyncIterable',
+    'Coroutine',
+    'Collection',
+    'AsyncGenerator',
+    'AsyncContextManager',
+
+    # Structural checks, a.k.a. protocols.
+    'Reversible',
+    'SupportsAbs',
+    'SupportsBytes',
+    'SupportsComplex',
+    'SupportsFloat',
+    'SupportsIndex',
+    'SupportsInt',
+    'SupportsRound',
+
+    # Concrete collection types.
+    'ChainMap',
+    'Counter',
+    'Deque',
+    'Dict',
+    'DefaultDict',
+    'List',
+    'OrderedDict',
+    'Set',
+    'FrozenSet',
+    'NamedTuple',  # Not really a type.
+    'TypedDict',  # Not really a type.
+    'Generator',
+
+    # Other concrete types.
+    'BinaryIO',
+    'IO',
+    'Match',
+    'Pattern',
+    'TextIO',
+
+    # One-off things.
+    'AnyStr',
+    'assert_type',
+    'assert_never',
+    'cast',
+    'clear_overloads',
+    'dataclass_transform',
+    'final',
+    'get_args',
+    'get_origin',
+    'get_overloads',
+    'get_type_hints',
+    'is_typeddict',
+    'LiteralString',
+    'Never',
+    'NewType',
+    'no_type_check',
+    'no_type_check_decorator',
+    'NoReturn',
+    'NotRequired',
+    'overload',
+    'override',
+    'ParamSpecArgs',
+    'ParamSpecKwargs',
+    'Required',
+    'reveal_type',
+    'runtime_checkable',
+    'Self',
+    'Text',
+    'TYPE_CHECKING',
+    'TypeAlias',
+    'TypeGuard',
+    'TypeAliasType',
+    'Unpack',
+]
 
 
 def get_origin(tp):
@@ -71,6 +191,11 @@ def _resolve(value, globalns, localns):
     """Resolve a single annotation: eval string forward refs, normalize None."""
     if value is None:
         return type(None)
+    if isinstance(value, ForwardRef):
+        try:
+            return value._evaluate(globalns, localns, recursive_guard=frozenset())
+        except Exception:
+            return value
     if isinstance(value, str):
         try:
             resolved = eval(value, globalns, localns)
@@ -275,8 +400,9 @@ def _typeddict_functional(typename, fields=None, /, *, total=True, **kwargs):
 
 
 # Names that CPython's `_get_protocol_attrs` never treats as protocol members:
-# typing/Protocol bookkeeping attrs and `object` infrastructure, not
-# user-declared requirements (issue #2526).
+# typing/Protocol bookkeeping attrs (`_TYPING_INTERNALS`) and `object`
+# infrastructure (`_SPECIAL_NAMES`), not user-declared requirements (issues
+# #2526, #3326).  Names starting with `_abc_` are skipped as well.
 _PROTOCOL_EXCLUDED_ATTRS = frozenset({
     "__init__", "__new__", "__init_subclass__", "__subclasshook__",
     "__class_getitem__", "__doc__", "__dict__", "__weakref__",
@@ -284,6 +410,8 @@ _PROTOCOL_EXCLUDED_ATTRS = frozenset({
     "__protocol_runtime_checkable__", "__non_callable_proto_members__",
     "__module__", "__qualname__",
     "__slots__", "__parameters__", "__orig_bases__", "__annotations__",
+    "__orig_class__", "__type_params__", "_is_protocol", "_is_runtime_protocol",
+    "_MutableMapping__marker",
 })
 
 
@@ -294,12 +422,12 @@ def _collect_protocol_attrs(cls):
         if getattr(base, "__name__", "") in ("Protocol", "Generic", "object"):
             continue
         for key in vars(base):
-            if key not in _PROTOCOL_EXCLUDED_ATTRS:
+            if key not in _PROTOCOL_EXCLUDED_ATTRS and not key.startswith("_abc_"):
                 attrs.add(key)
         ann = getattr(base, "__annotations__", None)
         if isinstance(ann, dict):
             for key in ann:
-                if key not in _PROTOCOL_EXCLUDED_ATTRS:
+                if key not in _PROTOCOL_EXCLUDED_ATTRS and not key.startswith("_abc_"):
                     attrs.add(key)
     return attrs
 
@@ -681,3 +809,357 @@ Unpack = _UnpackMarker()
 Required = _SingleArgSpecialForm("Required")
 NotRequired = _SingleArgSpecialForm("NotRequired")
 TypeGuard = _SingleArgSpecialForm("TypeGuard")
+
+
+class ForwardRef:
+    """Internal wrapper to hold a forward reference."""
+
+    __slots__ = ('__forward_arg__', '__forward_code__',
+                 '__forward_evaluated__', '__forward_value__',
+                 '__forward_is_argument__', '__forward_is_class__',
+                 '__forward_module__')
+
+    def __init__(self, arg, is_argument=True, module=None, *, is_class=False):
+        if not isinstance(arg, str):
+            raise TypeError(f"Forward reference must be a string -- got {arg!r}")
+        # `def f(*args: *Ts)` produces `arg = '*Ts'`, which is not a valid
+        # expression on its own, so unpack it manually.
+        if arg[0] == '*':
+            arg_to_compile = f'({arg},)[0]'
+        else:
+            arg_to_compile = arg
+        try:
+            code = compile(arg_to_compile, '<string>', 'eval')
+        except SyntaxError:
+            raise SyntaxError(f"Forward reference must be an expression -- got {arg!r}")
+
+        self.__forward_arg__ = arg
+        self.__forward_code__ = code
+        self.__forward_evaluated__ = False
+        self.__forward_value__ = None
+        self.__forward_is_argument__ = is_argument
+        self.__forward_is_class__ = is_class
+        self.__forward_module__ = module
+
+    def _evaluate(self, globalns, localns, type_params=None, *, recursive_guard):
+        if self.__forward_arg__ in recursive_guard:
+            return self
+        if not self.__forward_evaluated__ or localns is not globalns:
+            if globalns is None and localns is None:
+                globalns = localns = {}
+            elif globalns is None:
+                globalns = localns
+            elif localns is None:
+                localns = globalns
+            if self.__forward_module__ is not None:
+                globalns = getattr(
+                    _sys.modules.get(self.__forward_module__, None), '__dict__', globalns
+                )
+            value = eval(self.__forward_code__, globalns, localns)
+            self.__forward_value__ = type(None) if value is None else value
+            self.__forward_evaluated__ = True
+        return self.__forward_value__
+
+    def __eq__(self, other):
+        if not isinstance(other, ForwardRef):
+            return NotImplemented
+        if self.__forward_evaluated__ and other.__forward_evaluated__:
+            return (self.__forward_arg__ == other.__forward_arg__ and
+                    self.__forward_value__ == other.__forward_value__)
+        return (self.__forward_arg__ == other.__forward_arg__ and
+                self.__forward_module__ == other.__forward_module__)
+
+    def __hash__(self):
+        return hash((self.__forward_arg__, self.__forward_module__))
+
+    def __or__(self, other):
+        return Union[self, other]
+
+    def __ror__(self, other):
+        return Union[other, self]
+
+    def __repr__(self):
+        if self.__forward_module__ is None:
+            module_repr = ''
+        else:
+            module_repr = f', module={self.__forward_module__!r}'
+        return f'ForwardRef({self.__forward_arg__!r}{module_repr})'
+
+
+# A useful type variable with constraints.  This represents string types.
+AnyStr = TypeVar('AnyStr', bytes, str)
+AnyStr.__module__ = 'typing'
+
+# Python-version-specific alias (Python 2: unicode; Python 3: str).
+Text = str
+
+
+# Various ABCs mimicking those in collections.abc (CPython 3.12.3 order).
+# `_SpecialGenericAlias` is the native class from `typing/special_aliases.rs`;
+# its second argument is the number of type parameters the alias accepts.
+_alias = _SpecialGenericAlias
+
+Hashable = _alias(_collections_abc.Hashable, 0)  # Not generic.
+Awaitable = _alias(_collections_abc.Awaitable, 1)
+Coroutine = _alias(_collections_abc.Coroutine, 3)
+AsyncIterable = _alias(_collections_abc.AsyncIterable, 1)
+AsyncIterator = _alias(_collections_abc.AsyncIterator, 1)
+Iterable = _alias(_collections_abc.Iterable, 1)
+Iterator = _alias(_collections_abc.Iterator, 1)
+Reversible = _alias(_collections_abc.Reversible, 1)
+Sized = _alias(_collections_abc.Sized, 0)  # Not generic.
+Container = _alias(_collections_abc.Container, 1)
+Collection = _alias(_collections_abc.Collection, 1)
+AbstractSet = _alias(_collections_abc.Set, 1, name='AbstractSet')
+MutableSet = _alias(_collections_abc.MutableSet, 1)
+Mapping = _alias(_collections_abc.Mapping, 2)
+MutableMapping = _alias(_collections_abc.MutableMapping, 2)
+Sequence = _alias(_collections_abc.Sequence, 1)
+MutableSequence = _alias(_collections_abc.MutableSequence, 1)
+ByteString = _DeprecatedGenericAlias(
+    _collections_abc.ByteString, 0, removal_version=(3, 14)  # Not generic.
+)
+Deque = _alias(_collections.deque, 1, name='Deque')
+MappingView = _alias(_collections_abc.MappingView, 1)
+KeysView = _alias(_collections_abc.KeysView, 1)
+ItemsView = _alias(_collections_abc.ItemsView, 2)
+ValuesView = _alias(_collections_abc.ValuesView, 1)
+ContextManager = _alias(_contextlib.AbstractContextManager, 1, name='ContextManager')
+AsyncContextManager = _alias(
+    _contextlib.AbstractAsyncContextManager, 1, name='AsyncContextManager'
+)
+DefaultDict = _alias(_collections.defaultdict, 2, name='DefaultDict')
+OrderedDict = _alias(_collections.OrderedDict, 2)
+Counter = _alias(_collections.Counter, 1)
+ChainMap = _alias(_collections.ChainMap, 2)
+Generator = _alias(_collections_abc.Generator, 3)
+AsyncGenerator = _alias(_collections_abc.AsyncGenerator, 2)
+Pattern = _alias(_stdlib_re.Pattern, 1)
+Match = _alias(_stdlib_re.Match, 1)
+
+del _alias
+
+
+@runtime_checkable
+class SupportsInt(Protocol):
+    """An ABC with one abstract method __int__."""
+
+    __slots__ = ()
+
+    @_abstractmethod
+    def __int__(self) -> int:
+        pass
+
+
+@runtime_checkable
+class SupportsFloat(Protocol):
+    """An ABC with one abstract method __float__."""
+
+    __slots__ = ()
+
+    @_abstractmethod
+    def __float__(self) -> float:
+        pass
+
+
+@runtime_checkable
+class SupportsComplex(Protocol):
+    """An ABC with one abstract method __complex__."""
+
+    __slots__ = ()
+
+    @_abstractmethod
+    def __complex__(self) -> complex:
+        pass
+
+
+@runtime_checkable
+class SupportsBytes(Protocol):
+    """An ABC with one abstract method __bytes__."""
+
+    __slots__ = ()
+
+    @_abstractmethod
+    def __bytes__(self) -> bytes:
+        pass
+
+
+@runtime_checkable
+class SupportsIndex(Protocol):
+    """An ABC with one abstract method __index__."""
+
+    __slots__ = ()
+
+    @_abstractmethod
+    def __index__(self) -> int:
+        pass
+
+
+@runtime_checkable
+class SupportsAbs[T](Protocol):
+    """An ABC with one abstract method __abs__ that is covariant in its return type."""
+
+    __slots__ = ()
+
+    @_abstractmethod
+    def __abs__(self) -> T:
+        pass
+
+
+@runtime_checkable
+class SupportsRound[T](Protocol):
+    """An ABC with one abstract method __round__ that is covariant in its return type."""
+
+    __slots__ = ()
+
+    @_abstractmethod
+    def __round__(self, ndigits: int = 0) -> T:
+        pass
+
+
+class IO(Generic[AnyStr]):
+    """Generic base class for TextIO and BinaryIO.
+
+    This is an abstract, generic version of the return of open().
+
+    NOTE: This does not distinguish between the different possible
+    classes (text vs. binary, read vs. write vs. read/write,
+    append-only, unbuffered).  The TextIO and BinaryIO subclasses
+    below capture the distinctions between text vs. binary, which is
+    pervasive in the interface; however we currently do not offer a
+    way to track the other distinctions in the type system.
+    """
+
+    __slots__ = ()
+
+    @property
+    @_abstractmethod
+    def mode(self) -> str:
+        pass
+
+    @property
+    @_abstractmethod
+    def name(self) -> str:
+        pass
+
+    @_abstractmethod
+    def close(self) -> None:
+        pass
+
+    @property
+    @_abstractmethod
+    def closed(self) -> bool:
+        pass
+
+    @_abstractmethod
+    def fileno(self) -> int:
+        pass
+
+    @_abstractmethod
+    def flush(self) -> None:
+        pass
+
+    @_abstractmethod
+    def isatty(self) -> bool:
+        pass
+
+    @_abstractmethod
+    def read(self, n: int = -1) -> AnyStr:
+        pass
+
+    @_abstractmethod
+    def readable(self) -> bool:
+        pass
+
+    @_abstractmethod
+    def readline(self, limit: int = -1) -> AnyStr:
+        pass
+
+    @_abstractmethod
+    def readlines(self, hint: int = -1) -> List[AnyStr]:
+        pass
+
+    @_abstractmethod
+    def seek(self, offset: int, whence: int = 0) -> int:
+        pass
+
+    @_abstractmethod
+    def seekable(self) -> bool:
+        pass
+
+    @_abstractmethod
+    def tell(self) -> int:
+        pass
+
+    @_abstractmethod
+    def truncate(self, size: int = None) -> int:
+        pass
+
+    @_abstractmethod
+    def writable(self) -> bool:
+        pass
+
+    @_abstractmethod
+    def write(self, s: AnyStr) -> int:
+        pass
+
+    @_abstractmethod
+    def writelines(self, lines: List[AnyStr]) -> None:
+        pass
+
+    @_abstractmethod
+    def __enter__(self) -> 'IO[AnyStr]':
+        pass
+
+    @_abstractmethod
+    def __exit__(self, type, value, traceback) -> None:
+        pass
+
+
+class BinaryIO(IO[bytes]):
+    """Typed version of the return of open() in binary mode."""
+
+    __slots__ = ()
+
+    @_abstractmethod
+    def write(self, s: Union[bytes, bytearray]) -> int:
+        pass
+
+    @_abstractmethod
+    def __enter__(self) -> 'BinaryIO':
+        pass
+
+
+class TextIO(IO[str]):
+    """Typed version of the return of open() in text mode."""
+
+    __slots__ = ()
+
+    @property
+    @_abstractmethod
+    def buffer(self) -> BinaryIO:
+        pass
+
+    @property
+    @_abstractmethod
+    def encoding(self) -> str:
+        pass
+
+    @property
+    @_abstractmethod
+    def errors(self) -> Optional[str]:
+        pass
+
+    @property
+    @_abstractmethod
+    def line_buffering(self) -> bool:
+        pass
+
+    @property
+    @_abstractmethod
+    def newlines(self) -> Any:
+        pass
+
+    @_abstractmethod
+    def __enter__(self) -> 'TextIO':
+        pass

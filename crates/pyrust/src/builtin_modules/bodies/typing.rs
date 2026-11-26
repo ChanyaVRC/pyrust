@@ -25,6 +25,11 @@
 //   the subscript `Generic[T]` returns the `Generic` class itself (not a
 //   `_TypingAlias` instance) to satisfy that constraint.
 //
+// - `Iterable`, `Mapping`, `ContextManager`, `Pattern`, … are CPython-style
+//   `_SpecialGenericAlias` instances wrapping their runtime class; subscripting
+//   one yields a named `_GenericAlias` (`typing.Iterable[int]`).  The alias
+//   table lives in `typing_py.py`, the behaviour in `typing/special_aliases.rs`.
+//
 // - `TypeVar` is a real class defined via the `class { … }` block so that
 //   `TypeVar('T')` creates a `PyInstance` with `__name__ = 'T'`.
 //
@@ -57,6 +62,8 @@ mod aliases;
 mod generation;
 #[path = "typing/python_members.rs"]
 mod python_members;
+#[path = "typing/special_aliases.rs"]
+mod special_aliases;
 
 pub(crate) use aliases::legacy_alias_delegate;
 pub(crate) use generation::{is_protocol_marker_class, is_protocol_subclass};
@@ -122,6 +129,12 @@ pyrust_module! {
         // recreated with its owning module generation. `_TypingAlias` remains
         // internal on both runtimes, but is tracked by the same registry.
         "_GenericAlias" => Value::py_class(generation::current_generic_alias_class()),
+
+        // CPython's `_SpecialGenericAlias` / `_DeprecatedGenericAlias`: the
+        // types of bare `typing.Iterable`, `typing.ByteString`, …; the alias
+        // instances themselves are created by `typing_py.py`.
+        "_SpecialGenericAlias" => Value::py_class(generation::current_special_generic_alias_class()),
+        "_DeprecatedGenericAlias" => Value::py_class(generation::current_deprecated_generic_alias_class()),
 
         // Subscriptable special forms — also class-based.  For `Optional`,
         // `Union`, etc., expose the PyClass itself; subscripting dispatches
@@ -217,20 +230,12 @@ pyrust_module! {
         Ok(Value::none())
     }
 
-    #[py_name = "_GenericAlias.__call__"]
-    fn generic_alias_call(args) -> Result<Value> {
-        // `Stack[int](...)` constructs an instance of the origin class, dropping
-        // the type arguments (CPython's `_GenericAlias.__call__`).  `args[0]` is
-        // the alias instance; the remaining positionals/keywords are forwarded
-        // to the origin constructor unchanged.
-        let inst = expect_self(args, FN_NAME)?;
-        let origin = inst
-            .borrow()
-            .attrs
-            .get("__origin__")
-            .cloned()
-            .unwrap_or_else(|| Value::py_class(generation::current_generic_class()));
-        _interp.call_function_expanded(origin, &args[1..])
+    #[py_name = "_BaseGenericAlias.__call__"]
+    fn base_alias_call(args) -> Result<Value> {
+        // `Stack[int](...)` / `typing.Deque[int]()` construct an instance of the
+        // origin class, dropping the type arguments (CPython's
+        // `_BaseGenericAlias.__call__`).
+        special_aliases::base_call(_interp, args)
     }
 
     #[py_name = "_GenericAlias.__repr__"]
@@ -241,11 +246,10 @@ pyrust_module! {
             // The origin is the receiver class.  CPython's `_type_repr` shows
             // `typing.Generic` / `typing.Protocol` for the typing singletons but
             // a bare class name for a user subclass (`Stack[int]`, not
-            // `typing.Stack[int]`).
-            let origin_repr = borrow
-                .attrs
-                .get("_origin")
-                .map(aliases::generic_origin_repr)
+            // `typing.Stack[int]`).  A named alias (`typing.Iterable[int]`)
+            // keeps its `typing.` spelling instead of the origin's.
+            let origin_repr = special_aliases::named_origin_repr(&inst)
+                .or_else(|| borrow.attrs.get("_origin").map(aliases::generic_origin_repr))
                 .unwrap_or_else(|| "typing.Generic".to_string());
             let sub = borrow.attrs.get("_args").cloned().unwrap_or_else(Value::none);
             (origin_repr, sub)
@@ -256,58 +260,58 @@ pyrust_module! {
 
     #[py_name = "_GenericAlias.__mro_entries__"]
     fn generic_alias_mro_entries(args) -> Result<Value> {
-        let _ = _interp;
         let instance = expect_self(args, FN_NAME)?;
-        let user_args = &args[1..];
-        let positional_count = user_args
-            .iter()
-            .filter(|argument| argument.name.is_none())
-            .count();
-        let has_bases_keyword = user_args
-            .iter()
-            .any(|argument| argument.name.as_deref() == Some("bases"));
-
-        // `_GenericAlias.__mro_entries__` is an ordinary Python method with
-        // signature `(self, bases)`. The runtime supplies `self`, so validate
-        // the remaining expanded arguments here before reading the origin.
-        // `bases` is intentionally unused by CPython's implementation, but it
-        // is still required and may be passed by keyword.
-        if user_args
-            .iter()
-            .any(|argument| argument.name.as_deref() == Some("self"))
-        {
-            return Err(pyrust_core::type_err!(
-                "_GenericAlias.__mro_entries__() got multiple values for argument 'self'"
-            ));
-        }
-        if positional_count > 0 && has_bases_keyword {
-            return Err(pyrust_core::type_err!(
-                "_GenericAlias.__mro_entries__() got multiple values for argument 'bases'"
-            ));
-        }
-        if let Some(name) = user_args
-            .iter()
-            .filter_map(|argument| argument.name.as_deref())
-            .find(|name| *name != "bases")
-        {
-            return Err(pyrust_core::type_err!(
-                "_GenericAlias.__mro_entries__() got an unexpected keyword argument '{name}'"
-            ));
-        }
-        if positional_count > 1 {
-            return Err(pyrust_core::type_err!(
-                "_GenericAlias.__mro_entries__() takes 2 positional arguments but {} were given",
-                positional_count + 1
-            ));
-        }
-        if positional_count == 0 && !has_bases_keyword {
-            return Err(pyrust_core::type_err!(
-                "_GenericAlias.__mro_entries__() missing 1 required positional argument: 'bases'"
-            ));
-        }
-        let bases_arg = user_args.first().map(|arg| &arg.value);
-        aliases::resolve_generic_alias_mro_entries(&instance, bases_arg)
+        aliases::generic_alias_mro_entries(_interp, &instance, args)
     }
+
+    #[py_name = "_GenericAlias.__getitem__"]
+    fn generic_alias_getitem(args) -> Result<Value> { special_aliases::generic_getitem(_interp, args) }
+
+    #[py_name = "_GenericAlias.__eq__"]
+    fn generic_alias_eq(args) -> Result<Value> { special_aliases::generic_eq(_interp, args) }
+
+    #[py_name = "_GenericAlias.__hash__"]
+    fn generic_alias_hash(args) -> Result<Value> { special_aliases::generic_hash(_interp, args) }
+
+    #[py_name = "_GenericAlias.__subclasscheck__"]
+    fn generic_alias_subclasscheck(args) -> Result<Value> { special_aliases::generic_subclasscheck(_interp, args) }
+
+    // ── _BaseGenericAlias dispatch fns (shared by both alias families) ────────
+
+    #[py_name = "_BaseGenericAlias.__or__"]
+    fn base_alias_or(args) -> Result<Value> { special_aliases::base_or(_interp, args) }
+
+    #[py_name = "_BaseGenericAlias.__ror__"]
+    fn base_alias_ror(args) -> Result<Value> { special_aliases::base_ror(_interp, args) }
+
+    #[py_name = "_BaseGenericAlias.__getattr__"]
+    fn base_alias_getattr(args) -> Result<Value> { special_aliases::base_getattr(_interp, args) }
+
+    // ── _SpecialGenericAlias dispatch fns (`typing.Iterable`, …) ──────────────
+
+    #[py_name = "_SpecialGenericAlias.__init__"]
+    fn special_alias_init(args) -> Result<Value> { special_aliases::special_init(_interp, args) }
+
+    #[py_name = "_SpecialGenericAlias.__repr__"]
+    fn special_alias_repr(args) -> Result<Value> { special_aliases::special_repr(_interp, args) }
+
+    #[py_name = "_SpecialGenericAlias.__reduce__"]
+    fn special_alias_reduce(args) -> Result<Value> { special_aliases::special_reduce(_interp, args) }
+
+    #[py_name = "_SpecialGenericAlias.__getitem__"]
+    fn special_alias_getitem(args) -> Result<Value> { special_aliases::special_getitem(_interp, args) }
+
+    #[py_name = "_SpecialGenericAlias.__mro_entries__"]
+    fn special_alias_mro_entries(args) -> Result<Value> { special_aliases::special_mro_entries(_interp, args) }
+
+    #[py_name = "_SpecialGenericAlias.__instancecheck__"]
+    fn special_alias_instancecheck(args) -> Result<Value> { special_aliases::special_instancecheck(_interp, args) }
+
+    #[py_name = "_SpecialGenericAlias.__subclasscheck__"]
+    fn special_alias_subclasscheck(args) -> Result<Value> { special_aliases::special_subclasscheck(_interp, args) }
+
+    #[py_name = "_DeprecatedGenericAlias.__instancecheck__"]
+    fn deprecated_alias_instancecheck(args) -> Result<Value> { special_aliases::deprecated_instancecheck(_interp, args) }
 
     // ── Generic.__class_getitem__ ─────────────────────────────────────────────
     //
@@ -614,10 +618,12 @@ mod ownership_tests {
     const ALIASES: &str = include_str!("typing/aliases.rs");
     const GENERATION: &str = include_str!("typing/generation.rs");
     const PYTHON_MEMBERS: &str = include_str!("typing/python_members.rs");
+    const SPECIAL_ALIASES: &str = include_str!("typing/special_aliases.rs");
     const IMPLEMENTATIONS: &str = concat!(
         include_str!("typing/aliases.rs"),
         include_str!("typing/generation.rs"),
         include_str!("typing/python_members.rs"),
+        include_str!("typing/special_aliases.rs"),
     );
 
     #[test]
@@ -654,6 +660,11 @@ mod ownership_tests {
         assert!(PYTHON_MEMBERS.contains("TYPING_PY_SOURCE"));
         assert!(PYTHON_MEMBERS.contains("exec_source"));
         assert!(!PYTHON_MEMBERS.contains("TypingGeneration"));
+
+        assert!(SPECIAL_ALIASES.contains("fn special_getitem"));
+        assert!(SPECIAL_ALIASES.contains("fn base_mro_entries"));
+        assert!(!SPECIAL_ALIASES.contains("TYPING_PY_SOURCE"));
+        assert!(!SPECIAL_ALIASES.contains("TypingGeneration"));
     }
 
     #[test]
