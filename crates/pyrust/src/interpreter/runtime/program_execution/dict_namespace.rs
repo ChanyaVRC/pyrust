@@ -104,6 +104,14 @@ impl Interpreter {
 
         let num_regs = code.num_regs as usize;
         let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+        // Walrus targets are the eval code's only script locals: seed them
+        // from, and commit them to, the locals mapping (`STORE_NAME`).
+        Self::seed_explicit_exec_locals(
+            &local_index,
+            &mut regs,
+            &globals_dict,
+            locals_dict.as_ref(),
+        );
         let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
         let regs_len = regs.len();
         self.vm_frame_views.push(VmFrameView::script_frame(
@@ -118,6 +126,7 @@ impl Interpreter {
         let vm_result = self.run_script_bytecode_with_hooks(code, regs_slice, CellSlice::empty());
         drop(namespace_mirror_guard);
         self.detach_vm_frame_view();
+        self.flush_explicit_exec_locals(&local_index, &regs, &globals_dict, locals_dict.as_ref());
         drop(regs);
         self.env = previous_env;
         self.finish_pop_vm_frame_view();

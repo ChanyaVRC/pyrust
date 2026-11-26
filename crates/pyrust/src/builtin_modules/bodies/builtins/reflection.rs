@@ -425,18 +425,7 @@ pyrust_module! {
             .cloned();
         let closure_opt = closure_val.filter(|v| !matches!(v.kind(), ValueKind::None));
 
-        if globals_opt.is_none()
-            && _interp
-                .vm_frame_views
-                .last()
-                .is_some_and(|view| view.kind() == crate::interpreter::FrameKind::Function)
-        {
-            let active_env = Rc::clone(&_interp.env);
-            globals_opt = Some(_interp.globals_for_environment(&active_env));
-            if locals_opt.is_none() {
-                locals_opt = Some(_interp.retain_current_function_locals());
-            }
-        }
+        resolve_default_exec_namespaces(_interp, &mut globals_opt, &mut locals_opt);
         // Inject `__builtins__` into a caller-supplied globals dict, matching
         // CPython's PyEval_EvalCode behaviour.
         if let Some(g) = &globals_opt {
@@ -540,14 +529,15 @@ pyrust_module! {
         #[positional_only] #[default(OptionalArg::Omitted)] locals: OptValueRef,
     ) -> Result<Value> {
         let source_val = source.0;
-        let globals_opt = globals
+        let mut globals_opt = globals
             .as_value()
             .filter(|v| !matches!(v.kind(), ValueKind::None))
             .cloned();
-        let locals_opt = locals
+        let mut locals_opt = locals
             .as_value()
             .filter(|v| !matches!(v.kind(), ValueKind::None))
             .cloned();
+        resolve_default_exec_namespaces(_interp, &mut globals_opt, &mut locals_opt);
         // Inject `__builtins__` into a caller-supplied globals dict, matching
         // CPython's PyEval_EvalCode behaviour.
         if let Some(g) = &globals_opt {
@@ -927,8 +917,8 @@ pyrust_module! {
                         }
                     }
                 }
-                let local_index: Rc<std::collections::HashMap<String, crate::bytecode::Reg>> =
-                    Rc::new(std::collections::HashMap::new());
+                let local_index =
+                    crate::interpreter::Interpreter::eval_expression_local_index(&program);
                 let code = crate::compiler::compile_eval_expr_with_options(
                     &program,
                     Rc::clone(&local_index),

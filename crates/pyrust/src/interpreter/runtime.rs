@@ -443,7 +443,8 @@ mod introspection {
         FrameKind, GeneratorFrame, Interpreter, PyDict, PyError, PyKey, Rc, Result, UserFunction,
         Value, ValueKind, VmFrameCache, VmFrameView, cached_builtins_module, class_frame_identity,
         class_frame_locals_value, compiler_owned_frame_local_keys, lookup_enclosing_function_value,
-        resolve_frame_source_line, snapshot_view_locals, value_class, values_are_identical,
+        module_env, resolve_frame_source_line, snapshot_view_locals, value_class,
+        values_are_identical,
     };
     include!("runtime/introspection.rs");
 }

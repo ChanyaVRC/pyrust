@@ -207,7 +207,7 @@ impl Interpreter {
         // `eval("  1 + 2  ")` and `eval("1 + 2\n")` both work in CPython.
         let trimmed = source.trim();
         let (program, linenos) = self.parse_source_to_stmts_with_warnings(trimmed, "<string>")?;
-        let local_index: Rc<HashMap<String, crate::bytecode::Reg>> = Rc::new(HashMap::new());
+        let local_index = Self::eval_expression_local_index(&program);
         let code = {
             let c = crate::compiler::compile_eval_expr_with_options(
                 &program,
@@ -228,6 +228,27 @@ impl Interpreter {
             }
             Some(gdict) => self.eval_in_dict_env(&code, local_index, gdict, locals_dict),
         }
+    }
+
+    /// Script-local slots for an `eval` expression: its walrus targets.
+    ///
+    /// CPython compiles `eval` code like module code, so `(w := ...)` is a
+    /// `STORE_NAME` into the locals mapping, not a global store. Giving those
+    /// targets script registers lets the namespace runners seed them from and
+    /// flush them back to that mapping, exactly as `exec` handles assignments;
+    /// every other name keeps resolving through the namespace.
+    pub(crate) fn eval_expression_local_index(
+        program: &[crate::ast::Stmt],
+    ) -> Rc<HashMap<String, crate::bytecode::Reg>> {
+        let no_names = std::collections::HashSet::new();
+        let local_names =
+            crate::interpreter::collect_local_names(&[], program, &no_names, &no_names);
+        Rc::new(
+            (0u32..)
+                .zip(local_names.iter())
+                .map(|(i, n)| (n.clone(), i))
+                .collect(),
+        )
     }
 
     /// Run a compiled eval-mode code object in the current module namespace.
@@ -254,6 +275,8 @@ impl Interpreter {
         let vm_result = self.run_script_bytecode_with_hooks(code, regs_slice, CellSlice::empty());
         drop(namespace_mirror_guard);
         self.detach_vm_frame_view();
+        // Module-scope walrus targets are module bindings.
+        self.write_back_script_locals(&local_index, &mut regs);
         drop(regs);
         self.finish_pop_vm_frame_view();
         record_exec_string_frame(self, &vm_result, &code.filename);

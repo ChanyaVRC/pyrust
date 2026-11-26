@@ -188,6 +188,11 @@ pub fn compile_eval_expr_with_options(
     let mut c = Compiler::new(local_index, 0, cell_vars);
     // Threaded source file (#2438): the eval expression's `co_filename`.
     c.filename = std::sync::Arc::from(filename);
+    // CPython compiles eval code like module code: its only script locals are
+    // walrus targets (`STORE_NAME`), and a read of one before the walrus runs
+    // must fall back to the globals → builtins chain (issue #3317).
+    c.is_module_scope = true;
+    c.module_namespace_may_be_exposed = module_namespace_may_be_exposed(stmts);
     c.optimize = options.optimize;
     c.allow_top_level_await = options.allow_top_level_await;
     if let Some(&ln) = linenos.first()

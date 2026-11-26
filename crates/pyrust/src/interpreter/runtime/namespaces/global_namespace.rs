@@ -70,11 +70,12 @@ impl Interpreter {
             let (globals, locals, explicit) = root.namespace_globals_provider();
             (globals, locals, explicit, root.namespace_cache_disabled())
         };
-        let at_explicit_script_scope = is_explicit
-            && self
-                .vm_frame_views
-                .last()
-                .is_some_and(|view| view.kind() == FrameKind::Script);
+        // A list / set / dict comprehension in module-level exec/eval code is
+        // inlined into that script frame by CPython 3.12 (PEP 709), so its
+        // outer-name reads are `LOAD_NAME` against the explicit locals too
+        // (`eval("[x for _ in range(2)]", {}, {"x": 5})`, issue #3317).
+        let at_explicit_script_scope =
+            is_explicit && self.innermost_visible_frame_kind() == Some(FrameKind::Script);
         let namespace = GlobalNamespace {
             root,
             globals,
