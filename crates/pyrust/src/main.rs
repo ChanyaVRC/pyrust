@@ -961,6 +961,8 @@ fn run_repl_loop(interpreter: &mut Interpreter) -> Result<()> {
         // Add each line to history individually (not the whole buffer) so
         // recalled lines are displayed one at a time with proper indentation.
         rl.add_history_entry(&line).ok();
+        #[cfg(unix)]
+        builtin_modules::readline::record_repl_history(&line);
 
         buf.push_str(&line);
         buf.push('\n');

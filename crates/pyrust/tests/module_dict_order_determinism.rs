@@ -396,9 +396,18 @@ fn assert_stable_across_runs(name: &str, source: &str) {
 
 #[cfg(unix)]
 const POSIX_PROBE: &str = r#"
-names = ["fcntl", "grp", "posix", "pty", "pwd", "resource", "syslog", "termios", "tty"]
+import curses.ascii
+import curses.has_key
+import curses.panel
+import curses.textpad
+names = ["_curses", "_curses_panel", "curses", "fcntl", "grp", "posix", "pty", "pwd", "readline", "resource", "syslog", "termios", "tty"]
 for name in names:
     print(name, list(vars(__import__(name))))
+for name, module in [("curses.ascii", curses.ascii),
+                     ("curses.has_key", curses.has_key),
+                     ("curses.panel", curses.panel),
+                     ("curses.textpad", curses.textpad)]:
+    print(name, list(vars(module)))
 "#;
 
 #[test]
