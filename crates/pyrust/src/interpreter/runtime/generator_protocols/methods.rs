@@ -565,11 +565,19 @@ impl Interpreter {
         let inject = pyrust_core::py_err!("GeneratorExit", String::new());
         match self.resume_generator_with_exc(frame, Some(inject), Value::none()) {
             // Generator yielded again instead of returning/re-raising — that's
-            // an error in CPython.
+            // an error in CPython.  Like CPython (`gen_close`), the frame stays
+            // suspended at the new yield: a later `close()` injects
+            // `GeneratorExit` there again, so enclosing `finally` blocks still
+            // run (#3357).  The message names the frame's kind.
             Ok(_yielded) => {
-                // Mark as done so subsequent calls don't re-execute.
-                frame.done = true;
-                Err(pyrust_core::runtime_err!("generator ignored GeneratorExit"))
+                let kind = if frame.is_async_generator() {
+                    "async generator"
+                } else if frame.is_coroutine {
+                    "coroutine"
+                } else {
+                    "generator"
+                };
+                Err(pyrust_core::runtime_err!("{kind} ignored GeneratorExit"))
             }
             // Generator returned normally (StopIteration synthesised).
             Err(ref e) if is_stop_iteration_error(e) => Ok(Value::none()),

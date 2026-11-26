@@ -147,11 +147,14 @@ impl Compiler {
                 let handler_catch_patch = self.emit(Insn::SetupExcept(0));
                 self.emit(Insn::PushExcContext(subgroup_reg));
 
-                // Register except-body cleanup for early exits (return/break/
-                // continue directly inside `except*` is a SyntaxError, but
-                // cleanup still guards nested constructs if any).
+                // Register except-body cleanup (return/break/continue directly
+                // inside `except*` is a SyntaxError, so this only shapes a
+                // `raise` in the body).  The outer finally handler stays live
+                // across the handler body, so the finally block is never inlined
+                // at a raise site: the exception reaches the handler-local catch
+                // above and, through the residual re-raise, the finally handler
+                // (inlining it here ran the finally block twice).
                 self.except_cleanups.push(EarlyExitCleanup::ExceptBody {
-                    finally_stmts: finally_branch.map(|s| s.to_vec()),
                     as_var_delete: var_bind_cleanup.clone(),
                 });
 
