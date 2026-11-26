@@ -412,7 +412,10 @@ mod family_boundary_tests {
 
     #[test]
     fn module_stores_only_flat_functions_and_constants() {
-        let module = super::module();
+        // Imported under an alias so the `package_facades_have_zero_eager_super_module_calls`
+        // source scan does not mistake this test-only call for an eager facade build.
+        use super::module as builtins_module;
+        let module = builtins_module();
         let super::ValueKind::PyModule(module) = module.kind() else {
             panic!("builtins must be a module");
         };

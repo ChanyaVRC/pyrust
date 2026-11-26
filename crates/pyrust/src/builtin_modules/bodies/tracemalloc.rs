@@ -532,7 +532,7 @@ pyrust_module! {
     }
 
     fn is_tracing() -> Result<Value> {
-        Ok(Value::bool_(_interp.cold.tracemalloc_state.borrow().tracing))
+        Ok(Value::bool_(_interp.features().tracemalloc_tracing()))
     }
 
     fn clear_traces() -> Result<Value> {
@@ -541,7 +541,7 @@ pyrust_module! {
     }
 
     fn get_traced_memory() -> Result<Value> {
-        let st = _interp.cold.tracemalloc_state.borrow();
+        let st = _interp.features().tracemalloc();
         if !st.tracing {
             return Ok(Value::tuple(vec![Value::int(0), Value::int(0)]));
         }
@@ -552,7 +552,7 @@ pyrust_module! {
     }
 
     fn reset_peak() -> Result<Value> {
-        let mut st = _interp.cold.tracemalloc_state.borrow_mut();
+        let mut st = _interp.features().tracemalloc_mut();
         if st.tracing {
             st.peak_memory = st.current_memory;
         }
@@ -561,7 +561,7 @@ pyrust_module! {
 
     fn get_traceback_limit() -> Result<Value> {
         Ok(Value::int(
-            _interp.cold.tracemalloc_state.borrow().traceback_limit as i64,
+            _interp.features().tracemalloc().traceback_limit as i64,
         ))
     }
 
@@ -582,7 +582,7 @@ pyrust_module! {
 
     fn take_snapshot() -> Result<Value> {
         let (tracing, limit) = {
-            let st = _interp.cold.tracemalloc_state.borrow();
+            let st = _interp.features().tracemalloc();
             (st.tracing, st.traceback_limit as i64)
         };
         if !tracing {

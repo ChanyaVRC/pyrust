@@ -240,20 +240,14 @@ impl Interpreter {
     /// callbacks, and clearing the callback table afterward (matching CPython
     /// 3.12's `atexit_callfuncs`).
     pub fn run_atexit_callbacks(&mut self) {
-        if self.cold.atexit_state.borrow().is_empty() {
+        // Zero-allocation fast path: no `atexit.register` ever ran (#3296).
+        let mut index = self.features().atexit_len();
+        if index == 0 {
             return;
         }
-        let mut index = self.cold.atexit_state.borrow().len();
         while index > 0 {
             index -= 1;
-            let maybe_cb = {
-                let mut state = self.cold.atexit_state.borrow_mut();
-                if index < state.len() {
-                    state[index].take()
-                } else {
-                    None
-                }
-            };
+            let maybe_cb = self.features().atexit_take(index);
             if let Some(cb) = maybe_cb
                 && let Err(err) = self.call_function_expanded(cb.func.clone(), &cb.args)
             {
@@ -284,7 +278,7 @@ impl Interpreter {
                 }
             }
         }
-        self.cold.atexit_state.borrow_mut().clear();
+        self.features().atexit_clear();
     }
 
     /// Exit the current process if `err` is an uncaught `SystemExit` instance,

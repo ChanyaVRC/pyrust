@@ -523,13 +523,12 @@ fn is_temp_reg_live_at(code: &crate::bytecode::FnCode, start_pc: usize, target_r
 }
 
 impl Interpreter {
-    /// Recompute the single hot-loop hook bitmask from `sys_state` and the
+    /// Recompute the single hot-loop hook bitmask from `sys` feature state and the
     /// thread-local weakref counters.
     #[inline]
     pub(crate) fn sync_vm_hooks_flags(&mut self) {
         let mut flags = 0u8;
-        {
-            let state = self.sys_state.borrow();
+        self.features().sys_with(|state| {
             if !state.tracing_in_progress {
                 if !state.trace_func.is_none() {
                     flags |= VM_HOOK_TRACE;
@@ -538,11 +537,11 @@ impl Interpreter {
                     flags |= VM_HOOK_PROFILE;
                 }
             }
-        }
+        });
         if pyrust_core::has_live_weakrefs() || pyrust_core::has_pending_weakref_callbacks() {
             flags |= VM_HOOK_WEAKREF;
         }
-        if self.cold.tracemalloc_state.borrow().tracing {
+        if self.features().tracemalloc_tracing() {
             flags |= VM_HOOK_TRACEMALLOC;
         }
         if self.cold.gil_state.has_active_workers() {
@@ -635,7 +634,7 @@ impl Interpreter {
         is_trace: bool,
     ) -> Result<Value> {
         let prev_in_progress = {
-            let mut state = self.sys_state.borrow_mut();
+            let mut state = self.features().sys_mut();
             let prev = state.tracing_in_progress;
             state.tracing_in_progress = true;
             prev
@@ -659,7 +658,7 @@ impl Interpreter {
         let result = self.call_function_expanded(hook, &call_args);
 
         {
-            let mut state = self.sys_state.borrow_mut();
+            let mut state = self.features().sys_mut();
             state.tracing_in_progress = prev_in_progress;
             if result.is_err() {
                 // CPython 3.12: an exception escaping a trace or profile
@@ -719,7 +718,7 @@ impl Interpreter {
         regs_ptr: std::ptr::NonNull<Value>,
         regs_len: usize,
     ) {
-        let Ok(mut tm) = self.cold.tracemalloc_state.try_borrow_mut() else {
+        let Some(mut tm) = self.features().try_tracemalloc_peek_mut() else {
             return;
         };
         if !tm.tracing {
@@ -951,7 +950,7 @@ impl Interpreter {
         let frame = self.build_frame_object_at_view_with_code(view_index, first_line, Some(code));
 
         if self.vm_hooks_flags & VM_HOOK_TRACE != 0 {
-            let global_trace = self.sys_state.borrow().trace_func.clone();
+            let global_trace = self.features().sys_with(|state| state.trace_func.clone());
             if !global_trace.is_none() {
                 let local_trace = self.invoke_hook_callback(
                     global_trace,
@@ -965,7 +964,7 @@ impl Interpreter {
         }
 
         if self.vm_hooks_flags & VM_HOOK_PROFILE != 0 {
-            let profile_func = self.sys_state.borrow().profile_func.clone();
+            let profile_func = self.features().sys_with(|state| state.profile_func.clone());
             if !profile_func.is_none() {
                 self.invoke_hook_callback(profile_func, frame, "call", Value::none(), false)?;
             }
@@ -1001,7 +1000,7 @@ impl Interpreter {
         }
 
         if self.vm_hooks_flags & VM_HOOK_PROFILE != 0 {
-            let profile_func = self.sys_state.borrow().profile_func.clone();
+            let profile_func = self.features().sys_with(|state| state.profile_func.clone());
             if !profile_func.is_none() {
                 let frame = self.build_frame_object_at_view(view_index, 0);
                 self.invoke_hook_callback(profile_func, frame, "return", arg, false)?;
@@ -1066,7 +1065,7 @@ impl Interpreter {
         if self.vm_hooks_flags & VM_HOOK_PROFILE == 0 {
             return Ok(());
         }
-        let profile_func = self.sys_state.borrow().profile_func.clone();
+        let profile_func = self.features().sys_with(|state| state.profile_func.clone());
         if profile_func.is_none() {
             return Ok(());
         }
@@ -1087,7 +1086,7 @@ impl Interpreter {
         if self.vm_hooks_flags & VM_HOOK_PROFILE == 0 {
             return Ok(());
         }
-        let profile_func = self.sys_state.borrow().profile_func.clone();
+        let profile_func = self.features().sys_with(|state| state.profile_func.clone());
         if profile_func.is_none() {
             return Ok(());
         }

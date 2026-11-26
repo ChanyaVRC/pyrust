@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
@@ -262,6 +262,224 @@ impl Default for MonitoringRuntimeState {
     }
 }
 
+/// One lazily-initialized, boxed feature-state slot.
+type LazySlot<T> = RefCell<Option<Box<T>>>;
+
+/// Exclusive borrow of a lazy slot, initializing it to `T::default()` first.
+#[inline]
+fn lazy_slot_mut<T: Default>(slot: &LazySlot<T>) -> RefMut<'_, T> {
+    RefMut::map(slot.borrow_mut(), |s| {
+        &mut **s.get_or_insert_with(Box::default)
+    })
+}
+
+/// Shared borrow of a lazy slot, initializing it to `T::default()` first.
+#[inline]
+fn lazy_slot_ref<T: Default>(slot: &LazySlot<T>) -> Ref<'_, T> {
+    if slot.borrow().is_none() {
+        drop(lazy_slot_mut(slot));
+    }
+    Ref::map(slot.borrow(), |s| {
+        s.as_deref()
+            .expect("lazy feature slot was initialized just above")
+    })
+}
+
+/// Shared borrow of a lazy slot only when it is already initialized.
+#[inline]
+fn lazy_slot_peek<T>(slot: &LazySlot<T>) -> Option<Ref<'_, T>> {
+    Ref::filter_map(slot.borrow(), |s| s.as_deref()).ok()
+}
+
+/// Exclusive borrow of a lazy slot only when it is already initialized.
+#[inline]
+fn lazy_slot_peek_mut<T>(slot: &LazySlot<T>) -> Option<RefMut<'_, T>> {
+    RefMut::filter_map(slot.borrow_mut(), |s| s.as_deref_mut()).ok()
+}
+
+/// Optional interpreter feature states (`gc`, `tracemalloc`, `faulthandler`,
+/// `sys.monitoring`, `warnings`, `atexit`, `sys` runtime hooks) behind one
+/// shared handle (issue #3296).
+///
+/// `Interpreter::default()` allocates only this compact container; every slot
+/// starts uninitialized and is materialized on the first mutating (or
+/// module-level) access. Read-only hot checks (`atexit` shutdown, tracemalloc
+/// tracing, `sys` trace/profile hooks, audit hooks) observe the uninitialized
+/// slot as the CPython default without allocating it.
+///
+/// Root interpreters own an independent container. Filesystem-import children
+/// and spawned Python threads clone the `Rc`, so state that is lazily created
+/// after they were spawned is still shared with the parent interpreter.
+#[derive(Default)]
+pub(crate) struct SharedFeatureStates {
+    gc: LazySlot<GcRuntimeState>,
+    tracemalloc: LazySlot<TracemallocRuntimeState>,
+    faulthandler: LazySlot<FaulthandlerRuntimeState>,
+    monitoring: LazySlot<MonitoringRuntimeState>,
+    warnings: std::cell::OnceCell<Box<crate::builtin_modules::warnings::WarningsState>>,
+    atexit: RefCell<Option<Vec<Option<AtexitCallback>>>>,
+    sys: LazySlot<SysRuntimeState>,
+}
+
+impl SharedFeatureStates {
+    // ── gc ──────────────────────────────────────────────────────────────────
+    #[inline]
+    pub(crate) fn gc(&self) -> Ref<'_, GcRuntimeState> {
+        lazy_slot_ref(&self.gc)
+    }
+
+    #[inline]
+    pub(crate) fn gc_mut(&self) -> RefMut<'_, GcRuntimeState> {
+        lazy_slot_mut(&self.gc)
+    }
+
+    // ── tracemalloc ─────────────────────────────────────────────────────────
+    #[inline]
+    pub(crate) fn tracemalloc(&self) -> Ref<'_, TracemallocRuntimeState> {
+        lazy_slot_ref(&self.tracemalloc)
+    }
+
+    #[inline]
+    pub(crate) fn tracemalloc_mut(&self) -> RefMut<'_, TracemallocRuntimeState> {
+        lazy_slot_mut(&self.tracemalloc)
+    }
+
+    /// Already-initialized tracemalloc state, without materializing it.
+    #[inline]
+    pub(crate) fn tracemalloc_peek(&self) -> Option<Ref<'_, TracemallocRuntimeState>> {
+        lazy_slot_peek(&self.tracemalloc)
+    }
+
+    /// Non-panicking exclusive borrow of already-initialized tracemalloc state.
+    #[inline]
+    pub(crate) fn try_tracemalloc_peek_mut(&self) -> Option<RefMut<'_, TracemallocRuntimeState>> {
+        let guard = self.tracemalloc.try_borrow_mut().ok()?;
+        RefMut::filter_map(guard, |s| s.as_deref_mut()).ok()
+    }
+
+    /// `true` only while `tracemalloc` is tracing; never allocates.
+    #[inline]
+    pub(crate) fn tracemalloc_tracing(&self) -> bool {
+        self.tracemalloc_peek().is_some_and(|st| st.tracing)
+    }
+
+    // ── faulthandler ────────────────────────────────────────────────────────
+    #[inline]
+    pub(crate) fn faulthandler_mut(&self) -> RefMut<'_, FaulthandlerRuntimeState> {
+        lazy_slot_mut(&self.faulthandler)
+    }
+
+    /// Already-initialized faulthandler state, without materializing it.
+    #[inline]
+    pub(crate) fn faulthandler_peek_mut(&self) -> Option<RefMut<'_, FaulthandlerRuntimeState>> {
+        lazy_slot_peek_mut(&self.faulthandler)
+    }
+
+    /// `true` only while `faulthandler` is enabled; never allocates.
+    #[inline]
+    pub(crate) fn faulthandler_enabled(&self) -> bool {
+        lazy_slot_peek(&self.faulthandler).is_some_and(|st| st.enabled)
+    }
+
+    // ── sys.monitoring ──────────────────────────────────────────────────────
+    #[inline]
+    pub(crate) fn monitoring(&self) -> Ref<'_, MonitoringRuntimeState> {
+        lazy_slot_ref(&self.monitoring)
+    }
+
+    #[inline]
+    pub(crate) fn monitoring_mut(&self) -> RefMut<'_, MonitoringRuntimeState> {
+        lazy_slot_mut(&self.monitoring)
+    }
+
+    // ── warnings ────────────────────────────────────────────────────────────
+    #[inline]
+    pub(crate) fn warnings(&self) -> &crate::builtin_modules::warnings::WarningsState {
+        self.warnings.get_or_init(Box::default)
+    }
+
+    // ── atexit ──────────────────────────────────────────────────────────────
+    #[inline]
+    pub(crate) fn atexit_mut(&self) -> RefMut<'_, Vec<Option<AtexitCallback>>> {
+        RefMut::map(self.atexit.borrow_mut(), |s| s.get_or_insert_with(Vec::new))
+    }
+
+    /// Already-registered callback slots, without allocating the table.
+    #[inline]
+    pub(crate) fn atexit_peek(&self) -> Option<Ref<'_, Vec<Option<AtexitCallback>>>> {
+        Ref::filter_map(self.atexit.borrow(), Option::as_ref).ok()
+    }
+
+    /// Number of registered callback slots; `0` without allocating.
+    #[inline]
+    pub(crate) fn atexit_len(&self) -> usize {
+        self.atexit.borrow().as_ref().map_or(0, Vec::len)
+    }
+
+    /// Take the callback at `index` (leaving a tombstone), if any.
+    #[inline]
+    pub(crate) fn atexit_take(&self, index: usize) -> Option<AtexitCallback> {
+        self.atexit
+            .borrow_mut()
+            .as_mut()
+            .and_then(|state| state.get_mut(index))
+            .and_then(Option::take)
+    }
+
+    /// Drop every registered callback slot (no-op when none were registered).
+    #[inline]
+    pub(crate) fn atexit_clear(&self) {
+        if let Some(state) = self.atexit.borrow_mut().as_mut() {
+            state.clear();
+        }
+    }
+
+    // ── sys runtime state ───────────────────────────────────────────────────
+    /// Read `sys` runtime state, observing CPython defaults when the slot is
+    /// still uninitialized. Never allocates (`SysRuntimeState::default()` is
+    /// allocation-free).
+    #[inline]
+    pub(crate) fn sys_with<R>(&self, f: impl FnOnce(&SysRuntimeState) -> R) -> R {
+        match self.sys.borrow().as_deref() {
+            Some(state) => f(state),
+            None => f(&SysRuntimeState::default()),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn sys_mut(&self) -> RefMut<'_, SysRuntimeState> {
+        lazy_slot_mut(&self.sys)
+    }
+
+    /// Names of the feature slots that have been materialized (tests only).
+    #[cfg(test)]
+    pub(crate) fn initialized_slots(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.gc.borrow().is_some() {
+            out.push("gc");
+        }
+        if self.tracemalloc.borrow().is_some() {
+            out.push("tracemalloc");
+        }
+        if self.faulthandler.borrow().is_some() {
+            out.push("faulthandler");
+        }
+        if self.monitoring.borrow().is_some() {
+            out.push("monitoring");
+        }
+        if self.warnings.get().is_some() {
+            out.push("warnings");
+        }
+        if self.atexit.borrow().is_some() {
+            out.push("atexit");
+        }
+        if self.sys.borrow().is_some() {
+            out.push("sys");
+        }
+        out
+    }
+}
+
 /// Cold, rarely-used interpreter metadata, caches, and diagnostic/guard tables
 /// extracted behind a single `Box<InterpreterColdState>` (issue #3162).
 ///
@@ -392,18 +610,11 @@ pub(crate) struct InterpreterColdState {
     /// cold frame inspection (`warnings.warn(stacklevel=...)`) can recover the
     /// exact caller line without changing `VmFrameView` or `Interpreter` size.
     pub(crate) call_site_lines: Vec<(*mut Value, u32)>,
-    /// Shared per-interpreter `atexit` callback registry (issue #3209).
-    /// Cloned by `Rc` into filesystem-import child interpreters so callbacks
-    /// registered in imported modules execute on top-level interpreter shutdown.
-    pub(crate) atexit_state: Rc<RefCell<Vec<Option<AtexitCallback>>>>,
-    /// Shared per-interpreter `gc` state (issue #3246).
-    pub(crate) gc_state: Rc<RefCell<GcRuntimeState>>,
-    /// Shared per-interpreter `_tracemalloc` / `tracemalloc` state (issue #3246).
-    pub(crate) tracemalloc_state: Rc<RefCell<TracemallocRuntimeState>>,
-    /// Shared per-interpreter `faulthandler` state (issue #3246).
-    pub(crate) faulthandler_state: Rc<RefCell<FaulthandlerRuntimeState>>,
-    /// Shared per-interpreter `sys.monitoring` state (PEP 669, issue #3246).
-    pub(crate) monitoring_state: Rc<RefCell<MonitoringRuntimeState>>,
+    /// Lazily-initialized optional feature states (`gc`, `tracemalloc`,
+    /// `faulthandler`, `sys.monitoring`, `warnings`, `atexit`, `sys` runtime
+    /// hooks) shared via one `Rc` with filesystem-import children and spawned
+    /// Python threads (issues #3209, #3246, #2970, #3296).
+    pub(crate) feature_states: Rc<SharedFeatureStates>,
     /// Startup CLI flags and `PYTHON*` environment configuration (issue #3243).
     /// Shared via `Rc` with child filesystem-import interpreters.
     pub(crate) runtime_config: Rc<RuntimeConfig>,
@@ -507,6 +718,16 @@ impl Default for RuntimeConfig {
 
 impl InterpreterColdState {
     pub(crate) fn new_with_gil(gil_state: Arc<GilState>, is_gil_root: bool) -> Self {
+        Self::new_shared(gil_state, is_gil_root, Rc::default())
+    }
+
+    /// Fresh cold state that shares `feature_states` with another interpreter
+    /// of the same Python process (filesystem-import child or worker thread).
+    pub(crate) fn new_shared(
+        gil_state: Arc<GilState>,
+        is_gil_root: bool,
+        feature_states: Rc<SharedFeatureStates>,
+    ) -> Self {
         Self {
             script_dir: None,
             script_filename: None,
@@ -535,11 +756,7 @@ impl InterpreterColdState {
             push_exc_ctx_marks: Vec::new(),
             inlined_comp_escaped_span: None,
             call_site_lines: Vec::new(),
-            atexit_state: Rc::new(RefCell::new(Vec::new())),
-            gc_state: Rc::new(RefCell::new(GcRuntimeState::default())),
-            tracemalloc_state: Rc::new(RefCell::new(TracemallocRuntimeState::default())),
-            faulthandler_state: Rc::new(RefCell::new(FaulthandlerRuntimeState::default())),
-            monitoring_state: Rc::new(RefCell::new(MonitoringRuntimeState::default())),
+            feature_states,
             runtime_config: Rc::new(RuntimeConfig::default()),
             cli_startup_managed: false,
             cli_startup_initialized: false,
@@ -554,8 +771,6 @@ impl Default for InterpreterColdState {
         Self::new_with_gil(GilState::new_for_current_thread(), true)
     }
 }
-
-pub(crate) type SharedWarningsState = Rc<crate::builtin_modules::warnings::WarningsState>;
 
 pub struct Interpreter {
     pub(crate) env: EnvRef,
@@ -655,17 +870,6 @@ pub struct Interpreter {
     /// independent roots on the same thread cannot change one another's
     /// `sys.setrecursionlimit` setting.
     recursion_limit: usize,
-    /// Canonical filter and recording-context state for the `warnings` module.
-    ///
-    /// The concrete policy data remains private to the built-in module. Root
-    /// interpreters own independent handles; filesystem-import children clone
-    /// the handle because they are an implementation detail of the same
-    /// Python interpreter and share `sys.modules` with their parent.
-    pub(crate) warnings_state: Rc<crate::builtin_modules::warnings::WarningsState>,
-    /// Shared per-interpreter `sys` runtime state (switch interval, coroutine
-    /// origin tracking depth, profile/trace/asyncgen/audit hooks — issue
-    /// #2970). Shared via `Rc` with child filesystem-import interpreters.
-    pub(crate) sys_state: Rc<RefCell<SysRuntimeState>>,
     /// Boxed cold interpreter state: memo/comparison maps, `invoke_arg_buf`,
     /// class-only `env_pool`, script/import caches, and diagnostic tables (#3162).
     pub(crate) cold: Box<InterpreterColdState>,
@@ -1004,10 +1208,15 @@ fn compare_values_for_registry(a: &Value, b: &Value) -> Result<std::cmp::Orderin
 }
 
 impl Interpreter {
+    /// Lazily-initialized optional feature states shared across this Python
+    /// interpreter's import children and threads (issue #3296).
+    #[inline(always)]
+    pub(crate) fn features(&self) -> &SharedFeatureStates {
+        &self.cold.feature_states
+    }
+
     pub(crate) fn new_worker(
         env: EnvRef,
-        warnings_state: Rc<crate::builtin_modules::warnings::WarningsState>,
-        sys_state: Rc<RefCell<SysRuntimeState>>,
         int_max_str_digits: usize,
         recursion_limit: usize,
         cold: Box<InterpreterColdState>,
@@ -1026,8 +1235,6 @@ impl Interpreter {
             vm_frame_caches: None,
             int_max_str_digits,
             recursion_limit,
-            warnings_state,
-            sys_state,
             cold,
             reraise_is_bare: false,
             vm_hooks_flags: 0,
@@ -1070,8 +1277,6 @@ impl Default for Interpreter {
             vm_frame_caches: None,
             int_max_str_digits: pyrust_core::INT_MAX_STR_DIGITS_DEFAULT,
             recursion_limit: DEFAULT_RECURSION_LIMIT,
-            warnings_state: Rc::new(crate::builtin_modules::warnings::WarningsState::default()),
-            sys_state: Rc::new(RefCell::new(SysRuntimeState::default())),
             cold: Box::default(),
             reraise_is_bare: false,
             vm_hooks_flags: 0,

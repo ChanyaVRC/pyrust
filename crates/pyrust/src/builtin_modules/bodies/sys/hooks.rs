@@ -60,7 +60,9 @@ pub(super) fn getprofile(
     fn_name: &str,
 ) -> Result<Value> {
     require_no_args(args, fn_name, "getprofile")?;
-    Ok(interp.sys_state.borrow().profile_func.clone())
+    Ok(interp
+        .features()
+        .sys_with(|state| state.profile_func.clone()))
 }
 
 pub(super) fn setprofile(
@@ -69,7 +71,7 @@ pub(super) fn setprofile(
     fn_name: &str,
 ) -> Result<Value> {
     let func = require_exact_one_arg(args, fn_name, "setprofile")?;
-    interp.sys_state.borrow_mut().profile_func = func.clone();
+    interp.features().sys_mut().profile_func = func.clone();
     interp.sync_vm_hooks_flags();
     Ok(Value::none())
 }
@@ -80,7 +82,7 @@ pub(super) fn gettrace(
     fn_name: &str,
 ) -> Result<Value> {
     require_no_args(args, fn_name, "gettrace")?;
-    Ok(interp.sys_state.borrow().trace_func.clone())
+    Ok(interp.features().sys_with(|state| state.trace_func.clone()))
 }
 
 pub(super) fn settrace(
@@ -89,7 +91,7 @@ pub(super) fn settrace(
     fn_name: &str,
 ) -> Result<Value> {
     let func = require_exact_one_arg(args, fn_name, "settrace")?;
-    interp.sys_state.borrow_mut().trace_func = func.clone();
+    interp.features().sys_mut().trace_func = func.clone();
     interp.sync_vm_hooks_flags();
     Ok(Value::none())
 }
@@ -100,13 +102,12 @@ pub(super) fn get_asyncgen_hooks(
     fn_name: &str,
 ) -> Result<Value> {
     require_no_args(args, fn_name, "get_asyncgen_hooks")?;
-    let (firstiter, finalizer) = {
-        let state = interp.sys_state.borrow();
+    let (firstiter, finalizer) = interp.features().sys_with(|state| {
         (
             state.asyncgen_firstiter.clone(),
             state.asyncgen_finalizer.clone(),
         )
-    };
+    });
     Ok(make_asyncgen_hooks(firstiter, finalizer))
 }
 
@@ -176,7 +177,7 @@ pub(super) fn set_asyncgen_hooks(
             ));
         }
     }
-    let mut state = interp.sys_state.borrow_mut();
+    let mut state = interp.features().sys_mut();
     if let Some(f) = firstiter {
         state.asyncgen_firstiter = f;
     }
@@ -197,7 +198,7 @@ pub(super) fn addaudithook(interp: &mut Interpreter, args: &[ExpandedCallArg]) -
             ),
         ));
     }
-    interp.sys_state.borrow_mut().audit_hooks.push(hook);
+    interp.features().sys_mut().audit_hooks.push(hook);
     Ok(Value::none())
 }
 
@@ -223,7 +224,9 @@ pub(super) fn audit(
             ),
         ));
     }
-    let hooks: Vec<Value> = interp.sys_state.borrow().audit_hooks.clone();
+    let hooks: Vec<Value> = interp
+        .features()
+        .sys_with(|state| state.audit_hooks.clone());
     if hooks.is_empty() {
         return Ok(Value::none());
     }
@@ -368,14 +371,14 @@ pub(super) fn call_tracing(
         })
         .collect();
     let prev_in_progress = {
-        let mut state = interp.sys_state.borrow_mut();
+        let mut state = interp.features().sys_mut();
         let prev = state.tracing_in_progress;
         state.tracing_in_progress = false;
         prev
     };
     interp.sync_vm_hooks_flags();
     let result = interp.call_function_expanded(func, &call_args);
-    interp.sys_state.borrow_mut().tracing_in_progress = prev_in_progress;
+    interp.features().sys_mut().tracing_in_progress = prev_in_progress;
     interp.sync_vm_hooks_flags();
     result
 }

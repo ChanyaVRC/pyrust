@@ -2,8 +2,8 @@
 // (issue #3209).
 //
 // Stores registered exit callbacks per interpreter in
-// `InterpreterColdState::atexit_state` (shared across filesystem-import child
-// interpreters via `Rc<RefCell<_>>`), executes them in LIFO order on normal
+// `SharedFeatureStates::atexit` (shared across filesystem-import child
+// interpreters via one `Rc`), executes them in LIFO order on normal
 // interpreter shutdown or `SystemExit`, and matches CPython 3.12's `register`,
 // `unregister`, `_run_exitfuncs`, `_clear`, and `_ncallbacks` semantics.
 //
@@ -70,11 +70,7 @@ pyrust_module! {
             ));
         }
         let cb_args = args[1..].to_vec();
-        _interp
-            .cold
-            .atexit_state
-            .borrow_mut()
-            .push(Some(AtexitCallback {
+        _interp.features().atexit_mut().push(Some(AtexitCallback {
                 func: func.clone(),
                 args: cb_args,
             }));
@@ -98,7 +94,9 @@ pyrust_module! {
         let mut index = 0;
         loop {
             let candidate = {
-                let state = _interp.cold.atexit_state.borrow();
+                let Some(state) = _interp.features().atexit_peek() else {
+                    break;
+                };
                 if index >= state.len() {
                     break;
                 }
@@ -107,7 +105,7 @@ pyrust_module! {
             if let Some(cb_func) = candidate
                 && _interp.values_richcompare_eq(&cb_func, &target)?
             {
-                let mut state = _interp.cold.atexit_state.borrow_mut();
+                let mut state = _interp.features().atexit_mut();
                 if index < state.len() {
                     state[index] = None;
                 }
@@ -127,14 +125,14 @@ pyrust_module! {
     /// Clear the list of previously registered exit functions.
     fn _clear(args) -> Result<Value> {
         require_no_args(args, FN_NAME, "_clear")?;
-        _interp.cold.atexit_state.borrow_mut().clear();
+        _interp.features().atexit_clear();
         Ok(Value::none())
     }
 
     /// Return the number of registered exit callback slots (matching CPython 3.12).
     fn _ncallbacks(args) -> Result<Value> {
         require_no_args(args, FN_NAME, "_ncallbacks")?;
-        let count = _interp.cold.atexit_state.borrow().len() as i64;
+        let count = _interp.features().atexit_len() as i64;
         Ok(Value::int(count))
     }
 }

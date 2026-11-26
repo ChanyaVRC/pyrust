@@ -28,4 +28,5 @@ mod tests {
     include!("tests/library_modules.rs");
     include!("tests/declaration_syntax.rs");
     include!("tests/lazy_builtins.rs");
+    include!("tests/lazy_feature_states.rs");
 }

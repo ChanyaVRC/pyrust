@@ -225,11 +225,9 @@ fn write_resolved_file(interp: &mut Interpreter, target: &ResolvedFile, text: &s
 
 fn cancel_active_timer(interp: &mut Interpreter) {
     let prev = interp
-        .cold
-        .faulthandler_state
-        .borrow_mut()
-        .later_cancel
-        .take();
+        .features()
+        .faulthandler_peek_mut()
+        .and_then(|mut st| st.later_cancel.take());
     if let Some(pair) = prev {
         let (lock, cvar) = &*pair;
         if let Ok(mut cancelled) = lock.lock() {
@@ -349,7 +347,7 @@ pyrust_module! {
             ResolvedFile::PyFile(v, _) => Some(v),
             ResolvedFile::Fd(fd) => Some(Value::int(fd)),
         };
-        let mut st = _interp.cold.faulthandler_state.borrow_mut();
+        let mut st = _interp.features().faulthandler_mut();
         st.enabled = true;
         st.all_threads = all_threads.0;
         st.enabled_file = stored_file;
@@ -357,14 +355,15 @@ pyrust_module! {
     }
 
     fn disable() -> Result<Value> {
-        let mut st = _interp.cold.faulthandler_state.borrow_mut();
-        st.enabled = false;
-        st.enabled_file = None;
+        if let Some(mut st) = _interp.features().faulthandler_peek_mut() {
+            st.enabled = false;
+            st.enabled_file = None;
+        }
         Ok(Value::none())
     }
 
     fn is_enabled() -> Result<Value> {
-        Ok(Value::bool_(_interp.cold.faulthandler_state.borrow().enabled))
+        Ok(Value::bool_(_interp.features().faulthandler_enabled()))
     }
 
     fn dump_traceback(
@@ -410,7 +409,7 @@ pyrust_module! {
         cancel_active_timer(_interp);
 
         let cancel_pair = Arc::new((Mutex::new(false), Condvar::new()));
-        _interp.cold.faulthandler_state.borrow_mut().later_cancel = Some(Arc::clone(&cancel_pair));
+        _interp.features().faulthandler_mut().later_cancel = Some(Arc::clone(&cancel_pair));
 
         let wait_dur = Duration::from_secs_f64(secs);
         let do_repeat = repeat.0;
@@ -466,9 +465,8 @@ pyrust_module! {
         let sig = validate_unix_signal(raw_sig)?;
         let _resolved = resolve_file_arg(_interp, file)?;
         _interp
-            .cold
-            .faulthandler_state
-            .borrow_mut()
+            .features()
+            .faulthandler_mut()
             .registered_signals
             .insert(sig, (all_threads.0, chain.0));
         Ok(Value::none())
@@ -481,12 +479,9 @@ pyrust_module! {
             return Err(PyError::named("ValueError", "signal number out of range"));
         }
         let was_registered = _interp
-            .cold
-            .faulthandler_state
-            .borrow_mut()
-            .registered_signals
-            .remove(&(raw_sig as i32))
-            .is_some();
+            .features()
+            .faulthandler_peek_mut()
+            .is_some_and(|mut st| st.registered_signals.remove(&(raw_sig as i32)).is_some());
         Ok(Value::bool_(was_registered))
     }
 }

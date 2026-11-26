@@ -9,7 +9,8 @@
 //
 // ### Live filter list & interpreter isolation
 //
-// `WarningsState` is owned per root `Interpreter` behind an `Rc` (shared with
+// `WarningsState` is owned per root `Interpreter` inside the lazily-initialized
+// `SharedFeatureStates` container behind an `Rc` (shared with
 // filesystem-import child interpreters because both represent one Python
 // interpreter). Its `filters` field holds the live Python `list` exposed as
 // `warnings.filters`, and `onceregistry` holds the live `dict` exposed as
@@ -54,8 +55,9 @@ struct RecordSink {
 
 /// Mutable state of the `warnings` module for one Python interpreter.
 ///
-/// `Interpreter` owns this behind an `Rc`: roots get fresh state, while the
-/// implementation-only child used for a filesystem import clones the handle.
+/// `Interpreter` owns this lazily inside `SharedFeatureStates` behind an `Rc`:
+/// roots get fresh state, while the implementation-only child used for a
+/// filesystem import clones the handle (issue #3296).
 pub(crate) struct WarningsState {
     /// Live Python `list` of 5-tuple filter entries:
     /// `(action, message_pattern, category, module_pattern, lineno)`.
@@ -134,11 +136,11 @@ fn active_filters_value(interp: &crate::Interpreter) -> Value {
     {
         return filters;
     }
-    interp.warnings_state.filters.borrow().clone()
+    interp.features().warnings().filters.borrow().clone()
 }
 
 fn set_active_filters_value(interp: &crate::Interpreter, new_filters: Value) {
-    *interp.warnings_state.filters.borrow_mut() = new_filters.clone();
+    *interp.features().warnings().filters.borrow_mut() = new_filters.clone();
     if let Some(module) = warnings_module_rc(interp) {
         module
             .borrow_mut()
@@ -153,7 +155,7 @@ fn active_onceregistry(interp: &crate::Interpreter) -> Value {
     {
         return reg;
     }
-    interp.warnings_state.onceregistry.borrow().clone()
+    interp.features().warnings().onceregistry.borrow().clone()
 }
 
 fn active_defaultaction(interp: &crate::Interpreter) -> String {
@@ -245,7 +247,12 @@ fn new_catch_warnings_class() -> Value {
 /// Native post-load hook for `warnings`: applies startup `-W` / `PYTHONWARNINGS`
 /// / `-X dev` / `-b` options once per interpreter (issue #3243).
 pub(crate) fn post_load_init(interp: &mut crate::Interpreter) -> Result<()> {
-    if interp.warnings_state.startup_options_applied.replace(true) {
+    if interp
+        .features()
+        .warnings()
+        .startup_options_applied
+        .replace(true)
+    {
         return Ok(());
     }
     let options = interp.cold.runtime_config.warnoptions.clone();
@@ -456,11 +463,16 @@ pub(crate) fn prepare_module(interpreter: &crate::Interpreter, module: &Value) {
         let mut m = module.borrow_mut();
         m.attrs.insert(
             "filters".to_string(),
-            interpreter.warnings_state.filters.borrow().clone(),
+            interpreter.features().warnings().filters.borrow().clone(),
         );
         m.attrs.insert(
             "onceregistry".to_string(),
-            interpreter.warnings_state.onceregistry.borrow().clone(),
+            interpreter
+                .features()
+                .warnings()
+                .onceregistry
+                .borrow()
+                .clone(),
         );
     }
     let (warning_message, catch_warnings) = {
@@ -715,7 +727,7 @@ fn add_filter_entry(interp: &mut crate::Interpreter, item: Value, append: bool) 
             )?;
         }
     }
-    interp.warnings_state.bump_version();
+    interp.features().warnings().bump_version();
     Ok(())
 }
 
@@ -1076,22 +1088,23 @@ fn dispatch_show_warning(
 
     // If inside an active `catch_warnings(record=True)` block, append directly
     // to the innermost recording sink.
-    let recorded = if let Some(record_sink) = interp.warnings_state.record_sinks.borrow().last() {
-        let wmsg = make_warning_message(
-            &record_sink.warning_message_class,
-            warning_instance.clone(),
-            category,
-            filename,
-            lineno,
-            Value::none(),
-            Value::none(),
-            source,
-        );
-        let _ = record_sink.log.list_push(wmsg);
-        true
-    } else {
-        false
-    };
+    let recorded =
+        if let Some(record_sink) = interp.features().warnings().record_sinks.borrow().last() {
+            let wmsg = make_warning_message(
+                &record_sink.warning_message_class,
+                warning_instance.clone(),
+                category,
+                filename,
+                lineno,
+                Value::none(),
+                Value::none(),
+                source,
+            );
+            let _ = record_sink.log.list_push(wmsg);
+            true
+        } else {
+            false
+        };
     if !recorded {
         let cat_val = Value::py_class(Rc::clone(category));
         showwarning_impl(
@@ -1179,7 +1192,7 @@ fn warn_explicit_impl(
 
     // Invalidate per-module warning cache whenever filters were mutated.
     if matches!(registry.kind(), ValueKind::Dict(_)) {
-        let cur_ver = interp.warnings_state.version() as i64;
+        let cur_ver = interp.features().warnings().version() as i64;
         let stored_ver = dict_get_str(&registry, "version").and_then(|v| match v.kind() {
             ValueKind::Int(n) => Some(n),
             _ => None,
@@ -1579,7 +1592,7 @@ pyrust_module! {
         } else {
             set_active_filters_value(_interp, Value::list(Vec::new()));
         }
-        _interp.warnings_state.bump_version();
+        _interp.features().warnings().bump_version();
         Ok(Value::none())
     }
 
@@ -1763,7 +1776,7 @@ pyrust_module! {
             b.attrs.insert("_saved_showwarning", saved_showwarning);
         }
         set_active_filters_value(_interp, filters_copy);
-        _interp.warnings_state.bump_version();
+        _interp.features().warnings().bump_version();
 
         // If `action=...` was supplied to catch_warnings(), apply simplefilter now.
         let filter_spec = inst.borrow().attrs.get("_filter").cloned();
@@ -1796,7 +1809,8 @@ pyrust_module! {
             );
             let list_val = Value::list(Vec::new());
             _interp
-                .warnings_state
+                .features()
+                .warnings()
                 .record_sinks
                 .borrow_mut()
                 .push(RecordSink {
@@ -1840,7 +1854,7 @@ pyrust_module! {
             Some(ValueKind::Bool(true))
         );
         if record && sink_active {
-            _interp.warnings_state.record_sinks.borrow_mut().pop();
+            _interp.features().warnings().record_sinks.borrow_mut().pop();
             inst.borrow_mut()
                 .attrs
                 .insert("_sink_active", Value::bool_(false));
@@ -1858,7 +1872,7 @@ pyrust_module! {
         if let Some(saved_showwarning) = saved_showwarning {
             set_module_attr(_interp, "showwarning", saved_showwarning);
         }
-        _interp.warnings_state.bump_version();
+        _interp.features().warnings().bump_version();
         Ok(Value::none())
     }
 }

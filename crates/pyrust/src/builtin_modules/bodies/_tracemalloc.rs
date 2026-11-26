@@ -1,7 +1,7 @@
 // `_tracemalloc` module — 100% native Rust implementation of Python 3.12's
 // internal `_tracemalloc` C accelerator module (issue #3246).
 //
-// Backed by per-interpreter `InterpreterColdState::tracemalloc_state` and the
+// Backed by per-interpreter `SharedFeatureStates::tracemalloc` and the
 // cold `VM_HOOK_TRACEMALLOC` bit in `vm_hooks_flags` (zero hot-path overhead
 // when tracing is stopped).
 //
@@ -28,7 +28,7 @@ pub(crate) fn start_tracing(interp: &mut Interpreter, nframe: i64) -> Result<()>
         ));
     }
     {
-        let mut st = interp.cold.tracemalloc_state.borrow_mut();
+        let mut st = interp.features().tracemalloc_mut();
         st.tracing = true;
         st.traceback_limit = nframe as usize;
         st.tracked_objects.clear();
@@ -42,7 +42,7 @@ pub(crate) fn start_tracing(interp: &mut Interpreter, nframe: i64) -> Result<()>
 
 pub(crate) fn stop_tracing(interp: &mut Interpreter) {
     {
-        let mut st = interp.cold.tracemalloc_state.borrow_mut();
+        let mut st = interp.features().tracemalloc_mut();
         st.tracing = false;
         st.tracked_objects.clear();
         st.ignored_objects.clear();
@@ -53,7 +53,7 @@ pub(crate) fn stop_tracing(interp: &mut Interpreter) {
 }
 
 pub(crate) fn clear_all_traces(interp: &mut Interpreter) {
-    let mut st = interp.cold.tracemalloc_state.borrow_mut();
+    let mut st = interp.features().tracemalloc_mut();
     let old_keys: Vec<i64> = st.tracked_objects.keys().copied().collect();
     st.ignored_objects.extend(old_keys);
     st.tracked_objects.clear();
@@ -62,7 +62,9 @@ pub(crate) fn clear_all_traces(interp: &mut Interpreter) {
 }
 
 pub(crate) fn raw_traces_list(interp: &Interpreter) -> Vec<Value> {
-    let st = interp.cold.tracemalloc_state.borrow();
+    let Some(st) = interp.features().tracemalloc_peek() else {
+        return Vec::new();
+    };
     if !st.tracing {
         return Vec::new();
     }
@@ -87,7 +89,9 @@ pub(crate) fn raw_traces_list(interp: &Interpreter) -> Vec<Value> {
 }
 
 pub(crate) fn raw_object_traceback(interp: &Interpreter, obj: &Value) -> Value {
-    let st = interp.cold.tracemalloc_state.borrow();
+    let Some(st) = interp.features().tracemalloc_peek() else {
+        return Value::none();
+    };
     if !st.tracing {
         return Value::none();
     }
@@ -104,7 +108,9 @@ pub(crate) fn raw_object_traceback(interp: &Interpreter, obj: &Value) -> Value {
 }
 
 pub(crate) fn tracemalloc_metadata_bytes(interp: &Interpreter) -> i64 {
-    let st = interp.cold.tracemalloc_state.borrow();
+    let Some(st) = interp.features().tracemalloc_peek() else {
+        return 0;
+    };
     if !st.tracing {
         return 0;
     }
@@ -135,7 +141,7 @@ pyrust_module! {
     }
 
     fn is_tracing() -> Result<Value> {
-        Ok(Value::bool_(_interp.cold.tracemalloc_state.borrow().tracing))
+        Ok(Value::bool_(_interp.features().tracemalloc_tracing()))
     }
 
     fn clear_traces() -> Result<Value> {
@@ -144,7 +150,7 @@ pyrust_module! {
     }
 
     fn get_traced_memory() -> Result<Value> {
-        let st = _interp.cold.tracemalloc_state.borrow();
+        let st = _interp.features().tracemalloc();
         if !st.tracing {
             return Ok(Value::tuple(vec![Value::int(0), Value::int(0)]));
         }
@@ -155,7 +161,7 @@ pyrust_module! {
     }
 
     fn reset_peak() -> Result<Value> {
-        let mut st = _interp.cold.tracemalloc_state.borrow_mut();
+        let mut st = _interp.features().tracemalloc_mut();
         if st.tracing {
             st.peak_memory = st.current_memory;
         }
@@ -164,7 +170,7 @@ pyrust_module! {
 
     fn get_traceback_limit() -> Result<Value> {
         Ok(Value::int(
-            _interp.cold.tracemalloc_state.borrow().traceback_limit as i64,
+            _interp.features().tracemalloc().traceback_limit as i64,
         ))
     }
 
