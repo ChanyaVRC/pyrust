@@ -397,3 +397,15 @@ fn posix_builtin_module_dict_order_is_identical_across_processes() {
 fn star_import_binding_order_is_identical_across_processes() {
     assert_stable_across_runs("star_import_order", STAR_IMPORT_PROBE);
 }
+
+#[cfg(windows)]
+const WINDOWS_PROBE: &str = r#"
+for name in ["msvcrt", "nt", "winreg", "winsound"]:
+    print(name, list(vars(__import__(name))))
+"#;
+
+#[cfg(windows)]
+#[test]
+fn windows_builtin_module_dict_order_is_identical_across_processes() {
+    assert_stable_across_runs("windows_module_dict_order", WINDOWS_PROBE);
+}

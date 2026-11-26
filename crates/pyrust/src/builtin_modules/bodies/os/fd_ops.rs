@@ -64,7 +64,7 @@ pub(super) const SEEK_END: i64 = 2;
 static FD_TABLE: LazyLock<Mutex<HashMap<i64, std::fs::File>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-pub(super) fn ebadf_error() -> std::io::Error {
+pub(crate) fn ebadf_error() -> std::io::Error {
     #[cfg(unix)]
     {
         std::io::Error::from_raw_os_error(libc::EBADF)
@@ -245,12 +245,30 @@ pub(crate) fn stat_path_result(path: &Path) -> Result<Value> {
 }
 
 #[cfg(windows)]
+pub(crate) fn lookup_win_handle(fd: i64) -> Option<isize> {
+    use std::os::windows::io::AsRawHandle;
+    if fd < 0 {
+        return None;
+    }
+    {
+        let table = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(file) = table.get(&fd) {
+            return Some(file.as_raw_handle() as isize);
+        }
+    }
+    lookup_borrowed_win_handle(fd)
+}
+
+#[cfg(windows)]
 fn lookup_borrowed_win_handle(fd: i64) -> Option<isize> {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::{
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
     if let Some(h) = pyrust_builtins::file::lookup_open_file_raw_handle(fd) {
+        return Some(h);
+    }
+    if let Some(h) = crate::builtin_modules::tempfile::lookup_temp_fd_raw_handle(fd) {
         return Some(h);
     }
     let std_id = match fd {

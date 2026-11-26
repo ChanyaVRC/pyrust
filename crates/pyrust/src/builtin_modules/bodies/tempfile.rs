@@ -79,6 +79,13 @@ fn unregister_temp_fd_handle(fd: i64) {
         .remove(&fd);
 }
 
+/// Look up the borrowed raw Windows `HANDLE` for a `tempfile` native stream fd.
+#[cfg(windows)]
+pub(crate) fn lookup_temp_fd_raw_handle(fd: i64) -> Option<isize> {
+    let table = TEMP_FD_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+    table.get(&fd).map(|&raw| raw as isize)
+}
+
 /// Duplicate an open `std::fs::File` belonging to a `tempfile` native stream.
 pub(crate) fn try_clone_temp_fd(fd: i64) -> Option<std::io::Result<std::fs::File>> {
     let table = TEMP_FD_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
