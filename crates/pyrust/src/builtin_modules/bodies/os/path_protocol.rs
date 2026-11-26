@@ -138,9 +138,7 @@ pub(super) fn post_load_os_module(
 ) -> Result<()> {
     // 1a. Bind `os.path` via `load_module` so `os.path` constructs at most once.
     let os_path = interp.load_module("os.path")?;
-    mod_rc
-        .borrow_mut()
-        .insert_attr("path".to_string(), os_path);
+    mod_rc.borrow_mut().insert_attr("path".to_string(), os_path);
 
     // 1b. On Unix, mirror POSIX-only exports and install `os.environb`.
     #[cfg(unix)]

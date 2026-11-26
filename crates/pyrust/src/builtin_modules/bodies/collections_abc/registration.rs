@@ -237,7 +237,10 @@ pub(crate) fn ensure_mixins_initialized(interp: &mut Interpreter) -> Result<()> 
     }
 
     let ns = Value::dict(crate::value::PyDict::default());
-    ns.dict_insert(PyKey::str_from("__name__"), Value::string("collections.abc"))?;
+    ns.dict_insert(
+        PyKey::str_from("__name__"),
+        Value::string("collections.abc"),
+    )?;
     interp.exec_source(COLLECTIONS_ABC_PY_SOURCE, Some(ns.clone()), None)?;
 
     {
