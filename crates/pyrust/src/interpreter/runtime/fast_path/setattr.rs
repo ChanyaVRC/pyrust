@@ -32,30 +32,41 @@ impl Interpreter {
         let mut handled = false;
         {
             let cache = code.attr_cache.borrow();
-            if let Some(AttrCacheEntry::SetInstanceAttr {
-                class_ptr,
-                class_version,
-                epoch,
-            }) = cache.get(site_pc)
-                && let Some(inst_rc) = obj_val.as_py_instance_rc()
-            {
-                let (same_class, current_class_version) = {
-                    let inst = inst_rc.borrow();
-                    (
-                        Rc::as_ptr(&inst.class) == class_ptr.as_ptr(),
-                        inst.class.borrow().mutation_version.get(),
-                    )
-                };
-                if same_class
-                    && pyrust_core::class_cache_stamp_matches(
-                        current_class_version,
-                        *class_version,
-                        *epoch,
-                    )
-                {
-                    inst_rc.borrow_mut().attrs.insert(name, val_val.clone());
-                    handled = true;
+            match cache.get(site_pc) {
+                Some(AttrCacheEntry::SetInstanceAttr {
+                    class_ptr,
+                    class_version,
+                    epoch,
+                }) => {
+                    if let Some(inst_rc) = obj_val.as_py_instance_rc()
+                        && set_cache_guards_hold(inst_rc, class_ptr, *class_version, *epoch)
+                    {
+                        inst_rc.borrow_mut().attrs.insert(name, val_val.clone());
+                        handled = true;
+                    }
                 }
+                // `__slots__` member write (#3378): the cached fact is that
+                // `name` resolves to this class's `member_descriptor`, so a
+                // hit is exactly `member_descriptor.__set__`.  The displaced
+                // value is dropped after the instance borrow is released.
+                Some(AttrCacheEntry::SetSlotAttr(entry)) => {
+                    if let Some(inst_rc) = obj_val.as_py_instance_rc()
+                        && set_cache_guards_hold(
+                            inst_rc,
+                            &entry.class_ptr,
+                            entry.class_version,
+                            entry.epoch,
+                        )
+                    {
+                        let old = inst_rc
+                            .borrow_mut()
+                            .attrs
+                            .insert_member_slot(entry.slot_id, val_val.clone());
+                        drop(old);
+                        handled = true;
+                    }
+                }
+                _ => {}
             }
         }
         if !handled {
@@ -75,17 +86,45 @@ impl Interpreter {
                         AttrCacheEntry::Empty
                     }
                 }),
+                Some(AttrCacheEntry::SetSlotAttr(entry)) => {
+                    obj_val.as_py_instance_rc().map(|inst_rc| {
+                        let new_ptr = Rc::as_ptr(&inst_rc.borrow().class);
+                        if new_ptr != entry.class_ptr.as_ptr() {
+                            AttrCacheEntry::Megamorphic
+                        } else {
+                            AttrCacheEntry::Empty
+                        }
+                    })
+                }
                 None | Some(AttrCacheEntry::Empty) => {
-                    if let Some(class) = write_attribute_cache_class(&obj_val, name) {
+                    let (class, slot_id) = match write_attribute_cache_plan(&obj_val, name) {
+                        WriteAttributeCachePlan::Uncacheable => (None, None),
+                        WriteAttributeCachePlan::Instance(class) => (Some(class), None),
+                        WriteAttributeCachePlan::Slot(class, slot_id) => {
+                            (Some(class), Some(slot_id))
+                        }
+                    };
+                    if let Some(class) = class {
                         let Some((class_version, epoch)) =
                             pyrust_core::class_cache_stamp(class.borrow().mutation_version.get())
                         else {
                             return Ok(());
                         };
-                        Some(AttrCacheEntry::SetInstanceAttr {
-                            class_ptr: Rc::downgrade(&class),
-                            class_version,
-                            epoch,
+                        let class_ptr = Rc::downgrade(&class);
+                        Some(match slot_id {
+                            Some(slot_id) => AttrCacheEntry::SetSlotAttr(Box::new(
+                                crate::bytecode::SlotAttrCacheEntry {
+                                    class_ptr,
+                                    class_version,
+                                    epoch,
+                                    slot_id,
+                                },
+                            )),
+                            None => AttrCacheEntry::SetInstanceAttr {
+                                class_ptr,
+                                class_version,
+                                epoch,
+                            },
                         })
                     } else {
                         None
@@ -107,4 +146,22 @@ impl Interpreter {
         }
         Ok(())
     }
+}
+
+/// Shared hit guard for the `SetAttr` write caches: same class allocation, and
+/// the class mutation version / global epoch stamp still match.
+#[inline(always)]
+fn set_cache_guards_hold(
+    inst_rc: &Rc<std::cell::RefCell<pyrust_core::PyInstance>>,
+    class_ptr: &std::rc::Weak<std::cell::RefCell<pyrust_core::PyClass>>,
+    class_version: u64,
+    epoch: u64,
+) -> bool {
+    let inst = inst_rc.borrow();
+    Rc::as_ptr(&inst.class) == class_ptr.as_ptr()
+        && pyrust_core::class_cache_stamp_matches(
+            inst.class.borrow().mutation_version.get(),
+            class_version,
+            epoch,
+        )
 }

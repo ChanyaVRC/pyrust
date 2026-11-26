@@ -145,6 +145,15 @@ pub enum AttrCacheEntry {
         class_version: u64,
         epoch: u64,
     },
+    /// Monomorphic `__slots__` slot write cache (issue #3378).  Filled when a
+    /// `SetAttr` site resolves to the class's own `member_descriptor` with the
+    /// default `object.__setattr__` and no shadowing metaclass/data-descriptor
+    /// complication.  A hit (same class pointer + version + epoch) stores
+    /// straight into the member cell selected by the immutable `MemberSlotId`,
+    /// exactly what `member_descriptor.__set__` does, skipping the
+    /// `__setattr__` / MRO lookups and descriptor dispatch.  Reuses the boxed
+    /// [`SlotAttrCacheEntry`] payload so the enum does not grow.
+    SetSlotAttr(Box<SlotAttrCacheEntry>),
     /// More than one class seen at this site — disable caching.
     Megamorphic,
 }
@@ -220,6 +229,15 @@ impl std::fmt::Debug for AttrCacheEntry {
                     f,
                     "SetInstanceAttr({:?}, v{class_version}, e{epoch})",
                     class_ptr.as_ptr()
+                )
+            }
+            AttrCacheEntry::SetSlotAttr(entry) => {
+                write!(
+                    f,
+                    "SetSlotAttr({:?}, v{}, e{})",
+                    entry.class_ptr.as_ptr(),
+                    entry.class_version,
+                    entry.epoch
                 )
             }
             AttrCacheEntry::Megamorphic => write!(f, "Megamorphic"),

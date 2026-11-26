@@ -80,7 +80,7 @@ fn fill_get_attr_cache(code: &crate::bytecode::FnCode, pc: usize, name: &str, ob
                 return;
             }
         }
-        Some(AttrCacheEntry::SetInstanceAttr { .. }) => {
+        Some(AttrCacheEntry::SetInstanceAttr { .. } | AttrCacheEntry::SetSlotAttr(_)) => {
             // A SetAttr-only entry should never appear at a GetAttr site; if it
             // somehow does, drop it.
             AttrCacheEntry::Empty
