@@ -17,7 +17,7 @@ pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, 
         "contextlib" => prepare_contextlib_module(module),
         "functools" => prepare_functools_module(module),
         "itertools" => prepare_itertools_module(module),
-        "io" => prepare_io_module(module),
+        "io" => io::prepare_module(interpreter, module),
         "os" => os::prepare_module(interpreter, module),
         #[cfg(unix)]
         "posix" => posix::prepare_module(interpreter, module),
@@ -180,33 +180,6 @@ fn prepare_itertools_module(module: &Value) {
             .borrow_mut()
             .attrs
             .insert("from_iterable".to_string(), descriptor);
-    }
-}
-
-fn prepare_io_module(module: &Value) {
-    let ValueKind::PyModule(module) = module.kind() else {
-        return;
-    };
-    if let Some(exception) = crate::interpreter::lookup_exc_class("io.UnsupportedOperation") {
-        module.borrow_mut().insert_attr(
-            "UnsupportedOperation".to_string(),
-            Value::py_class(exception),
-        );
-    }
-    for class_name in ["StringIO", "BytesIO"] {
-        let class = module.borrow().attrs.get(class_name).cloned();
-        let Some(ValueKind::PyClass(class)) = class.as_ref().map(Value::kind) else {
-            continue;
-        };
-        let getter = class.borrow().attrs.get("closed").cloned();
-        if let Some(getter) = getter {
-            let property =
-                pyrust_builtins::property::property(getter, Value::none(), Value::none());
-            class
-                .borrow_mut()
-                .attrs
-                .insert("closed".to_string(), property);
-        }
     }
 }
 
