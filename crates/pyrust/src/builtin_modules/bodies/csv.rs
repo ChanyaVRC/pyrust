@@ -1,75 +1,1313 @@
-// `csv` module — body for the `csv` entry in `pyrust_builtin_modules!`
-// (issue #2808).
+// `csv` module — 100% native Rust implementation of CPython 3.12.3's
+// `Lib/csv.py` plus the `_csv` accelerator it wraps (issues #2808, #3340,
+// #3400).
 //
-// CPython's `csv` package centres on a character-level reader/writer state
-// machine and a couple of dialect/dict-helper classes.  None of that needs
-// interpreter internals, so pyrust ships it as a pure-Python module
-// (`csv_py.py`, targeting CPython 3.12 behaviour) which keeps the parsing
-// rules, quoting modes, and the `\r\n` line terminator in lock-step with the
-// reference.
+// `_csv` (here) provides the dialect type, the reader/writer objects and the
+// dialect registry: `reader/` holds the `parse_process_char` state machine
+// (multi-line quoted fields, escapes, `strict`, the field size limit),
+// `writer/` the `join_append` quoting rules, `dialect/` the `dialect_new`
+// validation, and `args/` the C-level argument diagnostics.  The `csv.py`
+// layer — the `Dialect` / `excel` / `excel_tab` / `unix_dialect` classes,
+// `DictReader`, `DictWriter` and `Sniffer` — lives in `dicts/`, `sniffer/` and
+// the class blocks below; like CPython's pure-Python classes they keep their
+// state in the instance `__dict__` and dispatch through `self` so subclasses
+// may override any method.
 //
-// The native `pyrust_module!` block is intentionally empty — it exists only so
-// the `pyrust_builtin_modules!` plumbing (`module()` / `regs()`) is generated
-// and `import csv` resolves to a real `PyModule`.  The public names are copied
-// onto the module by `inject_python_members`, wired from `env.rs::load_module`'s
-// post-import hook (mirrors `operator` / `string` / `json`).
+// `post_load_init` registers the three built-in dialects, reproduces
+// CPython's namespace order (including the `re` / `types` / `StringIO` /
+// `_Dialect` imports) and moves the `_csv.reader` / `_csv.writer` types out of
+// the module into per-GIL-group storage; the `_csv` shim (`internal_shims.rs`)
+// re-exports the `_csv` surface from there.
 //
 // Reference: <https://docs.python.org/3/library/csv.html>
 
-use std::cell::RefCell;
+use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
+use std::ffi::c_long;
 use std::rc::Rc;
 
-use crate::error::{PyError, Result};
-use crate::interpreter::Interpreter;
-use crate::value::{PyKey, Value};
 use pyrust_derive::pyrust_module;
 
-/// Python-source definitions for every public `csv` member.  Exec'd once at
-/// first import (see `inject_python_members`).
-const CSV_PY_SOURCE: &str = include_str!("csv_py.py");
+use crate::builtin_modules::macros::native_state::{
+    has_native_state, set_native_state, with_native_state, with_native_state_mut,
+};
+use crate::error::{PyError, Result};
+use crate::interpreter::builtin_args::{PyValue, PyValueRef};
+use crate::interpreter::{
+    ExpandedCallArg, Interpreter, builtin_data_backing, instantiate_exception, make_iterator,
+    value_type_name_str,
+};
+use crate::value::{InstanceAttrs, PyClass, PyDict, PyInstance, PyModule, Value, ValueKind};
 
-/// Public names from `CSV_PY_SOURCE` exported onto the `csv` module.
-const CSV_PY_EXPORTS: [&str; 17] = [
+#[path = "csv/args.rs"]
+mod args;
+#[path = "csv/dialect.rs"]
+mod dialect;
+#[path = "csv/dicts.rs"]
+mod dicts;
+#[path = "csv/reader.rs"]
+mod reader;
+#[path = "csv/sniffer.rs"]
+mod sniffer;
+#[path = "csv/writer.rs"]
+mod writer;
+
+use dialect::{DialectCfg, DialectState};
+use reader::ReaderState;
+use writer::WriterState;
+
+type ClassRc = Rc<RefCell<PyClass>>;
+
+/// `_csv.__doc__` (also `csv.__doc__`, which `csv.py` imports from `_csv`).
+const MODULE_DOC: &str = "CSV parsing and writing.\n\
+\n\
+This module provides classes that assist in the reading and writing\n\
+of Comma Separated Value (CSV) files, and implements the interface\n\
+described by PEP 305.  Although many CSV files are simple to parse,\n\
+the format is not formally defined by a stable specification and\n\
+is subtle enough that parsing lines of a CSV file with something\n\
+like line.split(\",\") is bound to fail.  The module supports three\n\
+basic APIs: reading, writing, and registration of dialects.\n\
+\n\
+\n\
+DIALECT REGISTRATION:\n\
+\n\
+Readers and writers support a dialect argument, which is a convenient\n\
+handle on a group of settings.  When the dialect argument is a string,\n\
+it identifies one of the dialects previously registered with the module.\n\
+If it is a class or instance, the attributes of the argument are used as\n\
+the settings for the reader or writer:\n\
+\n    class excel:\n\
+        delimiter = ','\n\
+        quotechar = '\"'\n\
+        escapechar = None\n\
+        doublequote = True\n\
+        skipinitialspace = False\n\
+        lineterminator = '\\r\\n'\n\
+        quoting = QUOTE_MINIMAL\n\
+\n\
+SETTINGS:\n\
+\n    * quotechar - specifies a one-character string to use as the\n\
+        quoting character.  It defaults to '\"'.\n\
+    * delimiter - specifies a one-character string to use as the\n\
+        field separator.  It defaults to ','.\n\
+    * skipinitialspace - specifies how to interpret spaces which\n\
+        immediately follow a delimiter.  It defaults to False, which\n\
+        means that spaces immediately following a delimiter is part\n\
+        of the following field.\n\
+    * lineterminator -  specifies the character sequence which should\n\
+        terminate rows.\n\
+    * quoting - controls when quotes should be generated by the writer.\n\
+        It can take on any of the following module constants:\n\
+\n        csv.QUOTE_MINIMAL means only when required, for example, when a\n\
+            field contains either the quotechar or the delimiter\n\
+        csv.QUOTE_ALL means that quotes are always placed around fields.\n\
+        csv.QUOTE_NONNUMERIC means that quotes are always placed around\n\
+            fields which do not parse as integers or floating point\n\
+            numbers.\n\
+        csv.QUOTE_STRINGS means that quotes are always placed around\n\
+            fields which are strings.  Note that the Python value None\n\
+            is not a string.\n\
+        csv.QUOTE_NOTNULL means that quotes are only placed around fields\n\
+            that are not the Python value None.\n\
+        csv.QUOTE_NONE means that quotes are never placed around fields.\n\
+    * escapechar - specifies a one-character string used to escape\n\
+        the delimiter when quoting is set to QUOTE_NONE.\n\
+    * doublequote - controls the handling of quotes inside fields.  When\n\
+        True, two consecutive quotes are interpreted as one during read,\n\
+        and when writing, each quote character embedded in the data is\n\
+        written as two quotes\n";
+
+const DIALECT_TYPE_DOC: &str =
+    "CSV dialect\n\nThe Dialect type records CSV parsing and generation options.\n";
+const READER_TYPE_DOC: &str = "CSV reader\n\nReader objects are responsible for reading and parsing tabular data\nin CSV format.\n";
+const WRITER_TYPE_DOC: &str = "CSV writer\n\nWriter objects are responsible for generating tabular data\nin CSV format from sequence input.\n";
+const DIALECT_DOC: &str = "Describe a CSV dialect.\n\n    This must be subclassed (see csv.excel).  Valid attributes are:\n    delimiter, quotechar, escapechar, doublequote, skipinitialspace,\n    lineterminator, quoting.\n\n    ";
+const EXCEL_DOC: &str = "Describe the usual properties of Excel-generated CSV files.";
+const EXCEL_TAB_DOC: &str = "Describe the usual properties of Excel-generated TAB-delimited files.";
+const UNIX_DOC: &str = "Describe the usual properties of Unix-generated CSV files.";
+const SNIFFER_DOC: &str = "\n    \"Sniffs\" the format of a CSV file (i.e. delimiter, quotechar)\n    Returns a Dialect object.\n    ";
+
+/// `csv.__all__`.
+const ALL: [&str; 23] = [
     "QUOTE_MINIMAL",
     "QUOTE_ALL",
     "QUOTE_NONNUMERIC",
     "QUOTE_NONE",
+    "QUOTE_STRINGS",
+    "QUOTE_NOTNULL",
     "Error",
     "Dialect",
+    "__doc__",
     "excel",
     "excel_tab",
-    "unix_dialect",
+    "field_size_limit",
     "reader",
     "writer",
+    "register_dialect",
+    "get_dialect",
+    "list_dialects",
+    "Sniffer",
+    "unregister_dialect",
+    "__version__",
     "DictReader",
     "DictWriter",
+    "unix_dialect",
+];
+
+/// `vars(csv)` order after the module dunders (CPython 3.12.3 `csv.py`).
+const NAMESPACE_ORDER: [&str; 27] = [
+    "re",
+    "types",
+    "Error",
+    "__version__",
+    "writer",
+    "reader",
     "register_dialect",
     "unregister_dialect",
     "get_dialect",
     "list_dialects",
+    "field_size_limit",
+    "QUOTE_MINIMAL",
+    "QUOTE_ALL",
+    "QUOTE_NONNUMERIC",
+    "QUOTE_NONE",
+    "QUOTE_STRINGS",
+    "QUOTE_NOTNULL",
+    "_Dialect",
+    "StringIO",
+    "__all__",
+    "Dialect",
+    "excel",
+    "excel_tab",
+    "unix_dialect",
+    "DictReader",
+    "DictWriter",
+    "Sniffer",
 ];
 
-/// Execute `CSV_PY_SOURCE` once and copy its public names onto the `csv`
-/// module's attribute map.  Called from the `csv` post-load hook in
-/// `env.rs::load_module`.
-pub(crate) fn inject_python_members(
-    interp: &mut Interpreter,
-    module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<Option<Value>> {
-    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
-    interp.exec_source(CSV_PY_SOURCE, Some(ns.clone()), None)?;
-    let dict = ns
-        .as_dict()
-        .ok_or_else(|| PyError::runtime("csv: exec namespace not a dict".into()))?;
-    for name in CSV_PY_EXPORTS {
-        if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            module
-                .borrow_mut()
-                .attrs
-                .insert(name.to_string(), val.clone());
-        }
-    }
-    Ok(Some(ns.clone()))
+/// `vars(_csv)` order after the module dunders; `None` entries are filled
+/// from [`CsvState`] rather than copied from `csv`.
+const SHIM_ORDER: [(&str, Option<&str>); 17] = [
+    ("reader", Some("reader")),
+    ("writer", Some("writer")),
+    ("register_dialect", Some("register_dialect")),
+    ("list_dialects", Some("list_dialects")),
+    ("unregister_dialect", Some("unregister_dialect")),
+    ("get_dialect", Some("get_dialect")),
+    ("field_size_limit", Some("field_size_limit")),
+    ("Dialect", Some("_Dialect")),
+    ("Reader", None),
+    ("Writer", None),
+    ("__version__", Some("__version__")),
+    ("_dialects", None),
+    ("QUOTE_MINIMAL", Some("QUOTE_MINIMAL")),
+    ("QUOTE_ALL", Some("QUOTE_ALL")),
+    ("QUOTE_NONNUMERIC", Some("QUOTE_NONNUMERIC")),
+    ("QUOTE_NONE", Some("QUOTE_NONE")),
+    ("QUOTE_STRINGS", Some("QUOTE_STRINGS")),
+];
+
+/// `_csvstate`: the objects every `_csv` entry point needs.
+#[derive(Clone)]
+struct CsvState {
+    error: ClassRc,
+    dialect_type: ClassRc,
+    reader_type: ClassRc,
+    writer_type: ClassRc,
+    /// The `csv.Dialect` class (`csv.py` level), for `Dialect.__init__`.
+    py_dialect: ClassRc,
+    /// The registry dict (`_csv._dialects`).
+    dialects: Value,
 }
 
-pyrust_module! {}
+// (a) Why `thread_local!`-style storage: `PyClass` / `Value` are `!Send +
+//     !Sync`, and `_csv`'s module state (error class, object types, dialect
+//     registry, field size limit) must be reachable from the reader/writer
+//     objects without a module reference, exactly like CPython's per-module
+//     `_csvstate`.
+// (b) Multi-interpreter / multi-threaded impact: interpreters on one GIL
+//     group share the most recently imported generation; live readers,
+//     writers and dialects keep the objects they were created with.
+pyrust_core::gil_local! {
+    static CSV_STATE: RefCell<Option<CsvState>> = const { RefCell::new(None) };
+    /// `field_size_limit` (a C `long`; 128 KiB by default).
+    static FIELD_LIMIT: Cell<c_long> = const { Cell::new(128 * 1024) };
+}
+
+fn state() -> Result<CsvState> {
+    CSV_STATE
+        .with(|slot| slot.borrow().clone())
+        .ok_or_else(|| PyError::runtime("csv is not initialised".to_string()))
+}
+
+fn field_limit() -> i64 {
+    FIELD_LIMIT.with(|limit| i64::from(limit.get()))
+}
+
+// ── Generic helpers ──────────────────────────────────────────────────────────
+
+/// The text of an exact `str` or a `str` subclass instance (`PyUnicode_Check`).
+fn str_text(value: &Value) -> Option<Cow<'_, str>> {
+    if let Some(text) = value.as_str() {
+        return Some(Cow::Borrowed(text));
+    }
+    let backing = builtin_data_backing(value)?;
+    backing.as_str().map(|text| Cow::Owned(text.to_owned()))
+}
+
+/// CPython's `Py_TYPE(obj)->tp_name` as used in `_csv` messages.
+fn type_name(value: &Value) -> String {
+    value_type_name_str(value).into_owned()
+}
+
+/// Raise `_csv.Error(msg)`.
+fn csv_error(msg: impl Into<String>) -> PyError {
+    let msg = msg.into();
+    match state() {
+        Ok(state) => PyError::raised(instantiate_exception(
+            Rc::clone(&state.error),
+            vec![Value::string(msg)],
+        )),
+        Err(err) => err,
+    }
+}
+
+/// Raw call arguments from positional values and `(name, value)` pairs.
+fn expand_args(positional: &[Value], keywords: &[(String, Value)]) -> Vec<ExpandedCallArg> {
+    let mut expanded: Vec<ExpandedCallArg> = positional
+        .iter()
+        .cloned()
+        .map(|value| ExpandedCallArg { name: None, value })
+        .collect();
+    expanded.extend(keywords.iter().map(|(name, value)| ExpandedCallArg {
+        name: Some(name.clone()),
+        value: value.clone(),
+    }));
+    expanded
+}
+
+fn call_kw(
+    interp: &mut Interpreter,
+    callee: Value,
+    positional: &[Value],
+    keywords: &[(String, Value)],
+) -> Result<Value> {
+    interp.call_function_expanded(callee, &expand_args(positional, keywords))
+}
+
+fn call_value(interp: &mut Interpreter, callee: Value, positional: &[Value]) -> Result<Value> {
+    call_kw(interp, callee, positional, &[])
+}
+
+fn call_method(
+    interp: &mut Interpreter,
+    target: &Value,
+    name: &str,
+    positional: &[Value],
+) -> Result<Value> {
+    let callee = interp.get_attr(target, name)?;
+    call_value(interp, callee, positional)
+}
+
+fn builtin(interp: &mut Interpreter, name: &str) -> Result<Value> {
+    let builtins = interp.load_module("builtins")?;
+    interp.get_attr(&builtins, name)
+}
+
+fn call_builtin(interp: &mut Interpreter, name: &str, positional: &[Value]) -> Result<Value> {
+    let callee = builtin(interp, name)?;
+    call_value(interp, callee, positional)
+}
+
+/// A bare instance of `cls` (no `__init__`); the caller attaches the state.
+fn new_instance(cls: &Value) -> Result<Value> {
+    let ValueKind::PyClass(class) = cls.kind() else {
+        return Err(args::type_error(format!(
+            "object.__new__(X): X is not a type object ({})",
+            type_name(cls)
+        )));
+    };
+    Ok(instance_of(class))
+}
+
+fn instance_of(class: &ClassRc) -> Value {
+    Value::py_instance(Rc::new(RefCell::new(PyInstance {
+        class: Rc::clone(class),
+        attrs: InstanceAttrs::new(),
+    })))
+}
+
+fn is_native_dialect(value: &Value) -> bool {
+    has_native_state::<DialectState>(value)
+}
+
+fn dialect_cfg(dialect: &Value) -> Result<Rc<DialectCfg>> {
+    with_native_state::<DialectState, _>(dialect, "_csv.Dialect", |st| Ok(Rc::clone(&st.cfg)))
+}
+
+fn with_reader_state<R>(this: &Value, f: impl FnOnce(&ReaderState) -> Result<R>) -> Result<R> {
+    with_native_state::<ReaderState, _>(this, "_csv.reader", f)
+}
+
+fn with_reader_state_mut<R>(
+    this: &Value,
+    f: impl FnOnce(&mut ReaderState) -> Result<R>,
+) -> Result<R> {
+    with_native_state_mut::<ReaderState, _>(this, "_csv.reader", f)
+}
+
+fn with_writer_state<R>(this: &Value, f: impl FnOnce(&WriterState) -> Result<R>) -> Result<R> {
+    with_native_state::<WriterState, _>(this, "_csv.writer", f)
+}
+
+/// `_call_dialect`: `_csv.Dialect(dialect_inst, **kwargs)`.
+fn call_dialect(
+    interp: &mut Interpreter,
+    dialect_inst: Option<&Value>,
+    keywords: &[(String, Value)],
+) -> Result<Value> {
+    let dialect_type = Value::py_class(state()?.dialect_type);
+    let positional: Vec<Value> = dialect_inst.cloned().into_iter().collect();
+    dialect::dialect_new(interp, &dialect_type, &positional, keywords)
+}
+
+/// `get_dialect_from_registry`.
+fn registry_get(interp: &mut Interpreter, name: &Value) -> Result<Value> {
+    let dialects = state()?.dialects;
+    match interp.dict_lookup_value(&dialects, name)? {
+        Some((_, dialect)) => Ok(dialect),
+        None => Err(csv_error("unknown dialect")),
+    }
+}
+
+fn readonly_attribute() -> PyError {
+    PyError::named("AttributeError", "readonly attribute".to_string())
+}
+
+fn not_writable(attr: &str) -> PyError {
+    PyError::named(
+        "AttributeError",
+        format!("attribute '{attr}' of '_csv.Dialect' objects is not writable"),
+    )
+}
+
+fn cannot_create(cls: &Value, own: &ClassRc, tp_name: &str) -> PyError {
+    let name = match cls.kind() {
+        ValueKind::PyClass(class) if !Rc::ptr_eq(class, own) => class.borrow().name.clone(),
+        _ => tp_name.to_string(),
+    };
+    args::type_error(format!("cannot create '{name}' instances"))
+}
+
+// ── `_csv` entry points ──────────────────────────────────────────────────────
+
+/// `csv_reader(module, args, kwargs)`.
+fn make_reader(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let (positional, keywords) = args::split(call_args);
+    args::unpack_tuple_anon(&positional, 1, 2)?;
+    let input_iter = make_iterator(interp, &positional[0])?;
+    let dialect = call_dialect(interp, positional.get(1), &keywords)?;
+    let cfg = dialect_cfg(&dialect)?;
+    let inst = instance_of(&state()?.reader_type);
+    set_native_state(
+        &inst,
+        ReaderState {
+            input_iter,
+            dialect,
+            cfg,
+            line_num: 0,
+        },
+    )?;
+    Ok(inst)
+}
+
+/// `csv_writer(module, args, kwargs)`.
+fn make_writer(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let (positional, keywords) = args::split(call_args);
+    args::unpack_tuple_anon(&positional, 1, 2)?;
+    let write = match interp.get_attr(&positional[0], "write") {
+        Ok(write) => Some(write),
+        Err(err) if err.class_name_is("AttributeError") => None,
+        Err(err) => return Err(err),
+    };
+    let write = match write {
+        Some(write) => {
+            let callable = call_builtin(interp, "callable", std::slice::from_ref(&write))?;
+            interp.truthy_value(&callable)?.then_some(write)
+        }
+        None => None,
+    };
+    let Some(write) = write else {
+        return Err(args::type_error("argument 1 must have a \"write\" method"));
+    };
+    let dialect = call_dialect(interp, positional.get(1), &keywords)?;
+    let cfg = dialect_cfg(&dialect)?;
+    let inst = instance_of(&state()?.writer_type);
+    set_native_state(
+        &inst,
+        WriterState {
+            write,
+            dialect,
+            cfg,
+        },
+    )?;
+    Ok(inst)
+}
+
+fn register_dialect_impl(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let (positional, keywords) = args::split(call_args);
+    args::unpack_tuple_anon(&positional, 1, 2)?;
+    let name = &positional[0];
+    if str_text(name).is_none() {
+        return Err(args::type_error("dialect name must be a string"));
+    }
+    let dialect = call_dialect(interp, positional.get(1), &keywords)?;
+    let dialects = state()?.dialects;
+    interp.dict_set_value(&dialects, name.clone(), dialect)?;
+    Ok(Value::none())
+}
+
+fn unregister_dialect_impl(
+    interp: &mut Interpreter,
+    call_args: &[ExpandedCallArg],
+) -> Result<Value> {
+    let slots = args::unpack_clinic("unregister_dialect", &["name"], 1, call_args)?;
+    let name = slots[0].clone().unwrap_or_else(Value::none);
+    let dialects = state()?.dialects;
+    match call_method(interp, &dialects, "pop", &[name]) {
+        Ok(_) => Ok(Value::none()),
+        Err(err) if err.class_name_is("KeyError") => Err(csv_error("unknown dialect")),
+        Err(err) => Err(err),
+    }
+}
+
+fn get_dialect_impl(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let slots = args::unpack_clinic("get_dialect", &["name"], 1, call_args)?;
+    let name = slots[0].clone().unwrap_or_else(Value::none);
+    registry_get(interp, &name)
+}
+
+fn list_dialects_impl(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    args::no_args("_csv.list_dialects", call_args)?;
+    let dialects = state()?.dialects;
+    Ok(Value::list(interp.collect_iterable(&dialects)?))
+}
+
+fn field_size_limit_impl(call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let slots = args::unpack_clinic("field_size_limit", &["new_limit"], 0, call_args)?;
+    let old_limit = FIELD_LIMIT.with(Cell::get);
+    if let Some(new_limit) = &slots[0] {
+        let value = match new_limit.kind() {
+            ValueKind::Int(v) => c_long::try_from(v).ok(),
+            ValueKind::BigInt(_) => None,
+            _ => return Err(args::type_error("limit must be an integer")),
+        };
+        let Some(value) = value else {
+            return Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C long".to_string(),
+            ));
+        };
+        FIELD_LIMIT.with(|limit| limit.set(value));
+    }
+    Ok(Value::int(i64::from(old_limit)))
+}
+
+/// `csv.Dialect._validate`: `_Dialect(self)`, re-raising `TypeError` as
+/// `Error(str(e))`.
+fn validate_dialect(interp: &mut Interpreter, this: &Value) -> Result<()> {
+    let dialect_type = Value::py_class(state()?.dialect_type);
+    match dialect::dialect_new(interp, &dialect_type, std::slice::from_ref(this), &[]) {
+        Ok(_) => Ok(()),
+        Err(err) if err.class_name_is("TypeError") => {
+            let exc = interp.materialize_pyerror(err)?;
+            let text = interp.render_value_as_str(&exc)?;
+            Err(csv_error(text))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+// ── `csv.py`-level method signatures ─────────────────────────────────────────
+
+const fn sig(
+    qualname: &'static str,
+    params: &'static [&'static str],
+    defaults: usize,
+    var_args: bool,
+) -> args::PySig {
+    args::PySig {
+        qualname,
+        params,
+        defaults,
+        var_args,
+    }
+}
+
+const SIG_DIALECT_INIT: args::PySig = sig("Dialect.__init__", &["self"], 0, false);
+const SIG_DIALECT_VALIDATE: args::PySig = sig("Dialect._validate", &["self"], 0, false);
+const SIG_DICT_READER_INIT: args::PySig = sig(
+    "DictReader.__init__",
+    &["self", "f", "fieldnames", "restkey", "restval", "dialect"],
+    4,
+    true,
+);
+const SIG_DICT_READER_ITER: args::PySig = sig("DictReader.__iter__", &["self"], 0, false);
+const SIG_DICT_READER_NEXT: args::PySig = sig("DictReader.__next__", &["self"], 0, false);
+const SIG_DICT_WRITER_INIT: args::PySig = sig(
+    "DictWriter.__init__",
+    &[
+        "self",
+        "f",
+        "fieldnames",
+        "restval",
+        "extrasaction",
+        "dialect",
+    ],
+    3,
+    true,
+);
+const SIG_DICT_WRITER_WRITEHEADER: args::PySig = sig("DictWriter.writeheader", &["self"], 0, false);
+const SIG_DICT_WRITER_DICT_TO_LIST: args::PySig =
+    sig("DictWriter._dict_to_list", &["self", "rowdict"], 0, false);
+const SIG_DICT_WRITER_WRITEROW: args::PySig =
+    sig("DictWriter.writerow", &["self", "rowdict"], 0, false);
+const SIG_DICT_WRITER_WRITEROWS: args::PySig =
+    sig("DictWriter.writerows", &["self", "rowdicts"], 0, false);
+const SIG_SNIFFER_INIT: args::PySig = sig("Sniffer.__init__", &["self"], 0, false);
+const SIG_SNIFFER_SNIFF: args::PySig =
+    sig("Sniffer.sniff", &["self", "sample", "delimiters"], 1, false);
+const SIG_SNIFFER_GUESS_QUOTE: args::PySig = sig(
+    "Sniffer._guess_quote_and_delimiter",
+    &["self", "data", "delimiters"],
+    0,
+    false,
+);
+const SIG_SNIFFER_GUESS_DELIMITER: args::PySig = sig(
+    "Sniffer._guess_delimiter",
+    &["self", "data", "delimiters"],
+    0,
+    false,
+);
+const SIG_SNIFFER_HAS_HEADER: args::PySig =
+    sig("Sniffer.has_header", &["self", "sample"], 0, false);
+
+/// Bind a signature with no defaults and return its `N` values.
+fn bind_n<const N: usize>(sig: &args::PySig, call_args: &[ExpandedCallArg]) -> Result<[Value; N]> {
+    let mut bound = args::bind(sig, call_args)?;
+    Ok(std::array::from_fn(|i| bound.take(i, Value::none)))
+}
+
+/// Bind a `def method(self)` signature and return `self`.
+fn bind_self(sig: &args::PySig, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let [this] = bind_n(sig, call_args)?;
+    Ok(this)
+}
+
+// ── Import-time finalisation ─────────────────────────────────────────────────
+
+fn module_class(module: &PyModule, name: &str) -> Result<ClassRc> {
+    match module.attrs.get(name).map(Value::kind) {
+        Some(ValueKind::PyClass(class)) => Ok(Rc::clone(class)),
+        _ => Err(PyError::runtime(format!("csv: missing class {name}"))),
+    }
+}
+
+/// Present a natively declared class as the `_csv` C type `tp_name`.
+fn adopt_c_type(class: &ClassRc, name: &str, tp_name: &'static str) {
+    let mut class = class.borrow_mut();
+    class.name = name.to_string();
+    class.qualname = name.to_string();
+    class
+        .attrs
+        .insert("__module__".to_string(), Value::string("_csv"));
+    // C types carry no per-instance `__dict__`.
+    class.slots = Some(indexmap::IndexSet::new());
+    class.error_name = Some(tp_name);
+}
+
+/// Move `order`'s names (when present) to the end of `attrs`, in order.
+fn reorder<S: std::hash::BuildHasher>(
+    attrs: &mut indexmap::IndexMap<String, Value, S>,
+    order: &[&str],
+) {
+    for name in order {
+        if let Some(value) = attrs.shift_remove(*name) {
+            attrs.insert((*name).to_string(), value);
+        }
+    }
+}
+
+fn reorder_class(class: &ClassRc, order: &[&str]) {
+    let mut class = class.borrow_mut();
+    reorder(&mut class.attrs, order);
+    class.bump_mutation_version();
+}
+
+/// Post-import hook: register the built-in dialects and finish the
+/// namespace the way CPython's `csv.py` leaves it.
+pub(crate) fn post_load_init(
+    interp: &mut Interpreter,
+    module: &Rc<RefCell<PyModule>>,
+) -> Result<()> {
+    let (dialect_type, reader_type, writer_type, error, py_dialect, dict_reader, dict_writer) = {
+        let mut m = module.borrow_mut();
+        let dialect_type = module_class(&m, "_Dialect")?;
+        let reader_type = module_class(&m, "Reader")?;
+        let writer_type = module_class(&m, "Writer")?;
+        m.attrs.shift_remove("Reader");
+        m.attrs.shift_remove("Writer");
+        (
+            dialect_type,
+            reader_type,
+            writer_type,
+            module_class(&m, "Error")?,
+            module_class(&m, "Dialect")?,
+            module_class(&m, "DictReader")?,
+            module_class(&m, "DictWriter")?,
+        )
+    };
+    adopt_c_type(&dialect_type, "Dialect", "_csv.Dialect");
+    adopt_c_type(&reader_type, "reader", "_csv.reader");
+    adopt_c_type(&writer_type, "writer", "_csv.writer");
+    reorder_class(
+        &dialect_type,
+        &[
+            "__new__",
+            "__reduce__",
+            "__reduce_ex__",
+            "skipinitialspace",
+            "doublequote",
+            "strict",
+            "delimiter",
+            "escapechar",
+            "lineterminator",
+            "quotechar",
+            "quoting",
+            "__doc__",
+            "__module__",
+        ],
+    );
+    reorder_class(
+        &reader_type,
+        &[
+            "__iter__",
+            "__next__",
+            "dialect",
+            "line_num",
+            "__doc__",
+            "__module__",
+        ],
+    );
+    reorder_class(
+        &writer_type,
+        &["writerow", "writerows", "dialect", "__doc__", "__module__"],
+    );
+    {
+        let mut error = error.borrow_mut();
+        error
+            .attrs
+            .insert("__module__".to_string(), Value::string("_csv"));
+        error.attrs.insert("__doc__".to_string(), Value::none());
+    }
+
+    let dialects = Value::dict(PyDict::default());
+    CSV_STATE.with(|slot| {
+        *slot.borrow_mut() = Some(CsvState {
+            error,
+            dialect_type: Rc::clone(&dialect_type),
+            reader_type,
+            writer_type,
+            py_dialect,
+            dialects: dialects.clone(),
+        });
+    });
+
+    // register_dialect("excel", excel) / ("excel-tab", excel_tab) / ("unix", unix_dialect)
+    let dialect_type_val = Value::py_class(dialect_type);
+    for (name, class_name) in [
+        ("excel", "excel"),
+        ("excel-tab", "excel_tab"),
+        ("unix", "unix_dialect"),
+    ] {
+        let class = Value::py_class(module_class(&module.borrow(), class_name)?);
+        let dialect = dialect::dialect_new(interp, &dialect_type_val, &[class], &[])?;
+        interp.dict_set_value(&dialects, Value::string(name), dialect)?;
+    }
+
+    // `__class_getitem__ = classmethod(types.GenericAlias)`.
+    let types_mod = interp.load_module("types")?;
+    let generic_alias = interp.get_attr(&types_mod, "GenericAlias")?;
+    for class in [&dict_reader, &dict_writer] {
+        let getitem = call_builtin(interp, "classmethod", std::slice::from_ref(&generic_alias))?;
+        class
+            .borrow_mut()
+            .attrs
+            .insert("__class_getitem__".to_string(), getitem);
+    }
+    reorder_class(
+        &dict_reader,
+        &[
+            "__init__",
+            "__iter__",
+            "fieldnames",
+            "__next__",
+            "__class_getitem__",
+            "__doc__",
+        ],
+    );
+    reorder_class(
+        &dict_writer,
+        &[
+            "__init__",
+            "writeheader",
+            "_dict_to_list",
+            "writerow",
+            "writerows",
+            "__class_getitem__",
+            "__doc__",
+        ],
+    );
+
+    let re_mod = interp.load_module("re")?;
+    let io_mod = interp.load_module("io")?;
+    let string_io = interp.get_attr(&io_mod, "StringIO")?;
+    let mut m = module.borrow_mut();
+    m.attrs.insert("re".to_string(), re_mod);
+    m.attrs.insert("types".to_string(), types_mod);
+    m.attrs.insert("StringIO".to_string(), string_io);
+    reorder(&mut m.attrs, &NAMESPACE_ORDER);
+    Ok(())
+}
+
+/// `_csv` shim initialisation: expose the `_csv` surface in CPython's order.
+pub(crate) fn init_csv_shim(
+    interp: &mut Interpreter,
+    module: &Rc<RefCell<PyModule>>,
+) -> Result<()> {
+    let csv = interp.load_module("csv")?;
+    let state = state()?;
+    let ValueKind::PyModule(csv) = csv.kind() else {
+        return Err(PyError::runtime("csv is not a module".to_string()));
+    };
+    let source = csv.borrow();
+    let mut dest = module.borrow_mut();
+    dest.attrs
+        .insert("__doc__".to_string(), Value::string(MODULE_DOC));
+    for (name, from) in SHIM_ORDER {
+        let value = match (name, from) {
+            (_, Some(from)) => source.attrs.get(from).cloned(),
+            ("Reader", None) => Some(Value::py_class(Rc::clone(&state.reader_type))),
+            ("Writer", None) => Some(Value::py_class(Rc::clone(&state.writer_type))),
+            _ => Some(state.dialects.clone()),
+        };
+        if let Some(value) = value {
+            dest.attrs.insert(name.to_string(), value);
+        }
+    }
+    for name in ["QUOTE_NOTNULL", "Error"] {
+        if let Some(value) = source.attrs.get(name).cloned() {
+            dest.attrs.insert(name.to_string(), value);
+        }
+    }
+    Ok(())
+}
+
+pyrust_module! {
+    constants {
+        "__doc__" => Value::string(MODULE_DOC),
+        "__version__" => Value::string("1.0"),
+        "QUOTE_MINIMAL" => Value::int(0),
+        "QUOTE_ALL" => Value::int(1),
+        "QUOTE_NONNUMERIC" => Value::int(2),
+        "QUOTE_NONE" => Value::int(3),
+        "QUOTE_STRINGS" => Value::int(4),
+        "QUOTE_NOTNULL" => Value::int(5),
+        "__all__" => Value::list(ALL.into_iter().map(Value::string).collect()),
+    }
+
+    exception Error;
+
+    fn writer(args) -> Result<Value> {
+        make_writer(_interp, args)
+    }
+
+    fn reader(args) -> Result<Value> {
+        make_reader(_interp, args)
+    }
+
+    fn register_dialect(args) -> Result<Value> {
+        register_dialect_impl(_interp, args)
+    }
+
+    fn unregister_dialect(args) -> Result<Value> {
+        unregister_dialect_impl(_interp, args)
+    }
+
+    fn get_dialect(args) -> Result<Value> {
+        get_dialect_impl(_interp, args)
+    }
+
+    fn list_dialects(args) -> Result<Value> {
+        list_dialects_impl(_interp, args)
+    }
+
+    fn field_size_limit(args) -> Result<Value> {
+        field_size_limit_impl(args)
+    }
+
+    // `_csv.Dialect` (renamed and re-homed by `post_load_init`).
+    #[native_state(DialectState)]
+    class _Dialect {
+        constants {
+            "__doc__" => Value::string(DIALECT_TYPE_DOC),
+        }
+
+        fn __new__(args) -> Result<Value> {
+            let Some(cls) = args.first().filter(|a| a.name.is_none()) else {
+                return Err(args::type_error("_csv.Dialect.__new__(): not enough arguments"));
+            };
+            let dialect_type = state()?.dialect_type;
+            match cls.value.kind() {
+                ValueKind::PyClass(class) => {
+                    if !crate::interpreter::class_is_subclass_of(class, &dialect_type) {
+                        let name = class.borrow().name.clone();
+                        return Err(args::type_error(format!(
+                            "_csv.Dialect.__new__({name}): {name} is not a subtype of _csv.Dialect"
+                        )));
+                    }
+                }
+                _ => {
+                    return Err(args::type_error(format!(
+                        "_csv.Dialect.__new__(X): X is not a type object ({})",
+                        type_name(&cls.value)
+                    )));
+                }
+            }
+            let (positional, keywords) = args::split(&args[1..]);
+            dialect::dialect_new(_interp, &cls.value, &positional, &keywords)
+        }
+
+        fn __reduce__(#[positional_only] self_val: PyValueRef<'_>) -> Result<Value> {
+            Err(args::type_error(format!(
+                "cannot pickle '{}' instances",
+                type_name(self_val.0)
+            )))
+        }
+
+        fn __reduce_ex__(
+            #[positional_only] self_val: PyValueRef<'_>,
+            #[positional_only] _protocol: PyValue,
+        ) -> Result<Value> {
+            Err(args::type_error(format!(
+                "cannot pickle '{}' instances",
+                type_name(self_val.0)
+            )))
+        }
+
+        #[getter]
+        fn skipinitialspace(#[state] st: &DialectState) -> Result<Value> {
+            Ok(Value::bool_(st.cfg.skipinitialspace))
+        }
+
+        #[setter("skipinitialspace")]
+        fn set_skipinitialspace(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValue,
+        ) -> Result<Value> {
+            Err(readonly_attribute())
+        }
+
+        #[getter]
+        fn doublequote(#[state] st: &DialectState) -> Result<Value> {
+            Ok(Value::bool_(st.cfg.doublequote))
+        }
+
+        #[setter("doublequote")]
+        fn set_doublequote(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValue,
+        ) -> Result<Value> {
+            Err(readonly_attribute())
+        }
+
+        #[getter]
+        fn strict(#[state] st: &DialectState) -> Result<Value> {
+            Ok(Value::bool_(st.cfg.strict))
+        }
+
+        #[setter("strict")]
+        fn set_strict(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValue,
+        ) -> Result<Value> {
+            Err(readonly_attribute())
+        }
+
+        #[getter]
+        fn delimiter(#[state] st: &DialectState) -> Result<Value> {
+            Ok(Value::string(st.cfg.delimiter.to_string()))
+        }
+
+        #[setter("delimiter")]
+        fn set_delimiter(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValue,
+        ) -> Result<Value> {
+            Err(not_writable("delimiter"))
+        }
+
+        #[getter]
+        fn escapechar(#[state] st: &DialectState) -> Result<Value> {
+            Ok(dialect::char_or_none(st.cfg.escapechar))
+        }
+
+        #[setter("escapechar")]
+        fn set_escapechar(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValue,
+        ) -> Result<Value> {
+            Err(not_writable("escapechar"))
+        }
+
+        #[getter]
+        fn lineterminator(#[state] st: &DialectState) -> Result<Value> {
+            Ok(st.cfg.lineterminator.clone())
+        }
+
+        #[setter("lineterminator")]
+        fn set_lineterminator(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValue,
+        ) -> Result<Value> {
+            Err(not_writable("lineterminator"))
+        }
+
+        #[getter]
+        fn quotechar(#[state] st: &DialectState) -> Result<Value> {
+            Ok(dialect::char_or_none(st.cfg.quotechar))
+        }
+
+        #[setter("quotechar")]
+        fn set_quotechar(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValue,
+        ) -> Result<Value> {
+            Err(not_writable("quotechar"))
+        }
+
+        #[getter]
+        fn quoting(#[state] st: &DialectState) -> Result<Value> {
+            Ok(Value::int(st.cfg.quoting.as_int()))
+        }
+
+        #[setter("quoting")]
+        fn set_quoting(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValue,
+        ) -> Result<Value> {
+            Err(not_writable("quoting"))
+        }
+    }
+
+    // `_csv.reader` (renamed and moved out of the module by `post_load_init`).
+    #[native_state(ReaderState)]
+    class Reader {
+        constants {
+            "__doc__" => Value::string(READER_TYPE_DOC),
+        }
+
+        fn __new__(args) -> Result<Value> {
+            let reader_type = state()?.reader_type;
+            let cls = args.first().map(|a| a.value.clone()).unwrap_or_else(Value::none);
+            Err(cannot_create(&cls, &reader_type, "_csv.reader"))
+        }
+
+        fn __iter__(#[positional_only] self_val: PyValueRef<'_>) -> Result<Value> {
+            Ok(self_val.0.clone())
+        }
+
+        fn __next__(#[positional_only] self_val: PyValueRef<'_>) -> Result<Value> {
+            reader::next_record(_interp, self_val.0)
+        }
+
+        #[getter]
+        fn dialect(#[state] st: &ReaderState) -> Result<Value> {
+            Ok(st.dialect.clone())
+        }
+
+        #[setter("dialect")]
+        fn set_dialect(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValue,
+        ) -> Result<Value> {
+            Err(readonly_attribute())
+        }
+
+        #[getter]
+        fn line_num(#[state] st: &ReaderState) -> Result<Value> {
+            Ok(Value::int(st.line_num as i64))
+        }
+
+        #[setter("line_num")]
+        fn set_line_num(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValue,
+        ) -> Result<Value> {
+            Err(readonly_attribute())
+        }
+    }
+
+    // `_csv.writer` (renamed and moved out of the module by `post_load_init`).
+    #[native_state(WriterState)]
+    class Writer {
+        constants {
+            "__doc__" => Value::string(WRITER_TYPE_DOC),
+        }
+
+        fn __new__(args) -> Result<Value> {
+            let writer_type = state()?.writer_type;
+            let cls = args.first().map(|a| a.value.clone()).unwrap_or_else(Value::none);
+            Err(cannot_create(&cls, &writer_type, "_csv.writer"))
+        }
+
+        fn writerow(args) -> Result<Value> {
+            let Some(this) = args.first() else {
+                return Err(args::type_error("writer.writerow() needs an argument"));
+            };
+            let row = args::exactly_one("writer.writerow", &args[1..])?;
+            writer::writerow(_interp, &this.value, row)
+        }
+
+        fn writerows(args) -> Result<Value> {
+            let Some(this) = args.first() else {
+                return Err(args::type_error("writer.writerows() needs an argument"));
+            };
+            let rows = args::exactly_one("writer.writerows", &args[1..])?;
+            writer::writerows(_interp, &this.value, rows)
+        }
+
+        #[getter]
+        fn dialect(#[state] st: &WriterState) -> Result<Value> {
+            Ok(st.dialect.clone())
+        }
+
+        #[setter("dialect")]
+        fn set_dialect(
+            #[positional_only] _this: PyValueRef<'_>,
+            #[positional_only] _value: PyValue,
+        ) -> Result<Value> {
+            Err(readonly_attribute())
+        }
+    }
+
+    class Dialect {
+        constants {
+            "__doc__" => Value::string(DIALECT_DOC),
+            "_name" => Value::string(""),
+            "_valid" => Value::bool_(false),
+            "delimiter" => Value::none(),
+            "quotechar" => Value::none(),
+            "escapechar" => Value::none(),
+            "doublequote" => Value::none(),
+            "skipinitialspace" => Value::none(),
+            "lineterminator" => Value::none(),
+            "quoting" => Value::none(),
+        }
+
+        fn __init__(args) -> Result<Value> {
+            let this = bind_self(&SIG_DIALECT_INIT, args)?;
+            let cls = _interp.get_attr(&this, "__class__")?;
+            let py_dialect = Value::py_class(state()?.py_dialect);
+            let ne = _interp.eval_binary(cls, crate::ast::BinaryOp::Ne, py_dialect)?;
+            if _interp.truthy_value(&ne)? {
+                _interp.assign_attr(this.clone(), "_valid", Value::bool_(true))?;
+            }
+            call_method(_interp, &this, "_validate", &[])?;
+            Ok(Value::none())
+        }
+
+        fn _validate(args) -> Result<Value> {
+            let this = bind_self(&SIG_DIALECT_VALIDATE, args)?;
+            validate_dialect(_interp, &this)?;
+            Ok(Value::none())
+        }
+    }
+
+    class excel("Dialect") {
+        constants {
+            "__doc__" => Value::string(EXCEL_DOC),
+            "delimiter" => Value::string(","),
+            "quotechar" => Value::string("\""),
+            "doublequote" => Value::bool_(true),
+            "skipinitialspace" => Value::bool_(false),
+            "lineterminator" => Value::string("\r\n"),
+            "quoting" => Value::int(0),
+        }
+    }
+
+    class excel_tab("excel") {
+        constants {
+            "__doc__" => Value::string(EXCEL_TAB_DOC),
+            "delimiter" => Value::string("\t"),
+        }
+    }
+
+    class unix_dialect("Dialect") {
+        constants {
+            "__doc__" => Value::string(UNIX_DOC),
+            "delimiter" => Value::string(","),
+            "quotechar" => Value::string("\""),
+            "doublequote" => Value::bool_(true),
+            "skipinitialspace" => Value::bool_(false),
+            "lineterminator" => Value::string("\n"),
+            "quoting" => Value::int(1),
+        }
+    }
+
+    class DictReader {
+        constants {
+            "__doc__" => Value::none(),
+        }
+
+        fn __init__(args) -> Result<Value> {
+            let mut b = args::bind(&SIG_DICT_READER_INIT, args)?;
+            let this = b.take(0, Value::none);
+            let f = b.take(1, Value::none);
+            let fieldnames = b.take(2, Value::none);
+            let restkey = b.take(3, Value::none);
+            let restval = b.take(4, Value::none);
+            let dialect = b.take(5, || Value::string("excel"));
+            dicts::dict_reader_init(
+                _interp,
+                &this,
+                f,
+                fieldnames,
+                restkey,
+                restval,
+                dialect,
+                &b.var_args,
+                &b.var_kwds,
+            )?;
+            Ok(Value::none())
+        }
+
+        fn __iter__(args) -> Result<Value> {
+            bind_self(&SIG_DICT_READER_ITER, args)
+        }
+
+        #[getter]
+        fn fieldnames(#[positional_only] self_val: PyValueRef<'_>) -> Result<Value> {
+            dicts::dict_reader_fieldnames(_interp, self_val.0)
+        }
+
+        #[setter("fieldnames")]
+        fn set_fieldnames(
+            #[positional_only] self_val: PyValueRef<'_>,
+            #[positional_only] value: PyValue,
+        ) -> Result<Value> {
+            _interp.assign_attr(self_val.0.clone(), "_fieldnames", value.0)?;
+            Ok(Value::none())
+        }
+
+        fn __next__(args) -> Result<Value> {
+            let this = bind_self(&SIG_DICT_READER_NEXT, args)?;
+            dicts::dict_reader_next(_interp, &this)
+        }
+    }
+
+    class DictWriter {
+        constants {
+            "__doc__" => Value::none(),
+        }
+
+        fn __init__(args) -> Result<Value> {
+            let mut b = args::bind(&SIG_DICT_WRITER_INIT, args)?;
+            let this = b.take(0, Value::none);
+            let f = b.take(1, Value::none);
+            let fieldnames = b.take(2, Value::none);
+            let restval = b.take(3, || Value::string(""));
+            let extrasaction = b.take(4, || Value::string("raise"));
+            let dialect = b.take(5, || Value::string("excel"));
+            dicts::dict_writer_init(
+                _interp,
+                &this,
+                f,
+                fieldnames,
+                restval,
+                extrasaction,
+                dialect,
+                &b.var_args,
+                &b.var_kwds,
+            )?;
+            Ok(Value::none())
+        }
+
+        fn writeheader(args) -> Result<Value> {
+            let this = bind_self(&SIG_DICT_WRITER_WRITEHEADER, args)?;
+            dicts::dict_writer_writeheader(_interp, &this)
+        }
+
+        fn _dict_to_list(args) -> Result<Value> {
+            let [this, rowdict] = bind_n(&SIG_DICT_WRITER_DICT_TO_LIST, args)?;
+            dicts::dict_writer_dict_to_list(_interp, &this, &rowdict)
+        }
+
+        fn writerow(args) -> Result<Value> {
+            let [this, rowdict] = bind_n(&SIG_DICT_WRITER_WRITEROW, args)?;
+            let row = call_method(_interp, &this, "_dict_to_list", &[rowdict])?;
+            let writer = _interp.get_attr(&this, "writer")?;
+            call_method(_interp, &writer, "writerow", &[row])
+        }
+
+        fn writerows(args) -> Result<Value> {
+            let [this, rowdicts] = bind_n(&SIG_DICT_WRITER_WRITEROWS, args)?;
+            let to_list = _interp.get_attr(&this, "_dict_to_list")?;
+            let rows = call_builtin(_interp, "map", &[to_list, rowdicts])?;
+            let writer = _interp.get_attr(&this, "writer")?;
+            call_method(_interp, &writer, "writerows", &[rows])
+        }
+    }
+
+    class Sniffer {
+        constants {
+            "__doc__" => Value::string(SNIFFER_DOC),
+        }
+
+        fn __init__(args) -> Result<Value> {
+            let this = bind_self(&SIG_SNIFFER_INIT, args)?;
+            // in case there is more than one possible delimiter
+            let preferred = [",", "\t", ";", " ", ":"]
+                .into_iter()
+                .map(Value::string)
+                .collect();
+            _interp.assign_attr(this, "preferred", Value::list(preferred))?;
+            Ok(Value::none())
+        }
+
+        /// Returns a dialect (or None) corresponding to the sample
+        fn sniff(args) -> Result<Value> {
+            let mut b = args::bind(&SIG_SNIFFER_SNIFF, args)?;
+            let this = b.take(0, Value::none);
+            let sample = b.take(1, Value::none);
+            let delimiters = b.take(2, Value::none);
+            sniffer::sniff(_interp, &this, &sample, &delimiters)
+        }
+
+        fn _guess_quote_and_delimiter(args) -> Result<Value> {
+            let [_this, data, delimiters] = bind_n(&SIG_SNIFFER_GUESS_QUOTE, args)?;
+            sniffer::guess_quote_and_delimiter(_interp, &data, &delimiters)
+        }
+
+        fn _guess_delimiter(args) -> Result<Value> {
+            let [this, data, delimiters] = bind_n(&SIG_SNIFFER_GUESS_DELIMITER, args)?;
+            sniffer::guess_delimiter(_interp, &this, &data, &delimiters)
+        }
+
+        fn has_header(args) -> Result<Value> {
+            let [this, sample] = bind_n(&SIG_SNIFFER_HAS_HEADER, args)?;
+            sniffer::has_header(_interp, &this, &sample)
+        }
+    }
+}

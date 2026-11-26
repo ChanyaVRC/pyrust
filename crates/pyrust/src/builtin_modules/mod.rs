@@ -308,6 +308,7 @@ macro_rules! pyrust_builtin_modules {
                 "numbers" => return numbers::post_load_init(interp, module),
                 "array" => return array::post_load_init(interp, module),
                 "string" => return string::post_load_init(interp, module),
+                "csv" => return csv::post_load_init(interp, module),
                 #[cfg(unix)]
                 "posix" => return posix::post_load_init(interp, module),
                 "importlib.abc" => return importlib_abc::post_load_init(interp, module),
@@ -598,11 +599,11 @@ pyrust_builtin_modules! {
     // `stdev` / `NormalDist` / … — defined in `statistics_py.py` and injected
     // by the `@inject` post-load hook; the native body is empty.
     statistics @inject,
-    // `csv` (issue #2808): a pure-Python module (`csv_py.py`) — the
-    // `reader` / `writer` factories, `DictReader` / `DictWriter`, the
-    // `Dialect` family, the dialect registry, and the `QUOTE_*` constants —
-    // injected by the `@inject` post-load hook; the native body is empty.
-    csv @inject,
+    // `csv` (issues #2808, #3340, #3400): the whole CPython 3.12 `csv` /
+    // `_csv` surface — the `_csv.c` reader state machine and writer, the
+    // dialect type and registry, `field_size_limit`, the `Dialect` family,
+    // `DictReader` / `DictWriter` and `Sniffer` — implemented 100% natively.
+    csv,
     // `decimal` (issue #2806): a port of CPython 3.12's pure-Python
     // `_pydecimal.py` (`decimal_py.py`) — `Decimal`, `Context`,
     // `getcontext` / `setcontext` / `localcontext`, the `ROUND_*` constants,

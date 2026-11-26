@@ -960,11 +960,8 @@ define_reexport_shims! {
     },
 
     _csv {
-        constants {
-            "_dialects" => Value::dict(PyDict::default()),
-        }
         init(interp, module) {
-            copy_all_from(interp, "csv", module)
+            crate::builtin_modules::csv::init_csv_shim(interp, module)
         }
     },
 
