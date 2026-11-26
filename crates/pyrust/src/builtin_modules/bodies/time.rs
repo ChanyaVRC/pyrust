@@ -12,87 +12,38 @@
 // constants and `process_time` still consult the platform on Unix and fall
 // back to UTC / monotonic time elsewhere.
 //
-// `struct_time` — the 9-field sequence returned by `gmtime` / `localtime` — is
-// defined in Python (`time_py.py`) as a `collections.namedtuple` and injected
-// onto the module by the `@inject` post-load hook.  The native conversion
-// functions fetch that class off the imported module and call it to build their
-// results, so a returned value is indexable (`t[0] == t.tm_year`), has
-// `len(t) == 9`, and exposes every `tm_*` attribute.
+// `struct_time` — the 9-field sequence (plus the `tm_zone` / `tm_gmtoff`
+// extra attributes) returned by `gmtime` / `localtime` — is a native
+// `pyrust_struct_seq!` type, so it needs no Python source or post-load hook.
 //
 // Reference: <https://docs.python.org/3/library/time.html>
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::LazyLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{ExpandedCallArg, Interpreter, reject_keyword_args_expanded};
-use crate::value::{PyKey, Value, ValueKind};
+use crate::value::{Value, ValueKind};
 use num_traits::ToPrimitive;
 use pyrust_derive::pyrust_module;
 
-/// Python-level members of the module (`struct_time`), defined as ordinary
-/// Python source.
-const TIME_PY_SOURCE: &str = include_str!("time_py.py");
-
-/// Names from `TIME_PY_SOURCE` exported onto the `time` module.
-const TIME_PY_EXPORTS: [&str; 1] = ["struct_time"];
+pyrust_struct_seq! {
+    pub(crate) struct_time in "time" {
+        fields: [
+            tm_year, tm_mon, tm_mday, tm_hour, tm_min, tm_sec, tm_wday, tm_yday, tm_isdst
+        ],
+        extra_fields: [tm_zone, tm_gmtoff],
+    }
+}
 
 /// Process-wide monotonic reference point. `monotonic()` / `perf_counter()`
 /// report seconds elapsed from this instant, so values from different
 /// interpreter threads share one comparable clock.
 static MONO_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
-/// Execute `TIME_PY_SOURCE` once and copy its public names onto the `time`
-/// module's attribute map.  Wired from `env.rs::load_module`'s post-import hook
-/// (mirrors the `string` / `asyncio` injection).
-pub(crate) fn inject_python_members(
-    interp: &mut Interpreter,
-    module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<Option<Value>> {
-    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
-    // Pre-seed `namedtuple` from `collections` so the Python source can use it
-    // by bare name without a top-level `import` (whose binding does not survive
-    // the exec-with-globals path used for module injection).
-    let namedtuple = collections_namedtuple(interp)?;
-    ns.dict_with_mut(|d| {
-        d.insert(PyKey::str_from("namedtuple"), namedtuple);
-    });
-    interp.exec_source(TIME_PY_SOURCE, Some(ns.clone()), None)?;
-    let dict = ns
-        .as_dict()
-        .ok_or_else(|| PyError::runtime("time: exec namespace not a dict".into()))?;
-    for name in TIME_PY_EXPORTS {
-        if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            if let ValueKind::PyClass(class) = val.kind() {
-                class.borrow_mut().error_name = Some("time.struct_time");
-            }
-            module
-                .borrow_mut()
-                .attrs
-                .insert(name.to_string(), val.clone());
-        }
-    }
-    Ok(Some(ns.clone()))
-}
-
-/// Fetch `collections.namedtuple` (importing `collections` if needed) so the
-/// injected `time_py.py` can build `struct_time` from it.
-fn collections_namedtuple(interp: &mut Interpreter) -> Result<Value> {
-    let module = interp.load_module("collections")?;
-    if let ValueKind::PyModule(m) = module.kind()
-        && let Some(v) = m.borrow().get_attr_value("namedtuple")
-    {
-        return Ok(v);
-    }
-    Err(PyError::runtime(
-        "time: collections.namedtuple not available".into(),
-    ))
-}
-
 pyrust_module! {
     constants {
+        "struct_time" => struct_time::class(),
         // Timezone constants, computed once at module load from the libc
         // timezone database (CPython sets these in `init_timezone`).  `west`
         // is positive, matching CPython.
@@ -209,7 +160,7 @@ pyrust_module! {
         reject_keyword_args_expanded(FN_NAME, args)?;
         let secs = optional_secs(FN_NAME, args)?;
         let tm = broken_down(secs, false)?;
-        make_struct_time(_interp, &tm)
+        Ok(make_struct_time(&tm, false))
     }
 
     /// CPython: time.localtime([secs]) → struct_time.  Convert `secs` (default:
@@ -219,7 +170,7 @@ pyrust_module! {
         reject_keyword_args_expanded(FN_NAME, args)?;
         let secs = optional_secs(FN_NAME, args)?;
         let tm = broken_down(secs, true)?;
-        make_struct_time(_interp, &tm)
+        Ok(make_struct_time(&tm, true))
     }
 
     /// CPython: time.mktime(t) → float.  Inverse of `localtime`: interpret the
@@ -503,20 +454,20 @@ fn mktime_local(tm: &Tm) -> Result<i64> {
         .ok_or_else(|| PyError::named("OverflowError", "mktime argument out of range".to_string()))
 }
 
-/// Build a `time.struct_time` instance from broken-down time by fetching the
-/// (Python-defined) `struct_time` class off the imported module and calling it
-/// with the nine fields (already in CPython conventions).
-fn make_struct_time(interp: &mut Interpreter, tm: &Tm) -> Result<Value> {
-    let fields = tm_to_fields(tm);
-    let class = struct_time_class(interp)?;
-    // `struct_time.__new__` takes a single iterable of nine values (matching
-    // CPython's constructor), so pass the fields as one tuple argument.
-    let seq = Value::tuple(fields.iter().map(|&n| Value::int(n)).collect());
-    let call_args = [ExpandedCallArg {
-        name: None,
-        value: seq,
-    }];
-    interp.call_function_expanded(class, &call_args)
+/// Build a `time.struct_time` instance from broken-down time.  `local`
+/// selects the `tm_zone` / `tm_gmtoff` extras: the platform standard-time zone
+/// name and offset for local time, `UTC` / 0 for `gmtime`.
+fn make_struct_time(tm: &Tm, local: bool) -> Value {
+    let (zone, gmtoff) = if local {
+        let tz = tz_info();
+        (tz.std_name, -tz.timezone)
+    } else {
+        ("UTC".to_string(), 0)
+    };
+    struct_time::make_with_extra(
+        tm_to_fields(tm).iter().map(|&n| Value::int(n)).collect(),
+        vec![Value::string(&zone), Value::int(gmtoff)],
+    )
 }
 
 /// The nine `struct_time` fields from a broken-down `Tm`.
@@ -524,17 +475,6 @@ fn tm_to_fields(tm: &Tm) -> [i64; 9] {
     [
         tm.year, tm.mon, tm.mday, tm.hour, tm.min, tm.sec, tm.wday, tm.yday, tm.isdst,
     ]
-}
-
-/// Fetch the `struct_time` class off the imported `time` module.
-fn struct_time_class(interp: &mut Interpreter) -> Result<Value> {
-    let module = interp.load_module("time")?;
-    if let ValueKind::PyModule(m) = module.kind()
-        && let Some(v) = m.borrow().get_attr_value("struct_time")
-    {
-        return Ok(v);
-    }
-    Err(PyError::runtime("time: struct_time not loaded".into()))
 }
 
 /// Convert a `struct_time` (or any other `tuple` / `tuple` subclass) into a
