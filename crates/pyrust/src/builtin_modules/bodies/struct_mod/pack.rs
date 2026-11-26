@@ -1,18 +1,16 @@
-//! Binary packing engine and `pack` / `pack_into` entry points for `struct`.
+//! Binary packing engine and `pack` / `pack_into` operations for `struct`.
 
 use std::ffi::c_long;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{
-    ExpandedCallArg, Interpreter, builtin_data_backing, reject_keyword_args_expanded,
-};
+use crate::interpreter::{Interpreter, builtin_data_backing};
 use crate::value::{Value, ValueKind};
 
 use super::coercion::{
     check_signed_range, check_unsigned_range, extract_bytes_for_s_or_p, f64_to_f16_bits,
     parse_offset_i128, validate_offset_i128, value_to_struct_float, value_to_struct_int,
 };
-use super::format::{CompiledFormat, Endian, FormatCode, compile_format, raise_struct_error};
+use super::format::{CompiledFormat, Endian, FormatCode, raise_struct_error};
 
 macro_rules! write_bytes {
     ($endian:expr, $dst:expr, $val:expr) => {
@@ -248,36 +246,30 @@ pub(super) fn pack_into_vec(
     Ok(out)
 }
 
-pub(super) fn pack_entry(
+/// `struct.pack` / `Struct.pack`: pack `values` into a fresh `bytes` object.
+pub(super) fn pack_values(
     interp: &mut Interpreter,
-    fn_name: &str,
-    args: &[ExpandedCallArg],
+    compiled: &CompiledFormat,
+    values: &[Value],
+    error_cls: &Value,
 ) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    let error_cls = &args[0].value;
-    let compiled = compile_format(&args[1].value, error_cls)?;
-    let values: Vec<Value> = match args[2].value.kind() {
-        ValueKind::Tuple(items) => items.to_vec(),
-        _ => Vec::new(),
-    };
-    let bytes = pack_into_vec(interp, &compiled, &values, error_cls)?;
-    Ok(Value::bytes(bytes))
+    Ok(Value::bytes(pack_into_vec(
+        interp, compiled, values, error_cls,
+    )?))
 }
 
-pub(super) fn pack_into_entry(
+/// `struct.pack_into` / `Struct.pack_into`: pack `values` into the writable
+/// `buffer` starting at `offset`.
+pub(super) fn pack_into_buffer(
     interp: &mut Interpreter,
-    fn_name: &str,
-    args: &[ExpandedCallArg],
+    compiled: &CompiledFormat,
+    buffer: &Value,
+    offset: &Value,
+    values: &[Value],
+    error_cls: &Value,
 ) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    let error_cls = &args[0].value;
-    let compiled = compile_format(&args[1].value, error_cls)?;
-    let target = crate::interpreter::acquire_writable_buffer(interp, &args[2].value)?;
+    let target = crate::interpreter::acquire_writable_buffer(interp, buffer)?;
     let result = (|| -> Result<Value> {
-        let values: Vec<Value> = match args[4].value.kind() {
-            ValueKind::Tuple(items) => items.to_vec(),
-            _ => Vec::new(),
-        };
         if values.len() != compiled.num_values {
             return Err(raise_struct_error(
                 error_cls,
@@ -288,13 +280,13 @@ pub(super) fn pack_into_entry(
                 ),
             ));
         }
-        let offset_i128 = parse_offset_i128(interp, &args[3].value, true)?;
+        let offset_i128 = parse_offset_i128(interp, offset, true)?;
         let initial_len = target.len;
         let _ = validate_offset_i128(offset_i128, initial_len, compiled.size, true, error_cls)?;
         // Pack into a scratch Vec before borrowing the buffer mutably so
         // user `__index__`/`__bool__`/`__float__` cannot alias the borrow or
         // leave a partially written buffer on error.
-        let packed = pack_into_vec(interp, &compiled, &values, error_cls)?;
+        let packed = pack_into_vec(interp, compiled, values, error_cls)?;
         let final_len = target
             .data
             .borrow()

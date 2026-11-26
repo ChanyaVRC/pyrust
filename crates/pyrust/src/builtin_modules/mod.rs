@@ -617,11 +617,10 @@ pyrust_builtin_modules! {
     // `Fraction` rational-number class — injected by the `@inject` post-load
     // hook.  The native body is empty.
     fractions @inject,
-    // `struct` (issue #2807): native binary packing/unpacking primitives in
-    // `struct_mod.rs` plus `error`, `Struct`, and top-level wrappers injected
-    // from `struct_mod_py.py` by the `@inject` post-load hook.  The Rust ident
-    // is `struct_mod` because `struct` is a keyword.
-    "struct" as struct_mod @inject,
+    // `struct` (issue #3309): 100% native `error`, `Struct`, and top-level
+    // functions in `struct_mod.rs`.  The Rust ident is `struct_mod` because
+    // `struct` is a keyword.
+    "struct" as struct_mod,
     // `array` (issue #2809): native typed-element binary encoding/decoding and
     // byteswap helpers in `array.rs` plus the `array` class, `ArrayType` alias,
     // and `typecodes` constant injected from `array_py.py` by the `@inject`

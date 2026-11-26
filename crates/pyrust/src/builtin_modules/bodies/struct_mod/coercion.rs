@@ -268,19 +268,32 @@ pub(super) fn parse_offset_i128(
     offset_val: &Value,
     packing: bool,
 ) -> Result<i128> {
-    let idx_val = interp.call_index_protocol(
-        offset_val,
-        if packing { "pack_into" } else { "unpack_from" },
-    )?;
+    let Some(idx_val) = interp.try_value_to_index(offset_val)? else {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(offset_val)
+            ),
+        ));
+    };
     match idx_val.kind() {
         ValueKind::Int(n) => Ok(i128::from(n)),
         ValueKind::Bool(b) => Ok(i128::from(i64::from(b))),
-        ValueKind::BigInt(bi) => bi.to_i128().ok_or_else(|| {
-            PyError::named(
-                "OverflowError",
+        // CPython converts the offset to `Py_ssize_t`: `pack_into` goes through
+        // `PyNumber_AsSsize_t(.., PyExc_IndexError)` while `unpack_from` uses
+        // the clinic `ssize_t` converter.
+        ValueKind::BigInt(bi) => match bi.to_i64() {
+            Some(n) => Ok(i128::from(n)),
+            None if packing => Err(PyError::named(
+                "IndexError",
                 "cannot fit 'int' into an index-sized integer".to_string(),
-            )
-        }),
+            )),
+            None => Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C ssize_t".to_string(),
+            )),
+        },
         _ => Err(PyError::named(
             "TypeError",
             format!(
