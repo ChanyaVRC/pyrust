@@ -31,6 +31,12 @@ impl Interpreter {
         };
         let mut exc_handlers: ExcHandlersBuf = exc_handlers_init;
         let mut pc: usize = start_pc;
+        // Safepoint epoch this activation last released its dead temporaries at;
+        // a resumed generator frame (`start_pc != 0`) starts out stale.
+        let mut safepoint_epoch: usize = self
+            .cold
+            .safepoint_epoch
+            .wrapping_sub(usize::from(start_pc != 0));
         let mut pending_inject: Option<PyError> = inject_exc;
 
         let exc_ctx_frame_base: usize = self.handled_exc_stack.len();
@@ -256,14 +262,32 @@ impl Interpreter {
                 }
                 return Err(err);
             };
-            if self.vm_hooks_flags & VM_HOOK_STEP_MASK != 0 {
-                vm_try!(self.vm_dispatch_step_hooks(
-                    code,
-                    pc,
-                    regs.non_null_ptr(),
-                    regs.len(),
-                    num_locals,
-                ));
+            let hooks = self.vm_hooks_flags;
+            if hooks & VM_HOOK_STEP_MASK != 0 {
+                // With only `weakref` / `__del__` armed, visit the cold safepoint
+                // just when a temporary can die here, a callback is queued, or
+                // the safepoint was switched on since this activation last ran it.
+                let epoch = self.cold.safepoint_epoch;
+                if safepoint_epoch != epoch
+                    || hooks & VM_HOOK_EVERY_STEP_MASK != 0
+                    || self.vm_safepoint_due(code, pc)
+                {
+                    vm_try!(self.vm_dispatch_step_hooks(
+                        code,
+                        pc,
+                        regs.non_null_ptr(),
+                        regs.len(),
+                        num_locals,
+                        safepoint_epoch != epoch,
+                    ));
+                    // Only the activation's base frame is known released; a caller
+                    // frame below stays stale until control returns to it.
+                    if self.tramp_stack.len() == tramp_base
+                        && self.gen_drive_stack.len() == gen_base
+                    {
+                        safepoint_epoch = epoch;
+                    }
+                }
             }
             pc += 1;
 

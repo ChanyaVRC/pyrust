@@ -22,7 +22,9 @@ pub(crate) use cache::{
     is_attr_cache_site, is_builtin_method_cache_site, is_call_builtin_cache_site,
 };
 pub use code::FnCode;
-pub(crate) use code::{ColTable, EXC_NO_HANDLER, LinenoTable, MAX_FRAME_REGS, intern_const_pool};
+pub(crate) use code::{
+    ColTable, EXC_NO_HANDLER, LinenoTable, MAX_FRAME_REGS, SafepointTable, intern_const_pool,
+};
 pub use function::{
     CaptureSource, CellSlotMeta, CellVar, FnParamSpec, FnProto, compute_param_binds,
     compute_self_bind,

@@ -600,11 +600,13 @@ pub(crate) struct InterpreterColdState {
     /// active exception sits at or below `saved_handled_len + 1`,
     /// `handle_vm_error` must NOT dedup-pop the pushed context entry.
     pub(crate) push_exc_ctx_marks: Vec<(usize, usize)>,
-    /// Address of the register window the `__del__` safepoint last ran in, or
-    /// 0 for none. A different window means the VM entered or returned to a
-    /// frame whose dead temporaries were not being released, so the safepoint
-    /// releases all of them once (issue #3341).
-    pub(crate) finalizer_scrubbed_regs: usize,
+    /// Epoch of the weakref / `__del__` dead-temporary safepoint, bumped each
+    /// time it is switched on. A VM-loop activation that last ran at an older
+    /// epoch releases all dead temporaries of its frame once (issues #3341,
+    /// #3380).
+    pub(crate) safepoint_epoch: usize,
+    /// Visits of the cold safepoint, used to pace the check that switches it off.
+    pub(crate) safepoint_visits: u32,
     /// When an inlined comprehension (`FnCode::is_inlined_comp`, PEP 709) exits
     /// with an error via a non-trampolined call or coroutine resume, it skips
     /// recording a `<listcomp>`/`<setcomp>`/`<dictcomp>` traceback frame and
@@ -759,7 +761,8 @@ impl InterpreterColdState {
             comparison_structural_cost_bias: 0,
             exc_classes: ExcClasses::uninitialized(),
             push_exc_ctx_marks: Vec::new(),
-            finalizer_scrubbed_regs: 0,
+            safepoint_epoch: 0,
+            safepoint_visits: 0,
             inlined_comp_escaped_span: None,
             call_site_lines: Vec::new(),
             feature_states,

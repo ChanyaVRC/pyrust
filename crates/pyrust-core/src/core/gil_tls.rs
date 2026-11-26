@@ -52,6 +52,8 @@ pub struct HotTlsState {
     pub live_weakref_callback_count: Cell<usize>,
     /// Fast flag for pending weakref callbacks (`weakref_support.rs`).
     pub has_pending_weakref_callbacks: Cell<bool>,
+    /// Fast flag for pending `__del__` calls (inalizer_support.rs).
+    pub has_pending_finalizers: Cell<bool>,
     /// Monotonic weakref handle id generator (`weakref_support.rs`).
     pub next_weakref_handle_id: Cell<u64>,
     /// Fast gate for escaped namespace dicts (`root_namespace.rs`).
@@ -78,6 +80,7 @@ impl HotTlsState {
             live_weakref_count: Cell::new(0),
             live_weakref_callback_count: Cell::new(0),
             has_pending_weakref_callbacks: Cell::new(false),
+            has_pending_finalizers: Cell::new(false),
             next_weakref_handle_id: Cell::new(1),
             has_namespace_aliases: Cell::new(false),
             next_root_namespace_id: Cell::new(1),
