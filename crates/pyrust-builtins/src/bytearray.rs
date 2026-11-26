@@ -161,6 +161,28 @@ pub struct ByteArrayState {
     pub exports: Rc<Cell<usize>>,
 }
 
+/// Remove the bytes at `indices` (as yielded by `slice_indices`) in one pass.
+///
+/// `slice_indices` is monotonic: positive steps yield ascending indices and
+/// negative steps descending ones. Normalise to ascending, then compact the
+/// Vec once. Repeated `Vec::remove` shifted the remaining tail for every
+/// selected byte, making `del b[::2]` quadratic.
+fn delete_extended_indices(data: &mut Vec<u8>, mut indices: Vec<usize>, step: i64) {
+    if step < 0 {
+        indices.reverse();
+    }
+    let mut indices = indices.into_iter().peekable();
+    let mut old_index = 0usize;
+    data.retain(|_| {
+        let should_delete = indices.peek().copied() == Some(old_index);
+        if should_delete {
+            indices.next();
+        }
+        old_index += 1;
+        !should_delete
+    });
+}
+
 /// Raise `BufferError` if this bytearray currently has active buffer exports.
 pub fn check_resizable(exports: &Rc<Cell<usize>>) -> Result<()> {
     if exports.get() > 0 {
@@ -396,10 +418,20 @@ impl BuiltinTypeOps for ByteArrayOps {
                 }
                 data.splice(s2..e2, replacement);
             } else {
-                // Extended slice: replacement must have the exact same length.
+                // Extended slice: replacement must have the exact same length,
+                // except that an empty replacement deletes the selected bytes
+                // (CPython's `bytearray_ass_subscript` treats `needed == 0` as
+                // a delete, so `ba[::2] = b""` equals `del ba[::2]`).
                 let indices: Vec<usize> = slice_indices(start, stop, step)
                     .filter(|&i| i < data.len())
                     .collect();
+                if replacement.is_empty() {
+                    if !indices.is_empty() {
+                        check_resizable(&exports_rc)?;
+                    }
+                    delete_extended_indices(&mut data, indices, step);
+                    return Ok(());
+                }
                 if indices.len() != replacement.len() {
                     return Err(PyError::named(
                         "ValueError",
@@ -454,31 +486,14 @@ impl BuiltinTypeOps for ByteArrayOps {
                 }
                 data.drain(s2..e2);
             } else {
-                // Extended slice deletion. `slice_indices` is already monotonic:
-                // positive steps yield ascending indices and negative steps
-                // yield descending indices. Normalise that list to ascending,
-                // then compact the Vec once. Repeated `Vec::remove` shifted the
-                // remaining tail for every selected byte, making `del b[::2]`
-                // quadratic.
-                let mut indices: Vec<usize> = slice_indices(start, stop, step)
+                // Extended slice deletion.
+                let indices: Vec<usize> = slice_indices(start, stop, step)
                     .filter(|&i| i < data.len())
                     .collect();
                 if !indices.is_empty() {
                     check_resizable(&s.exports)?;
                 }
-                if step < 0 {
-                    indices.reverse();
-                }
-                let mut indices = indices.into_iter().peekable();
-                let mut old_index = 0usize;
-                data.retain(|_| {
-                    let should_delete = indices.peek().copied() == Some(old_index);
-                    if should_delete {
-                        indices.next();
-                    }
-                    old_index += 1;
-                    !should_delete
-                });
+                delete_extended_indices(&mut data, indices, step);
             }
             return Ok(());
         }

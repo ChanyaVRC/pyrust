@@ -300,7 +300,9 @@ pub fn compute_indices(length: i64, lo: &Value, hi: &Value, st: &Value) -> Resul
                 "slice step cannot be zero".to_string(),
             ));
         }
-        s
+        // `PySlice_Unpack` clamps the step to `-PY_SSIZE_T_MAX`, so callers can
+        // negate it (`-step`) without overflowing on a huge negative BigInt.
+        s.max(-i64::MAX)
     };
 
     // Resolve a bound value and clamp it to the valid range for this step direction.

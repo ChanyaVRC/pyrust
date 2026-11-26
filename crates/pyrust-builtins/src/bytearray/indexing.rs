@@ -72,14 +72,14 @@ pub(super) fn resolve_slice_indices(
     let start_val: i64 = match start.kind() {
         ValueKind::None => default_start,
         ValueKind::Int(n) => clamp_bound(n),
-        ValueKind::Bool(b) => b as i64,
+        ValueKind::Bool(b) => clamp_bound(b as i64),
         ValueKind::BigInt(b) => clamp_bound(bigint_bound(b)),
         _ => default_start,
     };
     let stop_val: i64 = match stop.kind() {
         ValueKind::None => default_stop,
         ValueKind::Int(n) => clamp_bound(n),
-        ValueKind::Bool(b) => b as i64,
+        ValueKind::Bool(b) => clamp_bound(b as i64),
         ValueKind::BigInt(b) => clamp_bound(bigint_bound(b)),
         _ => default_stop,
     };

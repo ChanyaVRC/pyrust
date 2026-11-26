@@ -1646,7 +1646,9 @@ fn subscript(
             for _ in 0..length {
                 let at = cur as usize * size;
                 out.extend_from_slice(&data[at..at + size]);
-                cur += step;
+                // A huge step (clamped BigInt) selects one item; the final
+                // advance must not overflow.
+                cur = cur.wrapping_add(step);
             }
             out
         };
@@ -1728,8 +1730,13 @@ fn ass_subscript(
     }
     if needed == 0 {
         if step < 0 {
+            // CPython evaluates this in C `Py_ssize_t` (wrapping in practice);
+            // for an empty selection with a huge step the result is never read,
+            // so wrap instead of overflowing.
             stop = start + 1;
-            start = stop + step * (length as i64 - 1) - 1;
+            start = stop
+                .wrapping_add(step.wrapping_mul(length as i64 - 1))
+                .wrapping_sub(1);
             step = -step;
         }
         let _ = stop;
@@ -1760,7 +1767,7 @@ fn ass_subscript(
     for k in 0..length {
         let at = cur as usize * size;
         data[at..at + size].copy_from_slice(&source[k * size..(k + 1) * size]);
-        cur += step;
+        cur = cur.wrapping_add(step);
     }
     Ok(())
 }
