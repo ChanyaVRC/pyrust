@@ -168,10 +168,11 @@ impl Parser {
     /// Parse lambda parameter list, terminated by `:` instead of `)`.
     /// Lambda params cannot have type annotations (CPython 3.12).
     fn parse_lambda_params(&mut self) -> Result<Vec<FunctionParam>> {
-        let mut params = Vec::new();
+        let mut params: Vec<FunctionParam> = Vec::new();
         let mut seen_default = false;
         let mut seen_star = false;
         let mut seen_kwargs = false;
+        let mut seen_slash = false;
         // Set when a bare `*` separator is consumed; cleared when the first
         // keyword-only parameter is added.  If still set when `:` is reached,
         // CPython raises SyntaxError: named arguments must follow bare *.
@@ -179,10 +180,29 @@ impl Parser {
 
         loop {
             if seen_kwargs {
-                return Err(PyError::parse("parameter after **kwargs".to_string()));
+                return Err(PyError::parse(
+                    "arguments cannot follow var-keyword argument".to_string(),
+                ));
             }
 
-            if self.is(&Token::StarStar) {
+            if self.is(&Token::Slash) {
+                // Positional-only marker (PEP 570).  Messages follow CPython 3.12.
+                if seen_star {
+                    return Err(PyError::parse("/ must be ahead of *".to_string()));
+                }
+                if seen_slash {
+                    return Err(PyError::parse("/ may appear only once".to_string()));
+                }
+                if params.is_empty() {
+                    return Err(PyError::parse("invalid syntax".to_string()));
+                }
+                // Mark all prior params as positional-only.
+                for p in &mut params {
+                    p.is_positional_only = true;
+                }
+                seen_slash = true;
+                self.bump();
+            } else if self.is(&Token::StarStar) {
                 self.bump();
                 let name = self.expect_ident("kwargs parameter name")?;
                 params.push(FunctionParam {
@@ -229,7 +249,8 @@ impl Parser {
                         } else {
                             if seen_default && !seen_star {
                                 return Err(PyError::parse(
-                                    "non-default argument follows default argument".to_string(),
+                                    "parameter without a default follows parameter with a default"
+                                        .to_string(),
                                 ));
                             }
                             None
