@@ -100,7 +100,7 @@ fn extract_fd_list(val: &Value) -> Result<Vec<i64>> {
     Ok(fds)
 }
 
-fn select_fds_impl(args: &[ExpandedCallArg]) -> Result<Value> {
+fn select_fds_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() != 3 {
         return Err(PyError::named(
             "TypeError",
@@ -144,7 +144,11 @@ fn select_fds_impl(args: &[ExpandedCallArg]) -> Result<Value> {
         }
     };
 
-    let (ready_r, ready_w) = super::socket::select_raw_handles(&rlist, &wlist, timeout)?;
+    // Wait with the GIL released (CPython's `Py_BEGIN_ALLOW_THREADS` around
+    // `select()`): `socketserver.serve_forever()` parks here for every poll
+    // interval, and holding the GIL would starve every other Python thread.
+    let (ready_r, ready_w) =
+        interp.release_gil_during(|| super::socket::select_raw_handles(&rlist, &wlist, timeout))?;
     let r_vals = ready_r.into_iter().map(Value::int).collect();
     let w_vals = ready_w.into_iter().map(Value::int).collect();
     Ok(Value::tuple(vec![Value::list(r_vals), Value::list(w_vals)]))
@@ -152,7 +156,6 @@ fn select_fds_impl(args: &[ExpandedCallArg]) -> Result<Value> {
 
 pyrust_module! {
     fn _select_fds(args) -> Result<Value> {
-        let _ = _interp;
-        select_fds_impl(args)
+        select_fds_impl(_interp, args)
     }
 }

@@ -20,6 +20,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 #[cfg(unix)]
@@ -954,21 +955,113 @@ struct SocketOptions {
     sndbuf: Option<i32>,
 }
 
+/// Live OS socket of a `_socket_handle`.
+///
+/// The OS objects sit behind `Arc` so a blocking call can take a shared
+/// reference out of the `Rc`-owned handle state (an atomic increment, no
+/// `dup()` / `WSADuplicateSocketW`) and run the syscall with the GIL released,
+/// the way CPython wraps every `sock_call` in `Py_BEGIN_ALLOW_THREADS`.  If
+/// another Python thread closes the socket meanwhile, the in-flight call's
+/// clone keeps the OS socket open until it returns, so a released syscall
+/// never touches a recycled descriptor.
 enum SocketBackend {
     UnboundTcp,
     BoundTcp {
-        listener: TcpListener,
+        listener: Arc<TcpListener>,
         listening: bool,
     },
     ConnectedTcp {
-        stream: TcpStream,
+        stream: Arc<TcpStream>,
     },
     UnboundUdp,
     BoundUdp {
-        sock: UdpSocket,
+        sock: Arc<UdpSocket>,
         connected_peer: Option<SocketAddr>,
     },
     Closed,
+}
+
+/// Data-carrying OS socket shared out of a `_socket_handle` for one blocking
+/// call made with the GIL released (see [`SocketBackend`]).
+///
+/// Every method retries `EINTR` (PEP 475) and touches no Python object, so it
+/// is safe to call inside [`Interpreter::release_gil_during`].
+enum DataIo {
+    Tcp(Arc<TcpStream>),
+    Udp(Arc<UdpSocket>),
+}
+
+fn retry_eintr<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    loop {
+        match op() {
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            res => return res,
+        }
+    }
+}
+
+impl DataIo {
+    fn recv(&self, buf: &mut [u8], peek: bool) -> std::io::Result<usize> {
+        retry_eintr(|| match (self, peek) {
+            (Self::Tcp(stream), true) => stream.peek(buf),
+            (Self::Tcp(stream), false) => (&**stream).read(buf),
+            (Self::Udp(udp), true) => udp.peek(buf),
+            (Self::Udp(udp), false) => udp.recv(buf),
+        })
+    }
+
+    /// `recvfrom`: the peer is the datagram source for UDP and the connected
+    /// peer (when still known) for TCP.
+    fn recv_from(
+        &self,
+        buf: &mut [u8],
+        peek: bool,
+    ) -> std::io::Result<(usize, Option<SocketAddr>)> {
+        match self {
+            Self::Udp(udp) => retry_eintr(|| {
+                if peek {
+                    udp.peek_from(buf)
+                } else {
+                    udp.recv_from(buf)
+                }
+            })
+            .map(|(n, peer)| (n, Some(peer))),
+            Self::Tcp(stream) => {
+                let n = self.recv(buf, peek)?;
+                Ok((n, stream.peer_addr().ok()))
+            }
+        }
+    }
+
+    fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
+        retry_eintr(|| match self {
+            Self::Tcp(stream) => (&**stream).write(buf),
+            Self::Udp(udp) => udp.send(buf),
+        })
+    }
+
+    fn send_to(&self, buf: &[u8], target: SocketAddr) -> std::io::Result<usize> {
+        retry_eintr(|| match self {
+            Self::Tcp(stream) => (&**stream).write(buf),
+            Self::Udp(udp) => udp.send_to(buf, target),
+        })
+    }
+
+    /// `sendall`: a stream that accepts zero bytes is a broken pipe; a
+    /// datagram is sent whole or not at all.
+    fn send_all(&self, buf: &[u8]) -> std::io::Result<()> {
+        let mut written = 0;
+        while written < buf.len() {
+            match self.send(&buf[written..])? {
+                0 if matches!(self, Self::Tcp(_)) => {
+                    return Err(std::io::Error::from(ErrorKind::BrokenPipe));
+                }
+                0 => break,
+                n => written += n,
+            }
+        }
+        Ok(())
+    }
 }
 
 struct SocketHandleState {
@@ -1092,13 +1185,51 @@ impl SocketHandleState {
             let sock =
                 UdpSocket::bind(bind_addr).map_err(|e| io_error_to_socket_py(&e, self.timeout))?;
             self.backend = SocketBackend::BoundUdp {
-                sock,
+                sock: Arc::new(sock),
                 connected_peer: None,
             };
             self.apply_saved_options_to_backend();
             self.apply_timeout_to_backend()?;
         }
         Ok(())
+    }
+
+    /// Socket that `recv` / `recv_into` / `recvfrom` read from: a connected
+    /// stream or any bound datagram socket.
+    fn recv_io(&self) -> Result<DataIo> {
+        match &self.backend {
+            SocketBackend::Closed => Err(closed_socket_error()),
+            SocketBackend::ConnectedTcp { stream } => Ok(DataIo::Tcp(Arc::clone(stream))),
+            SocketBackend::BoundUdp { sock, .. } => Ok(DataIo::Udp(Arc::clone(sock))),
+            _ => Err(os_error(
+                plat::ENOTCONN,
+                "Transport endpoint is not connected",
+            )),
+        }
+    }
+
+    /// Socket that `send` / `sendall` write to: a connected stream or a
+    /// connected datagram socket.
+    fn send_io(&self) -> Result<DataIo> {
+        match &self.backend {
+            SocketBackend::Closed => Err(closed_socket_error()),
+            SocketBackend::ConnectedTcp { stream } => Ok(DataIo::Tcp(Arc::clone(stream))),
+            SocketBackend::BoundUdp {
+                sock,
+                connected_peer: Some(_),
+            } => Ok(DataIo::Udp(Arc::clone(sock))),
+            SocketBackend::BoundUdp {
+                connected_peer: None,
+                ..
+            }
+            | SocketBackend::UnboundUdp => {
+                Err(os_error(plat::EDESTADDRREQ, "Destination address required"))
+            }
+            SocketBackend::UnboundTcp | SocketBackend::BoundTcp { .. } => Err(os_error(
+                plat::ENOTCONN,
+                "Transport endpoint is not connected",
+            )),
+        }
     }
 }
 
@@ -1215,7 +1346,7 @@ pub(crate) fn handle_read_raw(
     let mut out_err: Option<std::io::Error> = None;
     let res = with_socket_mut(handle_val, |sock| match &mut sock.backend {
         SocketBackend::ConnectedTcp { stream } => loop {
-            match stream.read(buf) {
+            match (&**stream).read(buf) {
                 Ok(n) => return Ok(Some(n)),
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
@@ -1247,7 +1378,7 @@ pub(crate) fn handle_write_raw(
     let mut out_err: Option<std::io::Error> = None;
     let res = with_socket_mut(handle_val, |sock| match &mut sock.backend {
         SocketBackend::ConnectedTcp { stream } => loop {
-            match stream.write(buf) {
+            match (&**stream).write(buf) {
                 Ok(n) => return Ok(Some(n)),
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
@@ -1273,81 +1404,35 @@ pub(crate) fn handle_write_raw(
 }
 
 pub(crate) fn handle_connect_raw(
+    interp: &mut Interpreter,
     handle_val: &Value,
     addr: &Value,
     gaierror_cls: &Value,
 ) -> Result<()> {
-    with_socket_mut(handle_val, |sock| {
-        if matches!(sock.backend, SocketBackend::Closed) {
-            return Err(closed_socket_error());
-        }
-        let resolved = resolve_socket_addr(sock.family, addr, false, gaierror_cls)?;
-        let timeout = sock.timeout;
-        connect_inner(sock, resolved).map_err(|e| io_error_to_socket_py(&e, timeout))
-    })
+    let timeout = with_socket(handle_val, |sock| Ok(sock.timeout))?;
+    connect_handle(interp, handle_val, addr, gaierror_cls)?
+        .map_err(|e| io_error_to_socket_py(&e, timeout))
 }
 
 pub(crate) fn handle_connect_ex_raw(
+    interp: &mut Interpreter,
     handle_val: &Value,
     addr: &Value,
     gaierror_cls: &Value,
 ) -> Result<i64> {
-    with_socket_mut(handle_val, |sock| {
-        if matches!(sock.backend, SocketBackend::Closed) {
-            return Err(closed_socket_error());
-        }
-        let resolved = resolve_socket_addr(sock.family, addr, false, gaierror_cls)?;
-        match connect_inner(sock, resolved) {
-            Ok(()) => Ok(0),
-            Err(e) => Ok(io_error_to_errno(&e)),
-        }
-    })
+    let errno = match connect_handle(interp, handle_val, addr, gaierror_cls)? {
+        Ok(()) => 0,
+        Err(e) => io_error_to_errno(&e),
+    };
+    Ok(errno)
 }
 
 pub(crate) fn handle_accept_raw(
+    interp: &mut Interpreter,
     handle_val: &Value,
     default_timeout_val: &Value,
 ) -> Result<(Value, Value)> {
-    let default_timeout = parse_timeout_value(default_timeout_val)?;
-    with_socket(handle_val, |sock| {
-        let SocketBackend::BoundTcp {
-            listener,
-            listening,
-        } = &sock.backend
-        else {
-            return if matches!(sock.backend, SocketBackend::Closed) {
-                Err(closed_socket_error())
-            } else {
-                Err(os_error(plat::EINVAL, "Invalid argument"))
-            };
-        };
-        if !*listening {
-            return Err(os_error(plat::EINVAL, "Invalid argument"));
-        }
-        if let Some(dur) = sock.timeout
-            && !dur.is_zero()
-        {
-            let raw = tcp_listener_raw(listener);
-            let (ready_r, _) = select_raw_handles(&[raw], &[], Some(dur))?;
-            if ready_r.is_empty() {
-                return Err(PyError::named("TimeoutError", "timed out".to_string()));
-            }
-        }
-        let (stream, peer_addr) = listener
-            .accept()
-            .map_err(|e| io_error_to_socket_py(&e, sock.timeout))?;
-        let new_state = SocketHandleState {
-            family: sock.family,
-            sock_type: sock.sock_type,
-            proto: sock.proto,
-            synthetic_fd: NEXT_SYNTHETIC_FD.fetch_add(1, Ordering::Relaxed),
-            timeout: default_timeout,
-            opts: SocketOptions::default(),
-            backend: SocketBackend::ConnectedTcp { stream },
-        };
-        new_state.apply_timeout_to_backend()?;
-        Ok((wrap_socket_handle(new_state), sockaddr_to_py(peer_addr)))
-    })
+    accept_handle(interp, handle_val, default_timeout_val)
 }
 
 pub(crate) fn handle_shutdown_raw(handle_val: &Value, how: i64) -> Result<()> {
@@ -1884,7 +1969,7 @@ fn sock_bind_impl(args: &[ExpandedCallArg]) -> Result<Value> {
                 let listener =
                     TcpListener::bind(addr).map_err(|e| io_error_to_socket_py(&e, sock.timeout))?;
                 sock.backend = SocketBackend::BoundTcp {
-                    listener,
+                    listener: Arc::new(listener),
                     listening: false,
                 };
                 sock.apply_saved_options_to_backend();
@@ -1895,7 +1980,7 @@ fn sock_bind_impl(args: &[ExpandedCallArg]) -> Result<Value> {
                 let udp =
                     UdpSocket::bind(addr).map_err(|e| io_error_to_socket_py(&e, sock.timeout))?;
                 sock.backend = SocketBackend::BoundUdp {
-                    sock: udp,
+                    sock: Arc::new(udp),
                     connected_peer: None,
                 };
                 sock.apply_saved_options_to_backend();
@@ -1930,7 +2015,7 @@ fn sock_listen_impl(args: &[ExpandedCallArg]) -> Result<Value> {
             let listener = TcpListener::bind(bind_addr)
                 .map_err(|e| io_error_to_socket_py(&e, sock.timeout))?;
             sock.backend = SocketBackend::BoundTcp {
-                listener,
+                listener: Arc::new(listener),
                 listening: true,
             };
             sock.apply_saved_options_to_backend();
@@ -1948,98 +2033,53 @@ fn sock_accept_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Resul
             "_sock_accept() expects 2 arguments".to_string(),
         ));
     }
-    let default_timeout = parse_timeout_value(&args[1].value)?;
-    let is_nonblocking = with_socket(&args[0].value, |sock| {
-        Ok(sock.timeout.is_some_and(|d| d.is_zero()))
-    })
-    .unwrap_or(false);
-    if !interp.cold.gil_state.is_multi_threaded() || is_nonblocking {
-        return with_socket(&args[0].value, |sock| {
-            let SocketBackend::BoundTcp {
-                listener,
-                listening,
-            } = &sock.backend
-            else {
-                return if matches!(sock.backend, SocketBackend::Closed) {
-                    Err(closed_socket_error())
-                } else {
-                    Err(os_error(plat::EINVAL, "Invalid argument"))
-                };
-            };
-            if !*listening {
-                return Err(os_error(plat::EINVAL, "Invalid argument"));
-            }
-            if let Some(dur) = sock.timeout
-                && !dur.is_zero()
-            {
-                let raw = tcp_listener_raw(listener);
-                let (ready_r, _) = select_raw_handles(&[raw], &[], Some(dur))?;
-                if ready_r.is_empty() {
-                    return Err(PyError::named("TimeoutError", "timed out".to_string()));
-                }
-            }
-            let (stream, peer_addr) = listener
-                .accept()
-                .map_err(|e| io_error_to_socket_py(&e, sock.timeout))?;
-            let new_state = SocketHandleState {
-                family: sock.family,
-                sock_type: sock.sock_type,
-                proto: sock.proto,
-                synthetic_fd: NEXT_SYNTHETIC_FD.fetch_add(1, Ordering::Relaxed),
-                timeout: default_timeout,
-                opts: SocketOptions::default(),
-                backend: SocketBackend::ConnectedTcp { stream },
-            };
-            new_state.apply_timeout_to_backend()?;
-            Ok(Value::tuple(vec![
-                wrap_socket_handle(new_state),
-                sockaddr_to_py(peer_addr),
-            ]))
-        });
-    }
-    let (cloned_listener, family, sock_type, proto, timeout) =
-        with_socket(&args[0].value, |sock| {
-            let SocketBackend::BoundTcp {
-                listener,
-                listening,
-            } = &sock.backend
-            else {
-                return if matches!(sock.backend, SocketBackend::Closed) {
-                    Err(closed_socket_error())
-                } else {
-                    Err(os_error(plat::EINVAL, "Invalid argument"))
-                };
-            };
-            if !*listening {
-                return Err(os_error(plat::EINVAL, "Invalid argument"));
-            }
-            let cloned = listener
-                .try_clone()
-                .map_err(|e| io_error_to_socket_py(&e, sock.timeout))?;
-            Ok((
-                cloned,
-                sock.family,
-                sock.sock_type,
-                sock.proto,
-                sock.timeout,
-            ))
-        })?;
+    let (conn, peer) = accept_handle(interp, &args[0].value, &args[1].value)?;
+    Ok(Value::tuple(vec![conn, peer]))
+}
 
-    let accept_res = interp.release_gil_during(|| {
+/// `accept()`: wait for a connection (honouring the listener's timeout) and
+/// accept it with the GIL released.  Returns `(conn_handle, peer_address)`.
+fn accept_handle(
+    interp: &mut Interpreter,
+    handle_val: &Value,
+    default_timeout_val: &Value,
+) -> Result<(Value, Value)> {
+    let default_timeout = parse_timeout_value(default_timeout_val)?;
+    let (listener, family, sock_type, proto, timeout) = with_socket(handle_val, |sock| {
+        let SocketBackend::BoundTcp {
+            listener,
+            listening,
+        } = &sock.backend
+        else {
+            return if matches!(sock.backend, SocketBackend::Closed) {
+                Err(closed_socket_error())
+            } else {
+                Err(os_error(plat::EINVAL, "Invalid argument"))
+            };
+        };
+        if !*listening {
+            return Err(os_error(plat::EINVAL, "Invalid argument"));
+        }
+        Ok((
+            Arc::clone(listener),
+            sock.family,
+            sock.sock_type,
+            sock.proto,
+            sock.timeout,
+        ))
+    })?;
+    let (stream, peer_addr) = interp.release_gil_during(|| {
         if let Some(dur) = timeout
             && !dur.is_zero()
         {
-            let raw = tcp_listener_raw(&cloned_listener);
+            let raw = tcp_listener_raw(&listener);
             let (ready_r, _) = select_raw_handles(&[raw], &[], Some(dur))?;
             if ready_r.is_empty() {
                 return Err(PyError::named("TimeoutError", "timed out".to_string()));
             }
         }
-        cloned_listener
-            .accept()
-            .map_err(|e| io_error_to_socket_py(&e, timeout))
-    });
-    let (stream, peer_addr) = accept_res?;
+        retry_eintr(|| listener.accept()).map_err(|e| io_error_to_socket_py(&e, timeout))
+    })?;
     let new_state = SocketHandleState {
         family,
         sock_type,
@@ -2047,237 +2087,179 @@ fn sock_accept_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Resul
         synthetic_fd: NEXT_SYNTHETIC_FD.fetch_add(1, Ordering::Relaxed),
         timeout: default_timeout,
         opts: SocketOptions::default(),
-        backend: SocketBackend::ConnectedTcp { stream },
+        backend: SocketBackend::ConnectedTcp {
+            stream: Arc::new(stream),
+        },
     };
     new_state.apply_timeout_to_backend()?;
-    Ok(Value::tuple(vec![
-        wrap_socket_handle(new_state),
-        sockaddr_to_py(peer_addr),
-    ]))
+    Ok((wrap_socket_handle(new_state), sockaddr_to_py(peer_addr)))
 }
 
-fn connect_inner(
-    sock: &mut SocketHandleState,
-    addr: SocketAddr,
-) -> std::result::Result<(), std::io::Error> {
-    match &mut sock.backend {
-        SocketBackend::UnboundTcp => {
-            let stream = match sock.timeout {
-                None => TcpStream::connect(addr)?,
-                Some(d) if d.is_zero() => {
-                    TcpStream::connect_timeout(&addr, Duration::from_millis(50))?
-                }
-                Some(d) => TcpStream::connect_timeout(&addr, d)?,
-            };
-            sock.backend = SocketBackend::ConnectedTcp { stream };
-            sock.apply_saved_options_to_backend();
-            let _ = sock.apply_timeout_to_backend();
-            Ok(())
+/// `connect()` / `connect_ex()`.
+///
+/// Python-level failures (closed socket, malformed address, `gaierror`) are
+/// the outer `Err`; the OS connect result is the inner one, so `connect_ex`
+/// can report it as an errno.  The TCP handshake, the only step that waits on
+/// the network, runs with the GIL released.
+fn connect_handle(
+    interp: &mut Interpreter,
+    handle_val: &Value,
+    addr_val: &Value,
+    gaierror_cls: &Value,
+) -> Result<std::io::Result<()>> {
+    // `Some((addr, timeout))` = TCP handshake still to run; `None` = done.
+    let pending_tcp = with_socket_mut(handle_val, |sock| {
+        if matches!(sock.backend, SocketBackend::Closed) {
+            return Err(closed_socket_error());
         }
-        SocketBackend::BoundTcp {
-            listening: false, ..
-        } => {
-            // `bind()` followed by `connect()` (e.g. `create_connection(..., source_address=...)`).
-            sock.backend = SocketBackend::UnboundTcp;
-            let stream = match sock.timeout {
-                None => TcpStream::connect(addr)?,
-                Some(d) if d.is_zero() => {
-                    TcpStream::connect_timeout(&addr, Duration::from_millis(50))?
-                }
-                Some(d) => TcpStream::connect_timeout(&addr, d)?,
-            };
-            sock.backend = SocketBackend::ConnectedTcp { stream };
-            sock.apply_saved_options_to_backend();
-            let _ = sock.apply_timeout_to_backend();
-            Ok(())
-        }
-        SocketBackend::UnboundUdp => {
-            let bind_addr: SocketAddr = if sock.family == plat::AF_INET6 {
-                SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0))
-            } else {
-                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
-            };
-            let udp = UdpSocket::bind(bind_addr)?;
-            udp.connect(addr)?;
-            sock.backend = SocketBackend::BoundUdp {
+        let addr = resolve_socket_addr(sock.family, addr_val, false, gaierror_cls)?;
+        Ok(match &mut sock.backend {
+            // A `bind()` followed by `connect()` (e.g. `create_connection(...,
+            // source_address=...)`) connects from a fresh socket.
+            SocketBackend::UnboundTcp
+            | SocketBackend::BoundTcp {
+                listening: false, ..
+            } => {
+                sock.backend = SocketBackend::UnboundTcp;
+                Ok(Some((addr, sock.timeout)))
+            }
+            SocketBackend::UnboundUdp => {
+                let bind_addr: SocketAddr = if sock.family == plat::AF_INET6 {
+                    SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0))
+                } else {
+                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+                };
+                UdpSocket::bind(bind_addr)
+                    .and_then(|udp| udp.connect(addr).map(|()| udp))
+                    .map(|udp| {
+                        sock.backend = SocketBackend::BoundUdp {
+                            sock: Arc::new(udp),
+                            connected_peer: Some(addr),
+                        };
+                        sock.apply_saved_options_to_backend();
+                        let _ = sock.apply_timeout_to_backend();
+                        None
+                    })
+            }
+            SocketBackend::BoundUdp {
                 sock: udp,
-                connected_peer: Some(addr),
+                connected_peer,
+            } => udp.connect(addr).map(|()| {
+                *connected_peer = Some(addr);
+                None
+            }),
+            _ => Err(std::io::Error::from_raw_os_error(plat::EINVAL as i32)),
+        })
+    })?;
+    let (addr, timeout) = match pending_tcp {
+        Ok(Some(pending)) => pending,
+        Ok(None) => return Ok(Ok(())),
+        Err(e) => return Ok(Err(e)),
+    };
+    let connected = interp.release_gil_during(|| match timeout {
+        None => TcpStream::connect(addr),
+        Some(d) if d.is_zero() => TcpStream::connect_timeout(&addr, Duration::from_millis(50)),
+        Some(d) => TcpStream::connect_timeout(&addr, d),
+    });
+    let stream = match connected {
+        Ok(stream) => stream,
+        Err(e) => return Ok(Err(e)),
+    };
+    with_socket_mut(handle_val, |sock| match sock.backend {
+        SocketBackend::UnboundTcp => {
+            sock.backend = SocketBackend::ConnectedTcp {
+                stream: Arc::new(stream),
             };
             sock.apply_saved_options_to_backend();
             let _ = sock.apply_timeout_to_backend();
-            Ok(())
+            Ok(Ok(()))
         }
-        SocketBackend::BoundUdp {
-            sock: udp,
-            connected_peer,
-        } => {
-            udp.connect(addr)?;
-            *connected_peer = Some(addr);
-            Ok(())
-        }
-        _ => Err(std::io::Error::from_raw_os_error(plat::EINVAL as i32)),
-    }
+        // Another thread closed (or connected) the socket during the handshake.
+        SocketBackend::Closed => Err(closed_socket_error()),
+        _ => Ok(Err(std::io::Error::from_raw_os_error(plat::EINVAL as i32))),
+    })
 }
 
-fn sock_connect_impl(args: &[ExpandedCallArg]) -> Result<Value> {
+fn sock_connect_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() != 3 {
         return Err(PyError::named(
             "TypeError",
             "_sock_connect() expects 3 arguments".to_string(),
         ));
     }
-    let gaierror_cls = &args[2].value;
-    with_socket_mut(&args[0].value, |sock| {
-        if matches!(sock.backend, SocketBackend::Closed) {
-            return Err(closed_socket_error());
-        }
-        let addr = resolve_socket_addr(sock.family, &args[1].value, false, gaierror_cls)?;
-        let timeout = sock.timeout;
-        connect_inner(sock, addr).map_err(|e| io_error_to_socket_py(&e, timeout))?;
-        Ok(Value::none())
-    })
+    handle_connect_raw(interp, &args[0].value, &args[1].value, &args[2].value)?;
+    Ok(Value::none())
 }
 
-fn sock_connect_ex_impl(args: &[ExpandedCallArg]) -> Result<Value> {
+fn sock_connect_ex_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() != 3 {
         return Err(PyError::named(
             "TypeError",
             "_sock_connect_ex() expects 3 arguments".to_string(),
         ));
     }
-    let gaierror_cls = &args[2].value;
-    with_socket_mut(&args[0].value, |sock| {
-        if matches!(sock.backend, SocketBackend::Closed) {
-            return Err(closed_socket_error());
-        }
-        let addr = resolve_socket_addr(sock.family, &args[1].value, false, gaierror_cls)?;
-        match connect_inner(sock, addr) {
-            Ok(()) => Ok(Value::int(0)),
-            Err(e) => Ok(Value::int(io_error_to_errno(&e))),
-        }
+    let errno = handle_connect_ex_raw(interp, &args[0].value, &args[1].value, &args[2].value)?;
+    Ok(Value::int(errno))
+}
+
+/// Run `op` on the socket's [`DataIo`] (chosen by `pick`) with the GIL
+/// released, mapping OS errors the way the socket's timeout mode expects.
+fn blocking_io<T>(
+    interp: &mut Interpreter,
+    handle_val: &Value,
+    pick: impl FnOnce(&SocketHandleState) -> Result<DataIo>,
+    op: impl FnOnce(&DataIo) -> std::io::Result<T>,
+) -> Result<T> {
+    let (io, timeout) = with_socket(handle_val, |sock| Ok((pick(sock)?, sock.timeout)))?;
+    interp
+        .release_gil_during(|| op(&io))
+        .map_err(|e| io_error_to_socket_py(&e, timeout))
+}
+
+fn extract_send_data(val: &Value) -> Result<Vec<u8>> {
+    extract_bytes_like(val).ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            format!(
+                "a bytes-like object is required, not '{}'",
+                value_type_name_str(val)
+            ),
+        )
     })
 }
 
-fn sock_send_impl(args: &[ExpandedCallArg]) -> Result<Value> {
+fn sock_send_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() != 3 {
         return Err(PyError::named(
             "TypeError",
             "_sock_send() expects 3 arguments".to_string(),
         ));
     }
-    let data = extract_bytes_like(&args[1].value).ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            format!(
-                "a bytes-like object is required, not '{}'",
-                value_type_name_str(&args[1].value)
-            ),
-        )
-    })?;
+    let data = extract_send_data(&args[1].value)?;
     let _flags = extract_i64(&args[2].value, "flags")?;
-    with_socket_mut(&args[0].value, |sock| {
-        let timeout = sock.timeout;
-        match &mut sock.backend {
-            SocketBackend::Closed => Err(closed_socket_error()),
-            SocketBackend::ConnectedTcp { stream } => {
-                let n = stream
-                    .write(&data)
-                    .map_err(|e| io_error_to_socket_py(&e, timeout))?;
-                Ok(Value::int(n as i64))
-            }
-            SocketBackend::BoundUdp {
-                sock: udp,
-                connected_peer: Some(_),
-            } => {
-                let n = udp
-                    .send(&data)
-                    .map_err(|e| io_error_to_socket_py(&e, timeout))?;
-                Ok(Value::int(n as i64))
-            }
-            SocketBackend::BoundUdp {
-                connected_peer: None,
-                ..
-            }
-            | SocketBackend::UnboundUdp => {
-                Err(os_error(plat::EDESTADDRREQ, "Destination address required"))
-            }
-            SocketBackend::UnboundTcp | SocketBackend::BoundTcp { .. } => Err(os_error(
-                plat::ENOTCONN,
-                "Transport endpoint is not connected",
-            )),
-        }
-    })
+    let n = blocking_io(interp, &args[0].value, SocketHandleState::send_io, |io| {
+        io.send(&data)
+    })?;
+    Ok(Value::int(n as i64))
 }
 
-fn sock_sendall_impl(args: &[ExpandedCallArg]) -> Result<Value> {
+fn sock_sendall_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() != 3 {
         return Err(PyError::named(
             "TypeError",
             "_sock_sendall() expects 3 arguments".to_string(),
         ));
     }
-    let data = extract_bytes_like(&args[1].value).ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            format!(
-                "a bytes-like object is required, not '{}'",
-                value_type_name_str(&args[1].value)
-            ),
-        )
-    })?;
+    let data = extract_send_data(&args[1].value)?;
     let _flags = extract_i64(&args[2].value, "flags")?;
-    with_socket_mut(&args[0].value, |sock| {
-        let timeout = sock.timeout;
-        match &mut sock.backend {
-            SocketBackend::Closed => Err(closed_socket_error()),
-            SocketBackend::ConnectedTcp { stream } => {
-                let mut written = 0;
-                while written < data.len() {
-                    match stream.write(&data[written..]) {
-                        Ok(0) => {
-                            return Err(PyError::new(PyErrorKind::OsError {
-                                class_name: "BrokenPipeError",
-                                errno: 32,
-                                strerror: "Broken pipe".to_string(),
-                                filename: None,
-                                filename2: None,
-                            }));
-                        }
-                        Ok(n) => written += n,
-                        Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                        Err(e) => return Err(io_error_to_socket_py(&e, timeout)),
-                    }
-                }
-                Ok(Value::none())
-            }
-            SocketBackend::BoundUdp {
-                sock: udp,
-                connected_peer: Some(_),
-            } => {
-                let mut written = 0;
-                while written < data.len() {
-                    match udp.send(&data[written..]) {
-                        Ok(0) => break,
-                        Ok(n) => written += n,
-                        Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                        Err(e) => return Err(io_error_to_socket_py(&e, timeout)),
-                    }
-                }
-                Ok(Value::none())
-            }
-            SocketBackend::BoundUdp {
-                connected_peer: None,
-                ..
-            }
-            | SocketBackend::UnboundUdp => {
-                Err(os_error(plat::EDESTADDRREQ, "Destination address required"))
-            }
-            SocketBackend::UnboundTcp | SocketBackend::BoundTcp { .. } => Err(os_error(
-                plat::ENOTCONN,
-                "Transport endpoint is not connected",
-            )),
-        }
-    })
+    blocking_io(interp, &args[0].value, SocketHandleState::send_io, |io| {
+        io.send_all(&data)
+    })?;
+    Ok(Value::none())
+}
+
+fn recv_flags_peek(val: &Value) -> Result<bool> {
+    Ok((extract_i64(val, "flags")? & plat::MSG_PEEK) != 0)
 }
 
 fn sock_recv_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
@@ -2294,132 +2276,16 @@ fn sock_recv_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<
             "negative buffersize in recv".to_string(),
         ));
     }
-    let flags = extract_i64(&args[2].value, "flags")?;
-    let peek = (flags & plat::MSG_PEEK) != 0;
-    let size = (bufsize as usize).min(16 * 1024 * 1024);
-
-    let is_nonblocking = with_socket(&args[0].value, |sock| {
-        Ok(sock.timeout.is_some_and(|d| d.is_zero()))
-    })
-    .unwrap_or(false);
-    if !interp.cold.gil_state.is_multi_threaded() || is_nonblocking {
-        return with_socket_mut(&args[0].value, |sock| {
-            let timeout = sock.timeout;
-            match &mut sock.backend {
-                SocketBackend::Closed => Err(closed_socket_error()),
-                SocketBackend::ConnectedTcp { stream } => {
-                    let mut buf = vec![0u8; size];
-                    let n = loop {
-                        let res = if peek {
-                            stream.peek(&mut buf)
-                        } else {
-                            stream.read(&mut buf)
-                        };
-                        match res {
-                            Ok(n) => break n,
-                            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                            Err(e) => return Err(io_error_to_socket_py(&e, timeout)),
-                        }
-                    };
-                    buf.truncate(n);
-                    Ok(Value::bytes(buf))
-                }
-                SocketBackend::BoundUdp { sock: udp, .. } => {
-                    let mut buf = vec![0u8; size];
-                    let n = loop {
-                        let res = if peek {
-                            udp.peek(&mut buf)
-                        } else {
-                            udp.recv(&mut buf)
-                        };
-                        match res {
-                            Ok(n) => break n,
-                            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                            Err(e) => return Err(io_error_to_socket_py(&e, timeout)),
-                        }
-                    };
-                    buf.truncate(n);
-                    Ok(Value::bytes(buf))
-                }
-                _ => Err(os_error(
-                    plat::ENOTCONN,
-                    "Transport endpoint is not connected",
-                )),
-            }
-        });
-    }
-
-    enum RecvHandle {
-        Tcp(TcpStream),
-        Udp(UdpSocket),
-    }
-
-    let (handle, timeout) = with_socket(&args[0].value, |sock| {
-        let timeout = sock.timeout;
-        match &sock.backend {
-            SocketBackend::Closed => Err(closed_socket_error()),
-            SocketBackend::ConnectedTcp { stream } => Ok((
-                RecvHandle::Tcp(
-                    stream
-                        .try_clone()
-                        .map_err(|e| io_error_to_socket_py(&e, timeout))?,
-                ),
-                timeout,
-            )),
-            SocketBackend::BoundUdp { sock: udp, .. } => Ok((
-                RecvHandle::Udp(
-                    udp.try_clone()
-                        .map_err(|e| io_error_to_socket_py(&e, timeout))?,
-                ),
-                timeout,
-            )),
-            _ => Err(os_error(
-                plat::ENOTCONN,
-                "Transport endpoint is not connected",
-            )),
-        }
+    let peek = recv_flags_peek(&args[2].value)?;
+    let mut buf = vec![0u8; (bufsize as usize).min(16 * 1024 * 1024)];
+    let n = blocking_io(interp, &args[0].value, SocketHandleState::recv_io, |io| {
+        io.recv(&mut buf, peek)
     })?;
-
-    let data = interp.release_gil_during(|| match handle {
-        RecvHandle::Tcp(mut stream) => {
-            let mut buf = vec![0u8; size];
-            let n = loop {
-                let res = if peek {
-                    stream.peek(&mut buf)
-                } else {
-                    stream.read(&mut buf)
-                };
-                match res {
-                    Ok(n) => break n,
-                    Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(io_error_to_socket_py(&e, timeout)),
-                }
-            };
-            buf.truncate(n);
-            Ok(buf)
-        }
-        RecvHandle::Udp(udp) => {
-            let mut buf = vec![0u8; size];
-            let n = loop {
-                let res = if peek {
-                    udp.peek(&mut buf)
-                } else {
-                    udp.recv(&mut buf)
-                };
-                match res {
-                    Ok(n) => break n,
-                    Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(io_error_to_socket_py(&e, timeout)),
-                }
-            };
-            buf.truncate(n);
-            Ok(buf)
-        }
-    })?;
-    Ok(Value::bytes(data))
+    buf.truncate(n);
+    Ok(Value::bytes(buf))
 }
 
-fn sock_recv_into_impl(args: &[ExpandedCallArg]) -> Result<Value> {
+fn sock_recv_into_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() != 4 {
         return Err(PyError::named(
             "TypeError",
@@ -2450,48 +2316,15 @@ fn sock_recv_into_impl(args: &[ExpandedCallArg]) -> Result<Value> {
         }
         req
     };
-    let flags = extract_i64(&args[3].value, "flags")?;
-    let peek = (flags & plat::MSG_PEEK) != 0;
+    let peek = recv_flags_peek(&args[3].value)?;
 
-    let read_bytes = with_socket_mut(&args[0].value, |sock| {
-        let timeout = sock.timeout;
-        let mut tmp = vec![0u8; nbytes];
-        let n = match &mut sock.backend {
-            SocketBackend::Closed => return Err(closed_socket_error()),
-            SocketBackend::ConnectedTcp { stream } => loop {
-                let res = if peek {
-                    stream.peek(&mut tmp)
-                } else {
-                    stream.read(&mut tmp)
-                };
-                match res {
-                    Ok(n) => break n,
-                    Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(io_error_to_socket_py(&e, timeout)),
-                }
-            },
-            SocketBackend::BoundUdp { sock: udp, .. } => loop {
-                let res = if peek {
-                    udp.peek(&mut tmp)
-                } else {
-                    udp.recv(&mut tmp)
-                };
-                match res {
-                    Ok(n) => break n,
-                    Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(io_error_to_socket_py(&e, timeout)),
-                }
-            },
-            _ => {
-                return Err(os_error(
-                    plat::ENOTCONN,
-                    "Transport endpoint is not connected",
-                ));
-            }
-        };
-        tmp.truncate(n);
-        Ok(tmp)
+    // Receive into a private buffer while the GIL is released: the caller's
+    // buffer is a Python object that other threads may touch meanwhile.
+    let mut read_bytes = vec![0u8; nbytes];
+    let n = blocking_io(interp, &args[0].value, SocketHandleState::recv_io, |io| {
+        io.recv(&mut read_bytes, peek)
     })?;
+    read_bytes.truncate(n);
 
     let mut dst = data_rc.borrow_mut();
     let end = offset + read_bytes.len();
@@ -2505,51 +2338,40 @@ fn sock_recv_into_impl(args: &[ExpandedCallArg]) -> Result<Value> {
     Ok(Value::int(read_bytes.len() as i64))
 }
 
-fn sock_sendto_impl(args: &[ExpandedCallArg]) -> Result<Value> {
+fn sock_sendto_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() != 5 {
         return Err(PyError::named(
             "TypeError",
             "_sock_sendto() expects 5 arguments".to_string(),
         ));
     }
-    let data = extract_bytes_like(&args[1].value).ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            format!(
-                "a bytes-like object is required, not '{}'",
-                value_type_name_str(&args[1].value)
-            ),
-        )
-    })?;
+    let data = extract_send_data(&args[1].value)?;
     let _flags = extract_i64(&args[2].value, "flags")?;
     let gaierror_cls = &args[4].value;
 
-    with_socket_mut(&args[0].value, |sock| {
+    let target = with_socket_mut(&args[0].value, |sock| {
         if matches!(sock.backend, SocketBackend::Closed) {
             return Err(closed_socket_error());
         }
         let target = resolve_socket_addr(sock.family, &args[3].value, false, gaierror_cls)?;
         sock.ensure_bound_udp()?;
-        let timeout = sock.timeout;
-        match &mut sock.backend {
-            SocketBackend::BoundUdp { sock: udp, .. } => {
-                let n = udp
-                    .send_to(&data, target)
-                    .map_err(|e| io_error_to_socket_py(&e, timeout))?;
-                Ok(Value::int(n as i64))
-            }
-            SocketBackend::ConnectedTcp { stream } => {
-                let n = stream
-                    .write(&data)
-                    .map_err(|e| io_error_to_socket_py(&e, timeout))?;
-                Ok(Value::int(n as i64))
-            }
+        Ok(target)
+    })?;
+    let n = blocking_io(
+        interp,
+        &args[0].value,
+        |sock| match &sock.backend {
+            SocketBackend::BoundUdp { sock: udp, .. } => Ok(DataIo::Udp(Arc::clone(udp))),
+            SocketBackend::ConnectedTcp { stream } => Ok(DataIo::Tcp(Arc::clone(stream))),
+            SocketBackend::Closed => Err(closed_socket_error()),
             _ => Err(os_error(plat::EINVAL, "Invalid argument")),
-        }
-    })
+        },
+        |io| io.send_to(&data, target),
+    )?;
+    Ok(Value::int(n as i64))
 }
 
-fn sock_recvfrom_impl(args: &[ExpandedCallArg]) -> Result<Value> {
+fn sock_recvfrom_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() != 3 {
         return Err(PyError::named(
             "TypeError",
@@ -2563,57 +2385,14 @@ fn sock_recvfrom_impl(args: &[ExpandedCallArg]) -> Result<Value> {
             "negative buffersize in recvfrom".to_string(),
         ));
     }
-    let flags = extract_i64(&args[2].value, "flags")?;
-    let peek = (flags & plat::MSG_PEEK) != 0;
-    let size = (bufsize as usize).min(16 * 1024 * 1024);
-
-    with_socket_mut(&args[0].value, |sock| {
-        let timeout = sock.timeout;
-        match &mut sock.backend {
-            SocketBackend::Closed => Err(closed_socket_error()),
-            SocketBackend::BoundUdp { sock: udp, .. } => {
-                let mut buf = vec![0u8; size];
-                let (n, peer) = loop {
-                    let res = if peek {
-                        udp.peek_from(&mut buf)
-                    } else {
-                        udp.recv_from(&mut buf)
-                    };
-                    match res {
-                        Ok(v) => break v,
-                        Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                        Err(e) => return Err(io_error_to_socket_py(&e, timeout)),
-                    }
-                };
-                buf.truncate(n);
-                Ok(Value::tuple(vec![Value::bytes(buf), sockaddr_to_py(peer)]))
-            }
-            SocketBackend::ConnectedTcp { stream } => {
-                let mut buf = vec![0u8; size];
-                let n = loop {
-                    let res = if peek {
-                        stream.peek(&mut buf)
-                    } else {
-                        stream.read(&mut buf)
-                    };
-                    match res {
-                        Ok(n) => break n,
-                        Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                        Err(e) => return Err(io_error_to_socket_py(&e, timeout)),
-                    }
-                };
-                buf.truncate(n);
-                let peer_val = stream
-                    .peer_addr()
-                    .map_or_else(|_| Value::none(), sockaddr_to_py);
-                Ok(Value::tuple(vec![Value::bytes(buf), peer_val]))
-            }
-            _ => Err(os_error(
-                plat::ENOTCONN,
-                "Transport endpoint is not connected",
-            )),
-        }
-    })
+    let peek = recv_flags_peek(&args[2].value)?;
+    let mut buf = vec![0u8; (bufsize as usize).min(16 * 1024 * 1024)];
+    let (n, peer) = blocking_io(interp, &args[0].value, SocketHandleState::recv_io, |io| {
+        io.recv_from(&mut buf, peek)
+    })?;
+    buf.truncate(n);
+    let peer_val = peer.map_or_else(Value::none, sockaddr_to_py);
+    Ok(Value::tuple(vec![Value::bytes(buf), peer_val]))
 }
 
 fn sock_shutdown_impl(args: &[ExpandedCallArg]) -> Result<Value> {
@@ -2891,7 +2670,18 @@ fn native_gethostname_impl() -> Result<Value> {
     }
 }
 
-fn native_gethostbyname_impl(args: &[ExpandedCallArg]) -> Result<Value> {
+/// Resolve `host` through the system resolver with the GIL released: a DNS
+/// round-trip can take seconds, and CPython's `getaddrinfo()` /
+/// `gethostbyname()` let other threads run meanwhile.
+fn lookup_host(
+    interp: &mut Interpreter,
+    host: &str,
+    port: u16,
+) -> std::io::Result<Vec<SocketAddr>> {
+    interp.release_gil_during(|| (host, port).to_socket_addrs().map(Iterator::collect))
+}
+
+fn native_gethostbyname_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() != 2 {
         return Err(PyError::named(
             "TypeError",
@@ -2920,8 +2710,7 @@ fn native_gethostbyname_impl(args: &[ExpandedCallArg]) -> Result<Value> {
     if let Some(octets) = parse_inet_aton(&host) {
         return Ok(Value::string(Ipv4Addr::from(octets).to_string()));
     }
-    let addrs = (host.as_str(), 0u16)
-        .to_socket_addrs()
+    let addrs = lookup_host(interp, &host, 0)
         .map_err(|_| raise_gaierror(gaierror_cls, plat::EAI_NONAME, "Name or service not known"))?;
     for a in addrs {
         if let SocketAddr::V4(v4) = a {
@@ -2935,7 +2724,7 @@ fn native_gethostbyname_impl(args: &[ExpandedCallArg]) -> Result<Value> {
     ))
 }
 
-fn native_getaddrinfo_impl(args: &[ExpandedCallArg]) -> Result<Value> {
+fn native_getaddrinfo_impl(interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
     if args.len() != 7 {
         return Err(PyError::named(
             "TypeError",
@@ -3065,7 +2854,7 @@ fn native_getaddrinfo_impl(args: &[ExpandedCallArg]) -> Result<Value> {
                         "Name or service not known",
                     ));
                 }
-                let iter = (host, port).to_socket_addrs().map_err(|_| {
+                let iter = lookup_host(interp, host, port).map_err(|_| {
                     raise_gaierror(gaierror_cls, plat::EAI_NONAME, "Name or service not known")
                 })?;
                 for addr in iter {
@@ -3363,23 +3152,19 @@ pyrust_module! {
     }
 
     fn _sock_connect(args) -> Result<Value> {
-        let _ = _interp;
-        sock_connect_impl(args)
+        sock_connect_impl(_interp, args)
     }
 
     fn _sock_connect_ex(args) -> Result<Value> {
-        let _ = _interp;
-        sock_connect_ex_impl(args)
+        sock_connect_ex_impl(_interp, args)
     }
 
     fn _sock_send(args) -> Result<Value> {
-        let _ = _interp;
-        sock_send_impl(args)
+        sock_send_impl(_interp, args)
     }
 
     fn _sock_sendall(args) -> Result<Value> {
-        let _ = _interp;
-        sock_sendall_impl(args)
+        sock_sendall_impl(_interp, args)
     }
 
     fn _sock_recv(args) -> Result<Value> {
@@ -3387,18 +3172,15 @@ pyrust_module! {
     }
 
     fn _sock_recv_into(args) -> Result<Value> {
-        let _ = _interp;
-        sock_recv_into_impl(args)
+        sock_recv_into_impl(_interp, args)
     }
 
     fn _sock_sendto(args) -> Result<Value> {
-        let _ = _interp;
-        sock_sendto_impl(args)
+        sock_sendto_impl(_interp, args)
     }
 
     fn _sock_recvfrom(args) -> Result<Value> {
-        let _ = _interp;
-        sock_recvfrom_impl(args)
+        sock_recvfrom_impl(_interp, args)
     }
 
     fn _sock_shutdown(args) -> Result<Value> {
@@ -3452,13 +3234,11 @@ pyrust_module! {
     }
 
     fn _native_gethostbyname(args) -> Result<Value> {
-        let _ = _interp;
-        native_gethostbyname_impl(args)
+        native_gethostbyname_impl(_interp, args)
     }
 
     fn _native_getaddrinfo(args) -> Result<Value> {
-        let _ = _interp;
-        native_getaddrinfo_impl(args)
+        native_getaddrinfo_impl(_interp, args)
     }
 
     fn _native_inet_aton(args) -> Result<Value> {

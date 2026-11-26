@@ -358,8 +358,11 @@ pyrust_module! {
         let w_fds: Vec<i64> = w_pairs.iter().map(|(fd, _)| *fd).collect();
         let x_fds: Vec<i64> = x_pairs.iter().map(|(fd, _)| *fd).collect();
 
-        let (ready_r_fds, ready_w_fds, ready_x_fds) =
-            super::socket::select_raw_handles_3(&r_fds, &w_fds, &x_fds, timeout_dur)?;
+        // Wait with the GIL released, as CPython does around every blocking
+        // `select` / `poll` / `epoll_wait` / `kevent` call in this module.
+        let (ready_r_fds, ready_w_fds, ready_x_fds) = _interp.release_gil_during(|| {
+            super::socket::select_raw_handles_3(&r_fds, &w_fds, &x_fds, timeout_dur)
+        })?;
 
         let ready_r: Vec<Value> = r_pairs
             .into_iter()
@@ -464,7 +467,7 @@ pyrust_module! {
         }
 
         fn poll(
-            #[state] st: &PollState,
+            #[positional_only] self_val: PyValueRef<'_>,
             #[positional_only]
             #[default(None)]
             timeout: Option<PyNumber>,
@@ -487,65 +490,75 @@ pyrust_module! {
                 }
             };
 
-            let mut pfds: Vec<libc::pollfd> = st
-                .fds
-                .iter()
-                .map(|(&fd, &events)| libc::pollfd {
-                    fd,
-                    events,
-                    revents: 0,
-                })
-                .collect();
+            // Snapshot the registrations so no state borrow outlives the GIL
+            // release below (another thread may `register()` meanwhile).
+            let mut pfds: Vec<libc::pollfd> = with_state(self_val.0, |st| {
+                Ok(st
+                    .fds
+                    .iter()
+                    .map(|(&fd, &events)| libc::pollfd {
+                        fd,
+                        events,
+                        revents: 0,
+                    })
+                    .collect())
+            })?;
 
             let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_secs_f64(ms / 1000.0));
-            loop {
-                for pfd in &mut pfds {
-                    pfd.revents = 0;
-                }
-                let wait_ms: libc::c_int = match (timeout_ms, deadline) {
-                    (None, _) => -1,
-                    (Some(0.0), _) => 0,
-                    (Some(_), Some(dl)) => {
-                        let rem = dl.saturating_duration_since(Instant::now());
-                        if rem.is_zero() {
-                            0
-                        } else {
-                            let ms = rem.as_millis();
-                            if ms == 0 {
-                                1
+            _interp
+                .release_gil_during(|| loop {
+                    for pfd in &mut pfds {
+                        pfd.revents = 0;
+                    }
+                    let wait_ms: libc::c_int = match (timeout_ms, deadline) {
+                        (None, _) => -1,
+                        (Some(0.0), _) => 0,
+                        (Some(_), Some(dl)) => {
+                            let rem = dl.saturating_duration_since(Instant::now());
+                            if rem.is_zero() {
+                                0
                             } else {
-                                ms.min(libc::c_int::MAX as u128) as libc::c_int
+                                let ms = rem.as_millis();
+                                if ms == 0 {
+                                    1
+                                } else {
+                                    ms.min(libc::c_int::MAX as u128) as libc::c_int
+                                }
                             }
                         }
+                        _ => 0,
+                    };
+                    let rc = unsafe {
+                        libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, wait_ms)
+                    };
+                    if rc >= 0 {
+                        return Ok(());
                     }
-                    _ => 0,
-                };
-                let rc = unsafe {
-                    libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, wait_ms)
-                };
-                if rc < 0 {
                     let err = std::io::Error::last_os_error();
-                    if err.kind() == std::io::ErrorKind::Interrupted {
-                        if let Some(dl) = deadline
-                            && Instant::now() >= dl
-                        {
-                            return Ok(Value::list(Vec::new()));
+                    if err.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(err);
+                    }
+                    if let Some(dl) = deadline
+                        && Instant::now() >= dl
+                    {
+                        for pfd in &mut pfds {
+                            pfd.revents = 0;
                         }
-                        continue;
+                        return Ok(());
                     }
-                    return Err(PyError::from_io_error(&err, None));
-                }
-                let mut out = Vec::new();
-                for pfd in &pfds {
-                    if pfd.revents != 0 {
-                        out.push(Value::tuple(vec![
-                            Value::int(pfd.fd as i64),
-                            Value::int((pfd.revents as u16) as i64),
-                        ]));
-                    }
-                }
-                return Ok(Value::list(out));
-            }
+                })
+                .map_err(|err| PyError::from_io_error(&err, None))?;
+            let out = pfds
+                .iter()
+                .filter(|pfd| pfd.revents != 0)
+                .map(|pfd| {
+                    Value::tuple(vec![
+                        Value::int(pfd.fd as i64),
+                        Value::int((pfd.revents as u16) as i64),
+                    ])
+                })
+                .collect();
+            Ok(Value::list(out))
         }
     }
 
@@ -673,11 +686,11 @@ pyrust_module! {
         }
 
         fn poll(
-            #[state] st: &EpollState,
+            #[positional_only] self_val: PyValueRef<'_>,
             #[default(None)] timeout: Option<PyNumber>,
             #[default((-1_i64).into())] maxevents: PyIndex,
         ) -> Result<Value> {
-            let epfd = st.open_fd()?;
+            let epfd = with_state(self_val.0, |st| st.open_fd())?;
             let max_ev_i64 = maxevents.expect_i64(FN_NAME, "maxevents")?;
             let max_ev: usize = if max_ev_i64 == -1 {
                 64
@@ -707,49 +720,53 @@ pyrust_module! {
 
             let mut events = vec![libc::epoll_event { events: 0, u64: 0 }; max_ev];
             let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs_f64(s));
-            loop {
-                let wait_ms: libc::c_int = match (timeout_secs, deadline) {
-                    (None, _) => -1,
-                    (Some(0.0), _) => 0,
-                    (Some(_), Some(dl)) => {
-                        let rem = dl.saturating_duration_since(Instant::now());
-                        if rem.is_zero() {
-                            0
-                        } else {
-                            let ms = rem.as_millis();
-                            if ms == 0 {
-                                1
+            let ready = _interp
+                .release_gil_during(|| loop {
+                    let wait_ms: libc::c_int = match (timeout_secs, deadline) {
+                        (None, _) => -1,
+                        (Some(0.0), _) => 0,
+                        (Some(_), Some(dl)) => {
+                            let rem = dl.saturating_duration_since(Instant::now());
+                            if rem.is_zero() {
+                                0
                             } else {
-                                ms.min(libc::c_int::MAX as u128) as libc::c_int
+                                let ms = rem.as_millis();
+                                if ms == 0 {
+                                    1
+                                } else {
+                                    ms.min(libc::c_int::MAX as u128) as libc::c_int
+                                }
                             }
                         }
+                        _ => 0,
+                    };
+                    let rc = unsafe {
+                        libc::epoll_wait(epfd, events.as_mut_ptr(), max_ev as libc::c_int, wait_ms)
+                    };
+                    if rc >= 0 {
+                        return Ok(rc as usize);
                     }
-                    _ => 0,
-                };
-                let rc = unsafe {
-                    libc::epoll_wait(epfd, events.as_mut_ptr(), max_ev as libc::c_int, wait_ms)
-                };
-                if rc < 0 {
                     let err = std::io::Error::last_os_error();
-                    if err.kind() == std::io::ErrorKind::Interrupted {
-                        if let Some(dl) = deadline
-                            && Instant::now() >= dl
-                        {
-                            return Ok(Value::list(Vec::new()));
-                        }
-                        continue;
+                    if err.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(err);
                     }
-                    return Err(PyError::from_io_error(&err, None));
-                }
-                let mut out = Vec::with_capacity(rc as usize);
-                for ev in &events[..rc as usize] {
-                    out.push(Value::tuple(vec![
+                    if let Some(dl) = deadline
+                        && Instant::now() >= dl
+                    {
+                        return Ok(0);
+                    }
+                })
+                .map_err(|err| PyError::from_io_error(&err, None))?;
+            let out = events[..ready]
+                .iter()
+                .map(|ev| {
+                    Value::tuple(vec![
                         Value::int(ev.u64 as i64),
                         Value::int(ev.events as i64),
-                    ]));
-                }
-                return Ok(Value::list(out));
-            }
+                    ])
+                })
+                .collect();
+            Ok(Value::list(out))
         }
 
         fn __enter__(#[positional_only] self_val: PyValueRef<'_>) -> Result<Value> {
@@ -959,61 +976,63 @@ pyrust_module! {
             let mut out_events: Vec<libc::kevent> = vec![unsafe { std::mem::zeroed() }; max_ev];
             let deadline = timeout_dur.map(|d| Instant::now() + d);
 
-            let rc = loop {
-                let ts = match (timeout_dur, deadline) {
-                    (None, _) => None,
-                    (Some(d), _) if d.is_zero() => Some(libc::timespec {
-                        tv_sec: 0,
-                        tv_nsec: 0,
-                    }),
-                    (Some(_), Some(dl)) => {
-                        let rem = dl.saturating_duration_since(Instant::now());
-                        Some(libc::timespec {
-                            tv_sec: rem.as_secs() as libc::time_t,
-                            tv_nsec: rem.subsec_nanos() as libc::c_long,
-                        })
-                    }
-                    _ => Some(libc::timespec {
-                        tv_sec: 0,
-                        tv_nsec: 0,
-                    }),
-                };
-                let ts_ptr = match &ts {
-                    Some(t) => t as *const libc::timespec,
-                    None => std::ptr::null(),
-                };
-                let n = unsafe {
-                    libc::kevent(
-                        kqfd,
-                        if changes.is_empty() {
-                            std::ptr::null()
-                        } else {
-                            changes.as_ptr()
-                        },
-                        changes.len() as libc::c_int,
-                        if out_events.is_empty() {
-                            std::ptr::null_mut()
-                        } else {
-                            out_events.as_mut_ptr()
-                        },
-                        out_events.len() as libc::c_int,
-                        ts_ptr,
-                    )
-                };
-                if n < 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.kind() == std::io::ErrorKind::Interrupted {
-                        if let Some(dl) = deadline
-                            && Instant::now() >= dl
-                        {
-                            break 0;
+            let rc = _interp
+                .release_gil_during(|| loop {
+                    let ts = match (timeout_dur, deadline) {
+                        (None, _) => None,
+                        (Some(d), _) if d.is_zero() => Some(libc::timespec {
+                            tv_sec: 0,
+                            tv_nsec: 0,
+                        }),
+                        (Some(_), Some(dl)) => {
+                            let rem = dl.saturating_duration_since(Instant::now());
+                            Some(libc::timespec {
+                                tv_sec: rem.as_secs() as libc::time_t,
+                                tv_nsec: rem.subsec_nanos() as libc::c_long,
+                            })
                         }
-                        continue;
+                        _ => Some(libc::timespec {
+                            tv_sec: 0,
+                            tv_nsec: 0,
+                        }),
+                    };
+                    let ts_ptr = match &ts {
+                        Some(t) => t as *const libc::timespec,
+                        None => std::ptr::null(),
+                    };
+                    let n = unsafe {
+                        libc::kevent(
+                            kqfd,
+                            if changes.is_empty() {
+                                std::ptr::null()
+                            } else {
+                                changes.as_ptr()
+                            },
+                            changes.len() as libc::c_int,
+                            if out_events.is_empty() {
+                                std::ptr::null_mut()
+                            } else {
+                                out_events.as_mut_ptr()
+                            },
+                            out_events.len() as libc::c_int,
+                            ts_ptr,
+                        )
+                    };
+                    if n < 0 {
+                        let err = std::io::Error::last_os_error();
+                        if err.kind() == std::io::ErrorKind::Interrupted {
+                            if let Some(dl) = deadline
+                                && Instant::now() >= dl
+                            {
+                                break Ok(0);
+                            }
+                            continue;
+                        }
+                        break Err(err);
                     }
-                    return Err(PyError::from_io_error(&err, None));
-                }
-                break n;
-            };
+                    break Ok(n);
+                })
+                .map_err(|err| PyError::from_io_error(&err, None))?;
 
             let select_mod = _interp.load_module("select")?;
             let kevent_cls = _interp.get_attr(&select_mod, "kevent")?;

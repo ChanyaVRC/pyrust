@@ -209,6 +209,37 @@ impl Interpreter {
         self.eval_slice(&obj_val, lo, hi, st)
     }
 
+    /// `list[lo:hi:st] = val` on a `list` or on a list subclass's backing
+    /// list: `val` may be any iterable (a list is snapshotted first, so
+    /// `l[:] = l` is safe).
+    fn list_slice_store(
+        &mut self,
+        list: &Value,
+        lo: Option<Value>,
+        hi: Option<Value>,
+        st: Option<Value>,
+        val: &Value,
+    ) -> Result<()> {
+        let lo = self.resolve_slice_bound_val(lo)?;
+        let hi = self.resolve_slice_bound_val(hi)?;
+        let st = self.resolve_slice_bound_val(st)?;
+        let new_items = match val.kind() {
+            ValueKind::List(v) => v.to_vec(),
+            _ => self
+                .collect_iterable(val)
+                .map_err(|_| pyrust_core::type_err!("can only assign an iterable"))?,
+        };
+        list.list_with_mut(|items| {
+            Self::slice_setitem(items, lo.as_ref(), hi.as_ref(), st.as_ref(), new_items)
+        })
+        .unwrap_or_else(|| {
+            Err(pyrust_core::type_err!(
+                "'{}' object does not support item assignment",
+                value_type_name_str(list)
+            ))
+        })
+    }
+
     /// Execute `obj[idx] = val`.
     ///
     /// Extracted from the `SetItem` VM dispatch arm so that changes to
@@ -256,36 +287,11 @@ impl Interpreter {
         }
         let idx_val = vm_read(regs, idx, num_locals)?;
         let val_val = vm_read(regs, val, num_locals)?;
-        let is_list_target = regs[obj as usize].list_len().is_some();
-        if is_list_target && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
-            let lo = self.resolve_slice_bound_val(lo)?;
-            let hi = self.resolve_slice_bound_val(hi)?;
-            let st = self.resolve_slice_bound_val(st)?;
-            let new_items: Vec<Value> = match val_val.kind() {
-                ValueKind::List(v) => Some(v.to_vec()),
-                _ => None,
-            }
-            .unwrap_or_else(Vec::new);
-            let new_items = if !new_items.is_empty() || matches!(val_val.kind(), ValueKind::List(_))
-            {
-                new_items
-            } else {
-                self.collect_iterable(&val_val)
-                    .map_err(|_| pyrust_core::type_err!("can only assign an iterable"))?
-            };
-            let updated = regs[obj as usize].list_with_mut(|items| {
-                Self::slice_setitem(items, lo.as_ref(), hi.as_ref(), st.as_ref(), new_items)
-            });
-            return match updated {
-                Some(r) => r,
-                None => {
-                    let tname = value_type_name_str(&regs[obj as usize]);
-                    Err(pyrust_core::type_err!(
-                        "'{}' object does not support item assignment",
-                        tname
-                    ))
-                }
-            };
+        if regs[obj as usize].list_len().is_some()
+            && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val)
+        {
+            let list = regs[obj as usize].clone();
+            return self.list_slice_store(&list, lo, hi, st, &val_val);
         }
         let target_kind = regs[obj as usize]
             .as_some()
@@ -324,11 +330,12 @@ impl Interpreter {
                             ValueKind::List(_) => BkKind::List,
                             _ => BkKind::Other,
                         };
-                        // A dict subclass override is observable for every key
-                        // type: it may validate, transform, log, or decline the
-                        // store altogether.  Restricting this probe to object
-                        // keys bypassed user `__setitem__` for int/str keys.
-                        if matches!(bk_kind, BkKind::Dict) {
+                        // A dict or list subclass override is observable for
+                        // every key type: it may validate, transform, log, or
+                        // decline the store altogether.  Restricting this probe
+                        // to object keys bypassed user `__setitem__` for
+                        // int/str keys.
+                        if matches!(bk_kind, BkKind::Dict | BkKind::List) {
                             let class = Rc::clone(&inst_rc.borrow().class);
                             let user_setitem =
                                 lookup_class_attr(&class, "__setitem__").filter(|v| {
@@ -360,6 +367,9 @@ impl Interpreter {
                                 return Ok(());
                             }
                             BkKind::List => {
+                                if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                                    return self.list_slice_store(&backing, lo, hi, st, &val_val);
+                                }
                                 let len = backing.list_len().unwrap_or(0);
                                 let idx_resolved = self.call_index_protocol(&idx_val, "list")?;
                                 let i = normalize_index_write(&idx_resolved, len, "list")?;
