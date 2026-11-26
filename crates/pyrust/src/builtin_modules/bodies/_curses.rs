@@ -241,8 +241,7 @@ fn win_add_string(
         Some(n) if n >= 0 => Some(n as usize),
         _ => None,
     };
-    let mut written = 0usize;
-    for ch in text.chars() {
+    for (written, ch) in text.chars().enumerate() {
         if let Some(lim) = limit
             && written >= lim
         {
@@ -252,7 +251,6 @@ fn win_add_string(
         if let Err(msg) = res {
             return Err(raise_curses_error(interp, msg));
         }
-        written += 1;
     }
     Ok(())
 }
@@ -2257,6 +2255,7 @@ pyrust_module! {
     }
 
     fn unctrl(#[positional_only] ch: PyValue) -> Result<Value> {
+        require_initscr(_interp)?;
         let (c, _) = parse_ch_arg(&ch.0)?;
         Ok(Value::bytes(eng::unctrl_bytes(c as u32)))
     }

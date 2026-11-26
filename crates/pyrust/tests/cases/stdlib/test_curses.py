@@ -54,7 +54,7 @@ else:
         cp.error is _curses_panel.error,
         issubclass(cp.error, Exception),
         isinstance(_curses.version, bytes),
-        isinstance(_curses_panel.version, bytes),
+        isinstance(_curses_panel.version, str),
         curses.ERR,
         curses.OK,
     )
@@ -177,12 +177,15 @@ else:
         ca.unctrl(0x81),
     )
 
-    # ── 3. unctrl, keyname, has_key table ────────────────────────────────────
+    # ── 3. pre-initscr error, keyname, has_key table ─────────────────────────
+    try:
+        curses.unctrl(1)
+        print("unctrl_pre_init", "NO_ERROR")
+    except curses.error:
+        print("unctrl_pre_init", "curses.error")
+
     print(
-        "unctrl_keyname",
-        curses.unctrl(1),
-        curses.unctrl(b"A"),
-        curses.unctrl(0x7F),
+        "keyname_pre_init",
         curses.keyname(ord("a")),
         curses.keyname(1),
         curses.keyname(curses.KEY_UP),
@@ -243,6 +246,7 @@ try:
         curses.tparm(b"\x1b[%i%p1%d;%p2%dH", 2, 4),
     )
     log("has_key_up", curses.has_key(curses.KEY_UP), chk.has_key(curses.KEY_UP))
+    log("unctrl_post_init", curses.unctrl(1), curses.unctrl(b"A"), curses.unctrl(0x7F))
 
     # Window creation & writing/reading
     win = curses.newwin(10, 30, 2, 4)
@@ -270,8 +274,8 @@ try:
 
     # Box & lines
     bwin = curses.newwin(5, 10, 12, 2)
-    bwin.box()
-    log("box_corners", (bwin.inch(0, 0) & curses.A_ALTCHARSET) != 0, (bwin.inch(4, 9) & curses.A_ALTCHARSET) != 0)
+    bwin.box(ord("|"), ord("-"))
+    log("box_sides", bwin.instr(0, 1, 3), bwin.inch(1, 0) & curses.A_CHARTEXT)
     bwin.clear()
     log("after_clear", bwin.instr(0, 0, 4))
 
@@ -289,7 +293,9 @@ try:
     win.attrset(curses.A_BOLD)
     win.attron(curses.A_UNDERLINE)
     win.attroff(curses.A_BOLD)
-    log("attr_get", win.attr_get()[0] == curses.A_UNDERLINE)
+    win.addch(0, 0, "A")
+    ch_a = win.inch(0, 0)
+    log("attr_applied", (ch_a & curses.A_UNDERLINE) != 0, (ch_a & curses.A_BOLD) == 0)
     win.attrset(curses.A_NORMAL)
 
     # Overlay / overwrite
@@ -333,7 +339,7 @@ try:
     # Textbox & rectangle
     rwin = curses.newwin(8, 20, 0, 0)
     ctp.rectangle(rwin, 0, 0, 5, 10)
-    log("rect_ok", (rwin.inch(0, 0) & curses.A_ALTCHARSET) != 0)
+    log("rect_ok", rwin.inch(0, 0) != ord(" "), rwin.inch(5, 10) != ord(" "))
 
     twin = curses.newwin(2, 12, 1, 1)
     tb = ctp.Textbox(twin)

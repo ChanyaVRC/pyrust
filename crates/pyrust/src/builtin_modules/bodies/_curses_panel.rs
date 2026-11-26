@@ -60,8 +60,8 @@ fn make_panel_value(interp: &mut Interpreter, panel_id: usize) -> Result<Value> 
 
 pyrust_module! {
     constants {
-        "version" => Value::bytes(b"2.1".to_vec()),
-        "__version__" => Value::bytes(b"2.1".to_vec()),
+        "version" => Value::string("2.1"),
+        "__version__" => Value::string("2.1"),
     }
 
     /// Exception raised when a curses panel operation fails.

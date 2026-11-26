@@ -253,21 +253,18 @@ pyrust_module! {
         filename: Option<PyPath>,
     ) -> Result<Value> {
         let count = nelements.expect_i64(FN_NAME, "nelements")?;
-        if count < 0 {
-            return Err(PyError::named(
-                "ValueError",
-                "nelements must be non-negative".to_string(),
-            ));
-        }
         let path = resolve_optional_path(filename, default_history_path);
         let (to_append, max_len) = READLINE_STATE.with(|cell| {
             let st = cell.borrow();
-            let n = (count as usize).min(st.history.len());
+            let n = if count <= 0 {
+                0
+            } else {
+                (count as usize).min(st.history.len())
+            };
             let start = st.history.len() - n;
             (st.history[start..].to_vec(), st.history_length)
         });
         let mut file = OpenOptions::new()
-            .write(true)
             .append(true)
             .open(&path)
             .map_err(|e| PyError::from_io_error(&e, Some(&path.to_string_lossy())))?;

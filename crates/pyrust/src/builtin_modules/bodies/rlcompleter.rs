@@ -25,32 +25,29 @@ const RLCOMPLETER_PY_EXPORTS: &[&str] = &[
     "_readline_available",
 ];
 
-/// Execute `RLCOMPLETER_PY_SOURCE` once and copy its exported attributes onto
-/// the `rlcompleter` module's attribute map.
+/// Execute `RLCOMPLETER_PY_SOURCE` directly inside the module's live namespace
+/// so module attribute mutations (such as `rlcompleter._readline_available`)
+/// remain visible to `Completer` methods, matching CPython.
 pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<Option<Value>> {
-    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
+    let ns = module.borrow_mut().attach_live_namespace_with_dunders();
     interp.exec_source(RLCOMPLETER_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
         .ok_or_else(|| PyError::runtime("rlcompleter: exec namespace not a dict".into()))?;
     for name in RLCOMPLETER_PY_EXPORTS {
-        if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            if let ValueKind::PyClass(cls_rc) = val.kind() {
-                cls_rc
-                    .borrow_mut()
-                    .attrs
-                    .insert("__module__".to_string(), Value::string("rlcompleter"));
-            }
-            module
+        if let Some(val) = dict.get(&PyKey::str_from(name))
+            && let ValueKind::PyClass(cls_rc) = val.kind()
+        {
+            cls_rc
                 .borrow_mut()
                 .attrs
-                .insert((*name).to_string(), val.clone());
+                .insert("__module__".to_string(), Value::string("rlcompleter"));
         }
     }
-    Ok(Some(ns.clone()))
+    Ok(None)
 }
 
 pyrust_module! {}
