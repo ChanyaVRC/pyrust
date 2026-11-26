@@ -167,16 +167,32 @@ pub(crate) fn read_method_cache_plan(target: &Value, name: &str) -> ReadMethodCa
     }
 }
 
-/// Return the target class when a completed `SetAttr` may populate the plain
-/// instance-write cache.
-pub(crate) fn write_attribute_cache_class(
-    target: &Value,
-    name: &str,
-) -> Option<Rc<RefCell<PyClass>>> {
-    if matches!(name, "__class__" | "__dict__") {
-        return None;
+/// Write-cache shape that a completed `SetAttr` may retain.
+pub(crate) enum WriteAttributeCachePlan {
+    Uncacheable,
+    /// Plain instance `__dict__` write (`SetInstanceAttr`).
+    Instance(Rc<RefCell<PyClass>>),
+    /// `__slots__` `member_descriptor` write (`SetSlotAttr`, issue #3378).
+    Slot(Rc<RefCell<PyClass>>, pyrust_core::MemberSlotId),
+}
+
+/// Classify a *successfully completed* `SetAttr` for write-cache fill.
+///
+/// Both shapes require the default `object.__setattr__`.  The slot shape
+/// additionally requires that the name resolves, through the class MRO, to a
+/// `member_descriptor` whose owner is an ancestor of the instance class: a
+/// hit then performs exactly `member_descriptor.__set__` (the receiver check
+/// was satisfied by the slow path that preceded the fill; the class pointer,
+/// mutation version, and epoch guards keep it true).  `__class__`,
+/// `__dict__` and `__weakref__` keep their dedicated validation and are never
+/// cached.
+pub(crate) fn write_attribute_cache_plan(target: &Value, name: &str) -> WriteAttributeCachePlan {
+    if matches!(name, "__class__" | "__dict__" | "__weakref__") {
+        return WriteAttributeCachePlan::Uncacheable;
     }
-    let instance = target.as_py_instance_rc()?;
+    let Some(instance) = target.as_py_instance_rc() else {
+        return WriteAttributeCachePlan::Uncacheable;
+    };
     let class = Rc::clone(&instance.borrow().class);
     let uses_default_setattr = lookup_class_attr(&class, "__setattr__").is_none_or(|value| {
         crate::interpreter::value_is_canonical_slot(
@@ -184,16 +200,32 @@ pub(crate) fn write_attribute_cache_class(
             crate::interpreter::CanonicalSlot::ObjectSetAttr,
         )
     });
-    let has_data_descriptor =
-        lookup_class_attr(&class, name).is_some_and(|value| is_data_descriptor(&value));
+    if !uses_default_setattr {
+        return WriteAttributeCachePlan::Uncacheable;
+    }
+    let class_attr = lookup_class_attr(&class, name);
+    if let Some(info) = class_attr
+        .as_ref()
+        .and_then(pyrust_builtins::member_descriptor::as_member_descriptor_full)
+    {
+        let owner_applies = info
+            .owner
+            .as_ref()
+            .is_some_and(|owner| class_is_subclass_of(&class, owner));
+        return if owner_applies && class.borrow().canonical_tag.is_none() {
+            WriteAttributeCachePlan::Slot(class, info.slot_id)
+        } else {
+            WriteAttributeCachePlan::Uncacheable
+        };
+    }
+    let has_data_descriptor = class_attr.is_some_and(|value| is_data_descriptor(&value));
     let has_slots = class.borrow().slots.is_some();
     let is_object_singleton = Rc::ptr_eq(&class, &object_class_singleton());
     let is_exception = is_exception_class(&class);
 
-    (uses_default_setattr
-        && !has_data_descriptor
-        && !has_slots
-        && !is_object_singleton
-        && !is_exception)
-        .then_some(class)
+    if !has_data_descriptor && !has_slots && !is_object_singleton && !is_exception {
+        WriteAttributeCachePlan::Instance(class)
+    } else {
+        WriteAttributeCachePlan::Uncacheable
+    }
 }

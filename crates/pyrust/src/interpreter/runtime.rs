@@ -219,12 +219,12 @@ mod fast_path {
         GlobalCacheEntry, GlobalResolutionCache, Interpreter, IterState, LiveDictViewItem, MemoKey,
         NativeClassMethodCachePlan, OrderedIterationWatch, PyDict, PyError, PyKey, Rc,
         ReadAttributeCachePlan, ReadMethodCachePlan, RegSlice, Result, StrKey, UserFunction, Value,
-        ValueKind, active_live_class_namespace, bind_builtin_attribute,
+        ValueKind, WriteAttributeCachePlan, active_live_class_namespace, bind_builtin_attribute,
         bind_cached_native_class_method, comp_read_is_free, float_divmod, indexed_sequence_item,
         invoke_class_method, live_collection_len, live_dict_view_item,
         ordered_mapping_guard_outcome, py_mod_i64, read_attribute_cache_plan,
         read_method_cache_plan, unbound_binding_error, value_from_bigint,
-        write_attribute_cache_class,
+        write_attribute_cache_plan,
     };
     include!("runtime/fast_path.rs");
 }
@@ -278,9 +278,9 @@ mod attributes {
     include!("runtime/attributes.rs");
 }
 pub(crate) use attributes::{
-    ReadAttributeCachePlan, ReadMethodCachePlan, call_descriptor_get,
+    ReadAttributeCachePlan, ReadMethodCachePlan, WriteAttributeCachePlan, call_descriptor_get,
     class_descriptor_display_name, class_supports_weakref, dispatch_property_method,
-    read_attribute_cache_plan, read_method_cache_plan, write_attribute_cache_class,
+    read_attribute_cache_plan, read_method_cache_plan, write_attribute_cache_plan,
 };
 use attributes::{class_direct_subclasses, class_mro_items};
 

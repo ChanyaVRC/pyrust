@@ -266,6 +266,34 @@ fn cache_weak_identities_keep_dropped_allocations_reserved_against_aba() {
 }
 
 #[test]
+fn set_slot_attr_entry_keeps_weak_class_identity_and_stays_compact() {
+    let class = Rc::new(RefCell::new(PyClass::new(
+        "Slotted",
+        "Slotted",
+        None,
+        IndexMap::new(),
+    )));
+    let slot_id = pyrust_core::MemberSlotId::fresh();
+    let entry = AttrCacheEntry::SetSlotAttr(Box::new(super::SlotAttrCacheEntry {
+        class_ptr: Rc::downgrade(&class),
+        class_version: 3,
+        epoch: 7,
+        slot_id,
+    }));
+    assert!(format!("{entry:?}").starts_with("SetSlotAttr("));
+    let AttrCacheEntry::SetSlotAttr(payload) = &entry else {
+        unreachable!()
+    };
+    let old_ptr = Rc::as_ptr(&class);
+    drop(class);
+    // The weak allocation identity stays reserved after the class dies (ABA).
+    assert!(payload.class_ptr.upgrade().is_none());
+    assert_eq!(payload.class_ptr.as_ptr(), old_ptr);
+    assert_eq!(payload.slot_id, slot_id);
+    assert!(std::mem::size_of::<AttrCacheEntry>() <= 32);
+}
+
+#[test]
 fn inline_cache_entry_sizes_stay_compact() {
     use std::mem::size_of;
 
