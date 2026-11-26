@@ -536,7 +536,7 @@ impl Interpreter {
     fn start_finalizer_polling(&mut self) {
         let polling = crate::interpreter::execution::VM_HOOK_FINALIZER;
         if self.vm_hooks_flags & polling == 0 {
-            self.cold.finalizer_scrubbed_regs = 0;
+            self.bump_safepoint_epoch();
             self.vm_hooks_flags |= polling;
         }
     }

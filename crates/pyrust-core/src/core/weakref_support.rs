@@ -27,7 +27,6 @@ use std::collections::VecDeque;
 crate::gil_local! {
     static LIVE_WEAKREF_COUNT: Cell<usize> = const { Cell::new(0) };
     static LIVE_WEAKREF_CALLBACK_COUNT: Cell<usize> = const { Cell::new(0) };
-    static HAS_PENDING_WEAKREF_CALLBACKS: Cell<bool> = const { Cell::new(false) };
     static NEXT_WEAKREF_HANDLE_ID: Cell<u64> = const { Cell::new(1) };
     static LIVE_WEAKREF_REGISTRY: RefCell<HashMap<usize, Vec<WeakrefRegistryEntry>>> =
         RefCell::new(HashMap::new());
@@ -205,9 +204,7 @@ pub fn has_live_weakref_callbacks() -> bool {
 /// Fast check: whether any finalized weakref callbacks are waiting to run.
 #[inline(always)]
 pub fn has_pending_weakref_callbacks() -> bool {
-    HAS_PENDING_WEAKREF_CALLBACKS
-        .try_with(Cell::get)
-        .unwrap_or(false)
+    crate::gil_tls::try_active_tls().is_some_and(|tls| tls.has_pending_weakref_callbacks.get())
 }
 
 /// Whether `value` currently has at least one registered live weakref.
@@ -353,7 +350,9 @@ pub fn get_weakrefs(target_addr: usize) -> Vec<Value> {
 #[cold]
 #[inline(never)]
 pub fn take_pending_weakref_callbacks() -> Vec<(Value, Value)> {
-    HAS_PENDING_WEAKREF_CALLBACKS.with(|flag| flag.set(false));
+    crate::gil_tls::active_tls()
+        .has_pending_weakref_callbacks
+        .set(false);
     PENDING_WEAKREF_CALLBACKS.with(|q| q.borrow_mut().drain(..).collect())
 }
 
@@ -392,7 +391,9 @@ pub(crate) fn notify_object_dropped(addr: usize) {
     }
     if !queued.is_empty() {
         let _ = PENDING_WEAKREF_CALLBACKS.try_with(|q| q.borrow_mut().extend(queued));
-        let _ = HAS_PENDING_WEAKREF_CALLBACKS.try_with(|flag| flag.set(true));
+        if let Some(tls) = crate::gil_tls::try_active_tls() {
+            tls.has_pending_weakref_callbacks.set(true);
+        }
     }
     // Drop unused callbacks outside every registry borrow.
     drop(dropped_cbs);

@@ -20,6 +20,10 @@ pub(crate) const VM_HOOK_FINALIZER: u8 = 1 << 5;
 pub(crate) const VM_HOOK_FINALIZER_ARMED: u8 = 1 << 6;
 /// The bits that make the VM loop call `vm_dispatch_step_hooks`.
 pub(crate) const VM_HOOK_STEP_MASK: u8 = !VM_HOOK_FINALIZER_ARMED;
+/// The step bits that need the cold dispatcher on every instruction. `weakref` and
+/// `__del__` alone only need it at their safepoints (issue #3380).
+pub(crate) const VM_HOOK_EVERY_STEP_MASK: u8 =
+    VM_HOOK_STEP_MASK & !(VM_HOOK_WEAKREF | VM_HOOK_FINALIZER);
 
 /// Classification of how a single instruction interacts with a candidate
 /// temporary register `target_reg`.
@@ -437,121 +441,196 @@ fn insn_reg_access(
     }
 }
 
-/// Conservative forward reachability check: returns `true` if temporary register
-/// `target_reg` may be read on any execution path starting from `start_pc`
-/// before being overwritten.
-#[cold]
-#[inline(never)]
-fn is_temp_reg_live_at(code: &crate::bytecode::FnCode, start_pc: usize, target_reg: u32) -> bool {
+/// Calls `f` with every pc that can run right after the instruction at `pc`:
+/// its exception-handler edge (if any) and its own control-flow successors.
+fn for_each_successor(code: &crate::bytecode::FnCode, pc: usize, mut f: impl FnMut(usize)) {
     use crate::bytecode::Insn;
     let len = code.insns.len();
-    if start_pc >= len {
-        return false;
+    let mut push = |next_pc: usize| {
+        if next_pc < len {
+            f(next_pc);
+        }
+    };
+
+    // Also follow exception handler edge if this PC has one.
+    if let Some(&handler) = code.exc_table.get(pc)
+        && handler != crate::bytecode::EXC_NO_HANDLER
+    {
+        push(handler as usize);
     }
-    let mut visited = vec![false; len];
-    let mut queue = std::collections::VecDeque::new();
-    visited[start_pc] = true;
-    queue.push_back(start_pc);
 
-    while let Some(pc) = queue.pop_front() {
-        let insn = &code.insns[pc];
-        match insn_reg_access(insn, code, target_reg) {
-            RegAccess::Reads => return true,
-            RegAccess::WritesOnly => continue,
-            RegAccess::None => {}
+    let next = pc + 1;
+    let jump_target = |offset: i32| -> Option<usize> {
+        let tgt = next as i64 + i64::from(offset);
+        (tgt >= 0 && (tgt as usize) < len).then_some(tgt as usize)
+    };
+
+    match &code.insns[pc] {
+        Insn::Return(_)
+        | Insn::ReturnNone
+        | Insn::RaiseAssert(_)
+        | Insn::RaiseValue(_)
+        | Insn::RaiseFrom(_, _)
+        | Insn::RaiseReRaise
+        | Insn::RaiseExceptStarResidual(_) => {}
+        Insn::Jump(off) => {
+            if let Some(t) = jump_target(*off) {
+                push(t);
+            }
         }
-
-        let mut push_target = |next_pc: usize| {
-            if next_pc < len && !visited[next_pc] {
-                visited[next_pc] = true;
-                queue.push_back(next_pc);
+        Insn::JumpIfFalse(_, off)
+        | Insn::JumpIfTrue(_, off)
+        | Insn::CmpJumpIfFalse(_, _, _, off)
+        | Insn::CmpJumpIfTrue(_, _, _, off)
+        | Insn::CmpJumpIfFalseConst(_, _, _, off)
+        | Insn::CmpJumpIfTrueConst(_, _, _, off)
+        | Insn::JumpIfNotInt(_, off)
+        | Insn::CountCmpJumpTrue(_, _, _, _, off)
+        | Insn::CountCmpJumpFalse(_, _, _, _, off)
+        | Insn::JumpIfIterNotIntRange(_, off)
+        | Insn::JumpIfIterNotIndexedSeq(_, off)
+        | Insn::JumpIfIterNotIntRangeExact(_, off)
+        | Insn::JumpIfNotBuiltinLen(_, off)
+        | Insn::LenSeqOrExit(_, _, off)
+        | Insn::CallInlineBinOp(_, off)
+        | Insn::ForIter(_, _, off)
+        | Insn::SetupExcept(off)
+        | Insn::MatchExcept(_, off)
+        | Insn::MatchExceptStar(_, off) => {
+            push(next);
+            if let Some(t) = jump_target(*off) {
+                push(t);
             }
-        };
-
-        // Also follow exception handler edge if this PC has one.
-        if let Some(&handler) = code.exc_table.get(pc)
-            && handler != crate::bytecode::EXC_NO_HANDLER
-        {
-            push_target(handler as usize);
         }
-
-        let next = pc + 1;
-        let jump_target = |offset: i32| -> Option<usize> {
-            let tgt = next as i64 + i64::from(offset);
-            (tgt >= 0 && (tgt as usize) < len).then_some(tgt as usize)
-        };
-
-        match insn {
-            Insn::Return(_)
-            | Insn::ReturnNone
-            | Insn::RaiseAssert(_)
-            | Insn::RaiseValue(_)
-            | Insn::RaiseFrom(_, _)
-            | Insn::RaiseReRaise
-            | Insn::RaiseExceptStarResidual(_) => {}
-            Insn::Jump(off) => {
-                if let Some(t) = jump_target(*off) {
-                    push_target(t);
-                }
+        Insn::GetItemSeqIntOrExit(_, _, _, off) => {
+            push(next);
+            if let Some(t) = jump_target(i32::from(*off)) {
+                push(t);
             }
-            Insn::JumpIfFalse(_, off)
-            | Insn::JumpIfTrue(_, off)
-            | Insn::CmpJumpIfFalse(_, _, _, off)
-            | Insn::CmpJumpIfTrue(_, _, _, off)
-            | Insn::CmpJumpIfFalseConst(_, _, _, off)
-            | Insn::CmpJumpIfTrueConst(_, _, _, off)
-            | Insn::JumpIfNotInt(_, off)
-            | Insn::CountCmpJumpTrue(_, _, _, _, off)
-            | Insn::CountCmpJumpFalse(_, _, _, _, off)
-            | Insn::JumpIfIterNotIntRange(_, off)
-            | Insn::JumpIfIterNotIndexedSeq(_, off)
-            | Insn::JumpIfIterNotIntRangeExact(_, off)
-            | Insn::JumpIfNotBuiltinLen(_, off)
-            | Insn::LenSeqOrExit(_, _, off)
-            | Insn::CallInlineBinOp(_, off)
-            | Insn::ForIter(_, _, off)
-            | Insn::SetupExcept(off)
-            | Insn::MatchExcept(_, off)
-            | Insn::MatchExceptStar(_, off) => {
-                push_target(next);
-                if let Some(t) = jump_target(*off) {
-                    push_target(t);
-                }
-            }
-            Insn::GetItemSeqIntOrExit(_, _, _, off) => {
-                push_target(next);
-                if let Some(t) = jump_target(i32::from(*off)) {
-                    push_target(t);
-                }
-            }
-            _ => push_target(next),
         }
+        _ => push(next),
     }
-    false
 }
 
-/// The temporary registers that are dead at `pc`: all of them, or with
-/// `touched_only` just those the instruction before `pc` read or wrote.
-fn dead_temps(
+/// Computes, once per code object, the static facts the dead-temporary
+/// safepoint needs (issues #3341 / #3380):
+///
+/// - `live_in[pc]`: the temporaries some path from `pc` may read before
+///   overwriting them (backward liveness over the CFG, including exception
+///   handler edges and treating an unrecognised access as a read, so the
+///   answer is conservative);
+/// - `may_release[pc]`: whether a temporary can *die on an edge into* `pc`,
+///   i.e. some predecessor `q` reads or writes it, or has it live, and it is
+///   dead at `pc`.
+///
+/// If the safepoint released every dead temporary at each step it ran, a dead
+/// temporary can only hold a value when the instruction just executed touched
+/// it or it was live there, so `may_release == false` proves the step has
+/// nothing to release.
+fn build_safepoint_table(
     code: &crate::bytecode::FnCode,
-    pc: usize,
     num_locals: usize,
     regs_len: usize,
-    touched_only: bool,
-) -> Box<[u32]> {
-    let prev = pc.checked_sub(1).and_then(|prev| code.insns.get(prev));
-    if touched_only && prev.is_none() {
-        return Box::default();
+) -> crate::bytecode::SafepointTable {
+    use crate::bytecode::Insn;
+    let len = code.insns.len();
+    let temps = regs_len.saturating_sub(num_locals);
+    let words = temps.div_ceil(64);
+    let mut may_release = vec![0u64; len.div_ceil(64)];
+    if temps == 0 || len == 0 {
+        return crate::bytecode::SafepointTable::new(
+            num_locals as u32,
+            0,
+            Box::default(),
+            may_release.into_boxed_slice(),
+        );
     }
-    (num_locals as u32..regs_len as u32)
-        .filter(|&reg| {
-            let touched = !touched_only
-                || prev.is_some_and(|prev| {
-                    !matches!(insn_reg_access(prev, code, reg), RegAccess::None)
-                });
-            touched && !is_temp_reg_live_at(code, pc, reg)
-        })
-        .collect()
+
+    // Registers each instruction reads (`uses`) or overwrites without reading
+    // first (`defs`).
+    let mut uses = vec![0u64; len * words];
+    let mut defs = vec![0u64; len * words];
+    for (pc, insn) in code.insns.iter().enumerate() {
+        for t in 0..temps {
+            let slot = pc * words + t / 64;
+            let bit = 1u64 << (t % 64);
+            match insn_reg_access(insn, code, (num_locals + t) as u32) {
+                RegAccess::Reads => uses[slot] |= bit,
+                RegAccess::WritesOnly => defs[slot] |= bit,
+                RegAccess::None => {}
+            }
+        }
+    }
+
+    // Successor edges in compressed-row form.
+    let mut succ_start: Vec<usize> = Vec::with_capacity(len + 1);
+    let mut succ: Vec<usize> = Vec::new();
+    for pc in 0..len {
+        succ_start.push(succ.len());
+        for_each_successor(code, pc, |next| succ.push(next));
+    }
+    succ_start.push(succ.len());
+
+    // Without the zero-cost exception table, a raise jumps to the handler
+    // pushed by `SetupExcept` from whichever instruction raised: that edge is
+    // not in the CFG, so always release at those targets.
+    for (pc, insn) in code.insns.iter().enumerate() {
+        if let Insn::SetupExcept(off) = insn {
+            let target = pc as i64 + 1 + i64::from(*off);
+            if target >= 0 && (target as usize) < len {
+                may_release[target as usize / 64] |= 1 << (target as usize % 64);
+            }
+        }
+    }
+
+    let mut live_in = vec![0u64; len * words];
+    let mut live_out = vec![0u64; words];
+    loop {
+        let mut changed = false;
+        for pc in (0..len).rev() {
+            live_out.fill(0);
+            for &next in &succ[succ_start[pc]..succ_start[pc + 1]] {
+                for (w, out) in live_out.iter_mut().enumerate() {
+                    *out |= live_in[next * words + w];
+                }
+            }
+            for (w, out) in live_out.iter().enumerate() {
+                let i = pc * words + w;
+                let new = uses[i] | (out & !defs[i]);
+                if new != live_in[i] {
+                    live_in[i] = new;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let tail_mask = match temps % 64 {
+        0 => u64::MAX,
+        n => (1u64 << n) - 1,
+    };
+    for pc in 0..len {
+        for &next in &succ[succ_start[pc]..succ_start[pc + 1]] {
+            let releases = (0..words).any(|w| {
+                let mask = if w + 1 == words { tail_mask } else { u64::MAX };
+                (live_in[pc * words + w] | defs[pc * words + w]) & !live_in[next * words + w] & mask
+                    != 0
+            });
+            if releases {
+                may_release[next / 64] |= 1 << (next % 64);
+            }
+        }
+    }
+
+    crate::bytecode::SafepointTable::new(
+        num_locals as u32,
+        temps as u32,
+        live_in.into_boxed_slice(),
+        may_release.into_boxed_slice(),
+    )
 }
 
 impl Interpreter {
@@ -560,6 +639,7 @@ impl Interpreter {
     #[inline]
     pub(crate) fn sync_vm_hooks_flags(&mut self) {
         let mut flags = 0u8;
+        let had_safepoint = self.vm_hooks_flags & (VM_HOOK_WEAKREF | VM_HOOK_FINALIZER) != 0;
         self.features().sys_with(|state| {
             if !state.tracing_in_progress {
                 if !state.trace_func.is_none() {
@@ -588,127 +668,105 @@ impl Interpreter {
             }
         }
         self.vm_hooks_flags = flags;
+        if !had_safepoint && flags & (VM_HOOK_WEAKREF | VM_HOOK_FINALIZER) != 0 {
+            self.bump_safepoint_epoch();
+        }
     }
 
-    /// Clear dead temporary registers (`>= num_locals`) that still hold a
-    /// heap value (which may be a weak-referenced object or a wrapper/container
-    /// such as a `BoundMethod` retaining one), then drain any resulting weakref
-    /// callbacks.
+    /// Start a new safepoint epoch: the dead-temporary safepoint was off (or may
+    /// have missed releases), so every activation of the VM loop releases the
+    /// dead temporaries of its frame once at its next step.
+    #[inline]
+    pub(crate) fn bump_safepoint_epoch(&mut self) {
+        self.cold.safepoint_epoch = self.cold.safepoint_epoch.wrapping_add(1);
+    }
+
+    /// Inline gate of the VM loop: with only the `weakref` / `__del__` bits
+    /// armed, whether this instruction must visit the cold safepoint. It must
+    /// when the code has no table yet, when a temporary can die on the way into
+    /// `pc`, or when a weakref callback or finalizer is queued.
+    #[inline(always)]
+    pub(crate) fn vm_safepoint_due(&self, code: &crate::bytecode::FnCode, pc: usize) -> bool {
+        match code.dead_temps.get() {
+            None => true,
+            Some(table) => table.may_release(pc) || pyrust_core::has_pending_hook_work(),
+        }
+    }
+
+    /// Per-step `weakref` / `__del__` safepoint, run only while live weakrefs or
+    /// constructed instances of `__del__` classes exist (issues #3190, #3341,
+    /// #3380).
+    ///
+    /// CPython releases an object the moment its last reference goes away. Here
+    /// a dead temporary register can still hold that reference (directly, or
+    /// through a container, bound method or generator), so dead temporaries are
+    /// released first; then every queued weakref callback and finalizer runs,
+    /// before the next instruction executes.
+    ///
+    /// Between two steps of one frame only a temporary the instruction just
+    /// touched can have died, which `SafepointTable::may_release` precomputes;
+    /// the VM loop skips this call when it is clear. `stale` means the frame's
+    /// temporaries may have been left unreleased (the safepoint was just
+    /// switched on), so every dead temporary of the frame is released once.
     #[cold]
     #[inline(never)]
-    pub(crate) fn vm_scrub_dead_weakref_temps(
+    pub(crate) fn vm_dead_temp_safepoint(
         &mut self,
         code: &crate::bytecode::FnCode,
         pc: usize,
         regs_ptr: std::ptr::NonNull<Value>,
         regs_len: usize,
         num_locals: u32,
+        stale: bool,
     ) {
-        if pyrust_core::has_live_weakrefs() {
+        let table = code
+            .dead_temps
+            .get_or_init(|| build_safepoint_table(code, num_locals as usize, regs_len));
+        // A frame at its first instruction has no temporaries yet.
+        if (stale && pc != 0) || table.may_release(pc) {
             // SAFETY: `regs_ptr`/`regs_len` come directly from the active
             // `RegSlice` of the suspended VM loop frame; no aliasing
             // `&mut [Value]` exists concurrently.
             let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr.as_ptr(), regs_len) };
-            // Values are moved out here and dropped only after the memo borrow
-            // ends, so a drop can never observe the borrow.
+            // Values are moved out first and dropped together afterwards, so a
+            // drop (which may queue callbacks) never observes a half-updated
+            // register file.
             let mut released: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::new();
-            if let Ok(mut memo) = code.dead_temps.try_borrow_mut() {
-                // Every dead temporary at `pc` (not just those the previous
-                // instruction touched): this hook keeps no per-frame state, and
-                // a jump target's textual predecessor is not the instruction
-                // that actually ran before it. The per-`pc` answer is computed
-                // once per code object and shared with `vm_finalizer_step`.
-                let table = &mut memo.at;
-                if table.len() != code.insns.len() {
-                    table.resize(code.insns.len(), None);
+            table.for_each_dead_temp(pc, |reg| {
+                if let Some(v) = regs.get_mut(reg as usize)
+                    && !v.is_unset()
+                {
+                    released.push(std::mem::replace(v, Value::unset()));
                 }
-                if let Some(entry) = table.get_mut(pc) {
-                    let dead = entry.get_or_insert_with(|| {
-                        dead_temps(code, pc, num_locals as usize, regs_len, false)
-                    });
-                    for &reg in dead.iter() {
-                        if let Some(v) = regs.get_mut(reg as usize)
-                            && !v.is_unset()
-                        {
-                            released.push(std::mem::replace(v, Value::unset()));
-                        }
-                    }
-                }
-            }
+            });
             drop(released);
         }
-        if pyrust_core::has_pending_weakref_callbacks() {
-            self.drain_pending_weakref_callbacks();
+        let mut ran_callbacks = false;
+        if pyrust_core::has_pending_hook_work() {
+            ran_callbacks = true;
+            if pyrust_core::has_pending_weakref_callbacks() {
+                self.drain_pending_weakref_callbacks();
+            }
+            if pyrust_core::has_pending_finalizers() {
+                self.run_pending_finalizers();
+            }
         }
-        if !pyrust_core::has_live_weakrefs() && !pyrust_core::has_pending_weakref_callbacks() {
+        // Deciding that the safepoint can be switched off costs several
+        // thread-local lookups, so do it only now and then: a stale bit merely
+        // keeps the cheap inline gate armed a little longer.
+        self.cold.safepoint_visits = self.cold.safepoint_visits.wrapping_add(1);
+        if !(ran_callbacks || stale || self.cold.safepoint_visits.is_multiple_of(64)) {
+            return;
+        }
+        if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0
+            && !pyrust_core::has_live_weakrefs()
+            && !pyrust_core::has_pending_weakref_callbacks()
+        {
             self.vm_hooks_flags &= !VM_HOOK_WEAKREF;
         }
-    }
-
-    /// Per-step `__del__` safepoint, run only while constructed instances of
-    /// `__del__` classes await finalization.
-    ///
-    /// CPython finalizes an instance the moment its last reference goes away.
-    /// Here a dead temporary register can still hold that reference (directly,
-    /// or through a container, bound method or generator), so dead registers
-    /// are released first; then every queued finalizer runs, before the next
-    /// instruction executes.
-    ///
-    /// Within a frame only the registers the previous instruction touched can
-    /// have just died. When the safepoint arrives in a different frame (it
-    /// was just switched on, or the VM called into or returned to a frame),
-    /// values left behind while nobody was releasing them may be anywhere, so
-    /// every dead temporary of that frame is released once.
-    #[cold]
-    #[inline(never)]
-    pub(crate) fn vm_finalizer_step(
-        &mut self,
-        code: &crate::bytecode::FnCode,
-        pc: usize,
-        regs_ptr: std::ptr::NonNull<Value>,
-        regs_len: usize,
-        num_locals: u32,
-    ) {
-        let regs_addr = regs_ptr.as_ptr() as usize;
-        let entered_frame =
-            std::mem::replace(&mut self.cold.finalizer_scrubbed_regs, regs_addr) != regs_addr;
-        // A frame at its first instruction has no temporaries yet.
-        if !(entered_frame && pc == 0) {
-            // SAFETY: `regs_ptr`/`regs_len` come directly from the active
-            // `RegSlice` of the suspended VM loop frame; no aliasing
-            // `&mut [Value]` exists concurrently.
-            let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr.as_ptr(), regs_len) };
-            // Values are moved out here and dropped only after the memo borrow
-            // ends, so a drop can never observe the borrow.
-            let mut released: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::new();
-            if let Ok(mut memo) = code.dead_temps.try_borrow_mut() {
-                let table = if entered_frame {
-                    &mut memo.at
-                } else {
-                    &mut memo.after
-                };
-                if table.len() != code.insns.len() {
-                    table.resize(code.insns.len(), None);
-                }
-                if let Some(entry) = table.get_mut(pc) {
-                    let dead = entry.get_or_insert_with(|| {
-                        dead_temps(code, pc, num_locals as usize, regs_len, !entered_frame)
-                    });
-                    for &reg in dead.iter() {
-                        if let Some(v) = regs.get_mut(reg as usize)
-                            && !v.is_unset()
-                        {
-                            released.push(std::mem::replace(v, Value::unset()));
-                        }
-                    }
-                }
-            }
-            drop(released);
-        }
-        if pyrust_core::has_pending_finalizers() {
-            self.run_pending_finalizers();
-        }
-        if pyrust_core::live_finalizable_instances() == 0 && !pyrust_core::has_pending_finalizers()
+        if self.vm_hooks_flags & VM_HOOK_FINALIZER != 0
+            && pyrust_core::live_finalizable_instances() == 0
+            && !pyrust_core::has_pending_finalizers()
         {
             // Nothing left that could become due: stop diverting the VM loop
             // until the next finalizable instance is constructed.
@@ -820,12 +878,10 @@ impl Interpreter {
         regs_ptr: std::ptr::NonNull<Value>,
         regs_len: usize,
         num_locals: u32,
+        stale: bool,
     ) -> Result<()> {
-        if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0 {
-            self.vm_scrub_dead_weakref_temps(code, pc, regs_ptr, regs_len, num_locals);
-        }
-        if self.vm_hooks_flags & VM_HOOK_FINALIZER != 0 {
-            self.vm_finalizer_step(code, pc, regs_ptr, regs_len, num_locals);
+        if self.vm_hooks_flags & (VM_HOOK_WEAKREF | VM_HOOK_FINALIZER) != 0 {
+            self.vm_dead_temp_safepoint(code, pc, regs_ptr, regs_len, num_locals, stale);
         }
 
         if self.vm_hooks_flags & VM_HOOK_TRACE != 0 && !code.is_inlined_comp {

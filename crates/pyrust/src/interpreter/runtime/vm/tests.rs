@@ -53,6 +53,47 @@ mod vm_tests {
         code
     }
 
+    /// `r2`/`r3` are temporaries; the safepoint table must flag exactly the pcs
+    /// where one can die on the way in (#3380).
+    #[test]
+    fn safepoint_table_marks_only_edges_where_a_temp_dies() {
+        let mut code = empty_code(vec![
+            Insn::LoadConst(2, 0),   // 0: r2 = const
+            Insn::Move(0, 2),        // 1: local0 = r2 (last read of r2)
+            Insn::LoadConst(3, 0),   // 2: r3 = const
+            Insn::JumpIfFalse(3, 1), // 3: if not r3 goto 5
+            Insn::Move(0, 3),        // 4: local0 = r3
+            Insn::Return(0),         // 5
+        ]);
+        code.num_locals = 1;
+        code.num_regs = 4;
+        let table = super::build_safepoint_table(&code, 1, 4);
+        let flagged: Vec<bool> = (0..6).map(|pc| table.may_release(pc)).collect();
+        // pc 2: r2 died after pc 1. pc 5: r3 dies on the jump edge from pc 3
+        // (it is live on the fall-through edge only).
+        assert_eq!(flagged, [false, false, true, false, false, true]);
+        assert!(table.is_live_at(1, 2));
+        assert!(!table.is_live_at(2, 2));
+        assert!(table.is_live_at(4, 3));
+        assert!(!table.is_live_at(5, 3));
+        // Locals and registers outside the table are never reported dead.
+        assert!(table.is_live_at(2, 0));
+        assert!(table.is_live_at(2, 9));
+        let mut dead = Vec::new();
+        table.for_each_dead_temp(5, |reg| dead.push(reg));
+        // r1 is a temporary no instruction ever uses.
+        assert_eq!(dead, [1, 2, 3]);
+    }
+
+    #[test]
+    fn safepoint_table_for_code_without_temporaries_never_releases() {
+        let mut code = empty_code(vec![Insn::LoadNone(0), Insn::Return(0)]);
+        code.num_locals = 1;
+        code.num_regs = 1;
+        let table = super::build_safepoint_table(&code, 1, 1);
+        assert!(!table.may_release(0) && !table.may_release(1));
+    }
+
     fn execute_call(
         code: &FnCode,
         function: Value,

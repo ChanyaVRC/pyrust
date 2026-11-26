@@ -411,29 +411,112 @@ pub struct FnCode {
     /// propagates straight out (no frame on the stack could catch it).
     /// Conservatively `true` for un-optimized bytecode (no trampolining).
     pub(crate) has_exc_handlers: bool,
-    /// Lazily filled memo for the `__del__` safepoint (issue #3341): which
-    /// temporary registers are dead at each instruction. Empty until the code
-    /// first runs while instances with a pending `__del__` exist.
-    pub(crate) dead_temps: RefCell<DeadTempMemo>,
+    /// Lazily built table for the dead-temporary safepoint of weakrefs and
+    /// `__del__` (issues #3341 / #3380). Empty (no heap bytes) until the code
+    /// first runs while a weakref or finalizable instance is alive.
+    pub(crate) dead_temps: DeadTempMemo,
 }
 
-/// Per-code memo of dead temporary registers for the `__del__` safepoint.
-/// Liveness is static, so each entry is computed once, on first use.
+/// Holder of the lazily built [`SafepointTable`]. A clone starts empty: the
+/// table is only valid for the exact instruction sequence it was computed from,
+/// and a cloned code object may be rewritten.
 #[derive(Debug, Default)]
-pub(crate) struct DeadTempMemo {
-    /// `after[pc]`: temporaries the instruction at `pc - 1` touched that no
-    /// path from `pc` reads again. Used on every step within a frame.
-    pub(crate) after: Vec<Option<Box<[u32]>>>,
-    /// `at[pc]`: every temporary that no path from `pc` reads again. Used
-    /// when the safepoint enters a frame it was not following.
-    pub(crate) at: Vec<Option<Box<[u32]>>>,
-}
+pub(crate) struct DeadTempMemo(std::cell::OnceCell<SafepointTable>);
 
 impl Clone for DeadTempMemo {
-    /// A clone starts empty: the memo is only valid for the exact instruction
-    /// sequence it was computed from, and a cloned code object may be rewritten.
     fn clone(&self) -> Self {
         Self::default()
+    }
+}
+
+impl DeadTempMemo {
+    /// The table, if it was already built. A plain load: no borrow flag.
+    #[inline(always)]
+    pub(crate) fn get(&self) -> Option<&SafepointTable> {
+        self.0.get()
+    }
+
+    pub(crate) fn get_or_init(&self, init: impl FnOnce() -> SafepointTable) -> &SafepointTable {
+        self.0.get_or_init(init)
+    }
+}
+
+/// Static liveness facts of a code object's temporary registers, computed once
+/// by the VM's `weakref` / `__del__` safepoint. Both bit sets are row-major
+/// bitmaps with one row (or bit) per instruction.
+#[derive(Debug)]
+pub(crate) struct SafepointTable {
+    /// First temporary register (`num_locals`).
+    first_temp: u32,
+    /// Number of temporary registers covered.
+    temps: u32,
+    /// `u64` words per `live_in` row.
+    words: usize,
+    /// `live_in[pc]`: temporaries some path from `pc` may read before writing.
+    live_in: Box<[u64]>,
+    /// Bit `pc`: a temporary can die on an edge into `pc`, so the safepoint
+    /// before `pc` may have something to release.
+    may_release: Box<[u64]>,
+}
+
+impl SafepointTable {
+    pub(crate) fn new(
+        first_temp: u32,
+        temps: u32,
+        live_in: Box<[u64]>,
+        may_release: Box<[u64]>,
+    ) -> Self {
+        Self {
+            first_temp,
+            temps,
+            words: (temps as usize).div_ceil(64),
+            live_in,
+            may_release,
+        }
+    }
+
+    /// Whether the safepoint before `pc` may have a dead temporary to release.
+    #[inline(always)]
+    pub(crate) fn may_release(&self, pc: usize) -> bool {
+        self.may_release
+            .get(pc / 64)
+            .is_some_and(|word| word >> (pc % 64) & 1 != 0)
+    }
+
+    /// Calls `f` with every temporary register that no path from `pc` reads.
+    pub(crate) fn for_each_dead_temp(&self, pc: usize, mut f: impl FnMut(u32)) {
+        let temps = self.temps as usize;
+        let Some(row) = self.live_in.get(pc * self.words..(pc + 1) * self.words) else {
+            (0..self.temps).for_each(|t| f(self.first_temp + t));
+            return;
+        };
+        for (w, &live) in row.iter().enumerate() {
+            let mut dead = !live;
+            if w + 1 == self.words && !temps.is_multiple_of(64) {
+                dead &= (1u64 << (temps % 64)) - 1;
+            }
+            while dead != 0 {
+                f(self.first_temp + (w * 64) as u32 + dead.trailing_zeros());
+                dead &= dead - 1;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    /// Whether `reg` may be read on some path starting at `pc`. Registers
+    /// outside the table are reported live so they are never released.
+    pub(crate) fn is_live_at(&self, pc: usize, reg: u32) -> bool {
+        let Some(t) = reg
+            .checked_sub(self.first_temp)
+            .filter(|&t| t < self.temps)
+            .map(|t| t as usize)
+        else {
+            return true;
+        };
+        match self.live_in.get(pc * self.words + t / 64) {
+            Some(word) => word >> (t % 64) & 1 != 0,
+            None => false,
+        }
     }
 }
 

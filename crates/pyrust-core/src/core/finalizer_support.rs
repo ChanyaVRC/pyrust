@@ -18,7 +18,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 crate::gil_local! {
-    static HAS_PENDING_FINALIZERS: Cell<bool> = const { Cell::new(false) };
     static LIVE_FINALIZABLE: Cell<usize> = const { Cell::new(0) };
     static PENDING_FINALIZERS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
 }
@@ -55,14 +54,26 @@ pub fn live_finalizable_instances() -> usize {
 /// Fast check: whether instances are waiting for their `__del__` call.
 #[inline(always)]
 pub fn has_pending_finalizers() -> bool {
-    HAS_PENDING_FINALIZERS.try_with(Cell::get).unwrap_or(false)
+    crate::gil_tls::try_active_tls().is_some_and(|tls| tls.has_pending_finalizers.get())
+}
+
+/// Fast check: whether a weakref callback or a __del__ call is waiting to run.
+/// One TLS pointer load and two byte loads: cheap enough for the VM loop's inline
+/// safepoint gate (#3380).
+#[inline(always)]
+pub fn has_pending_hook_work() -> bool {
+    crate::gil_tls::try_active_tls().is_some_and(|tls| {
+        tls.has_pending_finalizers.get() | tls.has_pending_weakref_callbacks.get()
+    })
 }
 
 /// Take every instance waiting for its `__del__` call, oldest first.
 #[cold]
 #[inline(never)]
 pub fn take_pending_finalizers() -> Vec<Value> {
-    HAS_PENDING_FINALIZERS.with(|flag| flag.set(false));
+    crate::gil_tls::active_tls()
+        .has_pending_finalizers
+        .set(false);
     PENDING_FINALIZERS.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
@@ -107,7 +118,9 @@ fn push_pending_finalizer(instance: Value) {
     let _ = PENDING_FINALIZERS.try_with(|q| {
         if let Ok(mut q) = q.try_borrow_mut() {
             q.push(instance);
-            let _ = HAS_PENDING_FINALIZERS.try_with(|flag| flag.set(true));
+            if let Some(tls) = crate::gil_tls::try_active_tls() {
+                tls.has_pending_finalizers.set(true);
+            }
         }
     });
 }
