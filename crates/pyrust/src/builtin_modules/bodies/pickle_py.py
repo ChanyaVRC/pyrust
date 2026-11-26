@@ -860,6 +860,10 @@ class _Pickler:
         self.write = self.framer.write
         self._write_large_bytes = self.framer.write_large_bytes
         self.memo = {}
+        # CPython hands every global of one module the same ``__module__``
+        # string object, so the id-keyed memo emits a BINGET for the repeats.
+        # Canonicalise equal module names to reproduce those payloads.
+        self._global_modules = {}
         self.proto = int(protocol)
         self.bin = protocol >= 1
         self.fast = 0
@@ -868,6 +872,7 @@ class _Pickler:
     def clear_memo(self):
         """Clears the pickler's memo."""
         self.memo.clear()
+        self._global_modules.clear()
 
     def dump(self, obj):
         """Write a pickled representation of obj to the open file."""
@@ -1517,7 +1522,7 @@ class _Pickler:
             name = lastname
 
         if self.proto >= 4:
-            self.save(module_name)
+            self.save(self._global_modules.setdefault(module_name, module_name))
             self.save(name)
             write(STACK_GLOBAL)
         elif parent is not module:
