@@ -1,12 +1,9 @@
 // `html` package module — body for the `html @inject` entry in
 // `pyrust_builtin_modules!` (issue #3149).
 //
-// Exposes `escape` and `unescape` from `html_py.py` alongside the `entities`
-// and `parser` submodules. Declaring `entities` and `parser` as `PyModule`
-// constants lets `Interpreter::load_module` stitch them to the cached
-// `sys.modules["html.entities"]` and `sys.modules["html.parser"]` objects so
-// `import html`, `import html.entities`, `import html.parser`, and
-// `from html.parser import HTMLParser` share exact module identity.
+// Exposes `escape` and `unescape` from `html_py.py`. `html_py.py` imports
+// `html.entities` (binding `html.entities`, matching CPython 3.12), while
+// `html.parser` stays lazy until explicitly imported.
 //
 // Reference: <https://docs.python.org/3/library/html.html>
 
@@ -52,9 +49,4 @@ pub(crate) fn inject_python_members(
     Ok(Some(ns.clone()))
 }
 
-pyrust_module! {
-    constants {
-        "entities" => super::html_entities::module(),
-        "parser" => super::html_parser::module(),
-    }
-}
+pyrust_module! {}

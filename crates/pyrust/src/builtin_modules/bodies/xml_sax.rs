@@ -36,6 +36,8 @@ pub(crate) fn post_load_init(
     let h_mod = interp.load_module("xml.sax.handler")?;
     let xr_mod = interp.load_module("xml.sax.xmlreader")?;
     let mut m = module.borrow_mut();
+    m.insert_attr("handler".to_string(), h_mod.clone());
+    m.insert_attr("xmlreader".to_string(), xr_mod.clone());
     if let Ok(ch) = interp.get_attr(&h_mod, "ContentHandler") {
         m.insert_attr("ContentHandler".to_string(), ch);
     }
@@ -85,10 +87,6 @@ pyrust_module! {
     constants {
         "__package__" => Value::string("xml.sax"),
         "default_parser_list" => Value::list(vec![Value::string("xml.sax.expatreader")]),
-        "handler" => super::xml_sax_handler::module(),
-        "saxutils" => super::xml_sax_saxutils::module(),
-        "xmlreader" => super::xml_sax_xmlreader::module(),
-        "expatreader" => super::xml_sax_expatreader::module(),
     }
 
     class SAXException("Exception") {

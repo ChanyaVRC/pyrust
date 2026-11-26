@@ -201,6 +201,8 @@ macro_rules! pyrust_builtin_modules {
                 $(#[cfg($($cfg)*)])*
                 {
                     if name == pyrust_builtin_mod_name!($($py_name as)? $ident) {
+                        #[cfg(test)]
+                        record_builtin_module_load(pyrust_builtin_mod_name!($($py_name as)? $ident));
                         return Some($ident::module());
                     }
                 }
@@ -305,6 +307,9 @@ macro_rules! pyrust_builtin_modules {
                 return warnings::post_load_init(interp);
             }
             match name {
+                "os" => return os::post_load_init(interp, module),
+                #[cfg(unix)]
+                "posix" => return posix::post_load_init(interp, module),
                 "importlib.abc" => return importlib_abc::post_load_init(interp, module),
                 "importlib.resources.abc" => {
                     return importlib_resources_abc::post_load_init(interp, module);
@@ -438,9 +443,7 @@ pyrust_builtin_modules! {
     ntpath,
     nturl2path,
     "os.path" as os_path,
-    // `os` is a parent for `os.path` — see `bodies/os.rs`.  Must come
-    // after `os.path` in the order so the `super::os_path::module()`
-    // reference in `os`'s `constants` block resolves cleanly.
+    // `os` binds `os.path` via `os::post_load_init` using `interp.load_module("os.path")`.
     os,
     // Generation-bound factory callables and dynamic helper classes are
     // installed after the fresh module enters this Interpreter's import cache.
@@ -1037,4 +1040,122 @@ pyrust_builtin_modules! {
 include!("finalization.rs");
 
 #[cfg(test)]
+thread_local! {
+    static BUILTIN_LOAD_COUNTS: std::cell::RefCell<std::collections::HashMap<&'static str, usize>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(test)]
+fn record_builtin_module_load(name: &'static str) {
+    BUILTIN_LOAD_COUNTS.with(|counts| {
+        *counts.borrow_mut().entry(name).or_insert(0) += 1;
+    });
+}
+
+#[cfg(test)]
+fn reset_builtin_load_counts() {
+    BUILTIN_LOAD_COUNTS.with(|counts| counts.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn builtin_load_count(name: &str) -> usize {
+    BUILTIN_LOAD_COUNTS.with(|counts| counts.borrow().get(name).copied().unwrap_or(0))
+}
+
+#[cfg(test)]
 mod macro_tests;
+
+#[cfg(test)]
+mod lazy_facade_tests {
+    use super::*;
+    use crate::interpreter::Interpreter;
+
+    #[test]
+    fn modules_rs_has_zero_load_builtin_module_existence_probes() {
+        let src = include_str!("../interpreter/runtime/namespaces/modules.rs");
+        for (idx, line) in src.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            assert!(
+                !(line.contains("load_builtin_module(")
+                    && (line.contains(".is_some()") || line.contains(".is_none()"))),
+                "modules.rs:{} uses allocating load_builtin_module(...).is_some()/is_none() probe; \
+                 use is_builtin_module(...) instead: {line}",
+                idx + 1
+            );
+        }
+    }
+
+    #[test]
+    fn package_facades_have_zero_eager_super_module_calls() {
+        let bodies_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/builtin_modules/bodies");
+        for entry in std::fs::read_dir(&bodies_dir).expect("read builtin_modules/bodies") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("read facade body");
+            for (idx, line) in src.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                assert!(
+                    !(line.contains("super::") && line.contains("::module()")),
+                    "{}:{} eagerly constructs a submodule via super::*::module(); \
+                     load submodules lazily or via interp.load_module(...) in post_load_init: {line}",
+                    path.display(),
+                    idx + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn startup_constructs_os_and_os_path_at_most_once() {
+        reset_builtin_load_counts();
+        let mut interp = Interpreter::default();
+        interp.load_module("site").expect("startup import site");
+        assert_eq!(
+            builtin_load_count("os"),
+            1,
+            "os must construct at most once at startup"
+        );
+        assert_eq!(
+            builtin_load_count("os.path"),
+            1,
+            "os.path must construct at most once at startup"
+        );
+    }
+
+    #[test]
+    fn eager_cpython_submodules_construct_exactly_once() {
+        reset_builtin_load_counts();
+        let mut interp = Interpreter::default();
+        interp.load_module("os").expect("import os");
+        interp.load_module("os.path").expect("import os.path");
+        assert_eq!(builtin_load_count("os"), 1);
+        assert_eq!(builtin_load_count("os.path"), 1);
+
+        interp.load_module("encodings").expect("import encodings");
+        interp
+            .load_module("encodings.aliases")
+            .expect("import encodings.aliases");
+        assert_eq!(builtin_load_count("encodings"), 1);
+        assert_eq!(builtin_load_count("encodings.aliases"), 1);
+
+        interp.load_module("pyexpat").expect("import pyexpat");
+        interp
+            .load_module("pyexpat.errors")
+            .expect("import pyexpat.errors");
+        interp
+            .load_module("pyexpat.model")
+            .expect("import pyexpat.model");
+        assert_eq!(builtin_load_count("pyexpat"), 1);
+        assert_eq!(builtin_load_count("pyexpat.errors"), 1);
+        assert_eq!(builtin_load_count("pyexpat.model"), 1);
+    }
+}

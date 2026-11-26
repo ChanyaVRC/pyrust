@@ -47,10 +47,6 @@ include!("collections/module_setup.rs");
 include!("collections/support.rs");
 
 pyrust_module! {
-    constants {
-        "abc" => super::collections_abc::module()
-    }
-
     #[py_name = "_deque_iterator.__new__"]
     fn deque_iterator_new(args) -> Result<Value> {
         native_deque_iterator_new(_interp, args, NativeIteratorClass::Deque)

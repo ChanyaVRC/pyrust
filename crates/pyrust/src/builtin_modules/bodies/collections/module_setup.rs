@@ -120,7 +120,10 @@ pub(crate) fn inject_python_members(
         _ => None,
     };
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
-    let abc_module = interp.load_module("collections.abc")?;
+    // Match CPython 3.12: `collections` imports `_collections_abc`, not
+    // `collections.abc`, so plain `import collections` does not bind
+    // `collections.abc` or populate `sys.modules["collections.abc"]`.
+    let abc_module = interp.load_module("_collections_abc")?;
     if let ValueKind::PyModule(abc_mod) = abc_module.kind() {
         let abc_attrs = abc_mod.borrow();
         for (src_name, dst_name) in [

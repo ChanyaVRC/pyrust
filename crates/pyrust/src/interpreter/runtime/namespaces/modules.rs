@@ -991,7 +991,8 @@ impl Interpreter {
         self.load_module(name)
     }
 
-    /// Check whether `module` exposes a package `__path__` attribute.
+    /// Check whether `module` exposes a package `__path__` attribute, or is a
+    /// built-in package registered in `pyrust_builtin_modules!`.
     pub(crate) fn module_has_package_path(&mut self, module: &Value) -> Result<bool> {
         if let ValueKind::PyModule(m) = module.kind() {
             if m.borrow().filesystem_namespace().is_some() {
@@ -1001,7 +1002,13 @@ impl Interpreter {
             if let Some(val) = borrowed.get_attr_value("__path__") {
                 return Ok(!val.is_unset());
             }
-            if borrowed.filesystem_namespace().is_some() || borrowed.live_namespace().is_some() {
+            if borrowed.filesystem_namespace().is_some() {
+                return Ok(false);
+            }
+            if crate::builtin_modules::is_builtin_package(&borrowed.name) {
+                return Ok(true);
+            }
+            if borrowed.live_namespace().is_some() {
                 return Ok(false);
             }
         }
@@ -1143,7 +1150,7 @@ impl Interpreter {
                 match self.get_attr(&active_parent, "__path__") {
                     Ok(p) => (Some(active_parent), p),
                     Err(err) if err.class_name_is("AttributeError") => {
-                        if crate::builtin_modules::load_builtin_module(name).is_some() {
+                        if crate::builtin_modules::is_builtin_module(name) {
                             (Some(active_parent), Value::none())
                         } else {
                             return Err(PyError::import_error(
@@ -1216,41 +1223,39 @@ impl Interpreter {
                 if let ValueKind::PyModule(m) = val.kind() {
                     crate::builtin_modules::post_load_inject(name, self, m)?;
                 }
-                // Parent-package identity fix-up: a built-in module like
-                // `os` declares `path` as a constant via
-                // `super::os_path::module()`, which builds a *fresh*
-                // os.path Value rather than the one in `module_cache`.
-                // Replace each such submodule-shaped attr with the cached
-                // value so `os.path is direct_os_path` matches CPython.
+                // Parent-package identity fix-up: if a built-in module binds a
+                // submodule-shaped attr that is also a registered built-in
+                // module, ensure the attr points at the cached `sys.modules`
+                // entry so `pkg.submod is sys.modules["pkg.submod"]` matches
+                // CPython.
                 if let ValueKind::PyModule(m) = val.kind() {
-                    let submodule_attrs: Vec<String> = {
+                    let submodule_attrs: Vec<(String, Value)> = {
                         let snapshot = m.borrow().attrs_snapshot();
                         snapshot
-                            .iter()
-                            .filter_map(|(attr_name, attr_val)| {
+                            .into_iter()
+                            .filter(|(attr_name, attr_val)| {
                                 // Only consider attrs that are themselves
                                 // PyModules — primitive constants stay as-is.
-                                match attr_val.kind() {
-                                    ValueKind::PyModule(_) => Some(attr_name.clone()),
-                                    _ => None,
+                                if !matches!(attr_val.kind(), ValueKind::PyModule(_)) {
+                                    return false;
                                 }
-                            })
-                            .filter(|attr_name| {
                                 // And only if there's a registered built-in
                                 // by the dotted name — otherwise leave it.
                                 let dotted = format!("{name}.{attr_name}");
-                                crate::builtin_modules::load_builtin_module(&dotted).is_some()
+                                crate::builtin_modules::is_builtin_module(&dotted)
                             })
                             .collect()
                     };
-                    for attr_name in submodule_attrs {
+                    for (attr_name, attr_val) in submodule_attrs {
                         let dotted = format!("{name}.{attr_name}");
                         // Recursive load goes through the cache, so the
                         // first such call (whether triggered here or by an
                         // explicit `import os.path`) wins and subsequent
                         // accesses share its identity.
                         let cached_submodule = self.load_module(&dotted)?;
-                        m.borrow_mut().insert_attr(attr_name, cached_submodule);
+                        if !values_are_identical(&attr_val, &cached_submodule) {
+                            m.borrow_mut().insert_attr(attr_name, cached_submodule);
+                        }
                     }
                 }
                 // Dotted built-in module parent fix-up: importing a submodule
@@ -1259,7 +1264,7 @@ impl Interpreter {
                 // package is also loaded in `sys.modules` and has this
                 // submodule bound on it, matching CPython 3.12.
                 if let Some((parent, leaf)) = name.rsplit_once('.')
-                    && crate::builtin_modules::load_builtin_module(parent).is_some()
+                    && crate::builtin_modules::is_builtin_module(parent)
                 {
                     let parent_mod = if let Some(cached) = validate_import_cache_entry(
                         parent,
@@ -1567,7 +1572,7 @@ impl Interpreter {
                 "No module named {module_name}"
             )));
         }
-        if crate::builtin_modules::load_builtin_module(module_name).is_some() {
+        if crate::builtin_modules::is_builtin_module(module_name) {
             if let Some(source) = match module_name {
                 "timeit" => Some("import sys, timeit\nsys.exit(timeit.main())\n"),
                 "dis" => Some("import dis\ndis.main()\n"),

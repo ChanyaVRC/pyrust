@@ -1,5 +1,5 @@
-// `xml` package module — exposes `dom`, `parsers`, `sax`, and `etree`
-// (issues #3210, #3260).
+// `xml` package module — subpackages (`dom`, `parsers`, `sax`, `etree`) are
+// loaded lazily on explicit import, matching CPython 3.12 (issues #3210, #3260).
 //
 // Reference: <https://docs.python.org/3/library/xml.html>
 
@@ -15,9 +15,5 @@ pyrust_module! {
             Value::string("sax"),
             Value::string("etree"),
         ]),
-        "etree" => super::xml_etree::module(),
-        "parsers" => super::xml_parsers::module(),
-        "sax" => super::xml_sax::module(),
-        "dom" => super::xml_dom::module(),
     }
 }

@@ -916,7 +916,9 @@ define_reexport_shims! {
 
     _collections_abc {
         init(interp, module) {
-            copy_all_from(interp, "collections.abc", module)
+            crate::builtin_modules::collections_abc::ensure_mixins_initialized(interp)?;
+            crate::builtin_modules::collections_abc::populate_abc_exports(module);
+            Ok(())
         }
     },
 

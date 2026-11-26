@@ -99,15 +99,15 @@ pub(crate) fn post_load_init(
     interp: &mut Interpreter,
     module: &Rc<RefCell<PyModule>>,
 ) -> Result<()> {
-    let (exc_cls, parser_cls, errors_mod, model_mod) = {
+    let (exc_cls, parser_cls) = {
         let m = module.borrow();
         (
             m.get_attr_value("ExpatError"),
             m.get_attr_value("xmlparser"),
-            m.get_attr_value("errors"),
-            m.get_attr_value("model"),
         )
     };
+    let errors_mod = interp.load_module("pyexpat.errors")?;
+    let model_mod = interp.load_module("pyexpat.model")?;
     {
         let mut m = module.borrow_mut();
         if let Some(exc) = exc_cls {
@@ -116,14 +116,8 @@ pub(crate) fn post_load_init(
         if let Some(pcls) = parser_cls {
             m.insert_attr("XMLParserType".to_string(), pcls);
         }
-    }
-    let sys_mod = interp.load_module("sys")?;
-    let modules = interp.get_attr(&sys_mod, "modules")?;
-    if let Some(err_m) = errors_mod {
-        let _ = modules.dict_insert(PyKey::str_from("pyexpat.errors"), err_m);
-    }
-    if let Some(mod_m) = model_mod {
-        let _ = modules.dict_insert(PyKey::str_from("pyexpat.model"), mod_m);
+        m.insert_attr("errors".to_string(), errors_mod);
+        m.insert_attr("model".to_string(), model_mod);
     }
     Ok(())
 }
@@ -2232,8 +2226,6 @@ pyrust_module! {
         "XML_PARAM_ENTITY_PARSING_NEVER" => Value::int(0),
         "XML_PARAM_ENTITY_PARSING_UNLESS_STANDALONE" => Value::int(1),
         "XML_PARAM_ENTITY_PARSING_ALWAYS" => Value::int(2),
-        "errors" => super::pyexpat_errors::module(),
-        "model" => super::pyexpat_model::module(),
     }
 
     exception ExpatError;

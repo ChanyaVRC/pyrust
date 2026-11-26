@@ -4,6 +4,7 @@
 //! Path protocol lookup is kept separate from host I/O: it calls Python code
 //! and validates the returned object, but never touches the filesystem.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::builtin_modules::macros::link_class_bases;
@@ -11,7 +12,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::{
     ExpandedCallArg, Interpreter, reject_keyword_args_expanded, value_type_name_str,
 };
-use crate::value::{PyKey, PySet, Value, ValueKind};
+use crate::value::{PyKey, PyModule, PySet, Value, ValueKind};
 
 pub(super) fn fspath(
     interpreter: &mut Interpreter,
@@ -127,6 +128,19 @@ pub(super) fn prepare_os_module(interp: &mut Interpreter, module: &Value) {
             link_class_bases(pl_rc, vec![Rc::clone(base_rc)]);
         }
     }
+}
+
+/// Bind `os.path` through the module cache (single construction), mirror POSIX
+/// exports on Unix, and populate `os.supports_fd` / `os.supports_follow_symlinks`.
+pub(super) fn post_load_os_module(
+    interp: &mut Interpreter,
+    mod_rc: &Rc<RefCell<PyModule>>,
+) -> Result<()> {
+    // 1a. Bind `os.path` via `load_module` so `os.path` constructs at most once.
+    let os_path = interp.load_module("os.path")?;
+    mod_rc
+        .borrow_mut()
+        .insert_attr("path".to_string(), os_path);
 
     // 1b. On Unix, mirror POSIX-only exports and install `os.environb`.
     #[cfg(unix)]
@@ -165,4 +179,5 @@ pub(super) fn prepare_os_module(interp: &mut Interpreter, module: &Value) {
         "supports_follow_symlinks".to_string(),
         Value::set(follow_set),
     );
+    Ok(())
 }

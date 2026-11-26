@@ -1,5 +1,6 @@
-// `xml.etree` package module — exposes `ElementPath`, `ElementTree`,
-// `ElementInclude`, and `cElementTree` (issues #3210, #3260).
+// `xml.etree` package module — submodules (`ElementPath`, `ElementTree`,
+// `ElementInclude`, `cElementTree`) are loaded lazily on explicit import,
+// matching CPython 3.12 (issues #3210, #3260).
 //
 // Reference: <https://docs.python.org/3/library/xml.etree.elementtree.html>
 
@@ -9,7 +10,5 @@ use pyrust_derive::pyrust_module;
 pyrust_module! {
     constants {
         "__package__" => Value::string("xml.etree"),
-        "ElementPath" => super::xml_etree_elementpath::module(),
-        "ElementTree" => super::xml_etree_elementtree::module(),
     }
 }

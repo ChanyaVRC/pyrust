@@ -1,11 +1,9 @@
 // `http` package module — body for the `http @inject` entry in
 // `pyrust_builtin_modules!` (issue #3207).
 //
-// Exposes `HTTPStatus` and `HTTPMethod` from `http_py.py` alongside the
-// `client`, `server`, and `cookies` submodules. Declaring submodules as
-// `PyModule` constants lets `Interpreter::load_module` stitch them to the
-// cached `sys.modules["http.*"]` objects so all import forms share exact
-// module identity.
+// Exposes `HTTPStatus` and `HTTPMethod` from `http_py.py`. Submodules
+// (`client`, `server`, `cookies`, `cookiejar`) are loaded lazily on explicit
+// import, matching CPython 3.12.
 //
 // Reference: <https://docs.python.org/3/library/http.html>
 
@@ -43,11 +41,4 @@ pub(crate) fn inject_python_members(
     Ok(Some(ns.clone()))
 }
 
-pyrust_module! {
-    constants {
-        "client" => super::http_client::module(),
-        "server" => super::http_server::module(),
-        "cookies" => super::http_cookies::module(),
-        "cookiejar" => super::http_cookiejar::module(),
-    }
-}
+pyrust_module! {}

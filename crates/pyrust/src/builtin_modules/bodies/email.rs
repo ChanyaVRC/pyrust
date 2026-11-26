@@ -2,11 +2,9 @@
 // `pyrust_builtin_modules!` (issue #3211).
 //
 // Exposes `message_from_string`, `message_from_bytes`, `message_from_file`,
-// and `message_from_binary_file` from `email_py.py` alongside the `utils`,
-// `header`, `policy`, `message`, and `parser` submodules. Declaring the
-// submodules as `PyModule` constants lets `Interpreter::load_module` stitch
-// them to their cached `sys.modules["email.*"]` entries so every import form
-// shares exact module identity.
+// and `message_from_binary_file` from `email_py.py`. Submodules (`utils`,
+// `header`, `policy`, `message`, `parser`, etc.) are loaded lazily on explicit
+// import, matching CPython 3.12.
 //
 // Reference: <https://docs.python.org/3/library/email.html>
 
@@ -51,12 +49,4 @@ pub(crate) fn inject_python_members(
     Ok(Some(ns.clone()))
 }
 
-pyrust_module! {
-    constants {
-        "utils" => super::email_utils::module(),
-        "header" => super::email_header::module(),
-        "policy" => super::email_policy::module(),
-        "message" => super::email_message::module(),
-        "parser" => super::email_parser::module(),
-    }
-}
+pyrust_module! {}

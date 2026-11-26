@@ -82,12 +82,16 @@ pub(crate) fn post_load_init(
     interp: &mut Interpreter,
     module: &Rc<RefCell<PyModule>>,
 ) -> Result<()> {
-    // Wire `_aliases` to the exact same dict object as `encodings.aliases.aliases`.
+    // Wire `aliases` and `_aliases` via `load_module` (single construction) so
+    // `encodings.aliases` shares identity with `sys.modules["encodings.aliases"]`
+    // and `_aliases` is the exact same dict object as `encodings.aliases.aliases`.
     let aliases_mod = interp.load_module("encodings.aliases")?;
     let aliases_dict = interp.get_attr(&aliases_mod, "aliases")?;
-    module
-        .borrow_mut()
-        .insert_attr("_aliases".to_string(), aliases_dict);
+    {
+        let mut m = module.borrow_mut();
+        m.insert_attr("aliases".to_string(), aliases_mod);
+        m.insert_attr("_aliases".to_string(), aliases_dict);
+    }
 
     // Register `encodings.search_function` in `codecs` (matching CPython 3.12).
     let codecs_mod = interp.load_module("codecs")?;
@@ -101,7 +105,6 @@ pub(crate) fn post_load_init(
 pyrust_module! {
     constants {
         "__package__" => Value::string("encodings"),
-        "aliases" => super::encodings_aliases::module(),
         "_cache" => Value::dict(PyDict::default()),
         "_unknown" => Value::string(UNKNOWN_SENTINEL),
         "_import_tail" => Value::list(vec![Value::string("*")]),
