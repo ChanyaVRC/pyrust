@@ -175,5 +175,6 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         cached_code_object: RefCell::new(None),
         exc_table,
         has_exc_handlers,
+        dead_temps: Default::default(),
     }
 }

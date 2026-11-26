@@ -78,6 +78,9 @@ struct InstanceAttrsAux {
     native_slots: Vec<(Rc<str>, Value)>,
     member_slots: smallvec::SmallVec<[(MemberSlotId, Value); 2]>,
     builtin_data: Option<Value>,
+    /// PEP 442: the instance's `__del__` has run, or is queued to run, and
+    /// must not run again. Kept here so ordinary instances pay nothing (#3341).
+    finalized: bool,
 }
 
 /// Attribute count above which [`InstanceAttrs`] builds a hash index for
@@ -114,6 +117,7 @@ impl InstanceAttrs {
                 native_slots: Vec::with_capacity(cap),
                 member_slots: smallvec::SmallVec::new(),
                 builtin_data: None,
+                finalized: false,
             })),
             dict_ref: None,
         }
@@ -340,6 +344,17 @@ impl InstanceAttrs {
             .index = Some(index);
     }
 
+    /// Whether `__del__` already ran (or is queued) for this instance (PEP 442).
+    #[inline]
+    pub fn is_finalized(&self) -> bool {
+        self.aux.as_ref().is_some_and(|aux| aux.finalized)
+    }
+
+    /// Record that `__del__` must not run (again) for this instance.
+    pub fn mark_finalized(&mut self) {
+        self.aux.get_or_insert_with(Default::default).finalized = true;
+    }
+
     /// Release the uncommon allocation after its final index/slot is removed.
     #[inline]
     fn drop_empty_aux(&mut self) {
@@ -348,6 +363,7 @@ impl InstanceAttrs {
                 && aux.native_slots.is_empty()
                 && aux.member_slots.is_empty()
                 && aux.builtin_data.is_none()
+                && !aux.finalized
         }) {
             self.aux = None;
         }

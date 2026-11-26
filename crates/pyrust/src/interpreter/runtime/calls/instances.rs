@@ -90,6 +90,11 @@ impl Interpreter {
             self.reject_abstract_class(&class)?;
         }
         if is_exception_class(&class) {
+            // Exception classes do not use the construction plan, so one
+            // that defines `__del__` is counted here (issue #3341).
+            if self.vm_hooks_flags & VM_HOOK_FINALIZER_ARMED != 0 {
+                self.note_possible_finalizable_instance(&class);
+            }
             return self.construct_exception_instance(class, args);
         }
 
@@ -156,6 +161,9 @@ impl Interpreter {
         // classes, where attribute resolution must follow the C3 MRO — those
         // fall back to the byte-identical per-attr `lookup_class_attr` walks.
         let plan = resolve_construction_plan_cached(&class);
+        if plan.is_none() {
+            self.note_possible_finalizable_instance(&class);
+        }
         let prim = match &plan {
             Some(p) => p.prim,
             None => classify_primitive_layout(&class),

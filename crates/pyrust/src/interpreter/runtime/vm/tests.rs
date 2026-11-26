@@ -41,6 +41,7 @@ mod vm_tests {
             // uses the dynamic SetupExcept/PopExcept handler stack.
             exc_table: Vec::new(),
             has_exc_handlers: false,
+            dead_temps: Default::default(),
         }
     }
 

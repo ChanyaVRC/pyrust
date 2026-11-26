@@ -161,10 +161,8 @@ impl Interpreter {
         cells.clear();
         self.env = previous_env;
         self.finish_pop_vm_frame_view();
-        if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0
-            && pyrust_core::has_pending_weakref_callbacks()
-        {
-            self.drain_pending_weakref_callbacks();
+        if self.vm_hooks_flags & (VM_HOOK_WEAKREF | VM_HOOK_FINALIZER_ARMED) != 0 {
+            self.drain_frame_exit_hooks();
         }
         let value = vm_result?;
         Ok(value)

@@ -122,6 +122,17 @@ pub(crate) struct GeneratorFrame {
 }
 
 impl GeneratorFrame {
+    /// Release the locals of a finished generator. CPython clears a
+    /// generator's frame when its body ends, so objects it kept alive are
+    /// freed (and finalized) then, not when the generator object itself dies
+    /// (issue #3341).
+    #[cold]
+    pub(crate) fn release_locals(&mut self) {
+        for reg in &mut self.regs {
+            *reg = Value::unset();
+        }
+    }
+
     /// True when this frame backs an *async generator* (`async def` body that
     /// also contains `yield`, issue #2280): `is_coroutine` (async def) AND
     /// `code.is_generator` (has a bare `yield`).  Async generators reuse the

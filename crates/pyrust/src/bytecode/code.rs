@@ -405,6 +405,30 @@ pub struct FnCode {
     /// propagates straight out (no frame on the stack could catch it).
     /// Conservatively `true` for un-optimized bytecode (no trampolining).
     pub(crate) has_exc_handlers: bool,
+    /// Lazily filled memo for the `__del__` safepoint (issue #3341): which
+    /// temporary registers are dead at each instruction. Empty until the code
+    /// first runs while instances with a pending `__del__` exist.
+    pub(crate) dead_temps: RefCell<DeadTempMemo>,
+}
+
+/// Per-code memo of dead temporary registers for the `__del__` safepoint.
+/// Liveness is static, so each entry is computed once, on first use.
+#[derive(Debug, Default)]
+pub(crate) struct DeadTempMemo {
+    /// `after[pc]`: temporaries the instruction at `pc - 1` touched that no
+    /// path from `pc` reads again. Used on every step within a frame.
+    pub(crate) after: Vec<Option<Box<[u32]>>>,
+    /// `at[pc]`: every temporary that no path from `pc` reads again. Used
+    /// when the safepoint enters a frame it was not following.
+    pub(crate) at: Vec<Option<Box<[u32]>>>,
+}
+
+impl Clone for DeadTempMemo {
+    /// A clone starts empty: the memo is only valid for the exact instruction
+    /// sequence it was computed from, and a cloned code object may be rewritten.
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 impl FnCode {

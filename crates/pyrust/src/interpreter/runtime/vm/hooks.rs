@@ -12,6 +12,14 @@ pub(crate) const VM_HOOK_PROFILE: u8 = 1 << 1;
 pub(crate) const VM_HOOK_WEAKREF: u8 = 1 << 2;
 pub(crate) const VM_HOOK_TRACEMALLOC: u8 = 1 << 3;
 pub(crate) const VM_HOOK_THREADING: u8 = 1 << 4;
+/// Instances with a pending `__del__` exist: release dead temporaries and
+/// poll the finalizer queue before every instruction (issue #3341).
+pub(crate) const VM_HOOK_FINALIZER: u8 = 1 << 5;
+/// Some class defines `__del__`: poll the finalizer queue at frame exit.
+/// Unlike every other bit this one does not divert the VM loop.
+pub(crate) const VM_HOOK_FINALIZER_ARMED: u8 = 1 << 6;
+/// The bits that make the VM loop call `vm_dispatch_step_hooks`.
+pub(crate) const VM_HOOK_STEP_MASK: u8 = !VM_HOOK_FINALIZER_ARMED;
 
 /// Classification of how a single instruction interacts with a candidate
 /// temporary register `target_reg`.
@@ -522,6 +530,30 @@ fn is_temp_reg_live_at(code: &crate::bytecode::FnCode, start_pc: usize, target_r
     false
 }
 
+/// The temporary registers that are dead at `pc`: all of them, or with
+/// `touched_only` just those the instruction before `pc` read or wrote.
+fn dead_temps(
+    code: &crate::bytecode::FnCode,
+    pc: usize,
+    num_locals: usize,
+    regs_len: usize,
+    touched_only: bool,
+) -> Box<[u32]> {
+    let prev = pc.checked_sub(1).and_then(|prev| code.insns.get(prev));
+    if touched_only && prev.is_none() {
+        return Box::default();
+    }
+    (num_locals as u32..regs_len as u32)
+        .filter(|&reg| {
+            let touched = !touched_only
+                || prev.is_some_and(|prev| {
+                    !matches!(insn_reg_access(prev, code, reg), RegAccess::None)
+                });
+            touched && !is_temp_reg_live_at(code, pc, reg)
+        })
+        .collect()
+}
+
 impl Interpreter {
     /// Recompute the single hot-loop hook bitmask from `sys` feature state and the
     /// thread-local weakref counters.
@@ -546,6 +578,14 @@ impl Interpreter {
         }
         if self.cold.gil_state.has_active_workers() {
             flags |= VM_HOOK_THREADING;
+        }
+        if pyrust_core::finalizers_armed() {
+            flags |= VM_HOOK_FINALIZER_ARMED;
+            if pyrust_core::live_finalizable_instances() != 0
+                || pyrust_core::has_pending_finalizers()
+            {
+                flags |= VM_HOOK_FINALIZER;
+            }
         }
         self.vm_hooks_flags = flags;
     }
@@ -591,6 +631,90 @@ impl Interpreter {
         }
         if !pyrust_core::has_live_weakrefs() && !pyrust_core::has_pending_weakref_callbacks() {
             self.vm_hooks_flags &= !VM_HOOK_WEAKREF;
+        }
+    }
+
+    /// Per-step `__del__` safepoint, run only while constructed instances of
+    /// `__del__` classes await finalization.
+    ///
+    /// CPython finalizes an instance the moment its last reference goes away.
+    /// Here a dead temporary register can still hold that reference (directly,
+    /// or through a container, bound method or generator), so dead registers
+    /// are released first; then every queued finalizer runs, before the next
+    /// instruction executes.
+    ///
+    /// Within a frame only the registers the previous instruction touched can
+    /// have just died. When the safepoint arrives in a different frame (it
+    /// was just switched on, or the VM called into or returned to a frame),
+    /// values left behind while nobody was releasing them may be anywhere, so
+    /// every dead temporary of that frame is released once.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn vm_finalizer_step(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        pc: usize,
+        regs_ptr: std::ptr::NonNull<Value>,
+        regs_len: usize,
+        num_locals: u32,
+    ) {
+        let regs_addr = regs_ptr.as_ptr() as usize;
+        let entered_frame =
+            std::mem::replace(&mut self.cold.finalizer_scrubbed_regs, regs_addr) != regs_addr;
+        // A frame at its first instruction has no temporaries yet.
+        if !(entered_frame && pc == 0) {
+            // SAFETY: `regs_ptr`/`regs_len` come directly from the active
+            // `RegSlice` of the suspended VM loop frame; no aliasing
+            // `&mut [Value]` exists concurrently.
+            let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr.as_ptr(), regs_len) };
+            // Values are moved out here and dropped only after the memo borrow
+            // ends, so a drop can never observe the borrow.
+            let mut released: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::new();
+            if let Ok(mut memo) = code.dead_temps.try_borrow_mut() {
+                let table = if entered_frame {
+                    &mut memo.at
+                } else {
+                    &mut memo.after
+                };
+                if table.len() != code.insns.len() {
+                    table.resize(code.insns.len(), None);
+                }
+                if let Some(entry) = table.get_mut(pc) {
+                    let dead = entry.get_or_insert_with(|| {
+                        dead_temps(code, pc, num_locals as usize, regs_len, !entered_frame)
+                    });
+                    for &reg in dead.iter() {
+                        if let Some(v) = regs.get_mut(reg as usize)
+                            && !v.is_unset()
+                        {
+                            released.push(std::mem::replace(v, Value::unset()));
+                        }
+                    }
+                }
+            }
+            drop(released);
+        }
+        if pyrust_core::has_pending_finalizers() {
+            self.run_pending_finalizers();
+        }
+        if pyrust_core::live_finalizable_instances() == 0 && !pyrust_core::has_pending_finalizers()
+        {
+            // Nothing left that could become due: stop diverting the VM loop
+            // until the next finalizable instance is constructed.
+            self.vm_hooks_flags &= !VM_HOOK_FINALIZER;
+        }
+    }
+
+    /// Frame-exit safepoint: run weakref callbacks and finalizers made due by
+    /// the registers the frame just released.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn drain_frame_exit_hooks(&mut self) {
+        if pyrust_core::has_pending_weakref_callbacks() {
+            self.drain_pending_weakref_callbacks();
+        }
+        if pyrust_core::has_pending_finalizers() {
+            self.run_pending_finalizers();
         }
     }
 
@@ -688,6 +812,9 @@ impl Interpreter {
     ) -> Result<()> {
         if self.vm_hooks_flags & VM_HOOK_WEAKREF != 0 {
             self.vm_scrub_dead_weakref_temps(code, pc, regs_ptr, regs_len, num_locals);
+        }
+        if self.vm_hooks_flags & VM_HOOK_FINALIZER != 0 {
+            self.vm_finalizer_step(code, pc, regs_ptr, regs_len, num_locals);
         }
 
         if self.vm_hooks_flags & VM_HOOK_TRACE != 0 && !code.is_inlined_comp {

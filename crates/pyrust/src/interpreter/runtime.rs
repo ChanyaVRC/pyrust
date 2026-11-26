@@ -96,7 +96,9 @@ pub(crate) use threading_rt::{
 
 mod calls {
     use super::classes::{PrimitiveLayout, classify_primitive_layout, primitive_layout_for_class};
-    use super::execution::{VM_HOOK_PROFILE, VM_HOOK_TRACE, VM_HOOK_WEAKREF};
+    use super::execution::{
+        VM_HOOK_FINALIZER_ARMED, VM_HOOK_PROFILE, VM_HOOK_TRACE, VM_HOOK_WEAKREF,
+    };
     use super::{
         CallDepthGuard, CellSlice, CellsBuf, ExpandedArgBuf, ExpandedCallArg, FnCode,
         GeneratorFrame, GeneratorKind, InstanceAttrs, Interpreter, PyClass, PyDict, PyError,
@@ -289,12 +291,12 @@ mod namespaces {
         Interpreter, InterpreterColdState, MODULE_CLASS_CACHE_SLOT_COUNT, ModuleClassCache,
         ModuleClassCacheSlot, ModuleMutationState, PathBuf, PyClass, PyDict, PyError, PyInstance,
         PyKey, PyModule, Rc, RefCell, RegSlice, Result, StrKey, Value, ValueKind,
-        active_live_class_namespace, cached_builtins_module, call_del_if_last_binding,
-        call_del_if_last_binding_in_env, env_assign_local, get_int_max_str_digits,
-        invoke_class_method, is_cached_builtins_module, lookup_class_attr, lookup_name_in_env,
-        lookup_name_in_env_as_free, lookup_name_in_module, lookup_value_special_method, module_env,
-        module_type_singleton, object_class_singleton, set_int_max_str_digits,
-        unbound_binding_error, value_type_name_str, values_are_identical, vm_read,
+        active_live_class_namespace, cached_builtins_module, drop_deleted_binding,
+        env_assign_local, get_int_max_str_digits, invoke_class_method, is_cached_builtins_module,
+        lookup_class_attr, lookup_name_in_env, lookup_name_in_env_as_free, lookup_name_in_module,
+        lookup_value_special_method, module_env, module_type_singleton, object_class_singleton,
+        set_int_max_str_digits, unbound_binding_error, value_type_name_str, values_are_identical,
+        vm_read,
     };
     include!("runtime/namespaces.rs");
 }

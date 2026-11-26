@@ -269,6 +269,9 @@ impl Interpreter {
         // resolved __qualname__.
         let qualname =
             make_class_finalize_attrs(&mut attrs, proto_qualname, class_docstring.as_deref())?;
+        if attrs.contains_key("__del__") {
+            self.arm_finalizers();
+        }
 
         // Resolve and validate the base classes (already `__mro_entries__`-
         // flattened above).

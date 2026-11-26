@@ -44,6 +44,12 @@ fn resolve_construction_plan(class: &Rc<RefCell<PyClass>>) -> Option<Constructio
         if !borrowed.extra_bases.is_empty() {
             return None;
         }
+        // A class with a finalizer is never cached either: its constructions
+        // are counted on the uncached path (issue #3341), which keeps that
+        // bookkeeping entirely off the cached fast path.
+        if borrowed.attrs.contains_key("__del__") {
+            return None;
+        }
         if new_val.is_none() {
             new_val = borrowed.attrs.get("__new__").cloned();
         }

@@ -9,7 +9,6 @@ impl Interpreter {
     pub(crate) fn exec_delete_cell(
         &mut self,
         code: &crate::bytecode::FnCode,
-        regs: &RegSlice,
         cells: CellSlice,
         cell_idx: u16,
         raise_if_missing: bool,
@@ -25,13 +24,7 @@ impl Interpreter {
             }
             return Ok(());
         };
-        call_del_if_last_binding_in_env(
-            self,
-            deleted,
-            &self.env.clone(),
-            regs,
-            code.num_locals as usize,
-        );
+        drop_deleted_binding(self, deleted);
         Ok(())
     }
 
@@ -114,7 +107,7 @@ impl Interpreter {
         {
             if let Some(deleted) = namespace.dict_shift_remove(&PyKey::str_from(name))? {
                 regs[register as usize] = Value::unset();
-                call_del_if_last_binding(self, deleted, regs, code.num_locals as usize);
+                drop_deleted_binding(self, deleted);
                 return Ok(());
             }
             if raise_if_missing {
@@ -126,7 +119,7 @@ impl Interpreter {
             }
             let deleted = std::mem::replace(&mut regs[register as usize], Value::unset());
             if !deleted.is_unset() {
-                call_del_if_last_binding(self, deleted, regs, code.num_locals as usize);
+                drop_deleted_binding(self, deleted);
             }
             return Ok(());
         }
@@ -158,7 +151,7 @@ impl Interpreter {
         if (!is_module_scope || !self.globals_exposed_for_environment(&self.env))
             && !deleted.is_unset()
         {
-            call_del_if_last_binding(self, deleted, regs, code.num_locals as usize);
+            drop_deleted_binding(self, deleted);
         }
         Ok(())
     }
@@ -290,7 +283,6 @@ impl Interpreter {
     pub(crate) fn delete_module_global_binding(
         &mut self,
         code: &crate::bytecode::FnCode,
-        regs: &RegSlice,
         name_index: u16,
     ) -> Result<()> {
         let name = code.names.get(name_index as usize).ok_or_else(|| {
@@ -323,7 +315,7 @@ impl Interpreter {
                 .synchronize_namespace_fastlocal_binding(name, &Value::unset(), None);
         }
         if let Some(value) = from_env.or(from_dict) {
-            call_del_if_last_binding(self, value, regs, code.num_locals as usize);
+            drop_deleted_binding(self, value);
         }
         Ok(())
     }
@@ -449,7 +441,6 @@ impl Interpreter {
     pub(crate) fn exec_delete_name(
         &mut self,
         code: &crate::bytecode::FnCode,
-        regs: &RegSlice,
         name_idx: u16,
     ) -> Result<()> {
         let name = code.names.get(name_idx as usize).ok_or_else(|| {
@@ -499,7 +490,7 @@ impl Interpreter {
             }
             let del_candidate = from_env.or(from_dict).or(from_mirror);
             if let Some(val) = del_candidate {
-                call_del_if_last_binding(self, val, regs, code.num_locals as usize);
+                drop_deleted_binding(self, val);
             }
         } else {
             let (is_module_scope, in_env, from_mirror) = {
@@ -559,7 +550,7 @@ impl Interpreter {
             }
             let del_candidate = from_env.or(from_dict).or(from_mirror);
             if let Some(val) = del_candidate {
-                call_del_if_last_binding(self, val, regs, code.num_locals as usize);
+                drop_deleted_binding(self, val);
             }
         }
         Ok(())
