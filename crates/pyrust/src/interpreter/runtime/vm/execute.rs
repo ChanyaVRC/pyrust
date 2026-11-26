@@ -538,7 +538,7 @@ impl Interpreter {
                         } => (function, cache_probe),
                     };
                     if let ValueKind::BoundMethod { function, receiver } = func_val.kind()
-                        && function.trampoline_arity as usize == (*argc as usize) + 1
+                        && vm_tramp_arity_may_fit(function.trampoline_arity, (*argc as usize) + 1)
                     {
                         let f = Rc::clone(function);
                         let recv = Value::py_instance(Rc::clone(receiver));
@@ -583,7 +583,7 @@ impl Interpreter {
                     if let Some(method) = code.names.get(*name_idx as usize)
                         && let Some((f, recv_rc)) =
                             self.resolve_method_cached(&regs, *obj, method, code, pc - 1)
-                        && f.trampoline_arity as usize == (*nargs as usize) + 1
+                        && vm_tramp_arity_may_fit(f.trampoline_arity, (*nargs as usize) + 1)
                     {
                         let recv = Value::py_instance(recv_rc);
                         tramp_finish!(self.vm_tramp_try_method(
