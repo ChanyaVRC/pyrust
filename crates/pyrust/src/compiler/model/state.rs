@@ -260,6 +260,10 @@ struct Compiler {
     /// instead of a full attribute-lookup + method-call dispatch, mirroring
     /// CPython's dedicated `LIST_APPEND` opcode (issue #1862).
     is_list_comp: bool,
+    /// True when this Compiler is producing the reduction frame of an inlined
+    /// `sum(<genexpr>)` (#3384).  In that mode the synthesized accumulator
+    /// step `.acc.sum_step(.v)` is lowered directly to `Insn::SumStep`.
+    is_sum_reduction: bool,
     /// True when this Compiler is a **list comprehension** body whose single
     /// unconditional clause lets the accumulator be pre-sized from the source
     /// length (`[f(x) for x in src]`): the element count equals `len(src)`, so

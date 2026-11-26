@@ -1099,6 +1099,13 @@ fn decode_insn(fncode: &FnCode, pc: usize, insn: &Insn) -> DecodedInsn {
             argval: Value::int(i64::from(*val)),
             argrepr: format!("r{set_reg}.add(r{val})"),
         },
+        Insn::SumStep(cell_reg, val) => DecodedInsn {
+            opname: "SUM_STEP",
+            opcode: 108,
+            arg: Some(i64::from(*cell_reg)),
+            argval: Value::int(i64::from(*val)),
+            argrepr: format!("r{cell_reg}.sum_step(r{val})"),
+        },
         Insn::ListAppend(list_reg, val) => DecodedInsn {
             opname: "LIST_APPEND",
             opcode: 94,
@@ -1301,7 +1308,11 @@ fn build_code_from_proto(proto: &FnProto) -> Value {
     }
 
     let mut consts = vec![Value::none()];
-    consts.extend(fncode.consts.iter().filter(|c| !c.is_none()).cloned());
+    consts.extend(
+        crate::bytecode::python_visible_consts(&fncode.consts)
+            .filter(|c| !c.is_none())
+            .cloned(),
+    );
     let names = fncode
         .names
         .iter()

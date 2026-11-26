@@ -15,6 +15,19 @@ pub(super) fn try_constant_compare_fast(left: &Value, right: &Value, op: BinaryO
     if let Some(result) = try_integer_compare_fast(left, right, op) {
         return Some(result);
     }
+    // `x is None` / `x is True` / `x is not False`: identity against a
+    // singleton constant is decided by the operand's own tag, with no
+    // protocol dispatch.  An unset register still takes the slow path, which
+    // owns the unbound-local diagnostic.
+    if matches!(op, BinaryOp::Is | BinaryOp::IsNot) && !left.is_unset() {
+        let identical = match (left.kind(), right.kind()) {
+            (ValueKind::None, ValueKind::None) => true,
+            (ValueKind::Bool(left), ValueKind::Bool(right)) => left == right,
+            (_, ValueKind::None | ValueKind::Bool(_)) => false,
+            _ => return None,
+        };
+        return Some(identical == matches!(op, BinaryOp::Is));
+    }
     match (left.kind(), right.kind()) {
         (ValueKind::Str(left), ValueKind::Str(right)) => str_cmp(left, right, op),
         _ => None,

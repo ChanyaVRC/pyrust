@@ -783,6 +783,21 @@ pub enum Insn {
     /// emitted by `compile_set_comp`.  Performs `__eq__`/`__hash__` dedup in the
     /// VM, semantically equivalent to `set.add()`.
     SetAdd(Reg, Reg),
+    /// Fold R[item] into the `sum` accumulator cell in R[cell] — the
+    /// per-element step of a compiler-inlined `sum(<genexpr>)` (#3384).
+    ///
+    /// The cell is the three-slot list `[result, mode, compensation]` that
+    /// `compile_genexpr_reduction` allocates in the reduction frame:
+    /// `result` is always the value `sum` would return if iteration stopped
+    /// now, `mode` is `False` on the int fast path (or for a start value not
+    /// classified yet), the raw running float sum on the float path, and
+    /// `None` in generic mode; `compensation` is the float path's Neumaier
+    /// term.  The step delegates to the runtime's `SumAccumulator`, the same
+    /// state machine the `sum` builtin runs, so both agree bit for bit.
+    ///
+    /// Like `ListAppend` it writes no register; unlike it, a generic step
+    /// runs `__add__` / `__radd__` and can therefore raise or re-enter Python.
+    SumStep(Reg, Reg),
     /// R[list].push(R[val])  — in-place append for variadic call construction
     ListAppend(Reg, Reg),
     /// R[list].extend(iter(R[src]))  — in-place extend

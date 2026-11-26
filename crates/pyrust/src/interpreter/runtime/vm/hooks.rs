@@ -161,6 +161,7 @@ fn insn_reg_access(
         | Insn::CountCmpJumpFalse(a, _, b, _, _)
         | Insn::RaiseFrom(a, b)
         | Insn::SetAdd(a, b)
+        | Insn::SumStep(a, b)
         | Insn::ListAppend(a, b)
         | Insn::ListExtend(a, b)
         | Insn::DictUpdate(a, b) => {

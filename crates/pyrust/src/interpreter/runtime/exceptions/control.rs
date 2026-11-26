@@ -94,14 +94,20 @@ impl Interpreter {
         catch_lineno: u32,
         is_bare_reraise: bool,
     ) {
+        let reraised = self.cold.reraised_with_traceback.take();
         let Some(instance) = exception.as_py_instance_rc() else {
             return;
         };
+        let reraise_carries_traceback =
+            reraised.is_some_and(|reraised| std::ptr::eq(reraised.as_ptr(), Rc::as_ptr(instance)));
         let existing = instance.borrow().attrs.get_slot("__traceback__").cloned();
         if let Some(existing) = existing {
-            if let Some(traceback) =
-                self.caught_traceback_value(&existing, catch_lineno as i64, is_bare_reraise)
-            {
+            if let Some(traceback) = self.caught_traceback_value(
+                &existing,
+                catch_lineno as i64,
+                is_bare_reraise,
+                reraise_carries_traceback,
+            ) {
                 instance
                     .borrow_mut()
                     .attrs

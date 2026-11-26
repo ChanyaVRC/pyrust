@@ -95,6 +95,9 @@ impl Compiler {
                 if self.try_emit_list_comp_append(expr) {
                     return;
                 }
+                if self.try_emit_sum_reduction_step(expr) {
+                    return;
+                }
                 let r = self.compile_discarded_expr(expr);
                 self.free_temp(r);
             }

@@ -113,6 +113,7 @@ fn pass_copy_prop(insns: Vec<Insn>, descs: &mut Vec<InsnDesc>, num_locals: u32) 
             // mutation to the original allocation (copy propagation is only valid for
             // reads; deep-copied containers are independent allocations).
             Insn::SetAdd(st, val) => Insn::SetAdd(st, s(&copies, val)),
+            Insn::SumStep(cell, val) => Insn::SumStep(cell, s(&copies, val)),
             Insn::ListAppend(lst, val) => Insn::ListAppend(lst, s(&copies, val)),
             Insn::ListExtend(lst, src) => Insn::ListExtend(lst, s(&copies, src)),
             Insn::ListExtendCall(desc_idx) => {

@@ -711,3 +711,193 @@ fn augmented_targets_and_match_patterns_promote_enclosing_cells() {
         );
     }
 }
+
+/// The canonical-builtin guard of a reduction lowering in `code`, as the name
+/// of the builtin the callee value is compared against.
+fn genexpr_reduction_guard(code: &FnCode) -> Option<&'static str> {
+    code.insns.iter().find_map(|insn| match insn {
+        Insn::CmpJumpIfFalseConst(_, BinaryOp::Is, const_idx, _) => {
+            match code.consts[*const_idx as usize].kind() {
+                ValueKind::BuiltinFunction(name) => Some(name),
+                _ => None,
+            }
+        }
+        _ => None,
+    })
+}
+
+fn genexpr_protos(code: &FnCode) -> Vec<&FnCode> {
+    code.fn_protos
+        .iter()
+        .filter(|proto| proto.name.as_ref() == "<genexpr>")
+        .map(|proto| proto.code.as_ref())
+        .collect()
+}
+
+#[test]
+fn genexpr_reduction_guards_the_builtin_and_keeps_the_original_call() {
+    for (source, builtin) in [
+        ("r = sum(x for x in xs)\n", "sum"),
+        ("r = sum((x for x in xs), 10)\n", "sum"),
+        ("r = any(x for x in xs)\n", "any"),
+        ("r = all(x for x in xs if x)\n", "all"),
+        ("r = min(x for x in xs for y in x)\n", "min"),
+        ("r = max((x for x in xs), default=None)\n", "max"),
+    ] {
+        let code = compile_source(source);
+        assert_eq!(
+            genexpr_reduction_guard(&code),
+            Some(builtin),
+            "{source:?} must compare the loaded callee against the canonical builtin"
+        );
+
+        let protos = genexpr_protos(&code);
+        assert_eq!(
+            protos.len(),
+            2,
+            "{source:?} needs the reduction frame and the original generator"
+        );
+        let yields = |code: &FnCode| {
+            code.insns
+                .iter()
+                .filter(|insn| matches!(insn, Insn::Yield { .. }))
+                .count()
+        };
+        assert!(
+            protos.iter().all(|proto| proto.is_generator),
+            "{source:?}: both frames must stay generator frames"
+        );
+        let reduction = protos[0];
+        let original = protos[1];
+        assert_eq!(
+            yields(original),
+            1,
+            "{source:?}: the fallback generator yields each element"
+        );
+        assert!(
+            reduction
+                .insns
+                .iter()
+                .any(|insn| matches!(insn, Insn::SetupExcept(_))),
+            "{source:?}: the reduction step must be protected so its \
+             exception can be re-raised from the enclosing frame"
+        );
+        assert_eq!(
+            reduction
+                .insns
+                .iter()
+                .any(|insn| matches!(insn, Insn::SumStep(..))),
+            builtin == "sum",
+            "{source:?}: only `sum` folds through SumStep"
+        );
+        assert!(
+            original
+                .insns
+                .iter()
+                .all(|insn| !matches!(insn, Insn::SumStep(..) | Insn::SetupExcept(_))),
+            "{source:?}: the fallback generator must be the unmodified genexpr"
+        );
+
+        // The enclosing frame drives the reduction generator itself and
+        // re-raises a failed step; the fallback is a plain builtin call.
+        assert_eq!(
+            code.insns
+                .iter()
+                .filter(|insn| matches!(insn, Insn::ForIter(..)))
+                .count(),
+            2,
+            "{source:?}: one resume for the result, one to finish the frame"
+        );
+        assert!(
+            code.insns
+                .iter()
+                .any(|insn| matches!(insn, Insn::RaiseValue(_))),
+            "{source:?}: a failed step is re-raised from the enclosing frame"
+        );
+        assert!(
+            code.insns
+                .iter()
+                .any(|insn| matches!(insn, Insn::Call(..) | Insn::CallKw { .. })),
+            "{source:?}: the original call must remain as the deopt path"
+        );
+    }
+}
+
+#[test]
+fn genexpr_reduction_is_skipped_for_shadowed_names_and_other_shapes() {
+    for source in [
+        // The name is bound in this scope: statically not the builtin.
+        "sum = len\nr = sum(x for x in xs)\n",
+        "def f(any):\n    return any(x for x in xs)\n",
+        "def f():\n    min = max\n    def g():\n        return min(x for x in xs)\n    return g\n",
+        // Shapes the lowering does not cover.
+        "r = sum((x for x in xs), start=1)\n",
+        "r = min((x for x in xs), key=abs)\n",
+        "r = max((x for x in xs), key=abs, default=0)\n",
+        "r = min((x for x in xs), (y for y in xs))\n",
+        "r = sum([x for x in xs])\n",
+        "r = sum(*[(x for x in xs)])\n",
+        "r = sorted(x for x in xs)\n",
+        "r = m.sum(x for x in xs)\n",
+        // An asynchronous generator expression is not iterable by `sum`.
+        "async def f():\n    return sum(await x for x in xs)\n",
+        "async def f():\n    return any(x async for x in xs)\n",
+    ] {
+        fn visit<'a>(code: &'a FnCode, out: &mut Vec<&'a FnCode>) {
+            out.push(code);
+            for proto in &code.fn_protos {
+                visit(proto.code.as_ref(), out);
+            }
+        }
+        let module = compile_source(source);
+        let mut codes = Vec::new();
+        visit(&module, &mut codes);
+        for code in codes {
+            assert_eq!(
+                genexpr_reduction_guard(code),
+                None,
+                "{source:?} must keep the ordinary call"
+            );
+            assert!(
+                code.insns
+                    .iter()
+                    .all(|insn| !matches!(insn, Insn::SumStep(..))),
+                "{source:?} must not fold through SumStep"
+            );
+        }
+    }
+}
+
+#[test]
+fn genexpr_reduction_evaluates_the_iterable_once_before_the_guard() {
+    let code = compile_source("r = sum((x for x in make()), start_value())\n");
+    let position = |pred: &dyn Fn(&Insn) -> bool| {
+        code.insns
+            .iter()
+            .position(pred)
+            .expect("instruction must be present")
+    };
+    let guard = position(&|insn| matches!(insn, Insn::CmpJumpIfFalseConst(_, BinaryOp::Is, ..)));
+    let calls_before_guard = code.insns[..guard]
+        .iter()
+        .filter(|insn| matches!(insn, Insn::Call(..)))
+        .count();
+    assert_eq!(
+        calls_before_guard, 2,
+        "the outermost iterable and the start value are each evaluated once, \
+         in source order, before the paths split"
+    );
+    let make = code
+        .names
+        .iter()
+        .position(|name| name == "make")
+        .expect("make name") as u16;
+    assert_eq!(
+        code.insns
+            .iter()
+            .filter(|insn| matches!(insn, Insn::LoadGlobal(_, idx) if *idx == make))
+            .count(),
+        1,
+        "neither path may re-evaluate the outermost iterable"
+    );
+}

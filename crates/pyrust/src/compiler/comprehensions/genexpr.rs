@@ -28,7 +28,31 @@ impl Compiler {
         // Evaluate the outermost iterable in the enclosing (current) scope
         // before creating the nested function.
         let iter_reg = self.compile_expr(&clauses[0].iter);
+        self.compile_gen_exp_over(iter_reg, elt, elt_lineno, first_lineno, clauses, is_async)
+    }
 
+    /// Qualified name of a generator expression created in this scope.
+    fn genexpr_qualname(&self) -> String {
+        if self.qualname_prefix.is_empty() {
+            "<genexpr>".to_string()
+        } else {
+            format!("{}.<genexpr>", self.qualname_prefix)
+        }
+    }
+
+    /// Steps 2 and 3 of [`Self::compile_gen_exp`] for an outermost iterable
+    /// already evaluated into `iter_reg` (also the fallback path of the
+    /// reduction lowering in `reduction.rs`, which shares that register with
+    /// its fast path).
+    fn compile_gen_exp_over(
+        &mut self,
+        iter_reg: Reg,
+        elt: &Expr,
+        elt_lineno: u32,
+        first_lineno: u32,
+        clauses: &[CompClause],
+        is_async: bool,
+    ) -> Reg {
         // Thread per-part line numbers so `<genexpr>` raises report accurate
         // `tb_lineno` and PEP 657 carets (#2992).
         let effective_first_lineno = if first_lineno != 0 {
@@ -46,17 +70,17 @@ impl Compiler {
             span: None,
             lineno: effective_elt_lineno,
         });
-        let (body, body_linenos) =
-            Self::build_comp_loop_body_with_linenos(clauses, yield_stmt, effective_elt_lineno);
+        let (body, body_linenos) = Self::build_comp_loop_body_with_linenos(
+            clauses,
+            vec![yield_stmt],
+            effective_elt_lineno,
+        );
 
-        let genexpr_qualname = if self.qualname_prefix.is_empty() {
-            "<genexpr>".to_string()
-        } else {
-            format!("{}.<genexpr>", self.qualname_prefix)
-        };
+        let genexpr_qualname = self.genexpr_qualname();
 
         self.compile_comprehension_fn(CompFnConfig {
             iter_reg,
+            extra_arg: None,
             fn_body: &body,
             body_linenos: &body_linenos,
             display_name: "<genexpr>",
@@ -65,6 +89,7 @@ impl Compiler {
             is_inlined_comp: false,
             is_set_comp: false,
             is_list_comp: false,
+            is_sum_reduction: false,
             list_comp_presize: false,
             first_lineno: effective_first_lineno,
             call_span: None,

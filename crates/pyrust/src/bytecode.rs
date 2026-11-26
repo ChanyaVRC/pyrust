@@ -24,6 +24,7 @@ pub(crate) use cache::{
 pub use code::FnCode;
 pub(crate) use code::{
     ColTable, EXC_NO_HANDLER, LinenoTable, MAX_FRAME_REGS, SafepointTable, intern_const_pool,
+    python_visible_consts,
 };
 pub use function::{
     CaptureSource, CellSlotMeta, CellVar, FnParamSpec, FnProto, compute_param_binds,

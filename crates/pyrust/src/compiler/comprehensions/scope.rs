@@ -6,6 +6,10 @@ struct ComprehensionScopeBindings {
 
 struct CompFnConfig<'a> {
     iter_reg: Reg,
+    /// A second implicit parameter and the enclosing-scope register whose
+    /// value it receives — the `start` of a `sum(<genexpr>, start)` reduction
+    /// frame (#3384).
+    extra_arg: Option<(&'a str, Reg)>,
     fn_body: &'a [Stmt],
     body_linenos: &'a [u32],
     display_name: &'a str,
@@ -14,6 +18,7 @@ struct CompFnConfig<'a> {
     is_inlined_comp: bool,
     is_set_comp: bool,
     is_list_comp: bool,
+    is_sum_reduction: bool,
     list_comp_presize: bool,
     first_lineno: u32,
     call_span: Option<crate::ast::CaretSpan>,
@@ -87,16 +92,17 @@ impl Compiler {
     /// `innermost`.  The outermost `for` iterates over `IT_PARAM` (the implicit
     /// parameter that receives the outermost iterable from the enclosing scope).
     fn build_comp_loop_body(clauses: &[CompClause], innermost: Stmt) -> Vec<Stmt> {
-        Self::build_comp_loop_body_with_linenos(clauses, innermost, 0).0
+        Self::build_comp_loop_body_with_linenos(clauses, vec![innermost], 0).0
     }
 
     /// Build the loop-nest AST along with parallel 1-based statement line
     /// numbers so generator expressions carry accurate `tb_lineno` and PEP 657
     /// caret anchors across multi-line elements, clauses, and chained `if`
-    /// filters (issue #2992).
+    /// filters (issue #2992).  `innermost` is the statement sequence run for
+    /// each produced element, all on `innermost_lineno`.
     fn build_comp_loop_body_with_linenos(
         clauses: &[CompClause],
-        innermost: Stmt,
+        innermost: Vec<Stmt>,
         innermost_lineno: u32,
     ) -> (Vec<Stmt>, Vec<u32>) {
         const IT_PARAM: &str = ".0";
@@ -127,8 +133,8 @@ impl Compiler {
             (body, body_linenos)
         };
 
-        let mut body = vec![innermost];
-        let mut body_linenos = vec![innermost_lineno];
+        let mut body_linenos = vec![innermost_lineno; innermost.len()];
+        let mut body = innermost;
         for clause in clauses[1..].iter().rev() {
             (body, body_linenos) = wrap_filters(clause, body, body_linenos);
             body = vec![Stmt::For {
@@ -225,15 +231,19 @@ impl Compiler {
     fn compile_comprehension_fn(&mut self, cfg: CompFnConfig<'_>) -> Reg {
         const IT_PARAM: &str = ".0";
 
-        let params = vec![FunctionParam {
-            name: Symbol::intern(IT_PARAM),
+        let implicit_param = |name: &str| FunctionParam {
+            name: Symbol::intern(name),
             default: None,
             annotation: None,
             is_args: false,
             is_kwargs: false,
             is_keyword_only: false,
             is_positional_only: false,
-        }];
+        };
+        let mut params = vec![implicit_param(IT_PARAM)];
+        if let Some((name, _)) = cfg.extra_arg {
+            params.push(implicit_param(name));
+        }
 
         let Some(scope) = self.analyze_comprehension_scope(&params, cfg.fn_body) else {
             return 0;
@@ -277,6 +287,7 @@ impl Compiler {
         sub.is_async_function = cfg.is_async;
         sub.is_set_comp = cfg.is_set_comp;
         sub.is_list_comp = cfg.is_list_comp;
+        sub.is_sum_reduction = cfg.is_sum_reduction;
         sub.list_comp_presize = cfg.list_comp_presize;
         sub.is_inlined_comp = cfg.is_inlined_comp;
         sub.first_lineno = cfg.first_lineno;
@@ -375,7 +386,8 @@ impl Compiler {
             closure_capture_map,
         });
 
-        // Emit MakeFunction + Call: fn_reg = function, fn_reg+1 = iterable arg.
+        // Emit MakeFunction + Call: fn_reg = function, fn_reg+1 = iterable arg,
+        // fn_reg+2 = the extra implicit argument when there is one.
         let fn_reg = self.alloc_temp();
         let desc_idx = self.push_desc(InsnDesc::MakeFunction(MakeFunctionDesc {
             dst: fn_reg,
@@ -388,17 +400,22 @@ impl Compiler {
         self.emit(Insn::MakeFunction(desc_idx));
 
         let arg_reg = fn_reg + 1;
-        if arg_reg > self.max_reg {
-            self.max_reg = arg_reg;
+        let argc: u8 = if cfg.extra_arg.is_some() { 2 } else { 1 };
+        let last_arg_reg = fn_reg + Reg::from(argc);
+        if last_arg_reg > self.max_reg {
+            self.max_reg = last_arg_reg;
         }
-        if fn_reg + 2 > self.next_temp {
-            self.next_temp = fn_reg + 2;
+        if last_arg_reg + 1 > self.next_temp {
+            self.next_temp = last_arg_reg + 1;
         }
         self.emit(Insn::Move(arg_reg, cfg.iter_reg));
+        if let Some((_, extra_reg)) = cfg.extra_arg {
+            self.emit(Insn::Move(arg_reg + 1, extra_reg));
+        }
         if cfg.call_span.is_some() {
             self.set_col_span_for_next(cfg.call_span);
         }
-        self.emit(Insn::Call(fn_reg, 1));
+        self.emit(Insn::Call(fn_reg, argc));
         self.next_temp = fn_reg + 1;
         self.free_temp(cfg.iter_reg);
 

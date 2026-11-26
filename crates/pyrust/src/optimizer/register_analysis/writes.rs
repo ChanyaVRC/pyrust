@@ -190,6 +190,7 @@ fn for_each_write(insn: &Insn, descs: &[InsnDesc], mut f: impl FnMut(u32)) {
         | CheckLocal(..)
         | PrintExpr(..)
         | SetAdd(..)
+        | SumStep(..)
         | ListAppend(..)
         | ListExtend(..)
         | ListExtendCall(..)

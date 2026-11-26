@@ -77,6 +77,12 @@ impl Compiler {
         span: Option<crate::ast::CaretSpan>,
         lineno: u32,
     ) -> Reg {
+        // `sum` / `any` / `all` / `min` / `max` over a generator expression:
+        // guarded in-generator reduction (#3384).
+        if let Some(result) = self.try_compile_genexpr_reduction(func, args, span, lineno) {
+            return result;
+        }
+
         let has_splat = args.iter().any(|a| a.splat || a.double_splat);
         let has_kwargs = args.iter().any(|a| a.name.is_some());
 
