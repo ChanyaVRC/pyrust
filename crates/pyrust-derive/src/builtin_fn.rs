@@ -196,16 +196,6 @@ pub(crate) fn emit_attr_insert_into(
     }
 }
 
-/// Convenience wrapper inserting into the module-level `attrs` map.
-pub(crate) fn emit_attr_insert(
-    short_lit: &LitStr,
-    name_static_ident: &Ident,
-    cfg_attrs: &[Attribute],
-) -> TokenStream2 {
-    let attrs_ident = Ident::new("attrs", Span::call_site());
-    emit_attr_insert_into(&attrs_ident, short_lit, name_static_ident, cfg_attrs)
-}
-
 /// Expansion of `#[pyfunction(name = "module.fn")]`.
 pub(crate) fn expand_pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);

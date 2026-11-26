@@ -23,8 +23,9 @@ use std::process::Command;
 /// The list deliberately spans all the distinct namespace kinds: `math` keeps
 /// the compact direct `attrs` storage and synthesises `__dict__`; `sys` moves
 /// its namespace into a live dict (`attach_live_namespace`); `builtins` is
-/// composed from several sub-module attr maps *plus* the exception-class table,
-/// which was a second, separate hash-ordered source. The dotted names
+/// composed from its function families *plus* deferred class slots (the types
+/// and the exception-name table, issue #3294) that are only merged into the
+/// namespace when it is observed. The dotted names
 /// (`os.path`, `collections.abc`) are bound through their parent package rather
 /// than `__import__`, which returns the top-level module for a dotted name.
 const PROBE: &str = r#"

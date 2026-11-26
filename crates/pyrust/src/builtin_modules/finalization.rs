@@ -12,7 +12,6 @@ pub(crate) fn prepare_builtin_module(name: &str, interpreter: &mut Interpreter, 
             interpreter.initialize_system_module(module);
             prepare_sys_module(interpreter, module);
         }
-        "builtins" => prepare_builtins_module(module),
         "collections" => prepare_collections_module(module),
         "contextlib" => prepare_contextlib_module(module),
         "functools" => prepare_functools_module(module),
@@ -50,70 +49,6 @@ fn prepare_sys_module(interpreter: &Interpreter, module: &Value) {
     };
     let flags = sys::make_flags_from_config(&interpreter.cold.runtime_config);
     sys_mod.borrow_mut().insert_attr("flags".to_string(), flags);
-}
-
-/// Replace constructor registry tokens with the canonical Python type objects
-/// and install the built-in exception hierarchy.
-///
-/// This is the single finalization path for both the thread-local globals
-/// provider and modules loaded through `import builtins`.
-pub(crate) fn prepare_builtins_module(module: &Value) {
-    let ValueKind::PyModule(module) = module.kind() else {
-        return;
-    };
-    for type_name in [
-        "bool",
-        "bytearray",
-        "bytes",
-        "complex",
-        "dict",
-        "enumerate",
-        "filter",
-        "float",
-        "frozenset",
-        "int",
-        "list",
-        "map",
-        "memoryview",
-        "range",
-        "reversed",
-        "set",
-        "slice",
-        "str",
-        "tuple",
-        "zip",
-    ] {
-        if let Some(class) = crate::interpreter::primitive_class_by_name(type_name) {
-            module
-                .borrow_mut()
-                .insert_attr(type_name.to_string(), Value::py_class(class));
-        }
-    }
-    module.borrow_mut().insert_attr(
-        "type".to_string(),
-        Value::py_class(crate::interpreter::type_class_singleton()),
-    );
-    module.borrow_mut().insert_attr(
-        "object".to_string(),
-        Value::py_class(crate::interpreter::object_class_singleton()),
-    );
-
-    let exception_classes = crate::interpreter::build_exc_class_map();
-    let module_only_classes = exception_classes
-        .iter()
-        .filter(|(name, _)| name.contains('.'))
-        .map(|(_, class)| Rc::as_ptr(class))
-        .collect::<std::collections::HashSet<_>>();
-    for (exception_name, exception_class) in &exception_classes {
-        if !exception_name.contains('.')
-            && !module_only_classes.contains(&Rc::as_ptr(exception_class))
-        {
-            module.borrow_mut().insert_attr(
-                exception_name.to_string(),
-                Value::py_class(Rc::clone(exception_class)),
-            );
-        }
-    }
 }
 
 fn prepare_collections_module(module: &Value) {
@@ -189,10 +124,7 @@ fn prepare_io_module(module: &Value) {
     let ValueKind::PyModule(module) = module.kind() else {
         return;
     };
-    if let Some(exception) = crate::interpreter::build_exc_class_map()
-        .get("io.UnsupportedOperation")
-        .map(Rc::clone)
-    {
+    if let Some(exception) = crate::interpreter::lookup_exc_class("io.UnsupportedOperation") {
         module.borrow_mut().insert_attr(
             "UnsupportedOperation".to_string(),
             Value::py_class(exception),

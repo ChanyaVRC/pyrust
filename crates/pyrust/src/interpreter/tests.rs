@@ -27,4 +27,5 @@ mod tests {
     include!("tests/protocols_and_paths.rs");
     include!("tests/library_modules.rs");
     include!("tests/declaration_syntax.rs");
+    include!("tests/lazy_builtins.rs");
 }

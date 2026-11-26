@@ -8,7 +8,7 @@ use syn::punctuated::Punctuated;
 use syn::{Attribute, Expr, Ident, LitStr, Token, parse_macro_input};
 
 use crate::attrs::{ExceptionAttrs, parse_exception_attrs, peek_contextual_kw};
-use crate::builtin_fn::{emit_attr_insert, emit_fn_artefacts};
+use crate::builtin_fn::emit_fn_artefacts;
 use crate::class_macro::{
     ClassArtefacts, ClassConst, ModuleClass, emit_class_artefacts, parse_class,
     parse_constants_block,
@@ -196,7 +196,7 @@ pub(crate) fn expand_pyrust_module(input: TokenStream) -> TokenStream {
 
     let mut fn_items: Vec<TokenStream2> = Vec::new();
     let mut reg_entries: Vec<TokenStream2> = Vec::new();
-    let mut attr_entries: Vec<TokenStream2> = Vec::new();
+    let mut export_entries: Vec<TokenStream2> = Vec::new();
     let mut type_items: Vec<TokenStream2> = Vec::new();
 
     for group in &groups {
@@ -214,11 +214,11 @@ pub(crate) fn expand_pyrust_module(input: TokenStream) -> TokenStream {
 
         fn_items.extend(group_fn_items);
         reg_entries.push(reg_entry);
-        attr_entries.push(emit_attr_insert(
-            &short_lit,
-            &name_static_ident,
-            &head.cfg_attrs,
-        ));
+        let cfg_attrs = &head.cfg_attrs;
+        export_entries.push(quote! {
+            #(#cfg_attrs)*
+            visit(#short_lit, *#name_static_ident);
+        });
     }
 
     for decl in &types {
@@ -253,7 +253,7 @@ pub(crate) fn expand_pyrust_module(input: TokenStream) -> TokenStream {
         .collect();
 
     let reg_capacity = reg_entries.len();
-    let map_capacity = const_entries.len() + attr_entries.len() + type_items.len();
+    let map_capacity = const_entries.len() + export_entries.len() + type_items.len();
 
     quote! {
         // Per-function bodies.
@@ -280,6 +280,20 @@ pub(crate) fn expand_pyrust_module(input: TokenStream) -> TokenStream {
             regs()
         }
 
+        /// Visit every top-level callable as `(short name, registry name)`
+        /// in declaration order, without building any value.
+        ///
+        /// This is the single source of the module's function exports:
+        /// `module()` stores each one, and a composed namespace such as
+        /// `builtins` filters them straight into its own map instead of
+        /// building and discarding a `PyModule` per family (issue #3294).
+        #[allow(unused_mut, unused_variables)]
+        pub(crate) fn for_each_function_export(
+            mut visit: impl FnMut(&'static str, &'static str),
+        ) {
+            #(#export_entries)*
+        }
+
         /// Build the PyModule for this built-in module.  Called from the
         /// interpreter's `load_module` path on first `import`.
         pub(crate) fn module() -> crate::value::Value {
@@ -294,7 +308,16 @@ pub(crate) fn expand_pyrust_module(input: TokenStream) -> TokenStream {
                     Default::default(),
                 );
             #(#const_entries)*
-            #(#attr_entries)*
+            for_each_function_export(|short_name, registry_name| {
+                attrs.insert(
+                    short_name.to_string(),
+                    if FN_PREFIX.is_empty() {
+                        crate::value::Value::builtin_function(registry_name)
+                    } else {
+                        crate::value::Value::fresh_builtin_function(registry_name)
+                    },
+                );
+            });
             #(#type_items)*
             crate::value::Value::py_module(Rc::new(RefCell::new(
                 crate::value::PyModule::new(MODULE_NAME.to_string(), attrs)

@@ -40,12 +40,7 @@ fn oserror_subclass_for_errno(errno: i64) -> Option<Rc<RefCell<PyClass>>> {
         111 => "ConnectionRefusedError",
         _ => return None,
     };
-    EXC_CLASS_CACHE.with(|cache| {
-        cache
-            .iter()
-            .find(|(name, _)| *name == subclass_name)
-            .map(|(_, cls)| Rc::clone(cls))
-    })
+    lookup_exc_class(subclass_name)
 }
 
 /// Read the integer value CPython uses for exact `OSError` errno remapping.
@@ -806,18 +801,112 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
 //     threads own independent hierarchies.
 thread_local! {
     /// Per-thread cache of all built-in exception class `Rc`s.
-    /// Built once per thread; each `Interpreter::default()` call clones the
-    /// `Rc`s (O(1) reference-count bumps) instead of allocating fresh
+    /// Built once per thread, on the first raise, catch, or name lookup that
+    /// needs one; each `Interpreter` then clones the `Rc`s (O(1)
+    /// reference-count bumps) instead of allocating fresh
     /// `Rc<RefCell<PyClass>>` objects for the full hierarchy.
-    static EXC_CLASS_CACHE: Vec<ExcClassEntry> = build_exc_classes();
+    ///
+    /// A `OnceCell` rather than a lazy initializer so startup can be asserted
+    /// to leave it empty (issue #3294).
+    static EXC_CLASS_CACHE: std::cell::OnceCell<Vec<ExcClassEntry>> =
+        const { std::cell::OnceCell::new() };
 }
 
+fn with_exc_class_cache<R>(read: impl FnOnce(&[ExcClassEntry]) -> R) -> R {
+    EXC_CLASS_CACHE.with(|cache| read(cache.get_or_init(build_exc_classes)))
+}
+
+/// Whether this thread has built the built-in exception hierarchy yet.
+#[cfg(test)]
+pub(crate) fn exc_class_cache_is_initialized() -> bool {
+    EXC_CLASS_CACHE.with(|cache| cache.get().is_some())
+}
+
+/// Exception names bound in `builtins`, in the order they are published
+/// there (issue #2918): `EXC_CLASS_CACHE` order, minus the dotted registry
+/// keys and the classes that belong to another module's namespace
+/// (`io.UnsupportedOperation`).
+///
+/// Kept as a static table so `builtins` can describe its deferred exception
+/// slots without building a single class (issue #3294).
+pub(crate) const BUILTINS_EXCEPTION_NAMES: &[&str] = &[
+    "BaseException",
+    "Exception",
+    "ArithmeticError",
+    "OverflowError",
+    "ZeroDivisionError",
+    "FloatingPointError",
+    "LookupError",
+    "IndexError",
+    "KeyError",
+    "RuntimeError",
+    "RecursionError",
+    "NotImplementedError",
+    "TypeError",
+    "ValueError",
+    "NameError",
+    "UnboundLocalError",
+    "AssertionError",
+    "EOFError",
+    "StopIteration",
+    "AttributeError",
+    "SyntaxError",
+    "IndentationError",
+    "TabError",
+    "MemoryError",
+    "ImportError",
+    "ModuleNotFoundError",
+    "UnicodeError",
+    "UnicodeEncodeError",
+    "UnicodeDecodeError",
+    "UnicodeTranslateError",
+    "BufferError",
+    "ReferenceError",
+    "SystemError",
+    "StopAsyncIteration",
+    "OSError",
+    "IOError",
+    "EnvironmentError",
+    #[cfg(windows)]
+    "WindowsError",
+    "FileNotFoundError",
+    "FileExistsError",
+    "BlockingIOError",
+    "ChildProcessError",
+    "InterruptedError",
+    "IsADirectoryError",
+    "NotADirectoryError",
+    "PermissionError",
+    "ProcessLookupError",
+    "TimeoutError",
+    "ConnectionError",
+    "BrokenPipeError",
+    "ConnectionAbortedError",
+    "ConnectionRefusedError",
+    "ConnectionResetError",
+    "Warning",
+    "UserWarning",
+    "DeprecationWarning",
+    "PendingDeprecationWarning",
+    "RuntimeWarning",
+    "SyntaxWarning",
+    "ResourceWarning",
+    "FutureWarning",
+    "ImportWarning",
+    "UnicodeWarning",
+    "BytesWarning",
+    "EncodingWarning",
+    "SystemExit",
+    "GeneratorExit",
+    "KeyboardInterrupt",
+    "BaseExceptionGroup",
+    "ExceptionGroup",
+];
+
 /// Look up a built-in exception class by name, using the thread-local cache.
-/// Called by `resolve_builtin` to service `LoadGlobal("TypeError")` etc.
-/// without inserting exception classes into the module env at startup.
 /// Triggers `EXC_CLASS_CACHE` initialisation on the very first call.
 pub(crate) fn lookup_exc_class(name: &str) -> Option<Rc<RefCell<PyClass>>> {
-    EXC_CLASS_CACHE.with(|cache| {
+    with_exc_class_cache(|cache| {
         cache
             .iter()
             .find(|(n, _)| *n == name)
@@ -828,13 +917,11 @@ pub(crate) fn lookup_exc_class(name: &str) -> Option<Rc<RefCell<PyClass>>> {
 /// Build the `ExcClasses` map from the thread-local cache.  Called once
 /// per interpreter (lazily, on first exception raise or class lookup).
 ///
-/// Insertion ordered (issue #2918): `prepare_builtins_module` publishes the
-/// exception classes into `builtins` by iterating this map, so a hashed map
-/// made the tail of `vars(builtins)` differ run to run.  `EXC_CLASS_CACHE` is
-/// an ordered `Vec` declaring the hierarchy roots first, and that order carries
-/// through to the module namespace.
+/// Insertion ordered (issue #2918): `EXC_CLASS_CACHE` is an ordered `Vec`
+/// declaring the hierarchy roots first, and `BUILTINS_EXCEPTION_NAMES` pins
+/// the same order for the `builtins` namespace.
 pub(crate) fn build_exc_class_map() -> ExcClassMap {
-    EXC_CLASS_CACHE.with(|cache| {
+    with_exc_class_cache(|cache| {
         let mut map = indexmap::IndexMap::with_capacity_and_hasher(
             cache.len(),
             pyrust_core::PyHasher::default(),

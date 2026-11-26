@@ -12,11 +12,12 @@ mod tests {
 
     use super::{
         ACTIVE_COLLECTION_MUTATION_STATES, BuiltinTypeOps, COLLECTION_MUTATION_STATES,
-        CanonicalClassTag, FrozenSetKey, InstanceAttrs, MemberSlotId, ModuleAttrs,
-        NANBOX_HEAP_POINTER_ALIGNMENT, PAYLOAD_MASK, PyClass, PyDict, PyInstance, PyKey, PyModule,
-        PySet, PySetProbeSnapshot, STR_CODEPOINT_LEN_SHIFT, STR_CODEPOINT_LEN_TAG,
-        STR_MAX_BYTE_LEN, STR_OWNED_HEADER_SIZE, STR_RC_MAX, STR_RC_ONE, STR_SLICE_LAYOUT_SIZE,
-        SetProbeEntry, TAG_LIST_BITS, UserFunction, UserFunctionKind, Value, ValueKind,
+        CanonicalClassTag, FrozenSetKey, InstanceAttrs, LazyModuleAttrSource, LazyModuleAttrs,
+        LazyModuleSlotVisitor, MemberSlotId, ModuleAttrs, NANBOX_HEAP_POINTER_ALIGNMENT,
+        PAYLOAD_MASK, PyClass, PyDict, PyInstance, PyKey, PyModule, PySet, PySetProbeSnapshot,
+        STR_CODEPOINT_LEN_SHIFT, STR_CODEPOINT_LEN_TAG, STR_MAX_BYTE_LEN, STR_OWNED_HEADER_SIZE,
+        STR_RC_MAX, STR_RC_ONE, STR_SLICE_LAYOUT_SIZE, SetProbeEntry, StrKey, TAG_LIST_BITS,
+        UserFunction, UserFunctionKind, Value, ValueKind,
         builtin_type_name, encode_nanbox_heap_pointer, error_type_name, float_bits_as_exact_i64,
         instance_backing_for_repr, next_fn_id, opaque_layout, py_hash_nan, py_hash_pykey,
         range_len, str_is_inline_bits, try_nanbox_heap_pointer_payload,

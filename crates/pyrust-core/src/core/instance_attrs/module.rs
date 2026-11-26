@@ -38,6 +38,44 @@ impl FilesystemModuleNamespace {
     }
 }
 
+/// Receives one startup namespace slot during [`LazyModuleAttrSource::visit_slots`].
+///
+/// `Some(value)` is a deferred attribute resolved for this walk; `None` marks
+/// a slot whose value was stored in `attrs` when the module was built.
+pub type LazyModuleSlotVisitor<'a> = &'a mut dyn FnMut(&'static str, Option<Value>);
+
+/// Static description of the attributes a native module resolves on demand.
+///
+/// Both callbacks must be pure functions of the name: `resolve` hands back the
+/// same per-thread object every time, which is what lets a read stay
+/// non-mutating (nothing is cached in the module, so no version bump is
+/// needed and opcode caches keyed on [`ModuleMutationState`] stay sound).
+#[derive(Debug, Clone, Copy)]
+pub struct LazyModuleAttrSource {
+    /// Resolve one deferred attribute.  Must return `None` — without building
+    /// anything — for every name this source does not own.
+    pub resolve: fn(&str) -> Option<Value>,
+    /// Walk the module's complete startup namespace in insertion order,
+    /// resolving every deferred slot.
+    pub visit_slots: fn(LazyModuleSlotVisitor<'_>),
+}
+
+/// Pending deferred attributes of one module object.
+///
+/// The state is all-or-nothing: either every deferred slot is still pending
+/// (and absent from `attrs`), or the whole set has been materialized and this
+/// state dropped.  Rebinding or deleting a pending name materializes first, so
+/// a deferred value can never overwrite a user binding or reappear after `del`.
+#[derive(Debug)]
+struct LazyModuleAttrs {
+    source: LazyModuleAttrSource,
+    /// Number of leading `attrs` entries that still sit at their startup
+    /// position.  A startup name that was deleted and re-bound lives past this
+    /// boundary, so materialization appends it instead of restoring its
+    /// original slot — exactly what a Python `dict` would have done.
+    head_len: usize,
+}
+
 #[derive(Debug)]
 pub struct PyModule {
     pub name: String,
@@ -59,6 +97,10 @@ pub struct PyModule {
     /// Boxed so the built-in-module common case pays only one nullable pointer
     /// and continues to use its existing direct `attrs` fast path.
     filesystem_namespace: Option<Box<FilesystemModuleNamespace>>,
+    /// Attributes resolved on demand instead of stored in `attrs` (the
+    /// `builtins` class objects, issue #3294).  Boxed so every other module
+    /// pays one nullable pointer; only meaningful in compact `attrs` storage.
+    lazy_attrs: Option<Box<LazyModuleAttrs>>,
 }
 
 impl PyModule {
@@ -69,6 +111,76 @@ impl PyModule {
             mutation_state: ModuleMutationState::fresh(),
             live_namespace: None,
             filesystem_namespace: None,
+            lazy_attrs: None,
+        }
+    }
+
+    /// Build a module whose `attrs` hold only the eagerly stored slots of
+    /// `source`; the deferred ones stay unallocated until first use.
+    pub fn with_lazy_attrs(name: String, attrs: ModuleAttrs, source: LazyModuleAttrSource) -> Self {
+        let head_len = attrs.len();
+        let mut module = Self::new(name, attrs);
+        module.lazy_attrs = Some(Box::new(LazyModuleAttrs { source, head_len }));
+        module
+    }
+
+    /// Whether this module still has deferred attributes that were never
+    /// materialized into its namespace.
+    #[inline]
+    pub fn has_pending_lazy_attrs(&self) -> bool {
+        self.lazy_attrs.is_some()
+    }
+
+    /// The compact namespace with every deferred slot resolved and placed at
+    /// its startup position.
+    fn attrs_with_lazy_slots(&self, lazy: &LazyModuleAttrs) -> ModuleAttrs {
+        let head_len = lazy.head_len.min(self.attrs.len());
+        let mut placed = vec![false; self.attrs.len()];
+        let mut merged = ModuleAttrs::default();
+        (lazy.source.visit_slots)(&mut |name, deferred| match deferred {
+            Some(value) => {
+                merged.entry(name.to_string()).or_insert(value);
+            }
+            None => {
+                if let Some((index, key, value)) = self.attrs.get_full(name)
+                    && index < head_len
+                {
+                    placed[index] = true;
+                    merged.insert(key.clone(), value.clone());
+                }
+            }
+        });
+        // Everything bound after startup (and any startup name that was
+        // deleted and re-bound) follows in its own insertion order.
+        for (index, (key, value)) in self.attrs.iter().enumerate() {
+            if !placed[index] {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+        merged
+    }
+
+    /// Resolve every deferred attribute into `attrs`, in startup order.
+    ///
+    /// Name-to-value bindings are unchanged, but entry positions move, so the
+    /// provider version is bumped for any cache that remembers a slot index.
+    pub fn materialize_lazy_attrs(&mut self) {
+        let Some(lazy) = self.lazy_attrs.take() else {
+            return;
+        };
+        self.attrs = self.attrs_with_lazy_slots(&lazy);
+        self.mutation_state.bump();
+    }
+
+    /// Materialize before a write that targets a still-deferred name, so the
+    /// write then behaves exactly as it would on an eagerly built namespace.
+    #[inline]
+    fn materialize_lazy_attrs_for_write(&mut self, name: &str) {
+        if let Some(lazy) = self.lazy_attrs.as_deref()
+            && !self.attrs.contains_key(name)
+            && (lazy.source.resolve)(name).is_some()
+        {
+            self.materialize_lazy_attrs();
         }
     }
 
@@ -81,6 +193,7 @@ impl PyModule {
         if self.live_namespace.is_some() {
             return;
         }
+        self.materialize_lazy_attrs();
         let attrs = std::mem::take(&mut self.attrs)
             .into_iter()
             .map(|(name, value)| (PyKey::str_from(&name), value))
@@ -111,6 +224,7 @@ impl PyModule {
             self.mutation_state.disable_cache();
             return namespace.clone();
         }
+        self.materialize_lazy_attrs();
         let existing = std::mem::take(&mut self.attrs);
         let is_live = |key: &str| !existing.get(key).is_some_and(Value::is_unset);
         let mut dict: PyDict =
@@ -174,6 +288,7 @@ impl PyModule {
         environment
             .borrow()
             .configure_filesystem_module_namespace(self.mutation_state());
+        self.lazy_attrs = None;
         self.attrs.clear();
         self.filesystem_namespace = Some(Box::new(FilesystemModuleNamespace::new(
             environment,
@@ -192,6 +307,7 @@ impl PyModule {
     /// is globals()`).
     pub fn attach_main_namespace(&mut self, environment: &EnvRef) {
         let globals = environment.borrow().namespace_globals();
+        self.lazy_attrs = None;
         self.attrs.clear();
         self.filesystem_namespace = Some(Box::new(FilesystemModuleNamespace::new(
             environment,
@@ -218,7 +334,12 @@ impl PyModule {
                 .dict_with(|dict| dict.get(&crate::object_model::StrKey(name)).cloned())
                 .flatten();
         }
-        self.attrs.get(name).cloned()
+        if let Some(value) = self.attrs.get(name) {
+            return Some(value.clone());
+        }
+        self.lazy_attrs
+            .as_deref()
+            .and_then(|lazy| (lazy.source.resolve)(name))
     }
 
     /// Snapshot string-keyed attributes for generic reflection paths.
@@ -256,7 +377,10 @@ impl PyModule {
                 })
                 .unwrap_or_default();
         }
-        self.attrs.clone()
+        match self.lazy_attrs.as_deref() {
+            Some(lazy) => self.attrs_with_lazy_slots(lazy),
+            None => self.attrs.clone(),
+        }
     }
 
     /// Return the stable provider token used by module-backed namespace caches.
@@ -292,6 +416,7 @@ impl PyModule {
             self.mutation_state.bump();
             return previous;
         }
+        self.materialize_lazy_attrs_for_write(&name);
         let previous = self.attrs.insert(name, value);
         self.mutation_state.bump();
         previous
@@ -332,11 +457,15 @@ impl PyModule {
         // `shift_remove`, not `swap_remove`: deleting one attribute must not
         // reorder the surviving ones, matching `del d[k]` on a Python dict and
         // the `dict_shift_remove` used by both namespace-backed branches above.
-        let removed = self.attrs.shift_remove(name);
-        if removed.is_some() {
-            self.mutation_state.bump();
+        self.materialize_lazy_attrs_for_write(name);
+        let (index, _, removed) = self.attrs.shift_remove_full(name)?;
+        if let Some(lazy) = self.lazy_attrs.as_deref_mut()
+            && index < lazy.head_len
+        {
+            lazy.head_len -= 1;
         }
-        removed
+        self.mutation_state.bump();
+        Some(removed)
     }
 
     /// Replace the complete module namespace while preserving its storage kind.
@@ -383,6 +512,7 @@ impl PyModule {
             self.mutation_state.bump();
             return;
         }
+        self.lazy_attrs = None;
         self.attrs = attrs;
         self.mutation_state.bump();
     }

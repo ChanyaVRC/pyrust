@@ -983,11 +983,11 @@ impl Default for Interpreter {
         pyrust_core::install_iter_values(iter_values_for_registry);
         pyrust_core::install_compare_values(compare_values_for_registry);
         let env = Environment::new(None);
-        // Exception classes and NotImplemented are no longer inserted into the
-        // module env at startup.  They are resolved lazily: `LoadGlobal` falls
-        // through to `resolve_builtin` which calls `lookup_exc_class` / returns
-        // `Value::not_implemented()`.  `ExcClasses` is also lazy — the class
-        // hierarchy is built from `EXC_CLASS_CACHE` on the first raise.
+        // Exception classes are not inserted into the module env at startup.
+        // `LoadGlobal` falls through to the `builtins` provider, whose class
+        // slots are deferred attributes resolved via `lookup_exc_class` on
+        // first use.  `ExcClasses` is also lazy — the class hierarchy is built
+        // from `EXC_CLASS_CACHE` on the first raise.
         // Scripts that never raise or name-check exceptions pay zero class-build cost.
         Self {
             env,
