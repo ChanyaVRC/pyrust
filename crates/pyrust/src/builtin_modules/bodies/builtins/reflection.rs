@@ -1005,11 +1005,23 @@ pyrust_module! {
         // errors if the `<` comparison fails), and does NOT dedup the custom
         // result.  Only `PyInstance` values can carry an overridden `__dir__`;
         // primitives use the default `dir_names` path (issue #1941).
-        if let ValueKind::PyInstance(inst) = target.kind() {
-            let class = Rc::clone(&inst.borrow().class);
-            if let Some(method_val) = lookup_class_attr(&class, "__dir__") {
+        // A class whose metaclass defines `__dir__` (e.g. an `Enum` subclass
+        // under `EnumType`) dispatches the metaclass slot with the class as
+        // the receiver (#3339).
+        let dir_method = match target.kind() {
+            ValueKind::PyInstance(inst) => {
+                let class = Rc::clone(&inst.borrow().class);
+                lookup_class_attr(&class, "__dir__").map(Ok)
+            }
+            ValueKind::PyClass(cls) => {
+                crate::interpreter::metaclass_dunder_for_call(cls, "__dir__")
+            }
+            _ => None,
+        };
+        {
+            if let Some(method_val) = dir_method {
                 let result =
-                    invoke_class_method(_interp, method_val, target.clone(), &[])?;
+                    invoke_class_method(_interp, method_val?, target.clone(), &[])?;
                 let mut items = _interp.collect_iterable(&result)?;
                 // Sort the collected values exactly as `sorted()` would,
                 // surfacing the element comparison error verbatim.
