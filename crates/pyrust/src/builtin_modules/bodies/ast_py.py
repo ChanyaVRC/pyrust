@@ -1137,12 +1137,24 @@ class _AstSerializer:
             s += ' if ' + self._render_expr(cond, _PREC_OR)
         return s
 
+    @staticmethod
+    def _escape_fstring_literal(text):
+        # Mirrors CPython's `_str_literal_helper(escape_special_whitespace=True)`:
+        # backslashes and non-printable characters (including \n, \r, \t) are
+        # escaped; quotes are left for the delimiter choice in the caller.
+        out = []
+        for c in text:
+            if c == '\\' or not c.isprintable():
+                out.append(repr(c)[1:-1])
+            else:
+                out.append(c)
+        return ''.join(out).replace('{', '{{').replace('}', '}}')
+
     def _render_fstring_parts(self, values):
         chunks = []
         for v in values:
             if isinstance(v, Constant) and isinstance(v.value, str):
-                escaped = v.value.replace('{', '{{').replace('}', '}}')
-                chunks.append(escaped)
+                chunks.append(self._escape_fstring_literal(v.value))
             elif isinstance(v, FormattedValue):
                 inner = self._render_expr(v.value, _PREC_TEST)
                 if inner.startswith('{'):
@@ -1160,7 +1172,7 @@ class _AstSerializer:
         body = self._render_fstring_parts(node.values)
         # Pick a quote delimiter that does not collide with the rendered body.
         for q in ("'", '"', "'''", '"""'):
-            if q not in body and not body.endswith('\\'):
+            if q not in body:
                 if q in ("'", '"') and '\n' in body:
                     continue
                 return 'f' + q + body + q

@@ -128,7 +128,13 @@ fn lex_fstring(
                 .get(pos)
                 .copied()
                 .ok_or_else(|| PyError::lex("unterminated escape in f-string".to_string()))?;
-            if raw {
+            if next_ch == '{' || next_ch == '}' {
+                // `\` before a brace never escapes it (#3374): the backslash is
+                // a literal character and the brace keeps its f-string meaning
+                // (field start, or half of `{{` / `}}`).  In a non-raw f-string
+                // `\{` is just an invalid escape sequence, kept as `\`.
+                literal.push('\\');
+            } else if raw {
                 // Raw mode: pass backslash and the following character verbatim.
                 literal.push('\\');
                 literal.push(next_ch);
@@ -556,11 +562,9 @@ fn lex_format_spec(
                     Some('{' | '}') => {
                         literal.push('\\');
                     }
-                    Some(next_ch) if raw => {
-                        literal.push('\\');
-                        literal.push(next_ch);
-                        *pos += 1;
-                    }
+                    // CPython 3.12 decodes escapes in a format spec even for a
+                    // raw f-string (`rf"{x:\n}"` has a real newline in its
+                    // spec), so `raw` is deliberately ignored here.
                     Some('\n') => {
                         *pos += 1;
                     }
