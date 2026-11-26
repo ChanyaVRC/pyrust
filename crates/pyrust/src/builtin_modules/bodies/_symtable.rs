@@ -51,7 +51,7 @@ pub(crate) const TYPE_TYPE_VAR_BOUND: i64 = 4;
 pub(crate) const TYPE_TYPE_ALIAS: i64 = 5;
 pub(crate) const TYPE_TYPE_PARAM: i64 = 6;
 
-thread_local! {
+pyrust_core::gil_local! {
     static NEXT_BLOCK_ID: Cell<i64> = const { Cell::new(1) };
 }
 

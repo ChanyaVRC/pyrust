@@ -799,9 +799,9 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
 //     thread share the built-in exception class objects (mutations on a
 //     built-in exception class would be visible on the same thread); separate
 //     threads own independent hierarchies.
-thread_local! {
-    /// Per-thread cache of all built-in exception class `Rc`s.
-    /// Built once per thread, on the first raise, catch, or name lookup that
+pyrust_core::gil_local! {
+    /// Per-GIL-group cache of all built-in exception class `Rc`s.
+    /// Built once per group, on the first raise, catch, or name lookup that
     /// needs one; each `Interpreter` then clones the `Rc`s (O(1)
     /// reference-count bumps) instead of allocating fresh
     /// `Rc<RefCell<PyClass>>` objects for the full hierarchy.
@@ -816,7 +816,7 @@ fn with_exc_class_cache<R>(read: impl FnOnce(&[ExcClassEntry]) -> R) -> R {
     EXC_CLASS_CACHE.with(|cache| read(cache.get_or_init(build_exc_classes)))
 }
 
-/// Whether this thread has built the built-in exception hierarchy yet.
+/// Whether the active GIL group has built the built-in exception hierarchy yet.
 #[cfg(test)]
 pub(crate) fn exc_class_cache_is_initialized() -> bool {
     EXC_CLASS_CACHE.with(|cache| cache.get().is_some())

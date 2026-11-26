@@ -196,8 +196,8 @@ pyrust_module! {
                 "sleep length must be non-negative".to_string(),
             ));
         }
-        if secs > 0.0 {
-            std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+        if secs >= 0.0 {
+            _interp.sleep_releasing_gil(std::time::Duration::from_secs_f64(secs))?;
         }
         Ok(Value::none())
     }

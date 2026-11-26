@@ -149,7 +149,7 @@ pub(crate) fn deferred_class_resolutions() -> usize {
 /// Resolve one deferred `builtins` class by name.
 ///
 /// Returns `None` without building anything for every other name, and always
-/// hands back the same per-thread singleton, so a lookup needs no caching in
+/// hands back the same per-GIL-group singleton, so a lookup needs no caching in
 /// the module and never invalidates a `LoadGlobal` cache.  Resolving a type
 /// leaves the exception hierarchy unbuilt, and vice versa.
 fn resolve_builtins_class(name: &str) -> Option<Value> {

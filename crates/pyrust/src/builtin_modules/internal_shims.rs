@@ -15,7 +15,7 @@ use crate::builtin_registry::BuiltinReg;
 use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{PyBool, PyIndex, PyNumber, PyStr, PyValue, PyValueRef};
 use crate::interpreter::{ExpandedCallArg, Interpreter, lookup_exc_class};
-use crate::value::{PyDict, PyKey, PyModule, Value, ValueKind};
+use crate::value::{PyDict, PyModule, Value, ValueKind};
 
 const SKIP_DUNDERS: &[&str] = &[
     "__name__",
@@ -316,8 +316,9 @@ pub mod _thread {
 
     pyrust_module! {
         fn _count() -> Result<Value> {
-            let _ = _interp;
-            Ok(Value::int(0))
+            Ok(Value::int(
+                _interp.cold.gil_state.active_worker_count_val() as i64,
+            ))
         }
 
         fn daemon_threads_allowed() -> Result<Value> {
@@ -350,29 +351,44 @@ pub mod _thread {
             args: PyValueRef<'_>,
             #[default(PyValue(Value::none()))] kwargs: PyValue,
         ) -> Result<Value> {
-            let pos = _interp.collect_iterable(args.0)?;
-            let mut call_args: Vec<ExpandedCallArg> = pos
-                .into_iter()
-                .map(|value| ExpandedCallArg { name: None, value })
-                .collect();
-            if !kwargs.0.is_none()
-                && let Some(dict) = kwargs.0.as_dict()
-            {
-                for (k, v) in dict.iter() {
-                    if let PyKey::Str(s) = k
-                        && let Some(name) = s.as_str()
-                    {
-                        call_args.push(ExpandedCallArg {
-                            name: Some(name.to_string()),
-                            value: v.clone(),
-                        });
-                    }
-                }
+            if !matches!(args.0.kind(), ValueKind::Tuple(_)) {
+                return Err(PyError::named(
+                    "TypeError",
+                    "2nd arg must be a tuple",
+                ));
             }
-            let _ = _interp.call_function_expanded(function.0.clone(), &call_args)?;
-            let th = _interp.load_module("threading")?;
-            let get_ident = _interp.get_attr(&th, "get_ident")?;
-            call_positional(_interp, get_ident, &[])
+            if !kwargs.0.is_none() && kwargs.0.as_dict().is_none() {
+                return Err(PyError::named(
+                    "TypeError",
+                    "optional 3rd arg must be a dictionary",
+                ));
+            }
+            let th_mod = _interp.load_module("threading")?;
+            let thread_cls = _interp.get_attr(&th_mod, "Thread")?;
+            let mut kw_args = vec![
+                ExpandedCallArg {
+                    name: Some("target".to_string()),
+                    value: function.0.clone(),
+                },
+                ExpandedCallArg {
+                    name: Some("args".to_string()),
+                    value: args.0.clone(),
+                },
+                ExpandedCallArg {
+                    name: Some("daemon".to_string()),
+                    value: Value::bool_(true),
+                },
+            ];
+            if !kwargs.0.is_none() {
+                kw_args.push(ExpandedCallArg {
+                    name: Some("kwargs".to_string()),
+                    value: kwargs.0.clone(),
+                });
+            }
+            let thread_obj = _interp.call_function_expanded(thread_cls, &kw_args)?;
+            let start_fn = _interp.get_attr(&thread_obj, "start")?;
+            let _ = _interp.call_function_expanded(start_fn, &[])?;
+            _interp.get_attr(&thread_obj, "ident")
         }
 
         fn start_new(

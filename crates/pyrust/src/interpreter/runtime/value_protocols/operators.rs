@@ -164,6 +164,22 @@ impl Interpreter {
                     None => {}
                 }
             }
+        } else if let ValueKind::PyClass(cls) = left.kind()
+            && let Some(m_res) = crate::interpreter::metaclass_dunder_for_call(cls, method)
+        {
+            match m_res {
+                Err(e) => return Some(Err(e)),
+                Ok(m) => {
+                    let arg = ExpandedCallArg {
+                        name: None,
+                        value: right.clone(),
+                    };
+                    match invoke_class_method(self, m, left.clone(), &[arg]) {
+                        Ok(v) if is_not_implemented(&v) => {}
+                        result => return Some(result),
+                    }
+                }
+            }
         }
 
         // Same-type skip (mirrors CPython `binary_op1`): when the forward slot
@@ -181,18 +197,33 @@ impl Interpreter {
                 (ValueKind::PyInstance(li), ValueKind::PyInstance(ri))
                     if Rc::ptr_eq(&li.borrow().class, &ri.borrow().class)
             );
-        if !right_has_subtype_priority
-            && !same_type_reflected_arith
-            && let ValueKind::PyInstance(inst) = right.kind()
-        {
-            let class = Rc::clone(&inst.borrow().class);
-            if let Some(m) = lookup_class_attr(&class, rmethod)
-                && !super::expressions::is_inherited_sequence_binary_slot(&class, rmethod, &m)
+        if !right_has_subtype_priority && !same_type_reflected_arith {
+            if let ValueKind::PyInstance(inst) = right.kind() {
+                let class = Rc::clone(&inst.borrow().class);
+                if let Some(m) = lookup_class_attr(&class, rmethod)
+                    && !super::expressions::is_inherited_sequence_binary_slot(&class, rmethod, &m)
+                {
+                    match self.dispatch_binary_slot(m, right, inst, left, comparison_callback) {
+                        Some(Ok(v)) if is_not_implemented(&v) => {}
+                        Some(result) => return Some(result),
+                        None => {}
+                    }
+                }
+            } else if let ValueKind::PyClass(cls) = right.kind()
+                && let Some(m_res) = crate::interpreter::metaclass_dunder_for_call(cls, rmethod)
             {
-                match self.dispatch_binary_slot(m, right, inst, left, comparison_callback) {
-                    Some(Ok(v)) if is_not_implemented(&v) => {}
-                    Some(result) => return Some(result),
-                    None => {}
+                match m_res {
+                    Err(e) => return Some(Err(e)),
+                    Ok(m) => {
+                        let arg = ExpandedCallArg {
+                            name: None,
+                            value: left.clone(),
+                        };
+                        match invoke_class_method(self, m, right.clone(), &[arg]) {
+                            Ok(v) if is_not_implemented(&v) => {}
+                            result => return Some(result),
+                        }
+                    }
                 }
             }
         }

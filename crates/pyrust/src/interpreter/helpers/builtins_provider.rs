@@ -6,8 +6,8 @@
 //     thread share the cached `builtins` module attrs map unless a script
 //     replaces `__builtins__`; separate threads own independent `builtins`
 //     modules.
-thread_local! {
-    /// Per-thread cache of the `builtins` module value.
+pyrust_core::gil_local! {
+    /// Per-GIL-group cache of the `builtins` module value.
     /// `seed_module_dunders` clones this `Value` (one `Rc` increment) instead
     /// of rebuilding the module's `ModuleAttrs` map from scratch on every
     /// script invocation.
@@ -22,7 +22,7 @@ thread_local! {
 /// constants.  The class objects CPython also exposes there — the primitive
 /// type singletons (`int`, `str`, `list`, …) and the built-in exception
 /// hierarchy (issue #1255) — are deferred attributes of the module: each is
-/// resolved to its per-thread singleton on first lookup, and all of them are
+/// resolved to its per-GIL-group singleton on first lookup, and all of them are
 /// materialized in insertion order once the whole namespace is observed
 /// (issue #3294).
 pub(crate) fn cached_builtins_module() -> Value {

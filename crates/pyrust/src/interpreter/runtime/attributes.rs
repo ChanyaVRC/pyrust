@@ -3,19 +3,20 @@
 // Owns lookup, assignment, deletion, descriptor invocation, class/instance
 // attribute policy, and member descriptors.
 
+#[inline]
 fn typing_object_readonly_attr_error(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<String> {
-    if is_typevar_class(class) {
-        typevar_readonly_attr_error(name)
-    } else if is_type_alias_class(class) {
-        type_alias_readonly_attr_error(name)
-    } else if is_paramspec_class(class) {
-        paramspec_readonly_attr_error(name)
-    } else if is_typevartuple_class(class) {
-        typevartuple_readonly_attr_error(name)
-    } else if is_paramspec_args_class(class) || is_paramspec_kwargs_class(class) {
-        paramspec_proxy_readonly_attr_error(name)
-    } else {
-        None
+    match class.borrow().canonical_tag {
+        Some(pyrust_core::CanonicalClassTag::TypeVar) => typevar_readonly_attr_error(name),
+        Some(pyrust_core::CanonicalClassTag::TypeAliasType) => type_alias_readonly_attr_error(name),
+        Some(pyrust_core::CanonicalClassTag::ParamSpec) => paramspec_readonly_attr_error(name),
+        Some(pyrust_core::CanonicalClassTag::TypeVarTuple) => {
+            typevartuple_readonly_attr_error(name)
+        }
+        Some(
+            pyrust_core::CanonicalClassTag::ParamSpecArgs
+            | pyrust_core::CanonicalClassTag::ParamSpecKwargs,
+        ) => paramspec_proxy_readonly_attr_error(name),
+        _ => None,
     }
 }
 

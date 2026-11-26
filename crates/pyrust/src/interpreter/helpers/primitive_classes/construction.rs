@@ -11,7 +11,12 @@ pub(crate) fn primitive_class_dispatch(
     class: &Rc<RefCell<PyClass>>,
 ) -> Option<crate::builtin_registry::BuiltinDispatchFn> {
     let ptr = Rc::as_ptr(class);
-    PRIMITIVE_CLASS_DISPATCH.with(|m| m.borrow().get(&ptr).copied())
+    PRIMITIVE_CLASS_DISPATCH.with(|cell| {
+        cell.get_or_init(build_primitive_class_dispatch)
+            .borrow()
+            .get(&ptr)
+            .copied()
+    })
 }
 
 /// Read the optional immutable identity carried by the six canonical iterator
@@ -259,7 +264,10 @@ pub(crate) fn call_module_init(args: &[ExpandedCallArg]) -> Result<Value> {
             Ok(Value::none())
         }
         ValueKind::PyInstance(instance)
-            if class_is_subclass_of(&instance.borrow().class, &module_type_singleton()) =>
+            if MODULE_TYPE.with(|cell| {
+                cell.get()
+                    .is_some_and(|module| class_is_subclass_of(&instance.borrow().class, module))
+            }) =>
         {
             let (name_str, doc_val) = parse_module_init_args(rest)?;
             let mut inst = instance.borrow_mut();
@@ -305,7 +313,10 @@ pub(crate) fn call_module_repr(args: &[ExpandedCallArg]) -> Result<Value> {
     match receiver.kind() {
         ValueKind::PyModule(module) => Ok(Value::string(module.borrow().repr_string())),
         ValueKind::PyInstance(instance)
-            if class_is_subclass_of(&instance.borrow().class, &module_type_singleton()) =>
+            if MODULE_TYPE.with(|cell| {
+                cell.get()
+                    .is_some_and(|module| class_is_subclass_of(&instance.borrow().class, module))
+            }) =>
         {
             let repr = match instance.borrow().attrs.get("__name__") {
                 Some(v) if !v.is_unset() => format!("<module {}>", v.repr_raw()),
@@ -534,7 +545,12 @@ fn primitive_tag_isinstance(obj: &Value, tag: PrimitiveClassKind) -> bool {
         }
         pyrust_core::CanonicalClassTag::Object
         | pyrust_core::CanonicalClassTag::GenericAlias
-        | pyrust_core::CanonicalClassTag::TypeVar => false,
+        | pyrust_core::CanonicalClassTag::TypeAliasType
+        | pyrust_core::CanonicalClassTag::TypeVar
+        | pyrust_core::CanonicalClassTag::ParamSpec
+        | pyrust_core::CanonicalClassTag::ParamSpecArgs
+        | pyrust_core::CanonicalClassTag::ParamSpecKwargs
+        | pyrust_core::CanonicalClassTag::TypeVarTuple => false,
     }
 }
 

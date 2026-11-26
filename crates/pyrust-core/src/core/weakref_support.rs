@@ -23,7 +23,7 @@ use std::collections::VecDeque;
 //     independent registries; object addresses within a thread are unique for
 //     live allocations and removed synchronously during `Drop` before memory
 //     can be reused (preventing ABA collisions).
-thread_local! {
+crate::gil_local! {
     static LIVE_WEAKREF_COUNT: Cell<usize> = const { Cell::new(0) };
     static LIVE_WEAKREF_CALLBACK_COUNT: Cell<usize> = const { Cell::new(0) };
     static HAS_PENDING_WEAKREF_CALLBACKS: Cell<bool> = const { Cell::new(false) };

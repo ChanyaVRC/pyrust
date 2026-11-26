@@ -398,7 +398,7 @@ const STRUCTSEQ_REPR_NAME: &str = "_structseq.__repr__";
 //     are pruned on insertion; each thread maintains its own table.
 type StructSeqEntry = (Weak<RefCell<PyClass>>, &'static StructSeqSpec);
 
-thread_local! {
+pyrust_core::gil_local! {
     static STRUCT_SEQ_SPECS: RefCell<Vec<StructSeqEntry>> =
         const { RefCell::new(Vec::new()) };
 }
@@ -860,7 +860,7 @@ macro_rules! pyrust_struct_seq {
                     unnamed_fields: N_UNNAMED_FIELDS,
                 };
 
-            thread_local! {
+            pyrust_core::gil_local! {
                 static CLASS: Rc<RefCell<$crate::value::PyClass>> =
                     $crate::builtin_modules::macros::build_struct_seq_class(&SPEC);
             }

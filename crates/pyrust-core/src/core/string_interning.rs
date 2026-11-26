@@ -22,8 +22,8 @@ const INTERN_MAX_ENTRIES: usize = 1024;
 // (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
 //     thread share immutable interned string values (matching CPython string
 //     interning); separate threads own independent capped tables.
-thread_local! {
-    /// Per-thread cache mapping short string byte slices to their `Value`.
+crate::gil_local! {
+    /// Per-GIL-group cache mapping short string byte slices to their `Value`.
     ///
     /// Holding a strong `Value` reference is safe: `Value` is NaN-boxed, and
     /// string Values carry an Rc-like refcount in their heap header.  The intern

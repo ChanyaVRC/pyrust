@@ -328,18 +328,18 @@ struct MutableContainerKey {
 //     thread share the address-keyed registry safely (distinct containers have
 //     distinct addresses; idle cache holds weak targets only); separate threads
 //     never perturb each other's dict/set mutation fast path.
-thread_local! {
+crate::gil_local! {
     /// Keyed by backing address, so the registry is a pointer-identity lookup
     /// on the loop-entry and tracked-write paths. The stdlib's DoS-resistant
     /// default hash costs more than the lookup it protects.
     static COLLECTION_MUTATION_STATES:
         RefCell<HashMap<MutableContainerKey, Weak<CollectionMutationStateInner>, FxBuildHasher>> =
         RefCell::new(HashMap::default());
-    /// Cheap per-interpreter-thread gate for the mutation-state registry.
+    /// Cheap per-GIL-group gate for the mutation-state registry.
     ///
-    /// Values and their backing stores are thread-confined, so a process-wide
-    /// counter made an iterator on one thread force unrelated dict/set writes
-    /// on every other thread through a TLS HashMap probe.
+    /// Values and their backing stores are serialized by the owning GIL, so a
+    /// process-wide counter made an iterator on one thread force unrelated
+    /// dict/set writes on every other thread through a TLS HashMap probe.
     static ACTIVE_COLLECTION_MUTATION_STATES: Cell<usize> = const { Cell::new(0) };
     /// Recently registered states kept alive after their last observer left.
     ///

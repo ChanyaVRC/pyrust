@@ -81,6 +81,19 @@ pub(crate) use call_state::{
     set_recursion_limit,
 };
 
+fn enter_int_max_str_digits_guard(
+    interpreter: &Interpreter,
+) -> call_state::IntMaxStrDigitsExecutionGuard {
+    IntMaxStrDigitsExecutionGuard::enter(interpreter)
+}
+
+#[path = "runtime/threading_rt.rs"]
+pub(crate) mod threading_rt;
+pub(crate) use threading_rt::{
+    GilState, NativeLock, ThreadJoinState, current_os_native_id, current_os_thread_ident,
+    current_thread_is_daemon_worker,
+};
+
 mod calls {
     use super::classes::{PrimitiveLayout, classify_primitive_layout, primitive_layout_for_class};
     use super::execution::{VM_HOOK_PROFILE, VM_HOOK_TRACE, VM_HOOK_WEAKREF};
@@ -252,8 +265,7 @@ mod attributes {
         canonical_class_by_tag, class_chain_new_slot_wrapped, class_hash_inherits_builtin_none,
         class_is_subclass_of, class_suppresses_instance_dict, descriptor_get_slot_raw_call,
         effective_builtin_receiver, exception_slot_policy, full_type_name_str, invoke_class_method,
-        is_exception_class, is_paramspec_args_class, is_paramspec_class, is_paramspec_kwargs_class,
-        is_type_alias_class, is_typevar_class, is_typevartuple_class, lookup_class_attr,
+        is_exception_class, is_type_alias_class, is_typevar_class, lookup_class_attr,
         metaclass_dunder, metaclass_of, mro_has_unslotted_ancestor, mro_slot_allows,
         native_iterator_class, object_class_singleton, paramspec_proxy_readonly_attr_error,
         paramspec_readonly_attr_error, primitive_owned_object_dunder, replace_instance_dict,
@@ -360,6 +372,8 @@ mod type_objects {
     include!("runtime/type_objects.rs");
 }
 pub(crate) use pyrust_builtins::ordered_mapping::owner as ordered_dict_owner;
+#[cfg(test)]
+pub(crate) use type_objects::typing_class_singletons_initialized;
 pub(crate) use type_objects::{
     full_type_name_str, initialize_typevar_attr, is_paramspec_args_class, is_paramspec_class,
     is_paramspec_kwargs_class, is_type_alias_class, is_typevar_class, is_typevartuple_class,

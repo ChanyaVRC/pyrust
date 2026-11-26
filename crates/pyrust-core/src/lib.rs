@@ -17,6 +17,8 @@ mod environment;
 mod error_macros;
 #[path = "core/errors.rs"]
 mod errors;
+#[path = "core/gil_tls.rs"]
+mod gil_tls;
 #[path = "core/numeric_ops/mod.rs"]
 mod numeric_ops;
 #[path = "core/object_identity.rs"]
@@ -45,6 +47,9 @@ pub use environment::{
     NamespaceFastLocalCacheSource, NamespaceMirrorGuard, namespace_name_interest_mask,
 };
 pub use errors::{PyError, PyErrorKind, Result};
+pub use gil_tls::{
+    GilLocalKey, GilTlsGuard, HotTlsOwner, HotTlsState, active_tls, home_tls_owner, try_active_tls,
+};
 pub use numeric_ops::{
     NumericBinOp, NumericCmpOp, NumericOps, NumericSlot, NumericUnaryOp, bigint_divmod_floor,
     bigint_float_cmp, bigint_float_eq, bigint_to_float_or_overflow, dispatch_numeric_binop,

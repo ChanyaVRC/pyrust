@@ -47,7 +47,7 @@ pub type LazyModuleSlotVisitor<'a> = &'a mut dyn FnMut(&'static str, Option<Valu
 /// Static description of the attributes a native module resolves on demand.
 ///
 /// Both callbacks must be pure functions of the name: `resolve` hands back the
-/// same per-thread object every time, which is what lets a read stay
+/// same per-GIL-group object every time, which is what lets a read stay
 /// non-mutating (nothing is cached in the module, so no version bump is
 /// needed and opcode caches keyed on [`ModuleMutationState`] stay sound).
 #[derive(Debug, Clone, Copy)]

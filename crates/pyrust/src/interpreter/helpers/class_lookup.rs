@@ -195,7 +195,7 @@ pub(crate) fn c3_linearize_classes(class: &Rc<RefCell<PyClass>>) -> Vec<Rc<RefCe
 //     thread share the immutable built-in type objects (and track the latest
 //     weak `itertools.chain` import generation); separate threads build
 //     independent type singletons with zero synchronization.
-thread_local! {
+pyrust_core::gil_local! {
     static OBJECT_CLASS: Rc<RefCell<PyClass>> = {
         // Issue #1047: object.__init_subclass__ is a no-op classmethod in
         // CPython.  Register the builtin sentinel so that
@@ -370,26 +370,9 @@ thread_local! {
     /// Per-thread `PyClass` singleton for the `module` type (`types.ModuleType`
     /// / `type(sys)` — issue #2970).  Constructible via `types.ModuleType(name,
     /// doc=None)` and subclassable (`class Sub(types.ModuleType): ...`).
-    static MODULE_TYPE: Rc<RefCell<PyClass>> = {
-        let obj = OBJECT_CLASS.with(Rc::clone);
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
-        attrs.insert(
-            "__init__".to_string(),
-            Value::builtin_function("module.__init__"),
-        );
-        attrs.insert(
-            "__repr__".to_string(),
-            Value::builtin_function("module.__repr__"),
-        );
-        let cls = Rc::new(RefCell::new(PyClass::new(
-            "module",
-            "module",
-            Some(Rc::clone(&obj)),
-            attrs,
-        )));
-        obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
-        cls
-    };
+    /// Initialized lazily so startup and primitive calls do not allocate it.
+    static MODULE_TYPE: std::cell::OnceCell<Rc<RefCell<PyClass>>> =
+        const { std::cell::OnceCell::new() };
 
     /// Per-thread `PyClass` singleton for the `range` type.  In CPython,
     /// `range` is a proper class (`type(range(5)) is range`), not a builtin
@@ -476,116 +459,36 @@ thread_local! {
         })
     };
 
-    /// Concrete iterator classes for bytearray and deque. All are real type
-    /// objects; CPython additionally binds the forward deque iterator under
-    /// its private `collections._deque_iterator` module name.
-    static NATIVE_ITERATOR_CLASSES: [Rc<RefCell<PyClass>>; NativeIteratorClass::ALL.len()] = {
-        let obj = OBJECT_CLASS.with(Rc::clone);
-        NativeIteratorClass::ALL.map(|kind| {
-            let mut attrs = IndexMap::new();
-            if kind != NativeIteratorClass::Bytearray {
-                attrs.insert("__module__".to_string(), Value::string(kind.module()));
-            }
-            attrs.insert("__doc__".to_string(), Value::none());
-            for method in [
-                "__getattribute__",
-                "__iter__",
-                "__next__",
-                "__length_hint__",
-                "__reduce__",
-            ] {
-                let qualified = registered_builtin_method_name(kind.full_type_name(), method);
-                attrs.insert(method.to_string(), Value::builtin_function(qualified));
-            }
-            if kind == NativeIteratorClass::Bytearray {
-                let qualified =
-                    registered_builtin_method_name(kind.full_type_name(), "__setstate__");
-                attrs.insert("__setstate__".to_string(), Value::builtin_function(qualified));
-            }
-            if matches!(kind, NativeIteratorClass::Deque | NativeIteratorClass::DequeReverse) {
-                let qualified = registered_builtin_method_name(kind.full_type_name(), "__new__");
-                attrs.insert("__new__".to_string(), Value::builtin_function(qualified));
-            }
-            let mut class = PyClass::new(
-                kind.class_name(),
-                kind.class_name(),
-                Some(Rc::clone(&obj)),
-                attrs,
-            );
-            class.non_subclassable_name = Some(kind.class_name());
-            let class = Rc::new(RefCell::new(class));
-            obj.borrow()
-                .subclasses
-                .borrow_mut()
-                .push(Rc::downgrade(&class));
-            class
-        })
-    };
+    /// Concrete iterator class for `bytearray`. Built-in to `builtins` and
+    /// registered in `PRIMITIVE_CLASS_DISPATCH`.
+    static BYTEARRAY_ITERATOR_CLASS: Rc<RefCell<PyClass>> =
+        build_native_iterator_class(NativeIteratorClass::Bytearray);
 
-    /// Per-thread class singletons for the plain dictionary views and the
-    /// OrderedDict-specific subclasses. They are real built-in classes, but
+    /// Lazy concrete iterator classes for `collections.deque`
+    /// (`_deque_iterator`, `_deque_reverse_iterator`). Kept out of
+    /// `PRIMITIVE_CLASS_DISPATCH` eager bootstrap so importing nothing from
+    /// `collections` allocates neither class nor registers them in
+    /// `object.__subclasses__()`.
+    static DEQUE_ITERATOR_CLASSES: std::cell::OnceCell<[Rc<RefCell<PyClass>>; 2]> =
+        const { std::cell::OnceCell::new() };
+
+    /// Per-thread class singletons for the plain dictionary views (`dict_keys`,
+    /// `dict_items`, `dict_values`). They are real built-in classes, but
     /// deliberately have no `builtins` binding and no public constructor.
-    static DICT_VIEW_CLASSES: [Rc<RefCell<PyClass>>; DictViewClass::ALL.len()] = {
+    static DICT_VIEW_CLASSES: [Rc<RefCell<PyClass>>; 3] = {
         let obj = OBJECT_CLASS.with(Rc::clone);
-        let make = |kind: DictViewClass, base: Rc<RefCell<PyClass>>| {
-            let name = kind.class_name();
-            let mut attrs = IndexMap::new();
-            if kind.is_ordered() {
-                for method in ["__iter__", "__reversed__"] {
-                    let qualified = registered_builtin_method_name(name, method);
-                    attrs.insert(method.to_string(), Value::builtin_function(qualified));
-                }
-            } else {
-                for (dunder, flags) in builtin_methods::slot_dunder_table(name) {
-                    if flags & builtin_methods::SLOT_ATTR == 0 {
-                        continue;
-                    }
-                    let qualified = registered_builtin_method_name(name, dunder);
-                    attrs.insert(dunder.to_string(), Value::builtin_function(qualified));
-                }
-                if kind.is_set_like() {
-                    let qualified = registered_builtin_method_name(name, "isdisjoint");
-                    attrs.insert("isdisjoint".to_string(), Value::builtin_function(qualified));
-                    attrs.insert("__hash__".to_string(), Value::none());
-                }
-            }
-            attrs.insert("__doc__".to_string(), Value::none());
-
-            let mut class = PyClass::new(name, name, Some(Rc::clone(&base)), attrs);
-            class.non_subclassable_name = Some(name);
-            let class = Rc::new(RefCell::new(class));
-            base.borrow()
-                .subclasses
-                .borrow_mut()
-                .push(Rc::downgrade(&class));
-            if !kind.is_ordered() {
-                let mapping = pyrust_builtins::numeric_attrs_descriptor::dict_view_mapping_descriptor(
-                    &class,
-                    kind.view_kind(),
-                );
-                class
-                    .borrow_mut()
-                    .attrs
-                    .insert("mapping".to_string(), mapping);
-            }
-            class
-        };
-
-        let keys = make(DictViewClass::Keys, Rc::clone(&obj));
-        let items = make(DictViewClass::Items, Rc::clone(&obj));
-        let values = make(DictViewClass::Values, obj);
-        let ordered_keys = make(DictViewClass::OrderedKeys, Rc::clone(&keys));
-        let ordered_items = make(DictViewClass::OrderedItems, Rc::clone(&items));
-        let ordered_values = make(DictViewClass::OrderedValues, Rc::clone(&values));
-        [
-            keys,
-            items,
-            values,
-            ordered_keys,
-            ordered_items,
-            ordered_values,
-        ]
+        let keys = build_dict_view_class(DictViewClass::Keys, Rc::clone(&obj));
+        let items = build_dict_view_class(DictViewClass::Items, Rc::clone(&obj));
+        let values = build_dict_view_class(DictViewClass::Values, obj);
+        [keys, items, values]
     };
+
+    /// Lazy per-thread class singletons for `collections.OrderedDict` views
+    /// (`odict_keys`, `odict_items`, `odict_values`). Kept out of
+    /// `PRIMITIVE_CLASS_DISPATCH` eager bootstrap until an `OrderedDict` view
+    /// or `odict_*` class is actually accessed.
+    static ODICT_VIEW_CLASSES: std::cell::OnceCell<[Rc<RefCell<PyClass>>; 3]> =
+        const { std::cell::OnceCell::new() };
 
     /// Per-thread `PyClass` singleton for the `types.GenericAlias` type — the
     /// type of `list[int]`, `dict[str, int]`, etc. (PEP 585).  In CPython 3.12
@@ -627,7 +530,10 @@ thread_local! {
     /// O(1) dispatch table for primitive classes (#462 perf): maps the
     /// `Rc<RefCell<PyClass>>` identity (by raw pointer) to the registry's
     /// `BuiltinDispatchFn` for the corresponding constructor.  Populated
-    /// once per thread alongside `PRIMITIVE_CLASSES`.
+    /// once per thread alongside `PRIMITIVE_CLASSES`; lazy classes
+    /// (`module`, `odict_*`, `_deque_*`) insert themselves into this table
+    /// only when materialized (or are picked up via non-initializing `.get()`
+    /// if materialized before this table).
     ///
     /// Hot path: `call_function_expanded`'s `ValueKind::PyClass(class)`
     /// arm looks up `Rc::as_ptr(class)` here; on hit it dispatches
@@ -643,123 +549,15 @@ thread_local! {
     /// showed up as a 1.1-1.3x regression on constructor-heavy loops the
     /// moment #3000 moved `zip` / `map` / `filter` / `enumerate` / `slice` /
     /// `reversed` onto this table.
-    static PRIMITIVE_CLASS_DISPATCH:
+    static PRIMITIVE_CLASS_DISPATCH: std::cell::OnceCell<
         std::cell::RefCell<
             std::collections::HashMap<
                 *const std::cell::RefCell<PyClass>,
                 crate::builtin_registry::BuiltinDispatchFn,
                 pyrust_core::PyHasher,
             >,
-        > = {
-        let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity_and_hasher(
-            32,
-            pyrust_core::PyHasher::default(),
-        ));
-        PRIMITIVE_CLASSES.with(|c| {
-            let mut m = cell.borrow_mut();
-            for (class, name) in [
-                (&c.bool_class, "bool"),
-                (&c.bytearray_class, "bytearray"),
-                (&c.bytes_class, "bytes"),
-                (&c.complex_class, "complex"),
-                (&c.dict_class, "dict"),
-                (&c.float_class, "float"),
-                (&c.frozenset_class, "frozenset"),
-                (&c.int_class, "int"),
-                (&c.list_class, "list"),
-                (&c.set_class, "set"),
-                (&c.str_class, "str"),
-                (&c.tuple_class, "tuple"),
-            ] {
-                if let Some(dispatch) = crate::builtin_registry::lookup(name) {
-                    m.insert(Rc::as_ptr(class), dispatch);
-                }
-            }
-            // Issue #1451: NoneType, NotImplementedType, and ellipsis were
-            // added to PrimitiveClasses by #1403 but not registered here,
-            // causing calls like `type(None)()` to fall through to
-            // `call_class_expanded` which allocated a bogus PyInstance.
-            // CPython 3.12: zero-arg call returns the singleton; any
-            // arguments raise TypeError "<TypeName> takes no arguments".
-            m.insert(
-                Rc::as_ptr(&c.none_class),
-                none_ctor as crate::builtin_registry::BuiltinDispatchFn,
-            );
-            m.insert(
-                Rc::as_ptr(&c.notimplemented_class),
-                notimplemented_ctor as crate::builtin_registry::BuiltinDispatchFn,
-            );
-            m.insert(
-                Rc::as_ptr(&c.ellipsis_class),
-                ellipsis_ctor as crate::builtin_registry::BuiltinDispatchFn,
-            );
-        });
-        // `type` metaclass: every `PyClass` value is an instance of `type`
-        // in CPython.  Register the TYPE_CLASS singleton here so that
-        // calling `type(x)` dispatches to the existing "type" registry entry
-        // without going through `call_class_expanded` (issue #1312).
-        TYPE_CLASS.with(|t| {
-            if let Some(dispatch) = crate::builtin_registry::lookup("type") {
-                cell.borrow_mut().insert(Rc::as_ptr(t), dispatch);
-            }
-        });
-        // Issues #1793, #1800: `range` is a proper class in CPython, so
-        // `range(1, 10)` is a constructor call on the range class.  Register
-        // it so `call_function_expanded`'s PyClass arm dispatches to the
-        // existing "range" registry fn instead of falling through to
-        // `call_class_expanded` which would allocate a bogus PyInstance.
-        RANGE_CLASS.with(|r| {
-            if let Some(dispatch) = crate::builtin_registry::lookup("range") {
-                cell.borrow_mut().insert(Rc::as_ptr(r), dispatch);
-            }
-        });
-        // Issue #2970: `types.ModuleType` (`module`) is a constructible built-in
-        // class whose direct call allocates a real `PyModule` with a live dict.
-        MODULE_TYPE.with(|m| {
-            cell.borrow_mut().insert(
-                Rc::as_ptr(m),
-                module_ctor as crate::builtin_registry::BuiltinDispatchFn,
-            );
-        });
-        // Issue #3000: `zip` / `map` / `filter` / `enumerate` / `slice` /
-        // `reversed` are classes too, so `zip(a, b)` is a constructor call.
-        // Register each singleton against its existing registry entry, exactly
-        // as `range` above, so the call never reaches `call_class_expanded`.
-        BUILTIN_TYPE_CLASSES.with(|classes| {
-            for (kind, class) in BuiltinTypeClass::ALL.iter().zip(classes) {
-                if let Some(dispatch) = crate::builtin_registry::lookup(kind.class_name()) {
-                    cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
-                }
-            }
-        });
-        DICT_VIEW_CLASSES.with(|classes| {
-            for (kind, class) in DictViewClass::ALL.iter().zip(classes) {
-                let dispatch: crate::builtin_registry::BuiltinDispatchFn = match kind {
-                    DictViewClass::Keys => dict_keys_ctor,
-                    DictViewClass::Items => dict_items_ctor,
-                    DictViewClass::Values => dict_values_ctor,
-                    DictViewClass::OrderedKeys => odict_keys_ctor,
-                    DictViewClass::OrderedItems => odict_items_ctor,
-                    DictViewClass::OrderedValues => odict_values_ctor,
-                };
-                cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
-            }
-        });
-        NATIVE_ITERATOR_CLASSES.with(|classes| {
-            for (kind, class) in NativeIteratorClass::ALL.iter().zip(classes) {
-                let dispatch: crate::builtin_registry::BuiltinDispatchFn = match kind {
-                    NativeIteratorClass::Bytearray => bytearray_iterator_ctor,
-                    NativeIteratorClass::Deque => deque_iterator_ctor,
-                    NativeIteratorClass::DequeReverse => deque_reverse_iterator_ctor,
-                    NativeIteratorClass::Reversed => {
-                        unreachable!("reversed reuses its public built-in class")
-                    }
-                };
-                cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
-            }
-        });
-        cell
-    };
+        >,
+    > = const { std::cell::OnceCell::new() };
 
     /// The newest imported `itertools.chain` class generation.
     ///
@@ -769,6 +567,334 @@ thread_local! {
     /// it must not keep an otherwise-unreachable module generation alive.
     static ITERTOOLS_CHAIN_CLASS: RefCell<Option<std::rc::Weak<RefCell<PyClass>>>> =
         const { RefCell::new(None) };
+}
+
+type PrimitiveClassDispatchMap = std::collections::HashMap<
+    *const std::cell::RefCell<PyClass>,
+    crate::builtin_registry::BuiltinDispatchFn,
+    pyrust_core::PyHasher,
+>;
+
+#[cold]
+#[inline(never)]
+fn build_module_type() -> Rc<RefCell<PyClass>> {
+    let obj = OBJECT_CLASS.with(Rc::clone);
+    let mut attrs: IndexMap<String, Value> = IndexMap::new();
+    attrs.insert(
+        "__init__".to_string(),
+        Value::builtin_function("module.__init__"),
+    );
+    attrs.insert(
+        "__repr__".to_string(),
+        Value::builtin_function("module.__repr__"),
+    );
+    let cls = Rc::new(RefCell::new(PyClass::new(
+        "module",
+        "module",
+        Some(Rc::clone(&obj)),
+        attrs,
+    )));
+    obj.borrow()
+        .subclasses
+        .borrow_mut()
+        .push(Rc::downgrade(&cls));
+    register_lazy_class_dispatch(
+        &cls,
+        module_ctor as crate::builtin_registry::BuiltinDispatchFn,
+    );
+    cls
+}
+
+#[cold]
+#[inline(never)]
+fn build_native_iterator_class(kind: NativeIteratorClass) -> Rc<RefCell<PyClass>> {
+    let obj = OBJECT_CLASS.with(Rc::clone);
+    let mut attrs = IndexMap::new();
+    if kind != NativeIteratorClass::Bytearray {
+        attrs.insert("__module__".to_string(), Value::string(kind.module()));
+    }
+    attrs.insert("__doc__".to_string(), Value::none());
+    for method in [
+        "__getattribute__",
+        "__iter__",
+        "__next__",
+        "__length_hint__",
+        "__reduce__",
+    ] {
+        let qualified = registered_builtin_method_name(kind.full_type_name(), method);
+        attrs.insert(method.to_string(), Value::builtin_function(qualified));
+    }
+    if kind == NativeIteratorClass::Bytearray {
+        let qualified = registered_builtin_method_name(kind.full_type_name(), "__setstate__");
+        attrs.insert(
+            "__setstate__".to_string(),
+            Value::builtin_function(qualified),
+        );
+    }
+    if matches!(
+        kind,
+        NativeIteratorClass::Deque | NativeIteratorClass::DequeReverse
+    ) {
+        let qualified = registered_builtin_method_name(kind.full_type_name(), "__new__");
+        attrs.insert("__new__".to_string(), Value::builtin_function(qualified));
+    }
+    let mut class = PyClass::new(
+        kind.class_name(),
+        kind.class_name(),
+        Some(Rc::clone(&obj)),
+        attrs,
+    );
+    class.non_subclassable_name = Some(kind.class_name());
+    let class = Rc::new(RefCell::new(class));
+    obj.borrow()
+        .subclasses
+        .borrow_mut()
+        .push(Rc::downgrade(&class));
+    class
+}
+
+#[cold]
+#[inline(never)]
+fn build_deque_iterator_classes() -> [Rc<RefCell<PyClass>>; 2] {
+    let forward = build_native_iterator_class(NativeIteratorClass::Deque);
+    let reverse = build_native_iterator_class(NativeIteratorClass::DequeReverse);
+    register_lazy_class_dispatch(
+        &forward,
+        deque_iterator_ctor as crate::builtin_registry::BuiltinDispatchFn,
+    );
+    register_lazy_class_dispatch(
+        &reverse,
+        deque_reverse_iterator_ctor as crate::builtin_registry::BuiltinDispatchFn,
+    );
+    [forward, reverse]
+}
+
+#[cold]
+#[inline(never)]
+fn build_dict_view_class(kind: DictViewClass, base: Rc<RefCell<PyClass>>) -> Rc<RefCell<PyClass>> {
+    let name = kind.class_name();
+    let mut attrs = IndexMap::new();
+    if kind.is_ordered() {
+        for method in ["__iter__", "__reversed__"] {
+            let qualified = registered_builtin_method_name(name, method);
+            attrs.insert(method.to_string(), Value::builtin_function(qualified));
+        }
+    } else {
+        for (dunder, flags) in builtin_methods::slot_dunder_table(name) {
+            if flags & builtin_methods::SLOT_ATTR == 0 {
+                continue;
+            }
+            let qualified = registered_builtin_method_name(name, dunder);
+            attrs.insert(dunder.to_string(), Value::builtin_function(qualified));
+        }
+        if kind.is_set_like() {
+            let qualified = registered_builtin_method_name(name, "isdisjoint");
+            attrs.insert("isdisjoint".to_string(), Value::builtin_function(qualified));
+            attrs.insert("__hash__".to_string(), Value::none());
+        }
+    }
+    attrs.insert("__doc__".to_string(), Value::none());
+
+    let mut class = PyClass::new(name, name, Some(Rc::clone(&base)), attrs);
+    class.non_subclassable_name = Some(name);
+    let class = Rc::new(RefCell::new(class));
+    base.borrow()
+        .subclasses
+        .borrow_mut()
+        .push(Rc::downgrade(&class));
+    if !kind.is_ordered() {
+        let mapping = pyrust_builtins::numeric_attrs_descriptor::dict_view_mapping_descriptor(
+            &class,
+            kind.view_kind(),
+        );
+        class
+            .borrow_mut()
+            .attrs
+            .insert("mapping".to_string(), mapping);
+    }
+    class
+}
+
+#[cold]
+#[inline(never)]
+fn build_odict_view_classes() -> [Rc<RefCell<PyClass>>; 3] {
+    let [keys, items, values] = DICT_VIEW_CLASSES.with(|classes| {
+        [
+            Rc::clone(&classes[0]),
+            Rc::clone(&classes[1]),
+            Rc::clone(&classes[2]),
+        ]
+    });
+    let ordered_keys = build_dict_view_class(DictViewClass::OrderedKeys, keys);
+    let ordered_items = build_dict_view_class(DictViewClass::OrderedItems, items);
+    let ordered_values = build_dict_view_class(DictViewClass::OrderedValues, values);
+    register_lazy_class_dispatch(
+        &ordered_keys,
+        odict_keys_ctor as crate::builtin_registry::BuiltinDispatchFn,
+    );
+    register_lazy_class_dispatch(
+        &ordered_items,
+        odict_items_ctor as crate::builtin_registry::BuiltinDispatchFn,
+    );
+    register_lazy_class_dispatch(
+        &ordered_values,
+        odict_values_ctor as crate::builtin_registry::BuiltinDispatchFn,
+    );
+    [ordered_keys, ordered_items, ordered_values]
+}
+
+fn register_lazy_class_dispatch(
+    class: &Rc<RefCell<PyClass>>,
+    dispatch: crate::builtin_registry::BuiltinDispatchFn,
+) {
+    // Only update `PRIMITIVE_CLASS_DISPATCH` if it was already built; if not,
+    // `build_primitive_class_dispatch` will pick up this already-initialized
+    // `OnceCell` when it runs.
+    PRIMITIVE_CLASS_DISPATCH.with(|cell| {
+        if let Some(map) = cell.get() {
+            map.borrow_mut().insert(Rc::as_ptr(class), dispatch);
+        }
+    });
+}
+
+#[cold]
+#[inline(never)]
+fn build_primitive_class_dispatch() -> std::cell::RefCell<PrimitiveClassDispatchMap> {
+    let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity_and_hasher(
+        32,
+        pyrust_core::PyHasher::default(),
+    ));
+    PRIMITIVE_CLASSES.with(|c| {
+        let mut m = cell.borrow_mut();
+        for (class, name) in [
+            (&c.bool_class, "bool"),
+            (&c.bytearray_class, "bytearray"),
+            (&c.bytes_class, "bytes"),
+            (&c.complex_class, "complex"),
+            (&c.dict_class, "dict"),
+            (&c.float_class, "float"),
+            (&c.frozenset_class, "frozenset"),
+            (&c.int_class, "int"),
+            (&c.list_class, "list"),
+            (&c.set_class, "set"),
+            (&c.str_class, "str"),
+            (&c.tuple_class, "tuple"),
+        ] {
+            if let Some(dispatch) = crate::builtin_registry::lookup(name) {
+                m.insert(Rc::as_ptr(class), dispatch);
+            }
+        }
+        // Issue #1451: NoneType, NotImplementedType, and ellipsis were
+        // added to PrimitiveClasses by #1403 but not registered here,
+        // causing calls like `type(None)()` to fall through to
+        // `call_class_expanded` which allocated a bogus PyInstance.
+        // CPython 3.12: zero-arg call returns the singleton; any
+        // arguments raise TypeError "<TypeName> takes no arguments".
+        m.insert(
+            Rc::as_ptr(&c.none_class),
+            none_ctor as crate::builtin_registry::BuiltinDispatchFn,
+        );
+        m.insert(
+            Rc::as_ptr(&c.notimplemented_class),
+            notimplemented_ctor as crate::builtin_registry::BuiltinDispatchFn,
+        );
+        m.insert(
+            Rc::as_ptr(&c.ellipsis_class),
+            ellipsis_ctor as crate::builtin_registry::BuiltinDispatchFn,
+        );
+    });
+    // `type` metaclass: every `PyClass` value is an instance of `type`
+    // in CPython.  Register the TYPE_CLASS singleton here so that
+    // calling `type(x)` dispatches to the existing "type" registry entry
+    // without going through `call_class_expanded` (issue #1312).
+    TYPE_CLASS.with(|t| {
+        if let Some(dispatch) = crate::builtin_registry::lookup("type") {
+            cell.borrow_mut().insert(Rc::as_ptr(t), dispatch);
+        }
+    });
+    // Issues #1793, #1800: `range` is a proper class in CPython, so
+    // `range(1, 10)` is a constructor call on the range class.  Register
+    // it so `call_function_expanded`'s PyClass arm dispatches to the
+    // existing "range" registry fn instead of falling through to
+    // `call_class_expanded` which would allocate a bogus PyInstance.
+    RANGE_CLASS.with(|r| {
+        if let Some(dispatch) = crate::builtin_registry::lookup("range") {
+            cell.borrow_mut().insert(Rc::as_ptr(r), dispatch);
+        }
+    });
+    // Issue #3000: `zip` / `map` / `filter` / `enumerate` / `slice` /
+    // `reversed` are classes too, so `zip(a, b)` is a constructor call.
+    // Register each singleton against its existing registry entry, exactly
+    // as `range` above, so the call never reaches `call_class_expanded`.
+    BUILTIN_TYPE_CLASSES.with(|classes| {
+        for (kind, class) in BuiltinTypeClass::ALL.iter().zip(classes) {
+            if let Some(dispatch) = crate::builtin_registry::lookup(kind.class_name()) {
+                cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
+            }
+        }
+    });
+    DICT_VIEW_CLASSES.with(|classes| {
+        for (kind, class) in DictViewClass::PLAIN.iter().zip(classes) {
+            let dispatch: crate::builtin_registry::BuiltinDispatchFn = match kind {
+                DictViewClass::Keys => dict_keys_ctor,
+                DictViewClass::Items => dict_items_ctor,
+                DictViewClass::Values => dict_values_ctor,
+                _ => unreachable!("plain dict view classes only"),
+            };
+            cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
+        }
+    });
+    BYTEARRAY_ITERATOR_CLASS.with(|class| {
+        cell.borrow_mut().insert(
+            Rc::as_ptr(class),
+            bytearray_iterator_ctor as crate::builtin_registry::BuiltinDispatchFn,
+        );
+    });
+    // Pick up any lazy singletons that were already materialized before the
+    // first primitive constructor call, without initializing un-used ones.
+    MODULE_TYPE.with(|m| {
+        if let Some(module) = m.get() {
+            cell.borrow_mut().insert(
+                Rc::as_ptr(module),
+                module_ctor as crate::builtin_registry::BuiltinDispatchFn,
+            );
+        }
+    });
+    ODICT_VIEW_CLASSES.with(|odict| {
+        if let Some(classes) = odict.get() {
+            for (kind, class) in DictViewClass::ORDERED.iter().zip(classes) {
+                let dispatch: crate::builtin_registry::BuiltinDispatchFn = match kind {
+                    DictViewClass::OrderedKeys => odict_keys_ctor,
+                    DictViewClass::OrderedItems => odict_items_ctor,
+                    DictViewClass::OrderedValues => odict_values_ctor,
+                    _ => unreachable!("ordered dict view classes only"),
+                };
+                cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
+            }
+        }
+    });
+    DEQUE_ITERATOR_CLASSES.with(|deque| {
+        if let Some(classes) = deque.get() {
+            for (kind, class) in NativeIteratorClass::DEQUE.iter().zip(classes) {
+                let dispatch: crate::builtin_registry::BuiltinDispatchFn = match kind {
+                    NativeIteratorClass::Deque => deque_iterator_ctor,
+                    NativeIteratorClass::DequeReverse => deque_reverse_iterator_ctor,
+                    _ => unreachable!("deque iterator classes only"),
+                };
+                cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
+            }
+        }
+    });
+    cell
+}
+
+#[cfg(test)]
+pub(crate) fn lazy_class_singletons_initialized() -> (bool, bool, bool) {
+    (
+        ODICT_VIEW_CLASSES.with(|cell| cell.get().is_some()),
+        DEQUE_ITERATOR_CLASSES.with(|cell| cell.get().is_some()),
+        MODULE_TYPE.with(|cell| cell.get().is_some()),
+    )
 }
 
 /// Record the newest imported `itertools.chain` class generation.

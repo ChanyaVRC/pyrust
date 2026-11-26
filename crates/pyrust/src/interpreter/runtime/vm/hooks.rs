@@ -11,6 +11,7 @@ pub(crate) const VM_HOOK_TRACE: u8 = 1 << 0;
 pub(crate) const VM_HOOK_PROFILE: u8 = 1 << 1;
 pub(crate) const VM_HOOK_WEAKREF: u8 = 1 << 2;
 pub(crate) const VM_HOOK_TRACEMALLOC: u8 = 1 << 3;
+pub(crate) const VM_HOOK_THREADING: u8 = 1 << 4;
 
 /// Classification of how a single instruction interacts with a candidate
 /// temporary register `target_reg`.
@@ -544,6 +545,9 @@ impl Interpreter {
         if self.cold.tracemalloc_state.borrow().tracing {
             flags |= VM_HOOK_TRACEMALLOC;
         }
+        if self.cold.gil_state.has_active_workers() {
+            flags |= VM_HOOK_THREADING;
+        }
         self.vm_hooks_flags = flags;
     }
 
@@ -695,6 +699,9 @@ impl Interpreter {
         }
         if self.vm_hooks_flags & VM_HOOK_TRACEMALLOC != 0 {
             self.vm_tracemalloc_step(code, pc, regs_ptr, regs_len);
+        }
+        if self.vm_hooks_flags & VM_HOOK_THREADING != 0 {
+            self.vm_threading_safepoint()?;
         }
         Ok(())
     }

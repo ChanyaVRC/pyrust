@@ -30,7 +30,7 @@ struct ClassPairGeneration {
 // (b) Multi-interpreter / multi-threaded impact: Weak generation tracking
 //     isolates distinct `contextlib` imports across interpreters on one thread
 //     and prunes dead generations; separate threads are completely isolated.
-thread_local! {
+pyrust_core::gil_local! {
     /// Weak identities for every still-live imported contextlib generation.
     ///
     /// A fresh import after deleting `sys.modules["contextlib"]` must create a
@@ -50,7 +50,7 @@ thread_local! {
 }
 
 fn register_pair(
-    table: &'static std::thread::LocalKey<RefCell<Vec<ClassPairGeneration>>>,
+    table: &'static pyrust_core::GilLocalKey<RefCell<Vec<ClassPairGeneration>>>,
     key: &Rc<RefCell<PyClass>>,
     sibling: &Rc<RefCell<PyClass>>,
 ) {
@@ -71,7 +71,7 @@ fn register_pair(
 }
 
 fn lookup_pair(
-    table: &'static std::thread::LocalKey<RefCell<Vec<ClassPairGeneration>>>,
+    table: &'static pyrust_core::GilLocalKey<RefCell<Vec<ClassPairGeneration>>>,
     key: &Rc<RefCell<PyClass>>,
 ) -> Option<Rc<RefCell<PyClass>>> {
     table.with(|generations| {

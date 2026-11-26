@@ -58,6 +58,13 @@ import asyncio.timeouts
 import asyncio.transports
 import asyncio.trsock
 import collections.abc
+import concurrent.futures
+import concurrent.futures._base
+import concurrent.futures.process
+import concurrent.futures.thread
+import ctypes._endian
+import ctypes.util
+import ctypes.wintypes
 import dbm.dumb
 import email.base64mime
 import email.charset
@@ -167,14 +174,14 @@ import xmlrpc.client
 import xmlrpc.server
 import __future__
 names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_collections", "_collections_abc",
-         "_compat_pickle", "_compression", "_contextvars", "_csv", "_datetime", "_decimal", "_elementtree",
+         "_compat_pickle", "_compression", "_contextvars", "_csv", "_ctypes", "_datetime", "_decimal", "_elementtree",
          "_frozen_importlib", "_frozen_importlib_external", "_functools", "_hashlib", "_heapq", "_imp", "_io", "_json", "_locale", "_lsprof", "_lzma", "_markupbase", "_md5",
          "_opcode", "_operator", "_pickle", "_queue", "_random", "_sha1", "_sha2", "_sha3", "_signal", "_sitebuiltins",
          "_socket", "_sqlite3", "_sre", "_ssl", "_stat", "_statistics", "_string", "_strptime", "_struct", "_symtable", "_thread",
          "_threading_local", "_tokenize", "_tracemalloc", "_typing", "_uuid", "_warnings", "_weakref", "_weakrefset", "_zoneinfo",
          "abc", "antigravity", "argparse", "ast", "asyncio", "atexit", "base64", "bdb", "binascii", "bisect", "builtins",
-         "bz2", "cProfile", "calendar", "cmath", "cmd", "code", "codecs", "codeop", "collections", "colorsys", "compileall", "configparser", "contextlib", "contextvars",
-         "copy", "copyreg", "csv", "dataclasses", "dbm", "decimal", "difflib", "dis", "doctest", "email", "encodings", "enum", "errno", "faulthandler",
+         "bz2", "cProfile", "calendar", "cmath", "cmd", "code", "codecs", "codeop", "collections", "colorsys", "compileall", "concurrent", "configparser", "contextlib", "contextvars",
+         "copy", "copyreg", "csv", "ctypes", "dataclasses", "dbm", "decimal", "difflib", "dis", "doctest", "email", "encodings", "enum", "errno", "faulthandler",
          "filecmp", "fileinput", "fnmatch", "fractions", "ftplib", "functools", "gc", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "imaplib", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword",
          "linecache", "locale", "logging", "lzma", "mailbox", "marshal", "math", "mimetypes", "mmap", "modulefinder", "netrc", "ntpath", "nturl2path", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle",
@@ -213,6 +220,13 @@ for name, module in [("os.path", os.path),
                      ("asyncio.transports", asyncio.transports),
                      ("asyncio.trsock", asyncio.trsock),
                      ("collections.abc", collections.abc),
+                     ("concurrent.futures", concurrent.futures),
+                     ("concurrent.futures._base", concurrent.futures._base),
+                     ("concurrent.futures.process", concurrent.futures.process),
+                     ("concurrent.futures.thread", concurrent.futures.thread),
+                     ("ctypes._endian", ctypes._endian),
+                     ("ctypes.util", ctypes.util),
+                     ("ctypes.wintypes", ctypes.wintypes),
                      ("dbm.dumb", dbm.dumb),
                      ("email.base64mime", email.base64mime),
                      ("email.charset", email.charset),

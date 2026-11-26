@@ -43,7 +43,7 @@ const TYPING_ALIAS_METHODS: &[(&str, &str)] = &[
 // (b) Multi-interpreter / multi-threaded impact: Weak generation records keep
 //     re-imported `typing` modules isolated per import on a thread (while
 //     sharing the immutable `Generic` base); separate threads are isolated.
-thread_local! {
+pyrust_core::gil_local! {
     static STABLE_GENERIC_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
         attrs.insert(

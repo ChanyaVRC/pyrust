@@ -36,7 +36,7 @@ const CO_FUTURE_ANNOTATIONS: i64 = 0x1000000;
 // (b) Multi-interpreter / multi-threaded impact: Weak per-import entries keep
 //     re-imported `__future__` modules isolated across interpreters on one
 //     thread; separate threads maintain independent registries.
-thread_local! {
+pyrust_core::gil_local! {
     /// Weak identities of still-live imported `__future__` generations.
     ///
     /// `__future__` is a Python module in CPython: deleting it from
