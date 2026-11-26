@@ -22,6 +22,11 @@ use super::arguments::{require_key_arg, require_no_user_args, require_self, requ
 /// access the environment without taking PyRust's lock.
 static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+#[cfg(unix)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 pub(super) fn getenv(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
     let mut key_value: Option<Value> = None;
     let mut default_value: Option<Value> = None;

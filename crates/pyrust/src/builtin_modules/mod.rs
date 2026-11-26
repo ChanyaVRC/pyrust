@@ -926,6 +926,27 @@ pyrust_builtin_modules! {
     shelve,
     plistlib,
     wave,
+    // POSIX OS modules (issue #3261): 100% native-Rust Unix-only Python 3.12
+    // stdlib modules gated with `#[cfg(unix)]` (raising `ModuleNotFoundError`
+    // on Windows matching CPython 3.12).
+    #[cfg(unix)]
+    posix,
+    #[cfg(unix)]
+    fcntl,
+    #[cfg(unix)]
+    termios,
+    #[cfg(unix)]
+    tty,
+    #[cfg(unix)]
+    pty,
+    #[cfg(unix)]
+    pwd,
+    #[cfg(unix)]
+    grp,
+    #[cfg(unix)]
+    resource,
+    #[cfg(unix)]
+    syslog,
 }
 
 include!("finalization.rs");

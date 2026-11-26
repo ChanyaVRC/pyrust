@@ -128,9 +128,18 @@ pub(super) fn prepare_os_module(interp: &mut Interpreter, module: &Value) {
         }
     }
 
+    // 1b. On Unix, mirror POSIX-only exports and install `os.environb`.
+    #[cfg(unix)]
+    crate::builtin_modules::posix::install_posix_on_os(interp, mod_rc);
+
     // 2. Populate `os.supports_fd` and `os.supports_follow_symlinks`.
     let mut fd_set = PySet::default();
-    for fn_name in ["stat", "truncate"] {
+    let fd_names: &[&str] = if cfg!(unix) {
+        &["stat", "truncate", "chown", "statvfs", "pathconf"]
+    } else {
+        &["stat", "truncate"]
+    };
+    for &fn_name in fd_names {
         if let Some(f) = mod_rc.borrow().attrs.get(fn_name).cloned()
             && let Ok(key) = interp.value_to_pykey(&f)
         {
@@ -138,7 +147,12 @@ pub(super) fn prepare_os_module(interp: &mut Interpreter, module: &Value) {
         }
     }
     let mut follow_set = PySet::default();
-    for fn_name in ["stat", "utime", "chmod"] {
+    let follow_names: &[&str] = if cfg!(unix) {
+        &["stat", "utime", "chmod", "chown"]
+    } else {
+        &["stat", "utime", "chmod"]
+    };
+    for &fn_name in follow_names {
         if let Some(f) = mod_rc.borrow().attrs.get(fn_name).cloned()
             && let Ok(key) = interp.value_to_pykey(&f)
         {

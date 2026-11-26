@@ -285,9 +285,22 @@ fn assert_stable_across_runs(name: &str, source: &str) {
     let _ = std::fs::remove_file(&path);
 }
 
+#[cfg(unix)]
+const POSIX_PROBE: &str = r#"
+names = ["fcntl", "grp", "posix", "pty", "pwd", "resource", "syslog", "termios", "tty"]
+for name in names:
+    print(name, list(vars(__import__(name))))
+"#;
+
 #[test]
 fn builtin_module_dict_order_is_identical_across_processes() {
     assert_stable_across_runs("module_dict_order", PROBE);
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_builtin_module_dict_order_is_identical_across_processes() {
+    assert_stable_across_runs("posix_module_dict_order", POSIX_PROBE);
 }
 
 #[test]
