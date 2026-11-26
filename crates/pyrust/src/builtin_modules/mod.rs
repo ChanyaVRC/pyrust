@@ -23,6 +23,7 @@ pub(crate) mod ctypes_rt;
 pub(crate) mod curses_engine;
 pub(crate) mod encodings_codecs;
 pub(crate) mod internal_shims;
+pub(crate) mod mp_rt;
 pub(crate) mod ssl_engine;
 
 use crate::builtin_registry::BuiltinReg;
@@ -416,6 +417,48 @@ macro_rules! pyrust_builtin_modules {
                 "curses.has_key" => return curses_has_key::post_load_init(interp, module),
                 #[cfg(unix)]
                 "curses.panel" => return curses_panel::post_load_init(interp, module),
+                "multiprocessing.util" => {
+                    return multiprocessing_util::post_load_init(interp, module);
+                }
+                "multiprocessing.process" => {
+                    return multiprocessing_process::post_load_init(interp, module);
+                }
+                "multiprocessing.connection" => {
+                    return multiprocessing_connection::post_load_init(interp, module);
+                }
+                "multiprocessing.queues" => {
+                    return multiprocessing_queues::post_load_init(interp, module);
+                }
+                "multiprocessing.synchronize" => {
+                    return multiprocessing_synchronize::post_load_init(interp, module);
+                }
+                "multiprocessing.spawn" => {
+                    return multiprocessing_spawn::post_load_init(interp, module);
+                }
+                "multiprocessing.context" => {
+                    return multiprocessing_context::post_load_init(interp, module);
+                }
+                "multiprocessing.shared_memory" => {
+                    return multiprocessing_shared_memory::post_load_init(interp, module);
+                }
+                "multiprocessing.sharedctypes" => {
+                    return multiprocessing_sharedctypes::post_load_init(interp, module);
+                }
+                "multiprocessing.reduction" => {
+                    return multiprocessing_reduction::post_load_init(interp, module);
+                }
+                "multiprocessing.managers" => {
+                    return multiprocessing_managers::post_load_init(interp, module);
+                }
+                "multiprocessing.pool" => {
+                    return multiprocessing_pool::post_load_init(interp, module);
+                }
+                "multiprocessing.dummy" => {
+                    return multiprocessing_dummy::post_load_init(interp, module);
+                }
+                "multiprocessing" => {
+                    return multiprocessing::post_load_init(interp, module);
+                }
                 _ => {}
             }
             if asyncio_submodules::post_load_init(name, interp, module)? {
@@ -1086,6 +1129,36 @@ pyrust_builtin_modules! {
     "curses.panel" as curses_panel,
     #[cfg(unix)]
     "curses.textpad" as curses_textpad,
+    // `_multiprocessing` and `multiprocessing` package (issue #3264): 100%
+    // native-Rust Python 3.12 process spawning/forking, IPC, queues, locks,
+    // shared memory, managers, pools, and `multiprocessing.dummy` (no `@inject`).
+    _multiprocessing,
+    "multiprocessing.util" as multiprocessing_util,
+    "multiprocessing.process" as multiprocessing_process,
+    "multiprocessing.connection" as multiprocessing_connection,
+    "multiprocessing.queues" as multiprocessing_queues,
+    "multiprocessing.synchronize" as multiprocessing_synchronize,
+    "multiprocessing.spawn" as multiprocessing_spawn,
+    "multiprocessing.context" as multiprocessing_context,
+    "multiprocessing.shared_memory" as multiprocessing_shared_memory,
+    "multiprocessing.sharedctypes" as multiprocessing_sharedctypes,
+    "multiprocessing.heap" as multiprocessing_heap,
+    "multiprocessing.reduction" as multiprocessing_reduction,
+    "multiprocessing.resource_tracker" as multiprocessing_resource_tracker,
+    "multiprocessing.resource_sharer" as multiprocessing_resource_sharer,
+    "multiprocessing.managers" as multiprocessing_managers,
+    "multiprocessing.pool" as multiprocessing_pool,
+    "multiprocessing.dummy.connection" as multiprocessing_dummy_connection,
+    "multiprocessing.dummy" as multiprocessing_dummy,
+    #[cfg(windows)]
+    "multiprocessing.popen_spawn_win32" as multiprocessing_popen_spawn_win32,
+    #[cfg(unix)]
+    "multiprocessing.popen_spawn_posix" as multiprocessing_popen_spawn_posix,
+    #[cfg(unix)]
+    "multiprocessing.popen_fork" as multiprocessing_popen_fork,
+    #[cfg(unix)]
+    "multiprocessing.popen_forkserver" as multiprocessing_popen_forkserver,
+    multiprocessing,
 }
 
 pub(crate) use concurrent_futures_base as bodies_helpers_cf_base;

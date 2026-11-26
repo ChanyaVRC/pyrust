@@ -136,6 +136,23 @@ import json.scanner
 import json.tool
 import logging.config
 import logging.handlers
+import multiprocessing.connection
+import multiprocessing.context
+import multiprocessing.dummy
+import multiprocessing.dummy.connection
+import multiprocessing.heap
+import multiprocessing.managers
+import multiprocessing.pool
+import multiprocessing.process
+import multiprocessing.queues
+import multiprocessing.reduction
+import multiprocessing.resource_sharer
+import multiprocessing.resource_tracker
+import multiprocessing.shared_memory
+import multiprocessing.sharedctypes
+import multiprocessing.spawn
+import multiprocessing.synchronize
+import multiprocessing.util
 import sqlite3.dbapi2
 import sqlite3.dump
 import unittest.mock
@@ -177,7 +194,7 @@ import xmlrpc.server
 import __future__
 names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_collections", "_collections_abc",
          "_compat_pickle", "_compression", "_contextvars", "_csv", "_ctypes", "_datetime", "_decimal", "_elementtree",
-         "_frozen_importlib", "_frozen_importlib_external", "_functools", "_hashlib", "_heapq", "_imp", "_io", "_json", "_locale", "_lsprof", "_lzma", "_markupbase", "_md5",
+         "_frozen_importlib", "_frozen_importlib_external", "_functools", "_hashlib", "_heapq", "_imp", "_io", "_json", "_locale", "_lsprof", "_lzma", "_markupbase", "_md5", "_multiprocessing",
          "_opcode", "_operator", "_pickle", "_queue", "_random", "_sha1", "_sha2", "_sha3", "_signal", "_sitebuiltins",
          "_socket", "_sqlite3", "_sre", "_ssl", "_stat", "_statistics", "_string", "_strptime", "_struct", "_symtable", "_thread",
          "_threading_local", "_tokenize", "_tracemalloc", "_typing", "_uuid", "_warnings", "_weakref", "_weakrefset", "_zoneinfo",
@@ -186,7 +203,7 @@ names = ["_abc", "_ast", "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_
          "copy", "copyreg", "csv", "ctypes", "dataclasses", "dbm", "decimal", "difflib", "dis", "doctest", "email", "encodings", "ensurepip", "enum", "errno", "faulthandler",
          "filecmp", "fileinput", "fnmatch", "fractions", "ftplib", "functools", "gc", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib", "gzip", "hashlib", "heapq",
          "hmac", "html", "http", "imaplib", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword",
-         "linecache", "locale", "logging", "lzma", "mailbox", "marshal", "math", "mimetypes", "mmap", "modulefinder", "netrc", "ntpath", "nturl2path", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle",
+         "linecache", "locale", "logging", "lzma", "mailbox", "marshal", "math", "mimetypes", "mmap", "modulefinder", "multiprocessing", "netrc", "ntpath", "nturl2path", "numbers", "opcode", "operator", "optparse", "os", "pathlib", "pdb", "pickle",
          "pickletools", "pkgutil", "platform", "plistlib", "poplib", "posixpath", "pprint", "profile", "pstats", "py_compile", "pyclbr", "pydoc", "pydoc_data", "pyexpat", "queue", "quopri", "random", "re", "reprlib", "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shelve", "shlex", "shutil",
          "signal", "site", "smtplib", "socket", "socketserver", "sqlite3", "ssl", "stat", "statistics", "string", "stringprep", "subprocess", "symtable", "sys", "sysconfig", "tabnanny", "tarfile",
          "tempfile", "textwrap", "this", "threading", "time", "timeit", "token", "tokenize", "tomllib", "trace", "traceback", "tracemalloc",
@@ -300,6 +317,23 @@ for name, module in [("os.path", os.path),
                      ("json.tool", json.tool),
                      ("logging.config", logging.config),
                      ("logging.handlers", logging.handlers),
+                     ("multiprocessing.connection", multiprocessing.connection),
+                     ("multiprocessing.context", multiprocessing.context),
+                     ("multiprocessing.dummy", multiprocessing.dummy),
+                     ("multiprocessing.dummy.connection", multiprocessing.dummy.connection),
+                     ("multiprocessing.heap", multiprocessing.heap),
+                     ("multiprocessing.managers", multiprocessing.managers),
+                     ("multiprocessing.pool", multiprocessing.pool),
+                     ("multiprocessing.process", multiprocessing.process),
+                     ("multiprocessing.queues", multiprocessing.queues),
+                     ("multiprocessing.reduction", multiprocessing.reduction),
+                     ("multiprocessing.resource_sharer", multiprocessing.resource_sharer),
+                     ("multiprocessing.resource_tracker", multiprocessing.resource_tracker),
+                     ("multiprocessing.shared_memory", multiprocessing.shared_memory),
+                     ("multiprocessing.sharedctypes", multiprocessing.sharedctypes),
+                     ("multiprocessing.spawn", multiprocessing.spawn),
+                     ("multiprocessing.synchronize", multiprocessing.synchronize),
+                     ("multiprocessing.util", multiprocessing.util),
                      ("sqlite3.dbapi2", sqlite3.dbapi2),
                      ("sqlite3.dump", sqlite3.dump),
                      ("unittest.mock", unittest.mock),
@@ -400,13 +434,19 @@ import curses.ascii
 import curses.has_key
 import curses.panel
 import curses.textpad
+import multiprocessing.popen_fork
+import multiprocessing.popen_forkserver
+import multiprocessing.popen_spawn_posix
 names = ["_curses", "_curses_panel", "curses", "fcntl", "grp", "posix", "pty", "pwd", "readline", "resource", "syslog", "termios", "tty"]
 for name in names:
     print(name, list(vars(__import__(name))))
 for name, module in [("curses.ascii", curses.ascii),
                      ("curses.has_key", curses.has_key),
                      ("curses.panel", curses.panel),
-                     ("curses.textpad", curses.textpad)]:
+                     ("curses.textpad", curses.textpad),
+                     ("multiprocessing.popen_fork", multiprocessing.popen_fork),
+                     ("multiprocessing.popen_forkserver", multiprocessing.popen_forkserver),
+                     ("multiprocessing.popen_spawn_posix", multiprocessing.popen_spawn_posix)]:
     print(name, list(vars(module)))
 "#;
 
@@ -428,8 +468,10 @@ fn star_import_binding_order_is_identical_across_processes() {
 
 #[cfg(windows)]
 const WINDOWS_PROBE: &str = r#"
+import multiprocessing.popen_spawn_win32
 for name in ["msvcrt", "nt", "winreg", "winsound"]:
     print(name, list(vars(__import__(name))))
+print("multiprocessing.popen_spawn_win32", list(vars(multiprocessing.popen_spawn_win32)))
 "#;
 
 #[cfg(windows)]
