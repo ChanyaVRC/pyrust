@@ -381,7 +381,7 @@ with open(out_path, "w", encoding="utf-8") as f:
         master_fd, slave_fd = pty.openpty()
         try:
             termios.tcsetwinsize(slave_fd, (24, 80))
-            env = os.environ.copy()
+            env = dict(os.environ)
             env["TERM"] = "xterm-256color"
             env["LINES"] = "24"
             env["COLS"] = "80"
