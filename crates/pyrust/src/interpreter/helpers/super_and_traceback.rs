@@ -1,76 +1,56 @@
 /// Resolve zero-argument `super()` as CPython 3.12 does.
 ///
-/// CPython synthesises a `__class__` cell variable for every function compiled
-/// directly inside a class body and implicitly passes `__class__` and the first
-/// positional argument (typically `self` or `cls`) to zero-arg `super()`.
+/// CPython compiles a bare `super()` into `super(__class__, <first argument>)`:
+/// `__class__` is the implicit cell synthesised for every function lexically
+/// nested in a class body, and the first argument is the *current* frame's
+/// first positional parameter (typically `self` or `cls`).
 ///
 /// pyrust mirrors this by:
 /// - Writing `__class__` into the class env after the class body runs
-///   (`Insn::MakeClass` in vm.rs).  Methods capture the same env at
-///   `MakeFunction` time, so `__class__` is always reachable through the
-///   method's env chain.
-/// - `FnCode::is_class_method` — set to `true` only for functions compiled
-///   directly inside a class body (`compile_def` when `self.is_class_body`).
-///   Nested functions inside methods get `false`.
+///   (`Insn::MakeClass` in vm.rs).  Functions defined inside the class capture
+///   the same env at `MakeFunction` time, so `__class__` is reachable through
+///   their env chain.
+/// - Reading the first parameter from register 0 of the executing frame.
 ///
-/// Returns `(class_value, self_or_cls_value)` on success.
+/// The executing frame is the innermost function frame **after skipping PEP 709
+/// inlined comprehensions** (list/set/dict): CPython runs those inside the
+/// enclosing function, so `super()` there sees the method's `self` / `cls`
+/// (#3358).  Generator expressions are real frames in CPython 3.12, so their
+/// first argument is the hidden `.0` iterator and `super()` inside one raises
+/// `TypeError: super(type, obj): obj must be an instance or subtype of type`.
 ///
-/// Returns `Err(RuntimeError("super(): no arguments"))` when:
-/// - Called at module/script scope (no Function frame on the stack).
-/// - Called from a plain function or a nested function inside a method
-///   (innermost Function frame has `is_class_method == false`).
-/// - `__class__` is not reachable in the env chain (should not happen for
-///   valid class methods — defensive guard).
-/// - Register 0 (first positional arg) is unset.
+/// Returns `(class_value, first_arg_value)` on success.
+///
+/// Errors (all `RuntimeError`, matching `super_init_without_args`):
+/// - `super(): no arguments` — no function frame, or the frame has no leading
+///   positional parameter (`def f():`, `def f(*a):`, `def f(*, k):`, a class
+///   body, module scope).
+/// - `super(): __class__ cell not found` — the frame has a first argument but
+///   no enclosing class provides `__class__` (a plain module-level function).
 pub(crate) fn resolve_zero_arg_super(interp: &Interpreter) -> crate::error::Result<(Value, Value)> {
-    // The INNERMOST Function frame must itself be a direct class method.
-    // CPython's zero-arg super() uses a magic `__class__` cell that is only
-    // synthesised for functions compiled directly inside a class body; nested
-    // functions (`def inner(): super()` inside a method) do not get that cell
-    // and therefore zero-arg super() must raise RuntimeError.
-    //
-    // We find the innermost Function frame (the one currently executing) and
-    // check `is_class_method`.  If it is false we immediately fail — even if
-    // some outer frame IS a class method.
-    let innermost_fn_frame = interp
-        .vm_frame_views
-        .iter()
-        .rev()
-        .find(|v| v.kind() == FrameKind::Function);
+    let no_arguments = || PyError::runtime("super(): no arguments".to_string());
 
-    let Some(view) = innermost_fn_frame else {
-        // Called at module/script scope — no function frame at all.
-        return Err(PyError::runtime("super(): no arguments".to_string()));
+    let Some(view) = interp.zero_arg_super_frame_view() else {
+        // Module / class-body scope — no function frame at all.
+        return Err(no_arguments());
     };
 
-    if !view.is_class_method() {
-        // Innermost function is not a direct class method (e.g. nested inner
-        // function, standalone function).
-        return Err(PyError::runtime("super(): no arguments".to_string()));
-    }
-
-    // Verify that __class__ is reachable through the env chain.  It is written
-    // by MakeClass into the class env after the class body finishes; the method
-    // captured the same Rc<RefCell<Environment>> at MakeFunction time.
-    let class_val = lookup_name_in_env(&interp.env, "__class__")?;
-    let Some(class_val) = class_val else {
-        return Err(PyError::runtime("super(): no arguments".to_string()));
+    // CPython checks `co_argcount == 0` (and an unbound first argument)
+    // before looking at `__class__`.
+    let Some(first_arg) = view.first_positional_arg() else {
+        return Err(no_arguments());
     };
 
-    // Read register 0 — the first positional parameter (`self` or `cls`).
-    if view.regs_len == 0 {
-        return Err(PyError::runtime("super(): no arguments".to_string()));
-    }
-    // SAFETY: view.regs_ptr is a NonNull<Value> pointing at the frame's
-    // register file; the frame is suspended inside call_user_function_expanded
-    // (which pushed the VmFrameView) and has not been freed.  The single-
-    // element read does not alias any &mut [Value] (PR #646 removed those).
-    let first_arg = unsafe { view.regs_ptr.as_ref() };
-    if first_arg.is_unset() {
-        return Err(PyError::runtime("super(): no arguments".to_string()));
-    }
+    // `__class__` is written by MakeClass into the class env after the class
+    // body finishes; the method captured the same Rc<RefCell<Environment>> at
+    // MakeFunction time.
+    let Some(class_val) = lookup_name_in_env(&interp.env, "__class__")? else {
+        return Err(PyError::runtime(
+            "super(): __class__ cell not found".to_string(),
+        ));
+    };
 
-    Ok((class_val, first_arg.clone()))
+    Ok((class_val, first_arg))
 }
 
 /// Format the exception chain that precedes `exc_val` as a prefix string to

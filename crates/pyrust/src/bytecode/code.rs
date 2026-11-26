@@ -289,9 +289,9 @@ pub struct FnCode {
     pub(crate) is_coroutine: bool,
     /// True when this function was compiled as a direct method inside a class
     /// body (i.e., the enclosing `Compiler` had `is_class_body = true`).
-    /// Zero-argument `super()` is valid only in such functions — not in plain
-    /// functions or in functions nested inside methods.  Used by
-    /// `resolve_zero_arg_super` to identify the correct enclosing frame.
+    /// Frame-ownership tag only (`FrameOwner::ClassMethod`); zero-argument
+    /// `super()` no longer depends on it — `resolve_zero_arg_super` follows
+    /// CPython and reads the executing frame's first positional parameter.
     pub(crate) is_class_method: bool,
     /// True when this code object is a Python function/lambda/comprehension
     /// body (not a module script, `exec`/`eval` frame, or class body).

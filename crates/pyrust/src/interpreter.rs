@@ -1116,17 +1116,43 @@ impl VmFrameView {
         }
     }
 
-    #[inline]
-    pub(crate) fn is_class_method(&self) -> bool {
-        match self.owner {
-            FrameOwner::ClassMethod(_) => true,
+    /// Current value of the frame's first positional parameter (`self` / `cls`),
+    /// the object zero-argument `super()` binds to.
+    ///
+    /// `None` when the function declares no leading positional parameter (the
+    /// CPython `co_argcount == 0` test: `*args`, `**kwargs` and keyword-only
+    /// parameters do not count), the frame is not a function frame, or the
+    /// parameter is currently unbound (`del self`). The value is read from its
+    /// register, or from its cell when a nested scope captured the parameter.
+    pub(crate) fn first_positional_arg(&self) -> Option<Value> {
+        let function = match &self.owner {
+            FrameOwner::Function(f) | FrameOwner::ClassMethod(f) => f,
             FrameOwner::Generator(ptr) => {
                 // SAFETY: `ptr` points to the heap-stable `GeneratorFrame`
                 // while this view is on `vm_frame_views`.
-                unsafe { ptr.as_ref().code.is_class_method }
+                &unsafe { ptr.as_ref() }.function
             }
-            _ => false,
+            FrameOwner::Script(_) | FrameOwner::Class(_) => return None,
+        };
+        let first = function.params.first()?;
+        if first.is_args || first.is_kwargs || first.is_keyword_only {
+            return None;
         }
+        let value = match function.param_binds.first()? {
+            pyrust_core::ParamBind::Reg(reg) => {
+                if (*reg as usize) >= self.regs_len {
+                    return None;
+                }
+                // SAFETY: `regs_ptr` points at the live register file of this
+                // frame (the frame is suspended in a call that pushed the view)
+                // and `reg < regs_len`; the single-element read does not alias
+                // any `&mut [Value]` (PR #646 removed those).
+                unsafe { self.regs_ptr.add(*reg as usize).as_ref() }.clone()
+            }
+            pyrust_core::ParamBind::Cell(idx) => self.cells.as_slice().get(*idx as usize)?.get()?,
+            pyrust_core::ParamBind::None => return None,
+        };
+        (!value.is_unset()).then_some(value)
     }
 
     #[inline]
