@@ -167,23 +167,8 @@ fn try_extract_bytes_like(val: &Value) -> Option<Vec<u8>> {
             return Some(snap);
         }
     }
-    if let ValueKind::PyInstance(inst_rc) = val.kind() {
-        let inst = inst_rc.borrow();
-        let is_array = {
-            let cls = inst.class.borrow();
-            cls.name == "array"
-                && cls
-                    .attrs
-                    .get("__module__")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|m| m == "array")
-        };
-        if is_array
-            && let Some(buf) = inst.attrs.get("_buf")
-            && let Some(snap) = pyrust_builtins::bytearray::as_bytearray_snapshot(buf)
-        {
-            return Some(snap);
-        }
+    if let Some(snap) = super::array::buffer_snapshot(val) {
+        return Some(snap);
     }
     None
 }

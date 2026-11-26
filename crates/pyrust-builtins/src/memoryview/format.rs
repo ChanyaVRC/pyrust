@@ -3,7 +3,7 @@
 //!
 //! Matches CPython 3.12's `Objects/memoryobject.c` native format table:
 //! single-character native formats (`b`, `B`, `c`, `h`, `H`, `i`, `I`, `l`,
-//! `L`, `q`, `Q`, `n`, `N`, `e`, `f`, `d`, `?`, `P`, plus `u` for
+//! `L`, `q`, `Q`, `n`, `N`, `e`, `f`, `d`, `?`, `P`, plus `u` / `w` for
 //! `array.array('u')`), optionally prefixed with `'@'`.
 
 use std::ffi::{c_int, c_long, c_longlong, c_short};
@@ -63,7 +63,9 @@ impl NativeFormat {
             'e' => Ok(Self::Float16),
             'f' => Ok(Self::Float32),
             'd' => Ok(Self::Float64),
-            'u' => Ok(Self::Unicode),
+            // `array.array('u')` exports `'w'` where `wchar_t` is 4 bytes
+            // (CPython's `Py_UNICODE_WIDE` builds).
+            'u' | 'w' => Ok(Self::Unicode),
             _ => Err(invalid_cast_format_error()),
         }
     }
