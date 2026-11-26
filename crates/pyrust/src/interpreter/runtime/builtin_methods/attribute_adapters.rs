@@ -247,9 +247,29 @@ impl Interpreter {
                 Some(d) => d,
                 None => match fget_val.kind() {
                     ValueKind::UserFunction(func) => func.doc.borrow().clone(),
+                    // A non-function getter (e.g. a native abstract-method
+                    // descriptor) may still carry its own `__doc__`.
+                    _ if !fget_val.is_none() => self
+                        .get_attr(&fget_val, "__doc__")
+                        .unwrap_or_else(|_| Value::none()),
                     _ => Value::none(),
                 },
             }),
+            // `property.__isabstractmethod__`: true when any accessor is
+            // itself flagged abstract (CPython `property_get___isabstractmethod__`).
+            "__isabstractmethod__" => {
+                for accessor in [&fget_val, &fset_val, &fdel_val] {
+                    if accessor.is_none() {
+                        continue;
+                    }
+                    if let Ok(flag) = self.get_attr(accessor, "__isabstractmethod__")
+                        && self.truthy_value(&flag)?
+                    {
+                        return Ok(Value::bool_(true));
+                    }
+                }
+                Ok(Value::bool_(false))
+            }
             // Descriptor-protocol dunders.  Accessing `p.__get__` etc.
             // yields a bound method-wrapper (so `hasattr(p, "__get__")`
             // is True and `f = p.__get__; f(obj, owner)` works); the

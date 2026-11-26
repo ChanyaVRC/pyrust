@@ -305,6 +305,7 @@ macro_rules! pyrust_builtin_modules {
             }
             match name {
                 "os" => return os::post_load_init(interp, module),
+                "numbers" => return numbers::post_load_init(interp, module),
                 #[cfg(unix)]
                 "posix" => return posix::post_load_init(interp, module),
                 "importlib.abc" => return importlib_abc::post_load_init(interp, module),
@@ -654,9 +655,10 @@ pyrust_builtin_modules! {
     // inspection, and source/docstring helpers injected from `inspect_py.py`
     // with a private native bytecode-name classifier in `inspect.rs`.
     inspect @inject,
-    // `numbers` (issue #3147): PEP 3141 numeric tower ABCs (`Number`,
-    // `Complex`, `Real`, `Rational`, `Integral`) injected from `numbers_py.py`.
-    numbers @inject,
+    // `numbers` (issues #3147, #3371): PEP 3141 numeric tower ABCs (`Number`,
+    // `Complex`, `Real`, `Rational`, `Integral`) implemented 100% natively in
+    // Rust; no Python-source injection.
+    numbers,
     // `difflib` (issue #3147): pure-Python sequence matching and delta helpers
     // (`SequenceMatcher`, `Differ`, `unified_diff`, `context_diff`, `ndiff`,
     // `restore`, `diff_bytes`, `get_close_matches`, `HtmlDiff`, `Match`)
