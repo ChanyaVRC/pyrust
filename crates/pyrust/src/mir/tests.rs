@@ -905,3 +905,66 @@ def fib(n):
     let formatted = format_mir_fn(&mir_fib);
     assert!(formatted.starts_with("fn fib:"));
 }
+
+// ── Register allocation: temporaries die with the call ──────────────────────
+
+/// `(dst, obj, num_locals)` of every `CallMethod` / `CallMethodKw` in the
+/// fully optimized `fn_name`.
+fn optimized_method_calls(src: &str, fn_name: &str) -> Vec<(u32, u32, u32)> {
+    use crate::bytecode::{Insn, InsnDesc};
+    let (stmts, linenos) = Interpreter::parse_source_to_stmts_with_linenos(src).unwrap();
+    let module_mir = lower_ast_to_mir(&stmts, &linenos, "<test>").unwrap();
+    let proto = module_mir
+        .fn_protos
+        .iter()
+        .find(|proto| proto.name.as_ref() == fn_name)
+        .expect("function must be compiled");
+    let code = crate::optimizer::optimize((*proto.code).clone());
+    code.insns
+        .iter()
+        .filter_map(|insn| match insn {
+            Insn::CallMethod { dst, obj, .. } => Some((*dst, *obj, code.num_locals)),
+            Insn::CallMethodKw(idx) => match &code.descs[*idx as usize] {
+                InsnDesc::CallMethodKw(d) => Some((d.dst, d.obj, code.num_locals)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn method_call_result_reuses_dying_receiver_temp_3318() {
+    // A receiver temp that dies at the call is overwritten by the result, so
+    // the receiver (e.g. `open(...)` in `open(p, "w", encoding=e).write(s)`)
+    // is released when the call returns instead of lingering in a dead
+    // register until the frame exits.
+    let src = "\
+def f(g, a, b):
+    g(a, k=b).m(a)
+    g(a).m(a, k=b)
+    return 0
+";
+    let calls = optimized_method_calls(src, "f");
+    assert_eq!(calls.len(), 2, "expected CallMethod and CallMethodKw");
+    for (dst, obj, num_locals) in calls {
+        assert!(obj >= num_locals, "receiver must be a temp, got r{obj}");
+        assert_eq!(dst, obj, "result must overwrite the dead receiver temp");
+    }
+}
+
+#[test]
+fn method_call_result_never_overwrites_live_receiver_3318() {
+    // A receiver that stays live (a local, or a temp read again later) must
+    // keep its register.
+    let src = "\
+def f(g, a):
+    x = g(a)
+    x.m(a)
+    return x
+";
+    let calls = optimized_method_calls(src, "f");
+    assert_eq!(calls.len(), 1);
+    let (dst, obj, _) = calls[0];
+    assert_ne!(dst, obj, "live receiver r{obj} must not be overwritten");
+}

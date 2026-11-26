@@ -196,17 +196,35 @@ pub(super) fn compute_coalescing(
         }
     }
 
-    // 4. Record `Call` callee-reuse preference when `callee` dies right at the call.
+    // 4. Record a result-reuse preference when the callee (`Call`) or the
+    //    receiver (`CallMethod` / `CallMethodKw`, read before the result is
+    //    written) dies right at the call. Writing the result over that dead
+    //    temp also releases it as the call returns, like CPython popping its
+    //    stack, so e.g. `open(p, "w", encoding=e).write(s)` flushes the file
+    //    at the end of the statement (#3318).
     let mut call_reused_base: Vec<Option<Val>> = vec![None; nvals];
     for &bb_id in &dom.rpo {
         let bi = bb_id.0 as usize;
         let block = &func.blocks[bi];
         for (ii, inst) in block.instrs.iter().enumerate() {
-            if let (Some(def), MirOp::Call { callee, .. }) = (inst.def, &inst.op) {
-                let pos = liveness.block_start[bi] + 1 + ii;
-                if liveness.end_pos[callee.0 as usize] <= pos && !preassigned[callee.0 as usize] {
-                    call_reused_base[def.0 as usize] = Some(*callee);
-                }
+            let Some(def) = inst.def else {
+                continue;
+            };
+            let reused = match &inst.op {
+                MirOp::Call { callee, .. } => *callee,
+                MirOp::SideEffectInsn {
+                    insn: Insn::CallMethod { .. } | Insn::CallMethodKw(_),
+                    uses,
+                    defs,
+                } if defs.len() == 1 => match uses.first() {
+                    Some(&receiver) => receiver,
+                    None => continue,
+                },
+                _ => continue,
+            };
+            let pos = liveness.block_start[bi] + 1 + ii;
+            if liveness.end_pos[reused.0 as usize] <= pos && !preassigned[reused.0 as usize] {
+                call_reused_base[def.0 as usize] = Some(reused);
             }
         }
     }
