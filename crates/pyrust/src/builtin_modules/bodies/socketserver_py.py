@@ -250,8 +250,29 @@ class UDPServer(TCPServer):
         pass
 
 
+class _Threads(list):
+    """Joinable list of all non-daemon threads."""
+
+    def append(self, thread):
+        self.reap()
+        if thread.daemon:
+            return
+        super().append(thread)
+
+    def pop_all(self):
+        self[:], result = [], self[:]
+        return result
+
+    def join(self):
+        for thread in self.pop_all():
+            thread.join()
+
+    def reap(self):
+        self[:] = (thread for thread in self if thread.is_alive())
+
+
 class _NoThreads:
-    """Degenerate thread tracker for single-threaded compatibility."""
+    """Degenerate version of _Threads."""
 
     def append(self, thread):
         pass
@@ -263,11 +284,17 @@ class _NoThreads:
 class ThreadingMixIn:
     """Mix-in class to handle each request in a new thread."""
 
+    # Decides how threads will act upon termination of the main process.
     daemon_threads = False
+    # If true, server_close() waits until all non-daemonic threads terminate.
     block_on_close = True
+    # Used by server_close() to wait for all threads completion.  Each server
+    # gets its own `_Threads` in `process_request()`; this class-level
+    # placeholder only ever sees `append()`/`join()` no-ops.
     _threads = _NoThreads()
 
     def process_request_thread(self, request, client_address):
+        """Same as in BaseServer but as a thread, with exception handling."""
         try:
             self.finish_request(request, client_address)
         except Exception:
@@ -276,8 +303,16 @@ class ThreadingMixIn:
             self.shutdown_request(request)
 
     def process_request(self, request, client_address):
-        """Handle a request (synchronous fallback in single-threaded runtime)."""
-        self.process_request_thread(request, client_address)
+        """Start a new thread to process the request."""
+        if self.block_on_close:
+            vars(self).setdefault('_threads', _Threads())
+        t = threading.Thread(
+            target=self.process_request_thread,
+            args=(request, client_address),
+        )
+        t.daemon = self.daemon_threads
+        self._threads.append(t)
+        t.start()
 
     def server_close(self):
         super().server_close()

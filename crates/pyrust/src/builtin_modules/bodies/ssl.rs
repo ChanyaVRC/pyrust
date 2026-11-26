@@ -942,7 +942,7 @@ pyrust_module! {
             let handle = get_sock_handle(_interp, self_val.0)?;
             let sock_mod = _interp.load_module("socket")?;
             let gaierror = _interp.get_attr(&sock_mod, "gaierror")?;
-            super::socket::handle_connect_raw(&handle, &addr.0, &gaierror)?;
+            super::socket::handle_connect_raw(_interp, &handle, &addr.0, &gaierror)?;
             let do_hs = with_native_state_mut::<SslSocketState, _>(self_val.0, "SSLSocket", |st| {
                 st.connected = true;
                 Ok(st.do_handshake_on_connect)
@@ -957,7 +957,7 @@ pyrust_module! {
             let handle = get_sock_handle(_interp, self_val.0)?;
             let sock_mod = _interp.load_module("socket")?;
             let gaierror = _interp.get_attr(&sock_mod, "gaierror")?;
-            let rc = super::socket::handle_connect_ex_raw(&handle, &addr.0, &gaierror)?;
+            let rc = super::socket::handle_connect_ex_raw(_interp, &handle, &addr.0, &gaierror)?;
             if rc == 0 {
                 let do_hs =
                     with_native_state_mut::<SslSocketState, _>(self_val.0, "SSLSocket", |st| {
@@ -977,7 +977,7 @@ pyrust_module! {
             let get_dt = _interp.get_attr(&sock_mod, "getdefaulttimeout")?;
             let default_timeout = call_pos(_interp, get_dt, &[])?;
             let (new_handle, peer_addr) =
-                super::socket::handle_accept_raw(&handle, &default_timeout)?;
+                super::socket::handle_accept_raw(_interp, &handle, &default_timeout)?;
 
             let family = _interp.get_attr(self_val.0, "_family")?;
             let sock_type = _interp.get_attr(self_val.0, "_type")?;
