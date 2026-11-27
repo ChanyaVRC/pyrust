@@ -22,7 +22,7 @@ mod registration;
 use self::definitions::Abc;
 pub(crate) use self::registration::{
     ensure_mixins_initialized, inject_python_members, populate_abc_exports,
-    register_virtual_mapping, register_virtual_mutable_sequence, register_virtual_mutable_set,
+    register_virtual_mutable_sequence, register_virtual_mutable_set,
 };
 
 pyrust_module! {
