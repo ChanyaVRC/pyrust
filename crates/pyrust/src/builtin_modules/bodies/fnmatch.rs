@@ -702,7 +702,15 @@ pyrust_module! {
         let os = dep(_interp, "os")?;
         let os_path = _interp.get_attr(&os, "path")?;
         let posixpath = dep(_interp, "posixpath")?;
-        let is_posix = os_path.is_identical_to(&posixpath);
+        // `os.path is posixpath` in CPython.  Here `os.path` is its own
+        // native module that mirrors `posixpath` on POSIX, so fall back to
+        // `os.name` when the identity check cannot hold.
+        let is_posix = if os_path.is_identical_to(&posixpath) {
+            true
+        } else {
+            let os_name = _interp.get_attr(&os, "name")?;
+            os_name.as_str() == Some("posix")
+        };
         let mut iterator = ConsumerIterator::new(_interp, &names)?;
         let mut buf: Vec<u32> = Vec::new();
         while let Some(name) = iterator.next(_interp)? {
