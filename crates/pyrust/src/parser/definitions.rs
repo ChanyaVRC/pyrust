@@ -12,6 +12,9 @@ impl Parser {
     }
 
     fn parse_expr_stmt(&mut self) -> Result<Vec<Stmt>> {
+        // Token index where the first target group starts, for locating an
+        // invalid-target error on the target (#3402).
+        let group_start = self.pos;
         // Detect starred assignment target at the start: *name, ... = rhs
         // We need to check if the first token is Star before parsing as an expression,
         // since *name is not a valid expression.
@@ -135,11 +138,14 @@ impl Parser {
             // first one we just parsed above.
             let mut target_groups: Vec<(Vec<Expr>, Vec<bool>, bool)> =
                 vec![(targets, starred_flags, had_comma)];
+            // Token range of each target group, parallel to `target_groups`.
+            let mut group_ranges = vec![(group_start, self.pos)];
 
             // The final RHS expression (after the last `=`).
             let rhs;
             loop {
                 self.bump(); // consume `=`
+                let next_start = self.pos;
                 // Parse the next group: comma-separated expressions.  Star
                 // is only valid for an assignment target — we tentatively
                 // parse it as such, and reject below if it turns out to be
@@ -191,6 +197,7 @@ impl Parser {
                         ));
                     }
                     target_groups.push((next_items, next_flags, next_had_comma));
+                    group_ranges.push((next_start, self.pos));
                     continue;
                 }
 
@@ -212,7 +219,8 @@ impl Parser {
             // Build a Stmt::Assign / AttrAssign / IndexAssign / SliceAssign for
             // each target group.  For chained assignment we evaluate the RHS
             // exactly once and reuse the value for every target.
-            return build_assign_stmts(target_groups, rhs);
+            return build_assign_stmts(&target_groups, rhs)
+                .map_err(|e| self.locate_target_error(e, &target_groups, &group_ranges));
         }
 
         // Starred item outside assignment is invalid
@@ -224,10 +232,12 @@ impl Parser {
 
         // Augmented assignment: += -= etc.
         if let Some(aug_op) = self.current_aug_op() {
+            let target_end = self.pos;
             self.bump();
             let rhs = self.parse_expr()?;
             let target = if targets.len() == 1 {
-                expr_to_assign_target(&targets[0])?
+                expr_to_assign_target(&targets[0])
+                    .map_err(|e| self.locate_error_at(e, group_start, target_end))?
             } else {
                 return Err(PyError::parse(
                     "invalid augmented assignment target".to_string(),
@@ -414,6 +424,7 @@ impl Parser {
             } else {
                 match self.current().cloned() {
                     Some(Token::Ident(name)) => {
+                        let param_start = self.pos;
                         self.bump();
                         // Optional annotation
                         let annotation = if self.is(&Token::Colon) {
@@ -428,9 +439,15 @@ impl Parser {
                             Some(self.parse_expr()?)
                         } else {
                             if seen_default && !seen_args && !seen_star {
-                                return Err(PyError::parse(
-                                    "parameter without a default follows parameter with a default"
-                                        .to_string(),
+                                // CPython reports it on the parameter (#3402).
+                                return Err(self.locate_error_at(
+                                    PyError::parse(
+                                        "parameter without a default follows parameter with \
+                                         a default"
+                                            .to_string(),
+                                    ),
+                                    param_start,
+                                    self.pos,
                                 ));
                             }
                             None

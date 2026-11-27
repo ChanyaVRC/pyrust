@@ -1,3 +1,42 @@
+/// Messages CPython 3.12 raises from its compiler or symtable pass rather than
+/// from the parser.  pyrust detects them while parsing, after the construct is
+/// consumed, so the parser position is not where CPython points; they stay
+/// location-less instead of reporting a wrong one (#3402).
+fn is_compile_stage_message(msg: &str) -> bool {
+    msg.starts_with("duplicate argument '")
+        || msg.starts_with("keyword argument repeated: ")
+        || matches!(
+            msg,
+            "can't use starred expression here"
+                | "multiple starred expressions in assignment"
+                | "starred assignment target must be in a list or tuple"
+        )
+}
+
+/// Locate an unlocated lex/parse error on the 0-based columns `col..end_col`
+/// (1-based lines), as CPython's parser does for a known node (#3402).
+/// `tokenizer_lineno` is the line the parser stood on when it gave up.
+#[cold]
+fn located_parse_error(
+    error: PyError,
+    (line, col): (u32, u32),
+    (end_line, end_col): (u32, u32),
+    tokenizer_lineno: u32,
+) -> PyError {
+    match error.into_kind() {
+        crate::error::PyErrorKind::Lex(msg) | crate::error::PyErrorKind::Parse(msg) => {
+            PyError::syntax(crate::error::SyntaxErrorInfo::at_lines(
+                msg,
+                (line, i64::from(col) + 1),
+                (end_line, i64::from(end_col) + 1),
+                crate::error::SyntaxTextRule::ParserLine { tokenizer_lineno },
+                false,
+            ))
+        }
+        other => PyError::new(other),
+    }
+}
+
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         Self {
@@ -88,25 +127,154 @@ impl Parser {
     /// Return the innermost opening delimiter that has not been closed before
     /// the current token. Used only on the parser's EOF error path.
     fn unclosed_delimiter(&self) -> Option<char> {
+        self.unclosed_delimiter_at().map(|(open, _)| open)
+    }
+
+    /// Like [`Parser::unclosed_delimiter`], also returning the opening token's
+    /// index (for the error location, #3402).
+    fn unclosed_delimiter_at(&self) -> Option<(char, usize)> {
         let mut delimiters = Vec::new();
-        for token in &self.tokens[..self.pos] {
+        let end = self.pos.min(self.tokens.len());
+        for (index, token) in self.tokens[..end].iter().enumerate() {
             match token {
-                Token::LParen => delimiters.push(('(', ')')),
-                Token::LBracket => delimiters.push(('[', ']')),
-                Token::LBrace => delimiters.push(('{', '}')),
-                Token::RParen if delimiters.last().is_some_and(|&(_, close)| close == ')') => {
+                Token::LParen => delimiters.push(('(', ')', index)),
+                Token::LBracket => delimiters.push(('[', ']', index)),
+                Token::LBrace => delimiters.push(('{', '}', index)),
+                Token::RParen if delimiters.last().is_some_and(|&(_, close, _)| close == ')') => {
                     delimiters.pop();
                 }
-                Token::RBracket if delimiters.last().is_some_and(|&(_, close)| close == ']') => {
+                Token::RBracket if delimiters.last().is_some_and(|&(_, close, _)| close == ']') => {
                     delimiters.pop();
                 }
-                Token::RBrace if delimiters.last().is_some_and(|&(_, close)| close == '}') => {
+                Token::RBrace if delimiters.last().is_some_and(|&(_, close, _)| close == '}') => {
                     delimiters.pop();
                 }
                 _ => {}
             }
         }
-        delimiters.last().map(|&(open, _)| open)
+        delimiters.last().map(|&(open, _, index)| (open, index))
+    }
+
+    /// Attach CPython's `SyntaxError` location to a parse failure (#3402).
+    ///
+    /// Errors that already carry a location (lexer errors, or parser sites
+    /// that know their exact span) pass through.  Otherwise the error is
+    /// anchored the way CPython's PEG parser anchors a failure:
+    /// - `'(' was never closed` at the unclosed opener, with `end_offset` 0,
+    ///   raised once the tokenizer reached the end of the input;
+    /// - anything else on the token the parser stopped at — CPython's "last
+    ///   token fetched" — spanning that token.  An INDENT (the column just
+    ///   past the indentation) and the end of input (just past the last
+    ///   line's newline) report the tokenizer cursor with `end_offset` -1,
+    ///   like CPython's `unexpected indent` / `unexpected EOF`.
+    ///
+    /// Without line information (a `Parser::new` parse), and for
+    /// [compile-stage messages](is_compile_stage_message), nothing is
+    /// attached.
+    #[cold]
+    fn locate_error(&self, error: PyError) -> PyError {
+        let msg = match error.kind() {
+            crate::error::PyErrorKind::Lex(msg) | crate::error::PyErrorKind::Parse(msg) => msg,
+            _ => return error,
+        };
+        if self.line_nos.is_empty() || self.tokens.is_empty() || is_compile_stage_message(msg) {
+            return error;
+        }
+        let token_line = |index: usize| self.line_nos.get(index).copied().unwrap_or(0);
+        let token_col = |index: usize| i64::from(self.cols.get(index).copied().unwrap_or(0));
+        if msg.ends_with("was never closed")
+            && let Some((_, open)) = self.unclosed_delimiter_at()
+        {
+            let line = token_line(open);
+            return PyError::syntax(crate::error::SyntaxErrorInfo::at_lines(
+                msg.clone(),
+                (line, token_col(open) + 1),
+                (line, 0),
+                crate::error::SyntaxTextRule::ParserLine {
+                    tokenizer_lineno: 0,
+                },
+                false,
+            ));
+        }
+        let index = self.pos.min(self.tokens.len() - 1);
+        let line = token_line(index);
+        if line == 0 {
+            return error;
+        }
+        let col = token_col(index);
+        let ((offset, end_offset), newline_token) = match &self.tokens[index] {
+            Token::Newline => ((col + 1, col + 2), true),
+            // Both record the tokenizer cursor itself (just past the
+            // indentation / past the last line's newline), not a token start.
+            Token::Indent | Token::Eof => ((col, -1), false),
+            _ => {
+                let end = self.end_col_at(index).map_or(col + 1, i64::from);
+                ((col + 1, end + 1), false)
+            }
+        };
+        PyError::syntax(crate::error::SyntaxErrorInfo::at_lines(
+            msg.clone(),
+            (line, offset),
+            (line, end_offset),
+            crate::error::SyntaxTextRule::ParserLine {
+                tokenizer_lineno: line,
+            },
+            newline_token,
+        ))
+    }
+
+    /// Locate a parse failure on the tokens `start..end` — a construct the
+    /// parser had already consumed when it rejected it, such as an invalid
+    /// assignment or `del` target, which CPython reports on the construct
+    /// itself (#3402).  Errors that are already located, or that carry no
+    /// position information, pass through.
+    #[cold]
+    fn locate_error_at(&self, error: PyError, start: usize, end: usize) -> PyError {
+        if start >= end || end > self.line_nos.len() || end > self.cols.len() {
+            return error;
+        }
+        let (line, end_line) = (self.line_nos[start], self.line_nos[end - 1]);
+        if line == 0 || end_line == 0 {
+            return error;
+        }
+        let col = self.cols[start];
+        let end_col = self
+            .end_col_at(end - 1)
+            .unwrap_or_else(|| self.cols[end - 1] + 1);
+        located_parse_error(
+            error,
+            (line, col),
+            (end_line, end_col),
+            self.current_lineno(),
+        )
+    }
+
+    /// Token ranges of the top-level comma-separated items in
+    /// `tokens[start..end]` (an assignment target group), for
+    /// [`Parser::locate_error_at`].
+    #[cold]
+    fn top_level_item_ranges(&self, start: usize, end: usize) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        let mut depth = 0usize;
+        let mut item_start = start;
+        let end_index = end.min(self.tokens.len());
+        for (index, token) in self.tokens[..end_index].iter().enumerate().skip(start) {
+            match token {
+                Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                Token::RParen | Token::RBracket | Token::RBrace => {
+                    depth = depth.saturating_sub(1);
+                }
+                Token::Comma if depth == 0 => {
+                    ranges.push((item_start, index));
+                    item_start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        if item_start < end {
+            ranges.push((item_start, end));
+        }
+        ranges
     }
 
     pub fn parse_program(&mut self) -> Result<Vec<Stmt>> {
@@ -122,7 +290,96 @@ impl Parser {
     /// Like `parse_program` but also returns a parallel `Vec<u32>` of 1-based
     /// source line numbers (one per top-level statement).  Only meaningful
     /// when the parser was constructed with `new_with_lines`.
+    ///
+    /// Failures carry CPython's `SyntaxError` location (#3402).
     pub fn parse_program_with_linenos(&mut self) -> Result<(Vec<Stmt>, Vec<u32>)> {
+        self.parse_program_with_linenos_unlocated()
+            .map_err(|error| self.locate_error(error))
+    }
+
+    /// Parse `eval`-mode input: like CPython 3.12's `eval` rule
+    /// (`expressions NEWLINE* ENDMARKER`), it must be one expression (list)
+    /// followed only by newlines.
+    ///
+    /// The input is parsed as a program and accepted when that yields exactly
+    /// one expression statement without a `;`, so a valid expression gets the
+    /// same AST as an `exec`-mode expression statement.  Anything else is
+    /// rejected the way CPython's parser rejects it (#3402): see
+    /// [`Parser::eval_error`].
+    pub fn parse_eval_with_linenos(&mut self) -> Result<(Vec<Stmt>, Vec<u32>)> {
+        match self.parse_program_with_linenos_unlocated() {
+            Ok((stmts, linenos))
+                if matches!(stmts.as_slice(), [Stmt::Expr(_)])
+                    && !self.tokens.iter().any(|t| matches!(t, Token::Semicolon)) =>
+            {
+                Ok((stmts, linenos))
+            }
+            Ok(_) => Err(self.eval_error(None)),
+            Err(error) => {
+                let error = self.locate_error(error);
+                Err(self.eval_error(Some(error)))
+            }
+        }
+    }
+
+    /// The `SyntaxError` for `eval`-mode input that is not a lone expression
+    /// list.  `program_error` is the (located) failure of the program parse,
+    /// if it failed.
+    ///
+    /// CPython parses a comma-separated list of (unstarred, walrus-free)
+    /// expressions from the start and fails on the first token that cannot
+    /// continue it, so the input is re-parsed that way and the error lands
+    /// where CPython's does:
+    /// - no tokens at all: CPython's end-of-input location;
+    /// - the list ends: `invalid syntax` on the next token after any newlines
+    ///   (`x = 1` stops at `=`), or `unexpected indent` on an INDENT;
+    /// - an item cannot even start (`pass`, `import x`, `*a`): `invalid
+    ///   syntax` on its first token, or `unexpected indent` on indentation;
+    /// - an item fails part-way: the same failure the program parse hit
+    ///   (`'(' was never closed`, a trailing operator).
+    #[cold]
+    fn eval_error(&mut self, program_error: Option<PyError>) -> PyError {
+        self.pos = 0;
+        self.skip_newlines();
+        if self.is(&Token::Eof) || self.tokens.is_empty() {
+            return PyError::syntax(crate::error::SyntaxErrorInfo::empty_input("invalid syntax"));
+        }
+        loop {
+            if self.is(&Token::Star) || self.is(&Token::Indent) {
+                break;
+            }
+            let item_start = self.pos;
+            if let Err(item_error) = self.parse_expr_no_walrus() {
+                if self.pos == item_start {
+                    break;
+                }
+                return program_error.unwrap_or_else(|| self.locate_error(item_error));
+            }
+            if !self.is(&Token::Comma) {
+                self.skip_newlines();
+                break;
+            }
+            self.bump();
+            if self.at_stmt_end() {
+                self.skip_newlines();
+                break;
+            }
+        }
+        if self.is(&Token::Eof) {
+            // Not reachable for input the program parse accepted as one
+            // expression; keep whatever that parse reported.
+            return program_error
+                .unwrap_or_else(|| self.locate_error(PyError::parse("invalid syntax".into())));
+        }
+        let msg = if self.is(&Token::Indent) {
+            "unexpected indent"
+        } else {
+            "invalid syntax"
+        };
+        self.locate_error(PyError::parse(msg.to_string()))
+    }
+
+    fn parse_program_with_linenos_unlocated(&mut self) -> Result<(Vec<Stmt>, Vec<u32>)> {
         let mut stmts: Vec<Stmt> = Vec::new();
         let mut linenos: Vec<u32> = Vec::new();
         self.skip_newlines();
@@ -149,13 +406,26 @@ impl Parser {
     /// - Rejects an inline compound statement lacking a trailing newline
     ///   (e.g. `if True: 1` without `\n`).
     /// - Rejects trailing statements on subsequent lines (`SyntaxError`).
+    ///
+    /// Failures carry CPython's `SyntaxError` location (#3402).
     pub fn parse_single_with_linenos(
+        &mut self,
+        ends_with_newline: bool,
+    ) -> Result<(Vec<Stmt>, Vec<u32>)> {
+        self.parse_single_with_linenos_unlocated(ends_with_newline)
+            .map_err(|error| self.locate_error(error))
+    }
+
+    fn parse_single_with_linenos_unlocated(
         &mut self,
         ends_with_newline: bool,
     ) -> Result<(Vec<Stmt>, Vec<u32>)> {
         self.skip_newlines();
         if self.is(&Token::Eof) {
-            return Err(PyError::parse("invalid syntax".to_string()));
+            // Located on CPython's ENDMARKER once the source is known (#3402).
+            return Err(PyError::syntax(crate::error::SyntaxErrorInfo::empty_input(
+                "invalid syntax",
+            )));
         }
         let stmt_lineno = self.current_lineno();
         let stmts = self.parse_stmt_sequence()?;
@@ -186,14 +456,24 @@ impl Parser {
                 return Err(PyError::parse("invalid syntax".to_string()));
             }
         }
+        let stmt_end = self.pos;
         self.skip_newlines();
         if !self.is(&Token::Eof) {
-            let msg = if has_compound {
-                "invalid syntax"
-            } else {
-                "multiple statements found while compiling a single statement"
-            };
-            return Err(PyError::parse(msg.to_string()));
+            if has_compound {
+                return Err(PyError::parse("invalid syntax".to_string()));
+            }
+            // CPython reports this on the NEWLINE that ends the first
+            // statement (#3402).
+            let error = PyError::parse(
+                "multiple statements found while compiling a single statement".to_string(),
+            );
+            let line = self.line_nos.get(stmt_end).copied().unwrap_or(0);
+            return Err(match (self.tokens.get(stmt_end), self.cols.get(stmt_end)) {
+                (Some(Token::Newline), Some(&col)) if line != 0 => {
+                    located_parse_error(error, (line, col), (line, col + 1), line)
+                }
+                _ => error,
+            });
         }
         let linenos = vec![stmt_lineno; stmts.len()];
         Ok((stmts, linenos))

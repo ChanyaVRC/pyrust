@@ -914,15 +914,11 @@ fn last_line_is_indented(buf: &str) -> bool {
 }
 
 fn is_incomplete(err: &PyError) -> bool {
-    match err.kind() {
-        // "found Eof" — input cut off mid-expression
-        // "expected Indent, found" — block header (e.g. "for x:") with no body yet;
-        //   the trailing \n produces an extra Newline token instead of Eof
-        crate::error::PyErrorKind::Parse(msg) | crate::error::PyErrorKind::Lex(msg) => {
-            msg.contains("found Eof") || msg.contains("expected Indent, found")
-        }
-        _ => false,
-    }
+    // "found Eof" — input cut off mid-expression
+    // "expected Indent, found" — block header (e.g. "for x:") with no body yet;
+    //   the trailing \n produces an extra Newline token instead of Eof
+    err.syntax_message()
+        .is_some_and(|msg| msg.contains("found Eof") || msg.contains("expected Indent, found"))
 }
 
 fn normalize_repl_error(error: PyError) -> PyError {

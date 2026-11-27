@@ -1954,3 +1954,60 @@ RuntimeError: generator raised StopIteration
 ";
     assert_eq!(stderr_ctx, expected_ctx, "got:\n{stderr_ctx}");
 }
+
+// ── #3402: located SyntaxError printed like CPython's print_exception ──────
+//
+// A compile-time SyntaxError carries its location, so the uncaught printer
+// shows CPython's `File "<name>", line N` block (source line + caret) and the
+// bare `msg` instead of `str(exc)`'s `msg (<name>, line N)`.
+
+#[test]
+fn uncaught_exec_syntax_error_shows_location_block() {
+    let stderr = run_pyrust_stderr("exec_syntax.py", "exec(\"x = 1\\ny = (2 +\\n\")\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"exec_syntax.py\", line 1, in <module>
+    exec(\"x = 1\\ny = (2 +\\n\")
+  File \"<string>\", line 2
+    y = (2 +
+        ^
+SyntaxError: '(' was never closed
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn uncaught_indentation_error_underlines_one_char() {
+    let stderr = run_pyrust_stderr(
+        "indent_syntax.py",
+        "compile(\"if 1:\\n    x = 1\\n  y = 2\\n\", \"<cfg>\", \"exec\")\n",
+    );
+    let expected = "\
+Traceback (most recent call last):
+  File \"indent_syntax.py\", line 1, in <module>
+    compile(\"if 1:\\n    x = 1\\n  y = 2\\n\", \"<cfg>\", \"exec\")
+  File \"<cfg>\", line 3
+    y = 2
+         ^
+IndentationError: unindent does not match any outer indentation level
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn uncaught_user_raised_syntax_error_spans_end_offset() {
+    let stderr = run_pyrust_stderr(
+        "raised_syntax.py",
+        "raise SyntaxError(\"bad thing\", (\"<t>\", 1, 5, \"x = (1 +\\n\", 1, 9))\n",
+    );
+    let expected = "\
+Traceback (most recent call last):
+  File \"raised_syntax.py\", line 1, in <module>
+    raise SyntaxError(\"bad thing\", (\"<t>\", 1, 5, \"x = (1 +\\n\", 1, 9))
+  File \"<t>\", line 1
+    x = (1 +
+        ^^^^
+SyntaxError: bad thing
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}

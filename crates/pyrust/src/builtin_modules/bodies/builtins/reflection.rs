@@ -907,9 +907,8 @@ pyrust_module! {
                 ))
             }
             "eval" => {
-                let trimmed = source_text.trim();
                 let (program, mut linenos) = _interp
-                    .parse_source_to_stmts_with_warnings(trimmed, &compile_filename)?;
+                    .parse_eval_source_to_stmts_with_warnings(&source_text, &compile_filename)?;
                 if ast_linenos.len() == linenos.len() {
                     for (dst, &src_ln) in linenos.iter_mut().zip(ast_linenos.iter()) {
                         if src_ln != 0 {

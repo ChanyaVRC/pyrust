@@ -138,6 +138,16 @@ fn class_chain_defines_repr_like(
             .any(|b| class_chain_defines_repr_like(b, base_tag))
 }
 
+/// CPython's `my_basename` for `SyntaxError.__str__`: the text after the last
+/// path separator.
+fn syntax_error_basename(filename: &str) -> String {
+    let is_sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
+    match filename.rfind(is_sep) {
+        Some(index) => filename[index + 1..].to_owned(),
+        None => filename.to_owned(),
+    }
+}
+
 fn exception_args(instance: &Rc<RefCell<PyInstance>>) -> Vec<Value> {
     match instance.borrow().attrs.get_slot("args").map(|v| v.kind()) {
         Some(ValueKind::Tuple(args)) => args.to_vec(),
@@ -320,10 +330,12 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
             .get_slot("msg")
             .map(|v| v.to_py_str())
             .unwrap_or_else(|| "None".to_owned());
+        // `my_basename`: CPython shows only the part after the last path
+        // separator (`\` on Windows, where `/` is accepted too).
         let filename_str = borrowed
             .attrs
             .get_slot("filename")
-            .and_then(|v| v.as_str().map(str::to_owned));
+            .and_then(|v| v.as_str().map(syntax_error_basename));
         let lineno_int = borrowed.attrs.get_slot("lineno").and_then(|v| v.as_int());
         return match (filename_str, lineno_int) {
             (Some(fname), Some(lineno)) => format!("{msg_str} ({fname}, line {lineno})"),

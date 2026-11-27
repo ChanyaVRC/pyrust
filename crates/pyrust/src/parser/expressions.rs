@@ -265,6 +265,7 @@ impl Parser {
             } else {
                 match self.current().cloned() {
                     Some(Token::Ident(name)) => {
+                        let param_start = self.pos;
                         self.bump();
                         let default = if self.is(&Token::Assign) {
                             self.bump();
@@ -272,9 +273,15 @@ impl Parser {
                             Some(self.parse_expr_rejecting_yield()?)
                         } else {
                             if seen_default && !seen_star {
-                                return Err(PyError::parse(
-                                    "parameter without a default follows parameter with a default"
-                                        .to_string(),
+                                // CPython reports it on the parameter (#3402).
+                                return Err(self.locate_error_at(
+                                    PyError::parse(
+                                        "parameter without a default follows parameter with \
+                                         a default"
+                                            .to_string(),
+                                    ),
+                                    param_start,
+                                    self.pos,
                                 ));
                             }
                             None

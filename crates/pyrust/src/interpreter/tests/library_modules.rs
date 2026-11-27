@@ -911,12 +911,20 @@ fn int_max_str_digits_isolated_between_root_interpreters_and_applied_to_core() {
             None,
         )
         .unwrap_err();
-    let crate::error::PyErrorKind::Named(literal_error_class, literal_error_message) =
-        literal_error.into_kind()
-    else {
+    let crate::error::PyErrorKind::Syntax(literal_error) = literal_error.into_kind() else {
         panic!("oversized decimal literal must raise SyntaxError");
     };
-    assert_eq!(literal_error_class.as_ref(), "SyntaxError");
+    assert_eq!(literal_error.class_name, "SyntaxError");
+    // CPython names the literal's line but omits its columns (#3402).
+    assert_eq!(
+        (
+            literal_error.lineno,
+            literal_error.offset,
+            literal_error.end_offset
+        ),
+        (Some(1), Some(0), Some(0))
+    );
+    let literal_error_message = literal_error.msg;
     assert!(literal_error_message.contains("640 digits"));
     assert!(literal_error_message.contains("value has 700 digits"));
     assert_eq!(pyrust_core::get_int_max_str_digits(), 0);

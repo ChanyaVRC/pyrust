@@ -234,23 +234,28 @@ fn lex_conversion_segment(chars: &[char], pos: usize) -> String {
 ///     e.g. `5`/`.`) → `f-string: invalid conversion character` (no quoted char)
 ///   * a non-empty NAME segment that isn't `s`/`r`/`a` (e.g. `z`, `sr`, `ra`) →
 ///     `f-string: invalid conversion character '<segment>': expected 's', 'r', or 'a'`
+///
+/// CPython's parser reports it on the token after `!` — the conversion NAME
+/// or whatever stands there — so the error spans that token (#3402).
 fn fstring_conversion_error(chars: &[char], pos: usize, segment: &str) -> PyError {
-    if segment.is_empty() {
+    let msg = if segment.is_empty() {
         match chars.get(pos).copied() {
-            Some('}') | Some(':') => {
-                PyError::lex("f-string: missing conversion character".to_string())
-            }
-            Some(c) if c.is_whitespace() => {
-                PyError::lex("f-string: missing conversion character".to_string())
-            }
-            None => PyError::lex("f-string: missing conversion character".to_string()),
-            _ => PyError::lex("f-string: invalid conversion character".to_string()),
+            Some('}') | Some(':') | None => "f-string: missing conversion character".to_string(),
+            Some(c) if c.is_whitespace() => "f-string: missing conversion character".to_string(),
+            _ => "f-string: invalid conversion character".to_string(),
         }
     } else {
-        PyError::lex(format!(
-            "f-string: invalid conversion character '{segment}': expected 's', 'r', or 'a'"
-        ))
-    }
+        format!("f-string: invalid conversion character '{segment}': expected 's', 'r', or 'a'")
+    };
+    let width = segment.chars().count().max(1);
+    PyError::syntax(crate::error::SyntaxErrorInfo::at_chars(
+        msg,
+        pos + 1,
+        pos + width + 1,
+        crate::error::SyntaxTextRule::ParserLine {
+            tokenizer_lineno: 0,
+        },
+    ))
 }
 
 /// Maximum nesting depth of replacement fields inside format specifiers of a
