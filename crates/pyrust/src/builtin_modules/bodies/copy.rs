@@ -152,7 +152,7 @@ pyrust_module! {
 /// Bind `args` / `kwargs` to the parameters of a pure-Python function the way
 /// CPython does, reproducing its `TypeError` wording. The first `required`
 /// parameters have no default; an omitted optional parameter yields `None`.
-fn bind_python_args<const N: usize>(
+pub(crate) fn bind_python_args<const N: usize>(
     fn_name: &str,
     params: &[&str; N],
     required: usize,

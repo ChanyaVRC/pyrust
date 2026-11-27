@@ -306,14 +306,19 @@ pub(crate) fn getitem_value(interp: &mut Interpreter, obj: Value, key: Value) ->
     interp.exec_get_item(&regs, 0, 0, 1)
 }
 
-fn setitem_value(interp: &mut Interpreter, obj: Value, key: Value, value: Value) -> Result<()> {
+pub(crate) fn setitem_value(
+    interp: &mut Interpreter,
+    obj: Value,
+    key: Value,
+    value: Value,
+) -> Result<()> {
     let mut scratch = vec![obj, key, value];
     // SAFETY: as in `getitem_value`.
     let mut regs = unsafe { RegSlice::from_raw(scratch.as_mut_ptr(), scratch.len()) };
     interp.exec_set_item(&mut regs, 0, 0, 1, 2)
 }
 
-fn delitem_value(interp: &mut Interpreter, obj: Value, key: Value) -> Result<()> {
+pub(crate) fn delitem_value(interp: &mut Interpreter, obj: Value, key: Value) -> Result<()> {
     let mut scratch = vec![obj, key];
     // SAFETY: as in `getitem_value`.
     let mut regs = unsafe { RegSlice::from_raw(scratch.as_mut_ptr(), scratch.len()) };
