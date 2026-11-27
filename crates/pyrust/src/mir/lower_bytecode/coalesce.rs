@@ -213,7 +213,7 @@ pub(super) fn compute_coalescing(
             let reused = match &inst.op {
                 MirOp::Call { callee, .. } => *callee,
                 MirOp::SideEffectInsn {
-                    insn: Insn::CallMethod { .. } | Insn::CallMethodKw(_),
+                    insn: Insn::CallMethod { .. } | Insn::CallMethodKw(_) | Insn::CallSuperMethod(_),
                     uses,
                     defs,
                 } if defs.len() == 1 => match uses.first() {

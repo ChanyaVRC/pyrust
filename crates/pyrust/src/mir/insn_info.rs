@@ -8,10 +8,10 @@
 
 use crate::ast::CaretSpan;
 use crate::bytecode::{
-    CallExArgsDesc, CallMethodExpandedDesc, CallMethodKwDesc, DescIdx, DictMergeKwCallDesc, Insn,
-    InsnDesc, KwCallName, ListExtendCallDesc, MakeClassDesc, MakeFunctionDesc,
-    MatchClassPositionalDesc, MatchExceptStarDesc, NO_ARGS_SPLAT, NO_ASSERT_MSG, NO_KWARGS,
-    NO_METACLASS, Reg, SetItemKwCallDesc, push_desc,
+    CallExArgsDesc, CallMethodExpandedDesc, CallMethodKwDesc, CallSuperMethodDesc, DescIdx,
+    DictMergeKwCallDesc, Insn, InsnDesc, KwCallName, ListExtendCallDesc, MakeClassDesc,
+    MakeFunctionDesc, MatchClassPositionalDesc, MatchExceptStarDesc, NO_ARGS_SPLAT, NO_ASSERT_MSG,
+    NO_KWARGS, NO_METACLASS, Reg, SetItemKwCallDesc, push_desc,
 };
 
 /// Return the descriptor pool index carried by `insn`, if any.
@@ -23,6 +23,7 @@ pub(crate) fn insn_desc_idx(insn: &Insn) -> Option<DescIdx> {
         | Insn::CallMethodExpanded(idx)
         | Insn::CallExArgs(idx)
         | Insn::CallMethodKw(idx)
+        | Insn::CallSuperMethod(idx)
         | Insn::MatchClassPositional(idx)
         | Insn::MakeFunction(idx)
         | Insn::MatchExceptStar(idx, _)
@@ -43,6 +44,7 @@ pub(crate) fn set_insn_desc_idx(insn: &mut Insn, new_idx: DescIdx) {
         | Insn::CallMethodExpanded(idx)
         | Insn::CallExArgs(idx)
         | Insn::CallMethodKw(idx)
+        | Insn::CallSuperMethod(idx)
         | Insn::MatchClassPositional(idx)
         | Insn::MakeFunction(idx)
         | Insn::MatchExceptStar(idx, _)
@@ -423,6 +425,36 @@ macro_rules! dispatch_insn_operands {
                 };
                 $v.read_reg(obj);
                 $v.read_window(args_base, *total as u32);
+                $v.write_reg(d);
+            }
+            // Fused `super().name(...)` (#3424): the load reads the `super`
+            // callee and defines the method/receiver pair; the call reads
+            // that pair plus its argument window.
+            LoadSuperMethod {
+                func,
+                recv,
+                callee,
+                ..
+            } => {
+                $v.read_reg(callee);
+                $v.write_reg(func);
+                $v.write_reg(recv);
+            }
+            CallSuperMethod(_) => {
+                let Some(InsnDesc::CallSuperMethod(CallSuperMethodDesc {
+                    dst: d,
+                    func,
+                    recv,
+                    args_base,
+                    nargs,
+                    ..
+                })) = $desc
+                else {
+                    unreachable!("CallSuperMethod missing descriptor");
+                };
+                $v.read_reg(func);
+                $v.read_reg(recv);
+                $v.read_window(args_base, *nargs as u32);
                 $v.write_reg(d);
             }
             Concat { dst: d, base, count } => {

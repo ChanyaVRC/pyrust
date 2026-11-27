@@ -114,6 +114,21 @@ pub struct CallMethodKwDesc {
     pub kwnames_idx: u16,
 }
 
+/// Out-of-line descriptor for [`Insn::CallSuperMethod`].
+///
+/// `func` and `recv` are the two registers the paired
+/// [`Insn::LoadSuperMethod`] wrote; `nargs` positional arguments follow in
+/// `R[args_base .. args_base + nargs]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallSuperMethodDesc {
+    pub dst: Reg,
+    pub func: Reg,
+    pub recv: Reg,
+    pub args_base: Reg,
+    pub nargs: u8,
+    pub name_idx: u16,
+}
+
 /// Out-of-line descriptor for [`Insn::MatchClassPositional`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MatchClassPositionalDesc {
@@ -212,6 +227,7 @@ pub enum InsnDesc {
     CallMethodExpanded(CallMethodExpandedDesc),
     CallExArgs(CallExArgsDesc),
     CallMethodKw(CallMethodKwDesc),
+    CallSuperMethod(CallSuperMethodDesc),
     MatchClassPositional(MatchClassPositionalDesc),
     MakeFunction(MakeFunctionDesc),
     MatchExceptStar(MatchExceptStarDesc),
@@ -259,6 +275,14 @@ impl InsnDesc {
         match self {
             Self::CallMethodKw(d) => d,
             _ => unreachable!("descriptor mismatch: expected CallMethodKw"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_call_super_method(&self) -> &CallSuperMethodDesc {
+        match self {
+            Self::CallSuperMethod(d) => d,
+            _ => unreachable!("descriptor mismatch: expected CallSuperMethod"),
         }
     }
 
@@ -622,6 +646,41 @@ pub enum Insn {
     /// `*args` / `**kwargs` splats (issue #2392).
     /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::CallMethodKw`).
     CallMethodKw(DescIdx),
+    /// First half of a fused zero-argument `super().name(...)` call (#3424).
+    ///
+    /// `R[callee]` holds the value the preceding `LoadGlobal super` produced.
+    /// The instruction replaces the `Call(callee, 0)` that would build the
+    /// `super` object, and runs at the same point: before the call's
+    /// arguments are evaluated, exactly where CPython 3.12's
+    /// `LOAD_SUPER_ATTR` resolves the attribute.
+    ///
+    /// - Resolved: when `R[callee]` is the canonical builtin `super`, the
+    ///   frame's `__class__` cell and first argument form a valid
+    ///   `super(__class__, self)` on an instance, and `names[name_idx]`
+    ///   resolves along the receiver's MRO after `__class__` to a plain Python
+    ///   function, then `R[func]` = that function and `R[recv]` = `self`. No
+    ///   `super` object and no bound method are allocated.
+    /// - Generic: otherwise `R[func]` = `R[callee]()` (the real `super` object,
+    ///   or whatever a rebound `super` returns, raising whatever it raises)
+    ///   and `R[recv]` = `None`.
+    ///
+    /// `R[recv]` is a user instance only in the resolved form, which is how the
+    /// paired [`Insn::CallSuperMethod`] tells the two apart.
+    LoadSuperMethod {
+        func: Reg,
+        recv: Reg,
+        callee: Reg,
+        name_idx: u16,
+    },
+    /// Second half of a fused zero-argument `super().name(...)` call (#3424).
+    /// Payload lives in `FnCode::descs[idx]` (`InsnDesc::CallSuperMethod`).
+    ///
+    /// Resolved form (`R[recv]` is a user instance): `R[dst] =
+    /// R[func](R[recv], R[args_base .. args_base + nargs])`, the call a bound
+    /// method would make. Generic form: `R[dst] =
+    /// R[func].names[name_idx](R[args_base .. args_base + nargs])`, identical
+    /// to `CallMethod` on the `super` object.
+    CallSuperMethod(DescIdx),
     /// return R[src]
     Return(Reg),
     /// return None

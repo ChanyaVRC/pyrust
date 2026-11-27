@@ -901,3 +901,229 @@ fn genexpr_reduction_evaluates_the_iterable_once_before_the_guard() {
         "neither path may re-evaluate the outermost iterable"
     );
 }
+
+/// Every code object nested in `code` (itself included), depth first.
+fn all_code_objects(code: &FnCode) -> Vec<&FnCode> {
+    let mut out = vec![code];
+    for proto in &code.fn_protos {
+        out.extend(all_code_objects(&proto.code));
+    }
+    out
+}
+
+/// `(LoadSuperMethod, CallSuperMethod, Call, CallMethod)` instruction counts
+/// over `code` and everything nested in it.
+fn super_call_shape(code: &FnCode) -> (usize, usize, usize, usize) {
+    let count = |pred: &dyn Fn(&Insn) -> bool| {
+        all_code_objects(code)
+            .iter()
+            .flat_map(|code| code.insns.iter())
+            .filter(|insn| pred(insn))
+            .count()
+    };
+    (
+        count(&|insn| matches!(insn, Insn::LoadSuperMethod { .. })),
+        count(&|insn| matches!(insn, Insn::CallSuperMethod(_))),
+        count(&|insn| matches!(insn, Insn::Call(..))),
+        count(&|insn| matches!(insn, Insn::CallMethod { .. })),
+    )
+}
+
+/// Issue #3424: `super().name(<positional args>)` in a function scope lowers
+/// to the fused pair, with `super` still loaded as a global so a rebinding is
+/// decided at run time.
+#[test]
+fn zero_arg_super_method_call_lowers_to_the_fused_pair() {
+    // (source, plain `Call`s the source itself spells besides `super()`)
+    for (source, source_calls) in [
+        (
+            "class B(A):\n    def f(self, x):\n        return super().f(x)\n",
+            0,
+        ),
+        (
+            "class B(A):\n    def f(self):\n        return super().f()\n",
+            0,
+        ),
+        (
+            "class B(A):\n    def f(self, x, y):\n        return super().f(x, y + 1)\n",
+            0,
+        ),
+        // Comprehension, lambda, and nested-function scopes resolve the frame
+        // at run time, so they are fused as well.
+        (
+            "class B(A):\n    def f(self):\n        return [super().g(i) for i in xs]\n",
+            1,
+        ),
+        (
+            "class B(A):\n    def f(self):\n        return (lambda me: super().g(1))(self)\n",
+            1,
+        ),
+        (
+            "class B(A):\n    def f(self):\n        def inner(me):\n            return super().g(1)\n        return inner(self)\n",
+            1,
+        ),
+        (
+            "class B(A):\n    async def f(self):\n        return super().g(1)\n",
+            0,
+        ),
+        (
+            "class B(A):\n    def f(self):\n        yield super().g(1)\n",
+            0,
+        ),
+        // A `global super` declaration still reads the global.
+        (
+            "class B(A):\n    def f(self):\n        global super\n        return super().g(1)\n",
+            0,
+        ),
+    ] {
+        let code = compile_source(source);
+        let (loads, calls, plain_calls, method_calls) = super_call_shape(&code);
+        assert_eq!(
+            (loads, calls),
+            (1, 1),
+            "{source:?} must lower to one LoadSuperMethod/CallSuperMethod pair"
+        );
+        assert_eq!(
+            method_calls, 0,
+            "{source:?}: the generic CallMethod must be gone"
+        );
+        assert_eq!(
+            plain_calls, source_calls,
+            "{source:?}: no plain Call may remain for `super()`"
+        );
+        let fused = all_code_objects(&code)
+            .into_iter()
+            .find(|code| {
+                code.insns
+                    .iter()
+                    .any(|insn| matches!(insn, Insn::LoadSuperMethod { .. }))
+            })
+            .expect("a code object holds the fused pair");
+        let load_at = fused
+            .insns
+            .iter()
+            .position(|insn| matches!(insn, Insn::LoadSuperMethod { .. }))
+            .expect("LoadSuperMethod");
+        let Insn::LoadSuperMethod {
+            func,
+            recv,
+            callee,
+            name_idx,
+        } = fused.insns[load_at]
+        else {
+            unreachable!()
+        };
+        assert!(
+            matches!(
+                fused.insns[load_at - 1],
+                Insn::LoadGlobal(dst, idx) if dst == callee && fused.names[idx as usize] == "super"
+            ),
+            "{source:?}: `super` must be loaded as a global right before the fused load"
+        );
+        assert_ne!(func, recv, "{source:?}: the pair needs two registers");
+        let call = fused
+            .insns
+            .iter()
+            .find_map(|insn| match insn {
+                Insn::CallSuperMethod(idx) => {
+                    Some(*fused.descs[*idx as usize].as_call_super_method())
+                }
+                _ => None,
+            })
+            .expect("CallSuperMethod");
+        assert_eq!((call.func, call.recv), (func, recv), "{source:?}");
+        assert_eq!(call.name_idx, name_idx, "{source:?}");
+    }
+}
+
+/// Issue #3424: every shape the fused pair does not cover keeps the generic
+/// `Call` + `CallMethod` (or keyword/variadic) lowering untouched.
+#[test]
+fn super_method_call_is_not_fused_for_shadowed_names_and_other_shapes() {
+    for source in [
+        // `super` is a local, a parameter, or a captured variable.
+        "class B(A):\n    def f(self):\n        super = other\n        return super().g(1)\n",
+        "class B(A):\n    def f(self, super):\n        return super().g(1)\n",
+        "class B(A):\n    def f(self):\n        super = other\n        def inner(me):\n            return super().g(1)\n        return inner\n",
+        // Explicit arguments to `super` build a real super object.
+        "class B(A):\n    def f(self):\n        return super(B, self).g(1)\n",
+        // Module and class-body scopes have no function frame.
+        "r = super().g(1)\n",
+        "class B(A):\n    x = super().g(1)\n",
+        // Attribute access without a call, and non-positional calls.
+        "class B(A):\n    def f(self):\n        return super().g\n",
+        "class B(A):\n    def f(self):\n        return super().g(k=1)\n",
+        "class B(A):\n    def f(self, *a):\n        return super().g(*a)\n",
+        "class B(A):\n    def f(self, **k):\n        return super().g(**k)\n",
+        // Some other callee.
+        "class B(A):\n    def f(self):\n        return sup().g(1)\n",
+    ] {
+        let code = compile_source(source);
+        let (loads, calls, _, _) = super_call_shape(&code);
+        assert_eq!((loads, calls), (0, 0), "{source:?} must not be fused");
+    }
+}
+
+/// Issue #3424: the fused pair survives the SSA round trip and the bytecode
+/// optimizer with each call still consuming the pair its own load defined.
+#[test]
+fn fused_super_method_call_survives_optimization() {
+    let source = "\
+class B(A):
+    def f(self, x):
+        y = super().f(x)
+        return super().g(y, x) + super().f(y)
+";
+    let raw = compile_source(source);
+    for (stage, code) in [
+        ("mir", crate::mir::optimize_fncode_via_mir(raw.clone())),
+        ("optimizer", crate::optimizer::optimize(raw.clone())),
+    ] {
+        let (loads, calls, plain_calls, method_calls) = super_call_shape(&code);
+        assert_eq!(
+            (loads, calls),
+            (3, 3),
+            "{stage}: all three sites stay fused"
+        );
+        assert_eq!((plain_calls, method_calls), (0, 0), "{stage}");
+        let method = all_code_objects(&code)
+            .into_iter()
+            .find(|code| {
+                code.insns
+                    .iter()
+                    .any(|insn| matches!(insn, Insn::CallSuperMethod(_)))
+            })
+            .expect("method body");
+        let mut pending: Vec<(Reg, Reg, u16)> = Vec::new();
+        for insn in &method.insns {
+            match insn {
+                Insn::LoadSuperMethod {
+                    func,
+                    recv,
+                    name_idx,
+                    ..
+                } => {
+                    assert_ne!(func, recv, "{stage}: the pair needs two registers");
+                    pending.push((*func, *recv, *name_idx));
+                }
+                Insn::CallSuperMethod(idx) => {
+                    let call = method.descs[*idx as usize].as_call_super_method();
+                    let at = pending
+                        .iter()
+                        .position(|pair| *pair == (call.func, call.recv, call.name_idx))
+                        .unwrap_or_else(|| {
+                            panic!("{stage}: CallSuperMethod must consume a loaded pair: {call:?}")
+                        });
+                    pending.remove(at);
+                    assert!(
+                        (call.args_base..call.args_base + Reg::from(call.nargs))
+                            .all(|arg| arg != call.func && arg != call.recv),
+                        "{stage}: the argument window must not overlap the pair"
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert!(pending.is_empty(), "{stage}: every load is consumed");
+    }
+}

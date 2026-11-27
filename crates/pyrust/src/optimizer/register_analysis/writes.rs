@@ -52,6 +52,9 @@ fn writable_dst(insn: &Insn, descs: &[InsnDesc]) -> Option<u32> {
         CallMethodExpanded(desc_idx) => {
             Some(descs[*desc_idx as usize].as_call_method_expanded().dst)
         }
+        // `LoadSuperMethod` writes two registers and so, like `Unpack`, has no
+        // single destination: callers that kill facts handle it explicitly.
+        CallSuperMethod(desc_idx) => Some(descs[*desc_idx as usize].as_call_super_method().dst),
         CallMethod { dst, .. }
         | Concat { dst, .. }
         // Yield writes the caller's sent value into `dst` on resume; aliases
@@ -114,6 +117,11 @@ fn for_each_write(insn: &Insn, descs: &[InsnDesc], mut f: impl FnMut(u32)) {
         MakeClass(desc_idx) => f(descs[*desc_idx as usize].as_make_class().dst),
         CallMethodKw(desc_idx) => f(descs[*desc_idx as usize].as_call_method_kw().dst),
         CallMethodExpanded(desc_idx) => f(descs[*desc_idx as usize].as_call_method_expanded().dst),
+        LoadSuperMethod { func, recv, .. } => {
+            f(*func);
+            f(*recv);
+        }
+        CallSuperMethod(desc_idx) => f(descs[*desc_idx as usize].as_call_super_method().dst),
         MatchExceptStar(desc_idx, _) => {
             let desc = descs[*desc_idx as usize].as_match_except_star();
             f(desc.src_group); // src_group is updated to remaining

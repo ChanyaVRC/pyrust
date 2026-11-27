@@ -567,6 +567,79 @@ fn mro_search_start(mro: &[Value], class: &Rc<RefCell<PyClass>>) -> usize {
         .unwrap_or(0)
 }
 
+/// The raw class attribute an instance-bound `super(class, obj).name` lookup
+/// selects: the value stored under `name` by the first class *after* `class`
+/// in the MRO of `instance_class` (`type(obj)`) that defines it, before any
+/// descriptor binding. `Ok(None)` when no class on that tail defines `name`.
+///
+/// This is the single MRO walk shared by `super` attribute access and the
+/// fused `super().name(...)` call (#3424), so both always agree on which
+/// attribute a lookup resolves to.
+fn super_instance_mro_lookup(
+    instance_class: &Rc<RefCell<PyClass>>,
+    class: &Rc<RefCell<PyClass>>,
+    name: &str,
+) -> Result<Option<Value>> {
+    let mro = class_mro_items(instance_class)?;
+    // Find `class` in the MRO, then search from the next entry.
+    let start = mro_search_start(&mro, class);
+    for mro_entry in mro.iter().skip(start) {
+        let ValueKind::PyClass(entry_class) = mro_entry.kind() else {
+            continue;
+        };
+        let value = entry_class.borrow().attrs.get(name).cloned().or_else(|| {
+            super::builtin_methods::primitive_class_direct_object_dunder(entry_class, name)
+                .map(Value::builtin_function)
+        });
+        if value.is_some() {
+            return Ok(value);
+        }
+    }
+    Ok(None)
+}
+
+/// Resolve a zero-argument `super().name` whose result is a plain bound
+/// method, without building the `super` object or the bound method (#3424).
+///
+/// `start_class` is the frame's `__class__` cell and `instance` its first
+/// argument. Returns the unbound Python function exactly when the generic
+/// sequence — `super(start_class, instance)` followed by attribute access —
+/// would succeed and produce `function.__get__(instance)`:
+///
+/// - `instance` is an instance of `start_class` (the `super(type, obj)` check);
+/// - `name` is not one of the attributes a `super` object answers itself;
+/// - the MRO walk above selects a regular Python function, which `super`
+///   binds to `instance`. A `classmethod`, `staticmethod`, `property`, any
+///   other descriptor, a builtin, or a missing name all return `None`.
+///
+/// `None` never means failure: the caller then runs the generic sequence,
+/// which produces the right value or raises the right exception. Like every
+/// class-attribute read in this domain, the walk runs no Python code.
+pub(crate) fn super_plain_method(
+    start_class: &Rc<RefCell<PyClass>>,
+    instance: &Rc<RefCell<PyInstance>>,
+    name: &str,
+) -> Option<Value> {
+    // `__class__` / `__doc__` are answered by `get_attr` before it reaches the
+    // `super` lookup; the other three are the `super` object's own members.
+    if matches!(
+        name,
+        "__class__" | "__doc__" | "__thisclass__" | "__self__" | "__self_class__"
+    ) {
+        return None;
+    }
+    let instance_class = Rc::clone(&instance.borrow().class);
+    if !class_is_subclass_of(&instance_class, start_class) {
+        return None;
+    }
+    let value = super_instance_mro_lookup(&instance_class, start_class, name).ok()??;
+    match value.kind() {
+        ValueKind::UserFunction(function) if function.kind == UserFunctionKind::Regular => {}
+        _ => return None,
+    }
+    Some(value)
+}
+
 /// Returns the list of direct subclasses of `class`, pruning stale weak refs.
 /// Used by `__subclasses__()` dispatch (issue #1354).
 pub(super) fn class_direct_subclasses(class: &Rc<RefCell<PyClass>>) -> Vec<Value> {

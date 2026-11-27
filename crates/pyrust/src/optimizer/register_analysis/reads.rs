@@ -179,6 +179,14 @@ fn insn_reads_reg(insn: &Insn, descs: &[InsnDesc], r: u32) -> bool {
             let desc = descs[*desc_idx as usize].as_call_method_kw();
             desc.obj == r || (r >= desc.args_base && r < desc.args_base + desc.total as u32)
         }
+        // Fused `super().name(...)` (#3424).
+        LoadSuperMethod { callee, .. } => *callee == r,
+        CallSuperMethod(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_call_super_method();
+            desc.func == r
+                || desc.recv == r
+                || (r >= desc.args_base && r < desc.args_base + desc.nargs as u32)
+        }
         CallMethodExpanded(desc_idx) => {
             let desc = descs[*desc_idx as usize].as_call_method_expanded();
             desc.obj == r || desc.pos_list == r || desc.kw_dict == r
@@ -427,6 +435,15 @@ fn for_each_read(insn: &Insn, descs: &[InsnDesc], mut f: impl FnMut(u32)) {
             let desc = descs[*desc_idx as usize].as_call_method_kw();
             f(desc.obj);
             for r in desc.args_base..desc.args_base + desc.total as u32 {
+                f(r);
+            }
+        }
+        LoadSuperMethod { callee, .. } => f(*callee),
+        CallSuperMethod(desc_idx) => {
+            let desc = descs[*desc_idx as usize].as_call_super_method();
+            f(desc.func);
+            f(desc.recv);
+            for r in desc.args_base..desc.args_base + desc.nargs as u32 {
                 f(r);
             }
         }

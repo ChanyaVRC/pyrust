@@ -733,6 +733,35 @@ fn decode_insn(fncode: &FnCode, pc: usize, insn: &Insn) -> DecodedInsn {
                 ),
             }
         }
+        Insn::LoadSuperMethod {
+            func,
+            recv,
+            callee,
+            name_idx,
+        } => {
+            let name = lookup_name(fncode, *name_idx);
+            DecodedInsn {
+                opname: "LOAD_SUPER_METHOD",
+                opcode: 109,
+                arg: Some(i64::from(*name_idx)),
+                argval: Value::string(&name),
+                argrepr: format!("r{callee}().{name} -> r{func}, r{recv}"),
+            }
+        }
+        Insn::CallSuperMethod(desc_idx) => {
+            let d = fncode.descs[*desc_idx as usize].as_call_super_method();
+            let name = lookup_name(fncode, d.name_idx);
+            DecodedInsn {
+                opname: "CALL_SUPER_METHOD",
+                opcode: 110,
+                arg: Some(i64::from(d.nargs)),
+                argval: Value::string(&name),
+                argrepr: format!(
+                    "r{}.{name}(r{}, {} args) -> r{}",
+                    d.func, d.recv, d.nargs, d.dst
+                ),
+            }
+        }
         Insn::Return(src) => DecodedInsn {
             opname: "RETURN_VALUE",
             opcode: 54,

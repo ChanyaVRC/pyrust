@@ -18,3 +18,4 @@ include!("fast_path/setattr.rs");
 include!("fast_path/cache_support.rs");
 include!("fast_path/method_cache.rs");
 include!("fast_path/method_call.rs");
+include!("fast_path/super_method.rs");

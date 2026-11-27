@@ -38,6 +38,7 @@ mod vm_tests {
             fmt_spec_cache: std::cell::RefCell::new(crate::bytecode::SparsePcCache::new()),
             call_builtin_cache: std::cell::RefCell::new(crate::bytecode::SiteCache::new()),
             builtin_method_cache: std::cell::RefCell::new(crate::bytecode::SiteCache::new()),
+            super_method_cache: std::cell::RefCell::new(crate::bytecode::SparsePcCache::new()),
             cached_code_object: std::cell::RefCell::new(None),
             // Empty: these hand-built test fixtures run unoptimized, so the VM
             // uses the dynamic SetupExcept/PopExcept handler stack.

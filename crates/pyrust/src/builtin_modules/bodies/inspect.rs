@@ -187,6 +187,15 @@ pyrust_module! {
                 Insn::CallMethodKw(desc_idx) => {
                     push_attr(fncode.descs[*desc_idx as usize].as_call_method_kw().name_idx);
                 }
+                // One attribute name for the fused `super().name(...)` pair;
+                // its `LoadSuperMethod` half carries the same name.
+                Insn::CallSuperMethod(desc_idx) => {
+                    push_attr(
+                        fncode.descs[*desc_idx as usize]
+                            .as_call_super_method()
+                            .name_idx,
+                    );
+                }
                 Insn::CallMethodExpanded(desc_idx) => {
                     push_attr(
                         fncode.descs[*desc_idx as usize]

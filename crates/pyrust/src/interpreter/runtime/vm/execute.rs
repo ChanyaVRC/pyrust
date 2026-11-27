@@ -645,6 +645,77 @@ impl Interpreter {
                     regs[*dst as usize] = vm_try!(r);
                 }
 
+                // Fused zero-argument `super().name(...)` (#3424).
+                Insn::LoadSuperMethod {
+                    func,
+                    recv,
+                    callee,
+                    name_idx,
+                } => {
+                    if let Some((function, receiver)) =
+                        self.try_load_super_method(&regs[*callee as usize], *name_idx, code, pc - 1)
+                    {
+                        regs[*func as usize] = function;
+                        regs[*recv as usize] = receiver;
+                        continue 'vm;
+                    }
+                    let proxy = vm_try!(self.call_super_callee(
+                        &mut regs,
+                        num_locals,
+                        *callee,
+                        code,
+                        pc - 1,
+                    ));
+                    regs[*func as usize] = proxy;
+                    regs[*recv as usize] = Value::none();
+                }
+                Insn::CallSuperMethod(desc_idx) => {
+                    let desc = *code.descs[*desc_idx as usize].as_call_super_method();
+                    if let Some(function) = Self::resolved_super_method(&regs, desc.func, desc.recv)
+                    {
+                        if vm_tramp_arity_may_fit(
+                            function.trampoline_arity,
+                            (desc.nargs as usize) + 1,
+                        ) {
+                            let receiver = regs[desc.recv as usize].clone();
+                            tramp_finish!(self.vm_tramp_try_method(
+                                code,
+                                desc.dst,
+                                &function,
+                                receiver,
+                                desc.args_base,
+                                desc.nargs,
+                                &mut unwind_state!(),
+                            ));
+                        }
+                        let r = self.call_resolved_super_method(
+                            &regs,
+                            num_locals,
+                            &function,
+                            desc.func,
+                            desc.recv,
+                            desc.args_base,
+                            desc.nargs,
+                            code,
+                            pc - 1,
+                        );
+                        regs[desc.dst as usize] = vm_try!(r);
+                        continue 'vm;
+                    }
+                    let r = self.exec_call_method(
+                        &mut regs,
+                        num_locals,
+                        desc.dst,
+                        desc.func,
+                        desc.name_idx,
+                        desc.args_base,
+                        desc.nargs,
+                        code,
+                        pc - 1,
+                    );
+                    regs[desc.dst as usize] = vm_try!(r);
+                }
+
                 // ── Hot returns, append, yield & iteration ───────────────
                 Insn::Return(src) => tramp_return!(vm_try!(vm_read(&regs, *src, num_locals))),
                 Insn::ReturnNone => tramp_return!(Value::none()),

@@ -26,7 +26,9 @@ use crate::bytecode::Insn;
 /// [`crate::bytecode::FnCode::builtin_method_cache`].
 #[inline]
 pub(crate) fn is_builtin_method_cache_site(insn: &Insn) -> bool {
-    matches!(insn, Insn::CallMethod { .. })
+    // `CallSuperMethod`'s generic form is a `CallMethod` on whatever a rebound
+    // `super` returned, which may be a built-in container.
+    matches!(insn, Insn::CallMethod { .. } | Insn::CallSuperMethod(..))
 }
 
 /// Boxed payload for [`BuiltinMethodCacheEntry::NativeMethod`] so the enum

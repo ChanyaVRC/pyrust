@@ -57,6 +57,8 @@ fn insn_anchor_by_discriminant(insn: &Insn) -> bool {
             | Insn::CallMethod { .. }
             | Insn::CallMethodExpanded(..)
             | Insn::CallMethodKw(..)
+            | Insn::LoadSuperMethod { .. }
+            | Insn::CallSuperMethod(..)
             | Insn::RaiseValue(_)
             | Insn::RaiseExceptStarResidual(_)
             | Insn::RaiseFrom(..)
