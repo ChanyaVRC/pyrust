@@ -22,6 +22,8 @@ pub(crate) fn lex_parse_to_exc(e: PyError) -> PyError {
     }
 }
 
+const UNINDENT_MISMATCH: &str = "unindent does not match any outer indentation level";
+
 /// The `SyntaxError` subclass CPython raises for a lexer/parser message.
 fn syntax_error_class(msg: &str) -> &'static str {
     if msg == "inconsistent use of tabs and spaces in indentation" {
@@ -36,12 +38,14 @@ fn syntax_error_class(msg: &str) -> &'static str {
 /// Whether a lexer/parser error message describes an indentation failure that
 /// CPython reports as `IndentationError` rather than a bare `SyntaxError`.
 fn is_indentation_message(msg: &str) -> bool {
-    matches!(
-        msg,
-        "too many levels of indentation"
-            | "unindent does not match any outer indentation level"
-            | "inconsistent indentation"
-    )
+    msg.starts_with("expected an indented block")
+        || matches!(
+            msg,
+            "too many levels of indentation"
+                | UNINDENT_MISMATCH
+                | "inconsistent indentation"
+                | "unexpected indent"
+        )
 }
 
 /// The `compile()` mode a source string is parsed in, which decides two of
@@ -112,6 +116,15 @@ pub(crate) fn resolve_syntax_error(e: PyError, src: SyntaxErrorSource<'_>) -> Py
     if newline_token && src.mode != SourceMode::Exec && !line.is_some_and(|l| l.ends_with('\n')) {
         info.offset = Some(0);
         info.end_offset = Some(0);
+    }
+    // The tokenizer cursor of `unindent does not match` sits past the line's
+    // newline, which `eval` / `single` input does not get appended (#3403).
+    if src.mode != SourceMode::Exec
+        && info.msg == UNINDENT_MISMATCH
+        && !line.is_some_and(|l| l.ends_with('\n'))
+        && let Some(offset) = info.offset.as_mut()
+    {
+        *offset -= 1;
     }
     let without_newline = |l: &str| l.trim_end_matches('\n').trim_end_matches('\r').to_string();
     info.text = Some(match rule {

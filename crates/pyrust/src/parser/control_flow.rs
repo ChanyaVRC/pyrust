@@ -547,13 +547,17 @@ impl Parser {
     /// entries will be 0.
     fn parse_suite_with_linenos(&mut self) -> Result<(Vec<Stmt>, Vec<u32>)> {
         if self.is(&Token::Newline) {
+            let header_end = self.pos;
             self.bump();
             // Skip blank / comment-only lines that the lexer folds into bare
             // Newline tokens.  CPython accepts a leading comment or blank line
             // as the first line of any suite-introducing block (try/except/
             // for/while/def/class/with/if/else/match …).
             self.skip_newlines();
-            self.expect(&Token::Indent)?;
+            if !self.is(&Token::Indent) {
+                return Err(self.missing_block_error(header_end));
+            }
+            self.bump();
             let mut out = Vec::new();
             let mut linenos: Vec<u32> = Vec::new();
             self.skip_newlines();
