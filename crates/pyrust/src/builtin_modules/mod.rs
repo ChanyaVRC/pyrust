@@ -383,6 +383,9 @@ macro_rules! pyrust_builtin_modules {
                     return xml_dom_expatbuilder::post_load_init(interp, module);
                 }
                 "xml.dom.pulldom" => return xml_dom_pulldom::post_load_init(interp, module),
+                "xml.etree.ElementPath" => {
+                    return xml_etree_elementpath::post_load_init(interp, module);
+                }
                 "xml.etree.ElementInclude" => {
                     return xml_etree_elementinclude::post_load_init(interp, module);
                 }
@@ -890,7 +893,7 @@ pyrust_builtin_modules! {
     "xml.dom.expatbuilder" as xml_dom_expatbuilder,
     "xml.dom.pulldom" as xml_dom_pulldom,
     "xml.dom" as xml_dom,
-    "xml.etree.ElementPath" as xml_etree_elementpath @inject,
+    "xml.etree.ElementPath" as xml_etree_elementpath,
     "xml.etree.ElementTree" as xml_etree_elementtree @inject,
     "xml.etree.ElementInclude" as xml_etree_elementinclude,
     "xml.etree.cElementTree" as xml_etree_celementtree,

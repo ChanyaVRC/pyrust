@@ -297,7 +297,8 @@ fn inplace(
 
 // ─── Subscript helpers (run through the VM item opcodes) ────────────────────
 
-fn getitem_value(interp: &mut Interpreter, obj: Value, key: Value) -> Result<Value> {
+/// `obj[key]` with the VM's exact subscription semantics.
+pub(crate) fn getitem_value(interp: &mut Interpreter, obj: Value, key: Value) -> Result<Value> {
     let mut scratch = vec![obj, key];
     // SAFETY: `scratch` outlives `regs`, is not otherwise borrowed, and the
     // pointer/length describe exactly its allocation.
