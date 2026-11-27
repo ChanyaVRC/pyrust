@@ -309,6 +309,7 @@ macro_rules! pyrust_builtin_modules {
                 "array" => return array::post_load_init(interp, module),
                 "string" => return string::post_load_init(interp, module),
                 "csv" => return csv::post_load_init(interp, module),
+                "fractions" => return fractions::post_load_init(interp, module),
                 #[cfg(unix)]
                 "posix" => return posix::post_load_init(interp, module),
                 "importlib.abc" => return importlib_abc::post_load_init(interp, module),
@@ -613,10 +614,11 @@ pyrust_builtin_modules! {
     // and the `DecimalException` hierarchy — injected by the `@inject`
     // post-load hook.  The native body is empty.
     decimal @inject,
-    // `fractions` (issue #2810): a pure-Python module (`fractions_py.py`) — the
-    // `Fraction` rational-number class — injected by the `@inject` post-load
-    // hook.  The native body is empty.
-    fractions @inject,
+    // `fractions` (issues #2810, #3412): 100% native Rust in
+    // `bodies/fractions.rs` — the `Fraction` rational-number class over
+    // `BigInt` numerator/denominator; `post_load_init` makes it a
+    // `numbers.Rational` ABC subclass and restores CPython's namespace order.
+    fractions,
     // `struct` (issue #3309): 100% native `error`, `Struct`, and top-level
     // functions in `struct_mod.rs`.  The Rust ident is `struct_mod` because
     // `struct` is a keyword.
