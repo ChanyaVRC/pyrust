@@ -1,3 +1,17 @@
+/// Whether a class-level `__getattribute__` value replaces `object`'s default.
+///
+/// A Python `def __getattribute__` is a `UserFunction`.  A native module class
+/// (`pyrust_module!`) registers its override as a `module.Class.method`
+/// builtin (two dots or more), whereas the builtin types' own slot wrappers
+/// are `type.method` (`object.__getattribute__`, `list_iterator.__getattribute__`).
+pub(crate) fn is_custom_getattribute(value: &Value) -> bool {
+    match value.kind() {
+        ValueKind::UserFunction(_) => true,
+        ValueKind::BuiltinFunction(name) => name.matches('.').count() >= 2,
+        _ => false,
+    }
+}
+
 pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> {
     // Borrow the class to read its own attrs and recurse into the base chain by
     // reference, cloning out only the matched `Value`.  Distinct classes are

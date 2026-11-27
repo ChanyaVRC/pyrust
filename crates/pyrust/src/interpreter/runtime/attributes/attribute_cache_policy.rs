@@ -103,7 +103,7 @@ pub(crate) fn read_attribute_cache_plan(target: &Value, name: &str) -> ReadAttri
     }
 
     let has_custom_getattribute = lookup_class_attr(&instance.class, "__getattribute__")
-        .is_some_and(|value| matches!(value.kind(), ValueKind::UserFunction(_)));
+        .is_some_and(|value| is_custom_getattribute(&value));
     if has_custom_getattribute {
         return ReadAttributeCachePlan::Uncacheable;
     }
