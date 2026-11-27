@@ -369,9 +369,15 @@ impl Interpreter {
                         type_args,
                     ))
                 } else {
+                    let shown = {
+                        let class = class.borrow();
+                        class
+                            .error_name
+                            .map_or_else(|| class.name.clone(), str::to_string)
+                    };
                     Err(pyrust_core::type_err!(
                         "type '{}' is not subscriptable",
-                        class.borrow().name
+                        shown
                     ))
                 }
             }

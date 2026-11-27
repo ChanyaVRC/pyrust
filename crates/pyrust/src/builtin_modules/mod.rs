@@ -315,6 +315,7 @@ macro_rules! pyrust_builtin_modules {
                 "types" => return types::post_load_init(interp, module),
                 "csv" => return csv::post_load_init(interp, module),
                 "fractions" => return fractions::post_load_init(interp, module),
+                "contextvars" => return contextvars::post_load_init(interp, module),
                 #[cfg(unix)]
                 "posix" => return posix::post_load_init(interp, module),
                 "importlib.abc" => return importlib_abc::post_load_init(interp, module),
@@ -746,9 +747,11 @@ pyrust_builtin_modules! {
     // `RawConfigParser`, interpolations, `SectionProxy`, `ConverterMapping`)
     // injected from `configparser_py.py`.
     configparser @inject,
-    // `contextvars` (issue #3184, PEP 567): context variables (`ContextVar`,
-    // `Token`, `Context`, `copy_context`) injected from `contextvars_py.py`.
-    contextvars @inject,
+    // `contextvars` (issues #3184, #3461, PEP 567): 100% native Rust in
+    // `bodies/contextvars.rs` — `ContextVar`, `Token`, `Context` and
+    // `copy_context` with CPython's `_contextvars` semantics and a per-thread
+    // current context; no Python-source injection.
+    contextvars,
     // `tomllib` (issue #3184, PEP 680): pure-Python TOML 1.0.0 parser
     // (`loads`, `load`, `TOMLDecodeError`) injected from `tomllib_py.py`.
     tomllib @inject,
