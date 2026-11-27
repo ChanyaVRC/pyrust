@@ -28,7 +28,7 @@ impl Value {
 
     /// Borrow the tuple's elements as a slice.  Backs both the heap path
     /// (`TAG_TUPLE`, an `Rc<TupleInner>` since #2268) and the inline small-tuple
-    /// path (`Opaque::SmallTuple2/3`); see #281.
+    /// path (`Opaque::SmallTuple1/2/3`); see #281.
     pub fn as_tuple(&self) -> Option<&[Value]> {
         debug_assert!(
             !self.is_unset(),
@@ -40,6 +40,7 @@ impl Value {
         }
         if top16(self.0) == TAG_OPAQUE {
             match unsafe { &*self.opaque_ptr() } {
+                Opaque::SmallTuple1 { items, .. } => return Some(&items[..]),
                 Opaque::SmallTuple2 { items, .. } => return Some(&items[..]),
                 Opaque::SmallTuple3 { items, .. } => return Some(&items[..]),
                 _ => {}

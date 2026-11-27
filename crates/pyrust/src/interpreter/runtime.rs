@@ -53,15 +53,15 @@ use formatting::{format_dunder_owner, format_dunder_spec_arg};
 
 mod exceptions {
     use super::{
-        ExpandedCallArg, Interpreter, PyClass, PyError, PyInstance, PyToPrimitive, Rc, RefCell,
-        Result, Value, ValueKind, builtin_data_backing, canonical_class_by_tag,
-        class_is_builtin_exception_subclass, class_is_subclass_of, classify_exception_class,
-        instantiate_attribute_error, instantiate_exception, instantiate_exception_with_kinds,
-        instantiate_import_error, instantiate_name_error, instantiate_os_error,
-        instantiate_unicode_decode_error, instantiate_unicode_encode_error, invoke_class_method,
-        is_exception_class, is_stop_iteration_error, lookup_class_attr, lookup_exc_class,
-        lookup_value_special_method, reject_keyword_args_expanded, render_key_repr,
-        render_value_repr, value_to_bigint, value_type_name_str,
+        ExcClassKinds, ExpandedCallArg, Interpreter, PyClass, PyError, PyInstance, PyToPrimitive,
+        Rc, RefCell, Result, Value, ValueKind, builtin_data_backing, canonical_class_by_tag,
+        class_is_builtin_exception_subclass, class_is_subclass_of, instantiate_attribute_error,
+        instantiate_base_layout_exception, instantiate_exception, instantiate_exception_with_arg,
+        instantiate_exception_with_kinds, instantiate_import_error, instantiate_name_error,
+        instantiate_os_error, instantiate_unicode_decode_error, instantiate_unicode_encode_error,
+        invoke_class_method, is_exception_class, is_stop_iteration_error, lookup_class_attr,
+        lookup_exc_class, lookup_value_special_method, reject_keyword_args_expanded,
+        render_key_repr, render_value_repr, value_to_bigint, value_type_name_str,
     };
     include!("runtime/exceptions.rs");
 }
@@ -105,9 +105,10 @@ mod calls {
         PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result, UserFunction, Value, ValueKind,
         VmFrameView, allocate_frame_cells, bind_class_level_method_wrapper, call_depth,
         call_descriptor_get, call_slot_value_unbound, class_chain_new_slot_wrapped,
-        class_is_subclass_of, invoke_class_method, is_exception_class, is_primitive_class,
-        lookup_class_attr, mapping_entries_for_expansion, max_call_depth, object_class_singleton,
-        slot_is_descriptor, smallvec, type_class_singleton, value_type_name_str,
+        class_is_subclass_of, classify_exception_class, instantiate_base_layout_exception,
+        invoke_class_method, is_primitive_class, lookup_class_attr, mapping_entries_for_expansion,
+        max_call_depth, object_class_singleton, slot_is_descriptor, smallvec, type_class_singleton,
+        value_type_name_str,
     };
     include!("runtime/calls.rs");
 }
@@ -445,11 +446,11 @@ pub(crate) use generator_protocols::{
 
 mod introspection {
     use super::{
-        FrameKind, GeneratorFrame, Interpreter, PyDict, PyError, PyKey, Rc, Result, UserFunction,
-        Value, ValueKind, VmFrameCache, VmFrameView, cached_builtins_module, class_frame_identity,
-        class_frame_locals_value, compiler_owned_frame_local_keys, lookup_enclosing_function_value,
-        module_env, resolve_frame_source_line, snapshot_view_locals, value_class,
-        values_are_identical,
+        FrameKind, GeneratorFrame, Interpreter, PendingCatchLocals, PyDict, PyError, PyKey, Rc,
+        Result, UserFunction, Value, ValueKind, VmFrameCache, VmFrameView, cached_builtins_module,
+        class_frame_identity, class_frame_locals_value, compiler_owned_frame_local_keys,
+        lookup_enclosing_function_value, module_env, resolve_frame_source_line,
+        snapshot_view_locals, value_class, values_are_identical,
     };
     include!("runtime/introspection.rs");
 }

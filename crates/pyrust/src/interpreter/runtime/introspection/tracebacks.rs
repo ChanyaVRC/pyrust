@@ -98,7 +98,7 @@ impl Interpreter {
             } else {
                 catch
                     .locals
-                    .cloned()
+                    .resolved()
                     .unwrap_or_else(|| Value::dict(Default::default()))
             };
             let catch_builtins = frame_builtins_for_globals(&catch_globals);
@@ -247,9 +247,9 @@ impl Interpreter {
                 let (locals, token) = self.capture_catching_frame_locals_and_token(view_index);
                 (locals, Some((view_index, token)))
             }
-            None => (None, None),
+            None => (CatchFrameLocals::Module, None),
         };
-        let state: Box<dyn std::any::Any> = Box::new(DeferredTracebackState {
+        let state = DeferredTracebackState {
             frames: captured,
             catch_code,
             catch_lineno,
@@ -260,8 +260,51 @@ impl Interpreter {
             // handler dispatch (vm.rs), so it is current here (#2411).
             catch_col_span: pyrust_core::get_current_vm_col_span(),
             tail,
+        };
+        match catch_view_index {
+            Some(view_index) if state.retains_only_the_catching_frame() => {
+                self.deferred_traceback_placeholder(view_index, state)
+            }
+            _ => Value::builtin_object(DEFERRED_TRACEBACK_OPS, Box::new(state)),
+        }
+    }
+
+    /// Wrap `state` in a deferred-traceback placeholder for the activation at
+    /// `view_index`, reusing the placeholder that activation parked when no
+    /// exception refers to it any more (issue #3426).
+    ///
+    /// A placeholder is never Python-visible — every read of
+    /// `__traceback__` materialises it first — so handing the same object to
+    /// one caught exception after another is unobservable, and a loop that
+    /// raises and catches in one frame stops allocating a placeholder per
+    /// iteration.  The caller guarantees `state` retains only what the
+    /// catching activation already owns.
+    fn deferred_traceback_placeholder(
+        &mut self,
+        view_index: usize,
+        state: DeferredTracebackState,
+    ) -> Value {
+        let spare = with_frame_cache(self, view_index, |cache| {
+            cache.and_then(|cache| cache.spare_deferred_traceback.clone())
         });
-        Value::builtin_object(DEFERRED_TRACEBACK_OPS, state)
+        // Two handles — the activation's and the clone just taken — mean the
+        // exception that last used the placeholder has released it.
+        if let Some(spare) = spare
+            && spare.refcount() == 2
+            && let ValueKind::BuiltinObject { state: cell, .. } = spare.kind()
+            && let Ok(mut slot) = cell.try_borrow_mut()
+            && let Some(slot) = slot.downcast_mut::<DeferredTracebackState>()
+        {
+            *slot = state;
+            return spare.clone();
+        }
+        let placeholder = Value::builtin_object(DEFERRED_TRACEBACK_OPS, Box::new(state));
+        with_frame_cache_mut(self, view_index, |slot| {
+            if let Some(cache) = slot.as_deref_mut() {
+                cache.spare_deferred_traceback = Some(placeholder.clone());
+            }
+        });
+        placeholder
     }
 
     /// If `value` is a deferred-traceback placeholder, materialise it into a real
@@ -311,7 +354,7 @@ impl Interpreter {
                 lineno: catch_lineno,
                 col_span: catch_col_span,
                 globals: &catch_globals,
-                locals: catch_locals.as_ref(),
+                locals: &catch_locals,
                 live_view: catch_live_view.as_ref(),
             },
             tail,
@@ -338,7 +381,7 @@ impl Interpreter {
         let has_tb = inst
             .borrow()
             .attrs
-            .get_cloned_or_slot("__traceback__")
+            .get_slot("__traceback__")
             .is_some_and(|tb| !tb.is_none());
         if has_tb {
             pyrust_core::reset_captured_error_frames();
@@ -586,8 +629,36 @@ struct TracebackCatchFrame<'a> {
     /// PEP 657 caret anchor of the catching frame's raising instruction.
     col_span: Option<(u32, u32, u32, u32)>,
     globals: &'a pyrust_core::FrameGlobals,
-    locals: Option<&'a Value>,
+    locals: &'a CatchFrameLocals,
     live_view: Option<&'a (usize, std::rc::Weak<()>)>,
+}
+
+/// The catching frame's `f_locals` mapping as a deferred traceback holds it.
+///
+/// It is consulted only when the traceback is materialised after the catching
+/// frame has gone; a frame that is still live supplies its own frame object.
+#[derive(Clone)]
+pub(super) enum CatchFrameLocals {
+    /// Module scope: `f_locals` is the module namespace, resolved from the
+    /// frame's globals when the traceback is materialised.
+    Module,
+    /// A mapping that already existed when the exception was caught.
+    Ready(Value),
+    /// A function frame whose locals had not been observed at catch time. The
+    /// activation fills the shared cell when it next synchronises its locals,
+    /// at the latest on frame exit (issue #3426).
+    Pending(Rc<PendingCatchLocals>),
+}
+
+impl CatchFrameLocals {
+    /// The mapping, if the frame has one and has supplied it.
+    fn resolved(&self) -> Option<Value> {
+        match self {
+            Self::Module => None,
+            Self::Ready(locals) => Some(locals.clone()),
+            Self::Pending(pending) => pending.get().cloned(),
+        }
+    }
 }
 
 /// Stable identity needed to rebuild the catching frame's code object.
@@ -661,7 +732,7 @@ pub(crate) struct DeferredTracebackState {
     catch_globals: pyrust_core::FrameGlobals,
     /// Catching frame's locals mapping (synced on frame exit if the exception
     /// escapes before `e.__traceback__` is read, issue #3029).
-    catch_locals: Option<Value>,
+    catch_locals: CatchFrameLocals,
     /// `(view_index, live_token)` for ABA-safe reuse of the catching frame's
     /// live frame object while the frame is still on `vm_frame_views` (#3029).
     catch_live_view: Option<(usize, std::rc::Weak<()>)>,
@@ -674,6 +745,46 @@ pub(crate) struct DeferredTracebackState {
     /// materialised (issue #2367).  `None` for a fresh catch; a real or deferred
     /// traceback for a re-raised / carried exception.
     tail: Value,
+}
+
+impl DeferredTracebackState {
+    /// Whether a placeholder in this state keeps nothing alive beyond the
+    /// catching activation's own function and module namespace: no unwound
+    /// frames, no carried traceback, and no locals mapping (a function
+    /// frame's still-empty shared cell does not count).  Only such a
+    /// placeholder may be parked for reuse by its activation.
+    fn retains_only_the_catching_frame(&self) -> bool {
+        self.frames.is_empty()
+            && self.tail.is_none()
+            && match &self.catch_locals {
+                CatchFrameLocals::Module => true,
+                CatchFrameLocals::Pending(pending) => pending.get().is_none(),
+                CatchFrameLocals::Ready(_) => false,
+            }
+    }
+}
+
+/// Is `spare` a parked deferred-traceback placeholder that no exception refers
+/// to any more, and whose state shares `pending`?  Such an owner of the cell
+/// is not a traceback waiting for the frame's locals.
+fn idle_placeholder_shares(spare: &Value, pending: &Rc<PendingCatchLocals>) -> bool {
+    if spare.refcount() != 1 {
+        return false;
+    }
+    let ValueKind::BuiltinObject { state, .. } = spare.kind() else {
+        return false;
+    };
+    let Ok(state) = state.try_borrow() else {
+        return false;
+    };
+    state
+        .downcast_ref::<DeferredTracebackState>()
+        .is_some_and(|state| {
+            matches!(
+                &state.catch_locals,
+                CatchFrameLocals::Pending(shared) if Rc::ptr_eq(shared, pending)
+            )
+        })
 }
 
 pub(crate) struct DeferredTracebackOps;

@@ -38,13 +38,16 @@ pub(crate) fn class_is_builtin_exception_subclass(
 }
 
 /// Runtime-side "is this class an exception?" predicate used by the
-/// `raise`/`except` machinery.  Forwards to the canonical implementation
-/// in `pyrust_core` so the runtime and `Value::repr`/`Value::str` paths
+/// `raise`/`except` machinery.  Answers with the same rule as the canonical
+/// `pyrust_core::class_chain_contains_exception` — the base chain reaches the
+/// `BaseException` tag — so the runtime and `Value::repr`/`Value::str` paths
 /// cannot drift apart (issue #429: divergence here let `raise
 /// GeneratorExit(...)` succeed while `repr(GeneratorExit(...))` fell back
-/// to the default `<X object>` formatting).
+/// to the default `<X object>` formatting).  The answer is read from the
+/// class's stamped classification, so raising, matching and constructing do
+/// not each re-walk the chain (issue #3426).
 pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
-    pyrust_core::class_chain_contains_exception(class)
+    classify_exception_class(class).exception
 }
 
 /// The effective `__iter__` for a `PyInstance`: a USER-defined `__iter__`
@@ -155,8 +158,11 @@ pub(crate) fn class_hash_inherits_builtin_none(class: &Rc<RefCell<PyClass>>) -> 
 /// Python-visible class name. User subclasses inherit a classification when
 /// the walk reaches their tagged built-in base; unrelated same-named classes
 /// do not.
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ExcClassKinds {
+    /// `true` if the chain reaches `BaseException`: the class is an exception
+    /// class at all.
+    pub(crate) exception: bool,
     pub(crate) stop_iteration: bool,
     pub(crate) syntax_error: bool,
     pub(crate) os_error: bool,
@@ -188,6 +194,7 @@ impl ExcClassKinds {
             return;
         };
         match name {
+            "BaseException" => self.exception = true,
             "StopIteration" => self.stop_iteration = true,
             "SyntaxError" => self.syntax_error = true,
             "OSError" => self.os_error = true,
@@ -202,11 +209,112 @@ impl ExcClassKinds {
             _ => {}
         }
     }
+
+    /// The flags in bit order: flag `i` is bit `i` of [`Self::to_bits`], and
+    /// [`Self::from_bits`] reads each one back by the same index.
+    fn flags(&self) -> [bool; 14] {
+        [
+            self.exception,
+            self.stop_iteration,
+            self.syntax_error,
+            self.os_error,
+            self.system_exit,
+            self.unicode_decode_error,
+            self.unicode_encode_error,
+            self.unicode_translate_error,
+            self.name_error,
+            self.import_error,
+            self.attribute_error,
+            self.base_exception_group,
+            self.has_user_new,
+            self.has_user_init,
+        ]
+    }
+
+    /// Pack the classification for `PyClass::exception_kinds_cache`.
+    fn to_bits(self) -> u16 {
+        self.flags()
+            .iter()
+            .enumerate()
+            .fold(0, |bits, (index, &flag)| bits | (u16::from(flag) << index))
+    }
+
+    /// Inverse of [`Self::to_bits`].
+    fn from_bits(bits: u16) -> Self {
+        let flag = |index: usize| bits & (1 << index) != 0;
+        ExcClassKinds {
+            exception: flag(0),
+            stop_iteration: flag(1),
+            syntax_error: flag(2),
+            os_error: flag(3),
+            system_exit: flag(4),
+            unicode_decode_error: flag(5),
+            unicode_encode_error: flag(6),
+            unicode_translate_error: flag(7),
+            name_error: flag(8),
+            import_error: flag(9),
+            attribute_error: flag(10),
+            base_exception_group: flag(11),
+            has_user_new: flag(12),
+            has_user_init: flag(13),
+        }
+    }
+
+    /// `true` when construction needs nothing beyond `BaseException`'s own
+    /// state (`args` and `__traceback__`): the class belongs to no built-in
+    /// family that initialises extra attributes or validates its arguments.
+    /// `__new__` / `__init__` overrides are reported separately.
+    pub(crate) fn has_base_layout_only(&self) -> bool {
+        !(self.stop_iteration
+            || self.syntax_error
+            || self.os_error
+            || self.system_exit
+            || self.unicode_decode_error
+            || self.unicode_encode_error
+            || self.unicode_translate_error
+            || self.name_error
+            || self.import_error
+            || self.attribute_error
+            || self.base_exception_group)
+    }
 }
 
-/// Classify `class` against every special built-in exception name in a single
-/// borrowing walk of its base chain (issue #1967).
+/// Classify `class` against every special built-in exception name
+/// (issue #1967), reusing the class's stamped classification when it is still
+/// current (issue #3426).
+///
+/// The classification is a function of the immutable exception tags and the
+/// `__new__` / `__init__` attributes along the base chain.  Every class
+/// attribute write bumps the mutated class's `mutation_version` and the
+/// global class epoch, so a matching `(version, epoch)` stamp proves no class
+/// in the chain changed since the walk that produced the cached bits — the
+/// same contract as the per-class construction cache.
 pub(crate) fn classify_exception_class(class: &Rc<RefCell<PyClass>>) -> ExcClassKinds {
+    let stamp = {
+        let borrowed = class.borrow();
+        let version = borrowed.mutation_version.get();
+        if let Some((cached_version, cached_epoch, bits)) = borrowed.exception_kinds_cache.get()
+            && pyrust_core::class_cache_stamp_matches(version, cached_version, cached_epoch)
+        {
+            return ExcClassKinds::from_bits(bits);
+        }
+        pyrust_core::class_cache_stamp(version)
+    };
+    // The walk runs no Python code, so the stamp read above is still the one
+    // the classification was derived under.
+    let kinds = classify_exception_class_uncached(class);
+    if let Some((version, epoch)) = stamp {
+        class
+            .borrow()
+            .exception_kinds_cache
+            .set(Some((version, epoch, kinds.to_bits())));
+    }
+    kinds
+}
+
+/// Classify `class` in a single borrowing walk of its base chain
+/// (issue #1967).
+fn classify_exception_class_uncached(class: &Rc<RefCell<PyClass>>) -> ExcClassKinds {
     let mut kinds = ExcClassKinds::default();
     fn walk(class: &Rc<RefCell<PyClass>>, kinds: &mut ExcClassKinds) {
         let borrowed = class.borrow();

@@ -34,16 +34,23 @@ impl Value {
     }
 
     pub fn tuple(mut v: Vec<Value>) -> Self {
-        // Small-tuple fast path (#281): route 2- and 3-element tuples through
-        // `Opaque::SmallTuple2/3` so the backing `Vec<Value>` heap allocation
+        // Small-tuple fast path (#281): route 1- to 3-element tuples through
+        // `Opaque::SmallTuple1/2/3` so the backing `Vec<Value>` heap allocation
         // is avoided.  These shapes dominate hot sites (`dict.items()`,
-        // `enumerate()`, `divmod()`, `str.partition()`, …).
+        // `enumerate()`, `divmod()`, `str.partition()`, exception `args`, …).
         match v.len() {
             0 => {
                 // Empty tuple: share one immutable singleton, so `() is ()` is
                 // True (CPython parity, where `()` is a singleton) and an empty
                 // `*args` collection costs no allocation.
                 EMPTY_TUPLE.with(|t| t.clone())
+            }
+            1 => {
+                let a = v.pop().unwrap();
+                Value::opaque(Opaque::SmallTuple1 {
+                    items: [a],
+                    obj_id: next_obj_id(),
+                })
             }
             2 => {
                 let b = v.pop().unwrap();
@@ -73,12 +80,16 @@ impl Value {
     }
 
     /// Build a tuple by cloning `items`, without the intermediate `Vec` that
-    /// [`Value::tuple`] needs for the empty / 2- / 3-element shapes (#3422):
-    /// those go straight to the shared empty singleton or the inline
-    /// `SmallTuple2/3` representation.  Used to pack a callee's `*args`.
+    /// [`Value::tuple`] needs for the empty and 1- to 3-element shapes
+    /// (#3422): those go straight to the shared empty singleton or the inline
+    /// `SmallTuple1/2/3` representation.  Used to pack a callee's `*args`.
     pub fn tuple_from_slice(items: &[Value]) -> Self {
         match items {
             [] => EMPTY_TUPLE.with(|t| t.clone()),
+            [a] => Value::opaque(Opaque::SmallTuple1 {
+                items: [a.clone()],
+                obj_id: next_obj_id(),
+            }),
             [a, b] => Value::opaque(Opaque::SmallTuple2 {
                 items: [a.clone(), b.clone()],
                 obj_id: next_obj_id(),

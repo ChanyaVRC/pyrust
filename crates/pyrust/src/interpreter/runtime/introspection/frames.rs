@@ -161,8 +161,10 @@ fn cached_function_locals(
 
 fn is_inlined_comprehension_view(view: &VmFrameView) -> bool {
     if let Some(func) = view.function() {
-        if let Some(code_any) = func.precompiled_code.as_ref()
-            && let Ok(code) = Rc::clone(code_any).downcast::<crate::bytecode::FnCode>()
+        // Borrowing downcast: this runs for every caught exception, so it
+        // must not bump and drop the code object's reference count.
+        if let Some(code_any) = func.precompiled_code.as_deref()
+            && let Some(code) = code_any.downcast_ref::<crate::bytecode::FnCode>()
             && code.is_inlined_comp
         {
             return true;
@@ -214,6 +216,8 @@ fn install_materialized_frame_cache(
                 persistent_function_locals: None,
                 function_local_names,
                 live_token: Rc::new(()),
+                pending_catch_locals: None,
+                spare_deferred_traceback: None,
             }));
         }
     });
@@ -582,6 +586,8 @@ impl Interpreter {
                     persistent_function_locals: None,
                     function_local_names: Vec::new(),
                     live_token: Rc::new(()),
+                    pending_catch_locals: None,
+                    spare_deferred_traceback: None,
                 })
             });
             Rc::downgrade(&cache.live_token)
@@ -608,23 +614,97 @@ impl Interpreter {
     /// deferred tracebacks preserve live identity while the frame runs and
     /// preserve final locals if the exception escapes the catching frame
     /// (issue #3029).
+    ///
+    /// A function frame whose locals nothing has observed yet does not
+    /// snapshot them here: the traceback is handed the activation's shared
+    /// [`PendingCatchLocals`] cell, which
+    /// [`Self::sync_cached_function_locals_at`] fills if the traceback is
+    /// still alive when the frame next synchronises its locals (issue #3426).
     pub(super) fn capture_catching_frame_locals_and_token(
         &mut self,
         view_index: usize,
-    ) -> (Option<Value>, std::rc::Weak<()>) {
+    ) -> (CatchFrameLocals, std::rc::Weak<()>) {
         match self.vm_frame_views[view_index].kind() {
-            FrameKind::Script => (None, self.ensure_live_frame_cache_token(view_index)),
+            FrameKind::Script => (
+                CatchFrameLocals::Module,
+                self.ensure_live_frame_cache_token(view_index),
+            ),
             FrameKind::Class => {
                 let locals = class_frame_locals_value(self, &self.vm_frame_views[view_index]);
                 let token = self.ensure_live_frame_cache_token(view_index);
-                (Some(locals), token)
+                (CatchFrameLocals::Ready(locals), token)
             }
             FrameKind::Function => {
                 if let Some(locals) = cached_function_locals(self, view_index) {
                     self.sync_cached_function_locals_at(view_index);
                     let token = self.ensure_live_frame_cache_token(view_index);
-                    return (Some(Value::dict_shared(locals)), token);
+                    return (CatchFrameLocals::Ready(Value::dict_shared(locals)), token);
                 }
+                let (pending, token) = with_frame_cache_mut(self, view_index, |slot| {
+                    let cache = slot.get_or_insert_with(|| {
+                        Box::new(VmFrameCache {
+                            object: None,
+                            traced_frame: None,
+                            trace_last_line: 0,
+                            trace_last_pc: 0,
+                            function_locals: None,
+                            persistent_function_locals: None,
+                            function_local_names: Vec::new(),
+                            live_token: Rc::new(()),
+                            pending_catch_locals: None,
+                            spare_deferred_traceback: None,
+                        })
+                    });
+                    // Every traceback this activation still owes its locals
+                    // shares one cell, so they all observe the same mapping;
+                    // the activation keeps the cell, so a loop that catches
+                    // repeatedly allocates it once.
+                    let pending = Rc::clone(
+                        cache
+                            .pending_catch_locals
+                            .get_or_insert_with(|| Rc::new(PendingCatchLocals::new())),
+                    );
+                    (pending, Rc::downgrade(&cache.live_token))
+                });
+                (CatchFrameLocals::Pending(pending), token)
+            }
+        }
+    }
+
+    /// Pay the locals mapping this function activation owes to deferred
+    /// tracebacks (issue #3426), if any of them is still alive.
+    ///
+    /// `known` is the activation's already-synchronised `f_locals` mapping
+    /// when one exists; otherwise the locals are snapshotted now and
+    /// registered as that mapping, exactly as the catch site used to do
+    /// eagerly, so later frame lookups and synchronisations reuse it.
+    fn settle_pending_catch_locals(
+        &mut self,
+        view_index: usize,
+        known: Option<&Rc<std::cell::RefCell<PyDict>>>,
+    ) {
+        // Read-only probe first: an activation that owes nothing (the common
+        // case) must not grow the frame-cache side vector here.
+        let Some(pending) = with_frame_cache(self, view_index, |cache| {
+            let cache = cache?;
+            let pending = cache.pending_catch_locals.as_ref()?;
+            // Owners that are not waiting for the locals: the activation's
+            // own handle, and its parked placeholder once the exception that
+            // used it is gone.  Any further owner is a traceback that has
+            // not been materialised yet.
+            let idle_owners = 1 + usize::from(
+                cache
+                    .spare_deferred_traceback
+                    .as_ref()
+                    .is_some_and(|spare| idle_placeholder_shares(spare, pending)),
+            );
+            (Rc::strong_count(pending) > idle_owners).then(|| Rc::clone(pending))
+        }) else {
+            return;
+        };
+        let locals_value = match known {
+            Some(locals) => Value::dict_shared(Rc::clone(locals)),
+            None => {
                 let snapshot = snapshot_view_locals(self, &self.vm_frame_views[view_index]);
                 let function_local_names =
                     initial_function_local_names(&self.vm_frame_views[view_index], &snapshot);
@@ -634,30 +714,26 @@ impl Interpreter {
                         .get_dict_rc()
                         .expect("function frame locals must be a dict"),
                 );
-                let token = with_frame_cache_mut(self, view_index, |slot| {
-                    if let Some(cache) = slot.as_deref_mut() {
-                        cache.function_locals = Some(weak_locals);
-                        cache.function_local_names = function_local_names;
-                        Rc::downgrade(&cache.live_token)
-                    } else {
-                        let live_token = Rc::new(());
-                        let weak_token = Rc::downgrade(&live_token);
-                        *slot = Some(Box::new(VmFrameCache {
-                            object: None,
-                            traced_frame: None,
-                            trace_last_line: 0,
-                            trace_last_pc: 0,
-                            function_locals: Some(weak_locals),
-                            persistent_function_locals: None,
-                            function_local_names,
-                            live_token,
-                        }));
-                        weak_token
-                    }
+                with_frame_cache_mut(self, view_index, |slot| {
+                    let cache = slot
+                        .as_deref_mut()
+                        .expect("pending catch locals live in a frame cache");
+                    cache.function_locals = Some(weak_locals);
+                    cache.function_local_names = function_local_names;
                 });
-                (Some(locals_value), token)
+                locals_value
             }
-        }
+        };
+        with_frame_cache_mut(self, view_index, |slot| {
+            if let Some(cache) = slot.as_deref_mut() {
+                cache.pending_catch_locals = None;
+                // The parked placeholder shares the cell being filled, so it
+                // would now keep the mapping alive; it is not reused.
+                cache.spare_deferred_traceback = None;
+            }
+        });
+        // The debt is cleared above, so the cell is filled exactly once.
+        let _ = pending.set(locals_value);
     }
 
     /// Capture `(locals, cached_frame)` for the innermost active frame right
@@ -697,19 +773,17 @@ impl Interpreter {
     }
 
     fn sync_cached_function_locals_at(&mut self, view_index: usize) {
-        let (cached_locals, compiler_owned_names) = {
-            let view = &self.vm_frame_views[view_index];
-            if view.kind() != FrameKind::Function {
-                return;
-            }
-            (
-                cached_function_locals(self, view_index),
-                compiler_owned_frame_local_keys(view),
-            )
-        };
-        let Some(locals) = cached_locals else {
+        if self.vm_frame_views[view_index].kind() != FrameKind::Function {
+            return;
+        }
+        let Some(locals) = cached_function_locals(self, view_index) else {
+            // No mapping to refresh; a traceback that is still waiting for
+            // this activation's locals gets them now (issue #3426).
+            self.settle_pending_catch_locals(view_index, None);
             return;
         };
+        let compiler_owned_names =
+            compiler_owned_frame_local_keys(&self.vm_frame_views[view_index]);
         let fresh = snapshot_view_locals(self, &self.vm_frame_views[view_index]);
         with_frame_cache_mut(self, view_index, |slot| {
             let cache = slot.as_deref_mut().expect("checked frame cache");
@@ -720,6 +794,7 @@ impl Interpreter {
             }
             sync_function_frame_locals(&locals, fresh, &mut cache.function_local_names);
         });
+        self.settle_pending_catch_locals(view_index, Some(&locals));
     }
 
     /// Return the persistent locals mapping exposed by `locals()` and used by
@@ -889,6 +964,8 @@ impl Interpreter {
                     persistent_function_locals: Some(locals),
                     function_local_names,
                     live_token: Rc::new(()),
+                    pending_catch_locals: None,
+                    spare_deferred_traceback: None,
                 }));
             }
         });
@@ -1417,6 +1494,8 @@ impl Interpreter {
                     persistent_function_locals: None,
                     function_local_names: Vec::new(),
                     live_token: Rc::new(()),
+                    pending_catch_locals: None,
+                    spare_deferred_traceback: None,
                 }));
             }
         });

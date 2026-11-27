@@ -117,6 +117,7 @@ pub fn value_may_exceed_int_str_limit(value: &Value) -> bool {
         TAG_OPAQUE => matches!(
             unsafe { &*value.opaque_ptr() },
             Opaque::PyBigInt(_)
+                | Opaque::SmallTuple1 { .. }
                 | Opaque::SmallTuple2 { .. }
                 | Opaque::SmallTuple3 { .. }
                 | Opaque::Dict(_)

@@ -65,6 +65,59 @@ fn oserror_remap_errno(value: &Value) -> Option<i64> {
     value_to_bigint(&integer).and_then(|integer| integer.to_i64())
 }
 
+// Thread-local justification:
+// (a) Why `gil_local!`: holds `!Send` `Rc<str>` key handles that every
+//     exception constructed under the GIL clones without atomic refcounts.
+// (b) Multi-interpreter / multi-threaded impact: Python threads of one GIL
+//     group share the handles (they alias the group's interned key strings);
+//     independent interpreters on other OS threads own their own pair.
+pyrust_core::gil_local! {
+    /// Shared key handles for the two C-style slots every `BaseException`
+    /// instance starts with, so constructing an exception does not look the
+    /// names up in the attribute-key interner each time (issue #3426).
+    static BASE_EXCEPTION_SLOT_KEYS: (Rc<str>, Rc<str>) = (
+        pyrust_core::intern_attr_key("args"),
+        pyrust_core::intern_attr_key("__traceback__"),
+    );
+}
+
+/// Slot storage for a freshly allocated `BaseException` instance: `args`, plus
+/// `__traceback__` initialised to `None` as CPython 3.12 does at `__new__`
+/// time.  The VM overwrites the latter once the exception is caught.
+///
+/// `capacity` is the number of slots the caller expects the instance to end
+/// up with, so a family that adds its own attributes does not reallocate.
+fn base_exception_attrs(args: Value, capacity: usize) -> InstanceAttrs {
+    BASE_EXCEPTION_SLOT_KEYS.with(|(args_key, traceback_key)| {
+        InstanceAttrs::from_native_slots(
+            [
+                (Rc::clone(args_key), args),
+                (Rc::clone(traceback_key), Value::none()),
+            ],
+            capacity,
+        )
+    })
+}
+
+/// Allocate an instance of an exception class that carries nothing beyond
+/// `BaseException`'s own state ([`ExcClassKinds::has_base_layout_only`]),
+/// from its already-built `args` tuple.
+pub(crate) fn instantiate_base_layout_exception(class: Rc<RefCell<PyClass>>, args: Value) -> Value {
+    let attrs = base_exception_attrs(args, 2);
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+}
+
+/// [`instantiate_exception`] for exactly one argument.  The interpreter's own
+/// raises (`KeyError(key)`, a named error with its message) take this path,
+/// which builds the `args` tuple without an intermediate vector.
+pub(crate) fn instantiate_exception_with_arg(class: Rc<RefCell<PyClass>>, arg: Value) -> Value {
+    let kinds = classify_exception_class(&class);
+    if kinds.has_base_layout_only() {
+        return instantiate_base_layout_exception(class, Value::tuple_from_slice(&[arg]));
+    }
+    instantiate_exception_with_kinds(class, vec![arg], &kinds)
+}
+
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
     // Classify the class against the special built-in exception families in
     // one non-cloning MRO walk (issue #1967). StopIteration is matched against
@@ -83,10 +136,15 @@ pub(crate) fn instantiate_exception_with_kinds(
     args: Vec<Value>,
     kinds: &ExcClassKinds,
 ) -> Value {
-    // The common case (a plain built-in exception) sets exactly two attributes
-    // — `args` and `__traceback__` — so reserve for them up front to avoid the
-    // Vec growth realloc that would otherwise happen on the second insert.
-    let mut attrs = InstanceAttrs::with_slot_capacity(2);
+    // The common case (`ValueError`, `KeyError`, `TypeError`, a user subclass
+    // of them, ...) carries nothing beyond `BaseException`'s own state, so
+    // the argument vector becomes the `args` tuple directly and no family
+    // check below applies (issue #3426).
+    if kinds.has_base_layout_only() {
+        return instantiate_base_layout_exception(class, Value::tuple(args));
+    }
+    // Every family below adds at least one attribute to the two base slots.
+    let mut attrs = base_exception_attrs(Value::tuple(args.clone()), 4);
     // CPython 3.12: StopIteration.__init__ sets self.value = args[0] if args else None.
     let is_stop_iteration = kinds.stop_iteration;
     let is_syntax_error = kinds.syntax_error;
@@ -119,11 +177,6 @@ pub(crate) fn instantiate_exception_with_kinds(
     // Pass `&str` keys (not `String`): `insert` interns the key into a shared
     // `Rc<str>`, so a temporary `String` per key per raise would be allocated
     // only to be dropped immediately.
-    attrs.insert_slot("args", Value::tuple(args.clone()));
-    // CPython 3.12: every BaseException instance has __traceback__ initialised
-    // to None at __new__ time.  The VM's handle_vm_error overwrites it with a
-    // real traceback object once the exception propagates through a frame.
-    attrs.insert_slot("__traceback__", Value::none());
     if is_stop_iteration {
         let val = args.first().cloned().unwrap_or_else(Value::none);
         attrs.insert_slot("value", val);
@@ -351,9 +404,7 @@ pub(crate) fn instantiate_name_error(
     message: String,
     name: Option<String>,
 ) -> Value {
-    let mut attrs = InstanceAttrs::new();
-    attrs.insert_slot("args", Value::tuple(vec![Value::string(message)]));
-    attrs.insert_slot("__traceback__", Value::none());
+    let mut attrs = base_exception_attrs(Value::tuple(vec![Value::string(message)]), 3);
     let name_val = match name {
         Some(n) => Value::string(n),
         None => Value::none(),
@@ -378,9 +429,7 @@ pub(crate) fn instantiate_attribute_error(
     name: Option<String>,
     obj: Option<Value>,
 ) -> Value {
-    let mut attrs = InstanceAttrs::new();
-    attrs.insert_slot("args", Value::tuple(vec![Value::string(message)]));
-    attrs.insert_slot("__traceback__", Value::none());
+    let mut attrs = base_exception_attrs(Value::tuple(vec![Value::string(message)]), 4);
     attrs.insert_slot("name", name.map(Value::string).unwrap_or_else(Value::none));
     attrs.insert_slot("obj", obj.unwrap_or_else(Value::none));
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))

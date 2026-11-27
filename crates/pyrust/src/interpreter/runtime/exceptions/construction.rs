@@ -10,15 +10,14 @@ impl Interpreter {
         &mut self,
         class: Rc<RefCell<PyClass>>,
         args: &[ExpandedCallArg],
-    ) -> Result<Value> {
-        // Classify the class once up front: a single non-cloning MRO walk
-        // (issue #1967) that yields both the special-exception flags reused
-        // throughout this function (and threaded into `instantiate_exception`)
-        // and `has_user_new`/`has_user_init`.  The latter let the hot
+        // The caller's classification of `class` (issue #1967): the
+        // special-exception flags reused throughout this function (and
+        // threaded into `instantiate_exception`) plus
+        // `has_user_new`/`has_user_init`.  The latter let the hot
         // `raise ValueError("x")` path skip the dedicated `__new__`/`__init__`
         // MRO lookups entirely — plain built-in exceptions have neither.
-        let kinds = classify_exception_class(&class);
-
+        kinds: ExcClassKinds,
+    ) -> Result<Value> {
         // Issue #1420: if the class has a user-defined __new__ (UserFunction in
         // the MRO), call it with `cls` as the first argument before falling
         // through to instantiate_exception.  This mirrors the non-exception
@@ -121,6 +120,25 @@ impl Interpreter {
             return Ok(instance);
         }
 
+        // A class with neither a user `__new__`/`__init__` nor a built-in
+        // family of its own (`ValueError`, `KeyError`, `TypeError`, a plain
+        // subclass of them, ...) needs none of the argument handling below:
+        // keywords are rejected and the positional arguments become `args`,
+        // packed straight from the call without an intermediate vector
+        // (issue #3426).
+        if kinds.has_base_layout_only() {
+            if args.iter().any(|arg| arg.name.is_some()) {
+                let class_name = class.borrow().name.clone();
+                reject_keyword_args_expanded(&class_name, args)?;
+            }
+            let values: smallvec::SmallVec<[Value; 4]> =
+                args.iter().map(|arg| arg.value.clone()).collect();
+            return Ok(instantiate_base_layout_exception(
+                class,
+                Value::tuple_from_slice(&values),
+            ));
+        }
+
         // CPython 3.12: NameError.__init__ accepts exactly one keyword argument
         // (`name=`); ImportError.__init__ accepts two (`name=` and `path=`).
         // Extract any recognised keyword arguments before building the positional
@@ -130,7 +148,6 @@ impl Interpreter {
         // IMPORTANT: CPython's error messages always use the *base* class name
         // ("NameError()" / "ImportError()"), even when the actual class is a
         // subclass like UnboundLocalError or ModuleNotFoundError.
-        let class_name = class.borrow().name.clone();
         let is_name_error_class = kinds.name_error;
         let is_import_error_class = kinds.import_error;
         let mut kw_name: Option<Value> = None;
@@ -175,7 +192,12 @@ impl Interpreter {
                 }
             }
         } else {
-            reject_keyword_args_expanded(&class_name, args)?;
+            // The class name is needed only for the diagnostic, so the
+            // all-positional call does not copy it.
+            if args.iter().any(|arg| arg.name.is_some()) {
+                let class_name = class.borrow().name.clone();
+                reject_keyword_args_expanded(&class_name, args)?;
+            }
             for arg in args {
                 values.push(arg.value.clone());
             }

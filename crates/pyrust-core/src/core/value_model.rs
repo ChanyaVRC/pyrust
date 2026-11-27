@@ -18,7 +18,7 @@ pub enum ValueKind<'a> {
     List(std::cell::Ref<'a, Vec<Value>>),
     /// Borrowed view of a tuple's elements.  Backed either by the pool path
     /// (`TAG_TUPLE`) which stores `Vec<Value>`, or by the inline
-    /// `Opaque::SmallTuple2/3` path which stores a fixed-size array.  Tuples
+    /// `Opaque::SmallTuple1/2/3` path which stores a fixed-size array.  Tuples
     /// are immutable so no `RefCell` wraps them — a raw slice is sound.
     Tuple(&'a [Value]),
     /// Borrowed view of a dict.  Like [`Self::List`], holds a

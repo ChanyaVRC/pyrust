@@ -13,7 +13,7 @@ impl Interpreter {
             pyrust_core::PyErrorKind::Raised(value) => value,
             pyrust_core::PyErrorKind::Runtime(message) => {
                 if let Some(class) = self.cold.exc_classes.get("RuntimeError") {
-                    instantiate_exception(class, vec![Value::string(message)])
+                    instantiate_exception_with_arg(class, Value::string(message))
                 } else {
                     self.instantiate_named_exception("RuntimeError", message)?
                 }
@@ -22,12 +22,11 @@ impl Interpreter {
                 self.instantiate_named_exception(&class, message)?
             }
             pyrust_core::PyErrorKind::Class(class, message) => {
-                let args = if message.is_empty() {
-                    Vec::new()
+                if message.is_empty() {
+                    instantiate_exception(class, Vec::new())
                 } else {
-                    vec![Value::string(message)]
-                };
-                instantiate_exception(class, args)
+                    instantiate_exception_with_arg(class, Value::string(message))
+                }
             }
             pyrust_core::PyErrorKind::KeyError(key) => {
                 self.instantiate_named_exception_with_value("KeyError", key)?
@@ -252,17 +251,22 @@ impl Interpreter {
     }
 
     pub(super) fn coerce_to_exception(&mut self, value: Value) -> Result<Value> {
+        // An exception instance is raised as the very value it is: no new
+        // handle is minted for it on the way out.
+        let is_exception_instance = match value.kind() {
+            ValueKind::PyInstance(instance) => Some(is_exception_class(&instance.borrow().class)),
+            _ => None,
+        };
+        if let Some(is_exception) = is_exception_instance {
+            return if is_exception {
+                Ok(value)
+            } else {
+                Err(pyrust_core::type_err!(
+                    "exceptions must derive from BaseException"
+                ))
+            };
+        }
         match value.kind() {
-            ValueKind::PyInstance(instance) => {
-                let instance = Rc::clone(instance);
-                if is_exception_class(&instance.borrow().class) {
-                    Ok(Value::py_instance(instance))
-                } else {
-                    Err(pyrust_core::type_err!(
-                        "exceptions must derive from BaseException"
-                    ))
-                }
-            }
             ValueKind::PyClass(class) => {
                 let class = Rc::clone(class);
                 if is_exception_class(&class) {
@@ -355,12 +359,11 @@ impl Interpreter {
         let class = lookup_exc_class(name).ok_or_else(|| {
             PyError::runtime(format!("built-in exception '{}' is not defined", name))
         })?;
-        let args = if message.is_empty() {
-            vec![]
+        Ok(if message.is_empty() {
+            instantiate_exception(class, Vec::new())
         } else {
-            vec![Value::string(message)]
-        };
-        Ok(instantiate_exception(class, args))
+            instantiate_exception_with_arg(class, Value::string(message))
+        })
     }
 
     /// Like [`instantiate_named_exception`] but stores a raw `Value` as
@@ -374,7 +377,7 @@ impl Interpreter {
         let class = lookup_exc_class(name).ok_or_else(|| {
             PyError::runtime(format!("built-in exception '{}' is not defined", name))
         })?;
-        Ok(instantiate_exception(class, vec![arg]))
+        Ok(instantiate_exception_with_arg(class, arg))
     }
 
     /// Instantiate a `NameError` or `UnboundLocalError` with the CPython 3.12

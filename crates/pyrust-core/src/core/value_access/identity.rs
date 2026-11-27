@@ -32,12 +32,14 @@ impl Value {
         if top16(self.0) == TAG_TUPLE {
             return true;
         }
-        // Small tuples (2/3 elements) live in `Opaque::SmallTuple2/3` to
-        // avoid the backing `Vec<Value>` heap allocation.  See #281.
+        // Small tuples (1 to 3 elements) live in `Opaque::SmallTuple1/2/3`
+        // to avoid the backing `Vec<Value>` heap allocation.  See #281.
         if top16(self.0) == TAG_OPAQUE {
             return matches!(
                 unsafe { &*self.opaque_ptr() },
-                Opaque::SmallTuple2 { .. } | Opaque::SmallTuple3 { .. }
+                Opaque::SmallTuple1 { .. }
+                    | Opaque::SmallTuple2 { .. }
+                    | Opaque::SmallTuple3 { .. }
             );
         }
         false
@@ -47,8 +49,8 @@ impl Value {
     /// Since #2268 a heap-tuple `clone` is an O(1) refcount bump like `list`, so
     /// this no longer marks the O(N)-clone outlier; it still gates the VM's
     /// by-move builtin-arg fast path (#2251), which is now a cheap micro-opt
-    /// rather than an O(N) avoidance.  `SmallTuple2/3` (≤3 elements) return
-    /// `false` — they are inline, not heap.
+    /// rather than an O(N) avoidance.  `SmallTuple1/2/3` (1 to 3 elements)
+    /// return `false` — they are inline, not heap.
     #[inline]
     pub fn is_heap_tuple(&self) -> bool {
         top16(self.0) == TAG_TUPLE
@@ -212,6 +214,7 @@ impl Value {
             TAG_OPAQUE => match unsafe { &*self.opaque_ptr() } {
                 // Small-tuple variants stash a monotonic obj_id alongside their
                 // inline payload so `id()` stays stable across clones; see #281.
+                Opaque::SmallTuple1 { obj_id, .. } => Some(*obj_id as i64),
                 Opaque::SmallTuple2 { obj_id, .. } => Some(*obj_id as i64),
                 Opaque::SmallTuple3 { obj_id, .. } => Some(*obj_id as i64),
                 // Sets are Rc-shared with an obj_id captured at construction;
@@ -305,9 +308,9 @@ impl Value {
                     real: re.to_bits(),
                     imag: im.to_bits(),
                 },
-                Opaque::SmallTuple2 { obj_id, .. } | Opaque::SmallTuple3 { obj_id, .. } => {
-                    ObjectIdentity::Counter(*obj_id)
-                }
+                Opaque::SmallTuple1 { obj_id, .. }
+                | Opaque::SmallTuple2 { obj_id, .. }
+                | Opaque::SmallTuple3 { obj_id, .. } => ObjectIdentity::Counter(*obj_id),
                 Opaque::BuiltinObject { ops, state } => match ops.identity_payload(state) {
                     Some(payload) => ObjectIdentity::Builtin {
                         type_id: (*ops).type_id(),
@@ -414,6 +417,7 @@ impl Value {
                     | Opaque::SuperProxyClass { .. }
                     | Opaque::SuperProxyUnbound { .. }
                     | Opaque::Complex(_, _)
+                    | Opaque::SmallTuple1 { .. }
                     | Opaque::SmallTuple2 { .. }
                     | Opaque::SmallTuple3 { .. } => 0,
                 };

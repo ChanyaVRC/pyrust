@@ -162,12 +162,39 @@ impl From<PyErrorKind> for PyError {
     }
 }
 
+// Thread-local justification:
+// (a) Why `thread_local!`: the parked box is raw scratch memory on the cold
+//     error path; it is recycled without threading an allocator handle
+//     through every `Result` return path, and without atomics or locks.
+// (b) Multi-interpreter / multi-threaded impact: interpreters on one thread
+//     share the single parked box, which only ever holds the empty placeholder
+//     payload and therefore carries no Python-observable state; each OS thread
+//     owns its own box and frees it on exit.
+thread_local! {
+    /// One emptied [`PyError`] box per thread, handed back by
+    /// [`PyError::into_kind`] and reused by the next [`PyError::new`].
+    ///
+    /// Raising an exception that a handler then catches boxes one payload
+    /// and unboxes it again a few instructions later; keeping that single
+    /// allocation alive turns the pair into two moves (issue #3426).  The
+    /// parked box only ever holds the empty [`PyErrorKind::Runtime`]
+    /// placeholder, never a live exception value.
+    static SPARE_ERROR_BOX: std::cell::Cell<Option<Box<PyErrorKind>>> =
+        const { std::cell::Cell::new(None) };
+}
+
 impl PyError {
     /// Box a [`PyErrorKind`] into a compact [`PyError`].
     #[cold]
     #[inline]
     pub fn new(kind: PyErrorKind) -> Self {
-        Self(Box::new(kind))
+        match SPARE_ERROR_BOX.try_with(std::cell::Cell::take) {
+            Ok(Some(mut spare)) => {
+                *spare = kind;
+                Self(spare)
+            }
+            _ => Self(Box::new(kind)),
+        }
     }
 
     /// Borrow the underlying [`PyErrorKind`].
@@ -185,7 +212,12 @@ impl PyError {
     /// Unbox and return the underlying [`PyErrorKind`].
     #[inline]
     pub fn into_kind(self) -> PyErrorKind {
-        *self.0
+        let mut boxed = self.0;
+        let kind = std::mem::replace(&mut *boxed, PyErrorKind::Runtime(String::new()));
+        // Park the emptied box for the next error.  A thread that is tearing
+        // down its thread-locals simply frees it.
+        let _ = SPARE_ERROR_BOX.try_with(|spare| spare.set(Some(boxed)));
+        kind
     }
 
     /// Constructor for a lexer error.
@@ -519,8 +551,42 @@ pub type Result<T> = std::result::Result<T, PyError>;
 mod tests {
     use std::mem::size_of;
 
-    use super::{PyError, Result};
+    use super::{PyError, PyErrorKind, Result};
     use crate::object_model::Value;
+
+    #[test]
+    fn unboxed_error_box_is_reused_and_retains_no_value() {
+        // A private thread owns the spare box this test observes.
+        std::thread::spawn(|| {
+            let payload = Value::list(vec![Value::int(1)]);
+            let error = PyError::raised(payload.clone());
+            let first_box = std::ptr::from_ref(error.kind());
+
+            let kind = error.into_kind();
+            assert!(matches!(&kind, PyErrorKind::Raised(value) if value.is_identical_to(&payload)));
+            drop(kind);
+            assert_eq!(
+                payload.refcount(),
+                1,
+                "the parked box must not keep the raised value alive"
+            );
+
+            // The next error reuses the parked box and carries its own payload.
+            let next = PyError::runtime("next".to_string());
+            assert_eq!(std::ptr::from_ref(next.kind()), first_box);
+            assert!(matches!(next.kind(), PyErrorKind::Runtime(message) if message == "next"));
+
+            // With the spare in use, a second live error gets its own box.
+            let other = PyError::runtime("other".to_string());
+            assert_ne!(std::ptr::from_ref(other.kind()), first_box);
+            assert!(
+                matches!(other.into_kind(), PyErrorKind::Runtime(message) if message == "other")
+            );
+            assert!(matches!(next.into_kind(), PyErrorKind::Runtime(message) if message == "next"));
+        })
+        .join()
+        .expect("error box reuse must not panic");
+    }
 
     #[test]
     fn pyerror_and_result_sizes_stay_compact() {

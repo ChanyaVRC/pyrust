@@ -1127,3 +1127,47 @@ class B(A):
         assert!(pending.is_empty(), "{stage}: every load is consumed");
     }
 }
+
+/// A handler copies the caught exception into a register only when it binds
+/// it (`as VAR`): an unbound copy would keep the exception alive in a dead
+/// temporary until the frame exits (issue #3426).
+#[test]
+fn except_handlers_load_the_exception_only_when_one_binds_it() {
+    let loads = |source: &str| {
+        compile_source(source)
+            .insns
+            .iter()
+            .filter(|insn| matches!(insn, Insn::LoadExc(_)))
+            .count()
+    };
+
+    for unbound in [
+        "try:\n    f()\nexcept ValueError:\n    pass\n",
+        "try:\n    f()\nexcept:\n    pass\n",
+        "try:\n    f()\nexcept (KeyError, IndexError):\n    g()\nexcept ValueError:\n    h()\nelse:\n    k()\n",
+    ] {
+        assert_eq!(loads(unbound), 0, "{unbound:?}");
+        // Matching and the unmatched re-raise read the active exception.
+        let code = compile_source(unbound);
+        assert!(
+            code.insns
+                .iter()
+                .any(|insn| matches!(insn, Insn::RaiseReRaise)),
+            "{unbound:?}"
+        );
+        assert!(
+            code.insns
+                .iter()
+                .any(|insn| matches!(insn, Insn::EndExcept)),
+            "{unbound:?}"
+        );
+    }
+
+    // One load serves every handler of the statement once any of them binds.
+    for bound in [
+        "try:\n    f()\nexcept ValueError as err:\n    g(err)\n",
+        "try:\n    f()\nexcept KeyError:\n    pass\nexcept ValueError as err:\n    g(err)\n",
+    ] {
+        assert_eq!(loads(bound), 1, "{bound:?}");
+    }
+}

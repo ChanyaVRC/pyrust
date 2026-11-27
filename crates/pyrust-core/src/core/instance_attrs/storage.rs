@@ -83,6 +83,76 @@ struct InstanceAttrsAux {
     finalized: bool,
 }
 
+/// Number of emptied slot-storage blocks kept per thread for reuse.
+const SPARE_SLOT_STORAGE_LIMIT: usize = 16;
+/// A block whose slot vector grew past this many entries is freed instead of
+/// parked, so an unusually wide instance cannot pin its buffer.
+const SPARE_SLOT_STORAGE_MAX_SLOTS: usize = 8;
+
+// Thread-local justification:
+// (a) Why `thread_local!`: the parked blocks are emptied scratch memory (no
+//     `Value`, no key handle) reused as an allocator optimisation, so the
+//     pool needs neither atomics nor a lock and matches `Value`'s
+//     thread-confined ownership model.
+// (b) Multi-interpreter / multi-threaded impact: interpreters on one thread
+//     share the bounded pool, which carries no Python-observable state; each
+//     OS thread owns an independent pool that is freed on exit.
+thread_local! {
+    /// Emptied [`InstanceAttrsAux`] blocks (with their slot vectors' buffers)
+    /// left behind by dropped slot-only instances, reused by
+    /// [`InstanceAttrs::from_native_slots`] (issue #3426).
+    ///
+    /// The boxes are the point: each parked entry is the very heap block an
+    /// instance's `aux` pointer will own again, so the pool must hold boxes.
+    #[allow(clippy::vec_box)]
+    static SPARE_SLOT_STORAGE: RefCell<Vec<Box<InstanceAttrsAux>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Take a parked, empty slot-storage block, if this thread has one.
+fn take_spare_slot_storage() -> Option<Box<InstanceAttrsAux>> {
+    SPARE_SLOT_STORAGE
+        .try_with(|pool| pool.try_borrow_mut().ok()?.pop())
+        .ok()
+        .flatten()
+}
+
+/// Park the slot storage of an instance that is being dropped.
+///
+/// A built-in exception's storage is one `InstanceAttrsAux` block plus its
+/// slot vector's buffer; a `try` / `except` loop used to allocate and free
+/// both for every exception raised.  Only that shape — named slots and
+/// nothing else — is parked: everything it owns is released here, before the
+/// pool is touched, because dropping a slot value may drop further instances
+/// and re-enter this function.
+fn recycle_slot_storage(mut aux: Box<InstanceAttrsAux>) {
+    if aux.index.is_some()
+        || aux.builtin_data.is_some()
+        || !aux.member_slots.is_empty()
+        || aux.native_slots.capacity() == 0
+        || aux.native_slots.capacity() > SPARE_SLOT_STORAGE_MAX_SLOTS
+    {
+        return;
+    }
+    aux.native_slots.clear();
+    aux.finalized = false;
+    let _ = SPARE_SLOT_STORAGE.try_with(|pool| {
+        if let Ok(mut pool) = pool.try_borrow_mut()
+            && pool.len() < SPARE_SLOT_STORAGE_LIMIT
+        {
+            pool.push(aux);
+        }
+    });
+}
+
+impl Drop for InstanceAttrs {
+    fn drop(&mut self) {
+        if let Some(aux) = self.aux.take() {
+            recycle_slot_storage(aux);
+        }
+    }
+}
+
 /// Attribute count above which [`InstanceAttrs`] builds a hash index for
 /// O(1) cold lookups.  At or below this, linear scan over the compact `Vec`
 /// wins (the #2161 small-instance memory + speed gain); the measured crossover
@@ -119,6 +189,38 @@ impl InstanceAttrs {
                 builtin_data: None,
                 finalized: false,
             })),
+            dict_ref: None,
+        }
+    }
+
+    /// Construct storage from C-style slots the caller has already keyed.
+    ///
+    /// Lets a hot constructor (a built-in exception, issue #3426) hand over
+    /// its slots with shared key handles instead of looking each name up in
+    /// the interner and scanning for an existing entry, and reuses the slot
+    /// storage a dropped instance of the same shape left behind (see
+    /// [`recycle_slot_storage`]).  The names must be distinct, exactly as
+    /// repeated [`Self::insert_slot`] calls would leave them.  `capacity` is
+    /// the number of slots the instance is expected to end up with.
+    pub fn from_native_slots<const N: usize>(
+        native_slots: [(Rc<str>, Value); N],
+        capacity: usize,
+    ) -> Self {
+        debug_assert!(
+            native_slots
+                .iter()
+                .enumerate()
+                .all(|(index, (name, _))| native_slots[..index]
+                    .iter()
+                    .all(|(seen, _)| seen != name)),
+            "native slot names must be distinct"
+        );
+        let mut aux = take_spare_slot_storage().unwrap_or_default();
+        aux.native_slots.reserve(capacity.max(N));
+        aux.native_slots.extend(native_slots);
+        InstanceAttrs {
+            entries: Vec::new(),
+            aux: Some(aux),
             dict_ref: None,
         }
     }

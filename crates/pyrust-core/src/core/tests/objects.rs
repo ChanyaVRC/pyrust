@@ -704,3 +704,117 @@ fn backing_repr_does_not_trust_spoofed_builtin_or_object_names() {
         );
     }
 }
+
+#[test]
+fn one_element_tuple_is_stored_inline_and_behaves_like_any_tuple() {
+    let item = Value::list(vec![Value::int(1)]);
+    let tuple = Value::tuple(vec![item.clone()]);
+
+    assert!(tuple.is_tuple());
+    assert!(!tuple.is_heap_tuple(), "a 1-tuple needs no heap backing");
+    let items = tuple.as_tuple().expect("a 1-tuple is a tuple");
+    assert_eq!(items.len(), 1);
+    assert!(items[0].is_identical_to(&item));
+    assert!(matches!(tuple.kind(), ValueKind::Tuple(items) if items.len() == 1));
+
+    // An alias shares identity; a separately built equal tuple does not.
+    let alias = tuple.clone();
+    assert!(alias.is_identical_to(&tuple));
+    assert_eq!(alias.value_id(), tuple.value_id());
+    let equal = Value::tuple_from_slice(std::slice::from_ref(&item));
+    assert!(!equal.is_heap_tuple());
+    assert_eq!(equal, tuple);
+    assert!(!equal.is_identical_to(&tuple));
+    assert_ne!(equal.value_id(), tuple.value_id());
+    // An unhashable item makes the tuple unhashable; a hashable 1-tuple keys
+    // like any equal tuple and unlike its bare item.
+    assert!(tuple.to_key().is_none());
+    let key = |value: Value| value.to_key().expect("an int tuple is hashable");
+    assert_eq!(
+        key(Value::tuple(vec![Value::int(7)])),
+        key(Value::tuple_from_slice(&[Value::int(7)]))
+    );
+    assert_ne!(key(Value::tuple(vec![Value::int(7)])), key(Value::int(7)));
+
+    // The neighbouring shapes keep their own representation.
+    assert!(Value::tuple(vec![]).is_heap_tuple());
+    assert!(!Value::tuple(vec![Value::int(1), Value::int(2)]).is_heap_tuple());
+    assert!(Value::tuple(vec![Value::int(0); 4]).is_heap_tuple());
+
+    drop((tuple, alias, equal));
+    assert_eq!(item.refcount(), 1, "dropping the tuples releases the item");
+}
+
+#[test]
+fn slot_storage_is_recycled_without_retaining_keys_or_values() {
+    // A private thread keeps this test's pool separate from other tests.
+    std::thread::spawn(|| {
+        let payload = Value::list(vec![]);
+        let args_key: Rc<str> = Rc::from("args");
+        let traceback_key: Rc<str> = Rc::from("__traceback__");
+
+        let attrs = InstanceAttrs::from_native_slots(
+            [
+                (Rc::clone(&args_key), payload.clone()),
+                (Rc::clone(&traceback_key), Value::none()),
+            ],
+            2,
+        );
+        assert_eq!(attrs.slot_len(), 2);
+        assert!(attrs.is_empty(), "slots are not visible attributes");
+        assert!(attrs.get_slot("args").unwrap().is_identical_to(&payload));
+        assert!(attrs.get_slot("__traceback__").unwrap().is_none());
+        drop(attrs);
+
+        // The parked storage is empty: it holds neither the value nor a key.
+        assert_eq!(payload.refcount(), 1);
+        assert_eq!(Rc::strong_count(&args_key), 1);
+        assert_eq!(Rc::strong_count(&traceback_key), 1);
+
+        // The next instance reuses it and sees only its own slots.
+        let next = InstanceAttrs::from_native_slots([(Rc::clone(&args_key), Value::int(7))], 1);
+        assert_eq!(next.slot_len(), 1);
+        assert_eq!(next.get_slot("args").and_then(Value::as_int), Some(7));
+        assert!(next.get_slot("__traceback__").is_none());
+    })
+    .join()
+    .expect("slot storage recycling must not panic");
+}
+
+#[test]
+fn recycled_slot_storage_never_carries_instance_state_over() {
+    std::thread::spawn(|| {
+        let key: Rc<str> = Rc::from("args");
+        let fresh = || InstanceAttrs::from_native_slots([(Rc::clone(&key), Value::int(1))], 1);
+
+        // A finalized instance: the flag must not leak into the next owner.
+        let mut finalized = fresh();
+        finalized.mark_finalized();
+        drop(finalized);
+        assert!(!fresh().is_finalized());
+
+        // Storage that also holds a member cell or a built-in backing value
+        // is a different shape and is simply freed.
+        let backing = Value::list(vec![]);
+        let mut other_shape = fresh();
+        other_shape.insert_member_slot(MemberSlotId::fresh(), backing.clone());
+        other_shape.set_builtin_data(backing.clone());
+        drop(other_shape);
+        assert_eq!(backing.refcount(), 1);
+        let next = fresh();
+        assert_eq!(next.member_slot_len(), 0);
+        assert!(next.builtin_data().is_none());
+
+        // Many instances dropped at once stay within the pool's bound and
+        // every later instance still starts clean.
+        let batch: Vec<InstanceAttrs> = (0..64).map(|_| fresh()).collect();
+        drop(batch);
+        for _ in 0..64 {
+            let attrs = fresh();
+            assert_eq!(attrs.slot_len(), 1);
+            assert_eq!(attrs.get_slot("args").and_then(Value::as_int), Some(1));
+        }
+    })
+    .join()
+    .expect("slot storage recycling must not panic");
+}

@@ -148,11 +148,13 @@ fn resolve_construction_plan_cached(class: &Rc<RefCell<PyClass>>) -> Option<Cons
 ///
 /// - no metaclass `__call__` override (#1956 / #2939 / #2944 / #2947),
 /// - no non-empty `__abstractmethods__` (#3293),
-/// - not an exception class, not a `type` subclass, no primitive storage base,
-/// - `__new__` resolves to `object.__new__` and its slot was never wrapped
-///   (#1143 / #2335),
-/// - `__init__` resolves to `object.__init__` or to an ordinary Python
-///   function.
+/// - not a `type` subclass, no primitive storage base,
+/// - for an ordinary class: `__new__` resolves to `object.__new__` and its
+///   slot was never wrapped (#1143 / #2335), and `__init__` resolves to
+///   `object.__init__` or to an ordinary Python function,
+/// - for an exception class (issue #3426): it carries only `BaseException`'s
+///   own state, and neither it nor an ancestor defines `__new__`, `__init__`
+///   or `__del__` (see [`PlainClassShape::BaseLayoutException`]).
 ///
 /// Every one of those facts is a function of class attributes along the class
 /// and metaclass MROs, and every class-attribute write or delete bumps both
@@ -178,6 +180,21 @@ pub(crate) struct PlainClassPlan {
     /// Some class in the MRO defines `__del__`, so each construction is
     /// offered to the finalizer bookkeeping (#3341 / #3353).
     has_finalizer: bool,
+    /// What a construction allocates.
+    shape: PlainClassShape,
+}
+
+/// The allocation a [`PlainClassPlan`] performs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlainClassShape {
+    /// An ordinary instance: bare allocation plus the plan's `__init__`.
+    Instance,
+    /// A built-in exception class, or a subclass that adds neither a
+    /// constructor nor a finalizer, whose instances carry only
+    /// `BaseException`'s own state: the positional arguments become `args`
+    /// and nothing else runs (issue #3426).  Such a plan never has an
+    /// `__init__` or a finalizer.
+    BaseLayoutException,
 }
 
 /// The resolved ordinary-function `__init__` of a [`PlainClassPlan`].
@@ -216,6 +233,13 @@ impl PlainClassPlan {
         self.init.is_none()
     }
 
+    /// The plan constructs a built-in exception that carries only
+    /// `BaseException`'s own state.
+    #[inline]
+    pub(crate) fn is_base_layout_exception(&self) -> bool {
+        self.shape == PlainClassShape::BaseLayoutException
+    }
+
     /// Whether constructions are offered to the finalizer bookkeeping.
     #[cfg(test)]
     pub(crate) fn has_finalizer(&self) -> bool {
@@ -232,7 +256,7 @@ impl PlainClassPlan {
             (Some(current), Some(new)) => current.function.ptr_eq(&new.function),
             _ => false,
         };
-        if !same_init || self.has_finalizer != fresh.has_finalizer {
+        if !same_init || self.has_finalizer != fresh.has_finalizer || self.shape != fresh.shape {
             return false;
         }
         self.stamp.set(fresh.stamp.get());
@@ -298,10 +322,43 @@ impl Interpreter {
         if crate::interpreter::metaclass_dunder(class, "__call__").is_some() {
             return None;
         }
-        if is_exception_class(class) || class_is_subclass_of(class, &type_class_singleton()) {
+        let exception_kinds = classify_exception_class(class);
+        if exception_kinds.exception {
+            return Self::resolve_base_layout_exception_plan(class, stamp, exception_kinds);
+        }
+        if class_is_subclass_of(class, &type_class_singleton()) {
             return None;
         }
         Self::resolve_plain_class_slots(class, stamp)
+    }
+
+    /// The exception half of [`Self::resolve_plain_class_plan`], mirroring
+    /// `default_construct` and `construct_exception_instance` (issue #3426).
+    ///
+    /// Only a class those two would construct by packing the positional
+    /// arguments into `args` is planned: any built-in family with attributes
+    /// or argument validation of its own, any `__new__` / `__init__` along
+    /// the chain, and any `__del__` (whose constructions the generic path
+    /// counts, #3341) stays on the generic path.
+    fn resolve_base_layout_exception_plan(
+        class: &Rc<RefCell<PyClass>>,
+        stamp: (u64, u64),
+        kinds: crate::interpreter::ExcClassKinds,
+    ) -> Option<PlainClassPlan> {
+        if !kinds.has_base_layout_only()
+            || kinds.has_user_new
+            || kinds.has_user_init
+            || lookup_class_attr(class, "__del__").is_some()
+        {
+            return None;
+        }
+        Some(PlainClassPlan {
+            class: Rc::downgrade(class),
+            stamp: std::cell::Cell::new(stamp),
+            init: None,
+            has_finalizer: false,
+            shape: PlainClassShape::BaseLayoutException,
+        })
     }
 
     /// The `__new__` / `__init__` / `__del__` half of
@@ -375,6 +432,7 @@ impl Interpreter {
             stamp: std::cell::Cell::new(stamp),
             init,
             has_finalizer,
+            shape: PlainClassShape::Instance,
         })
     }
 }
