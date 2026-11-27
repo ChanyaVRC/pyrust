@@ -676,10 +676,10 @@ pyrust_builtin_modules! {
     // `shlex` (issues #3147, #3356): shell-like lexical analyzer (`shlex`,
     // `split`, `join`, `quote`) implemented 100% natively in Rust.
     shlex,
-    // `fnmatch` (issue #3148): pure-Python Unix shell-style filename pattern
-    // matching (`fnmatch`, `fnmatchcase`, `filter`, `translate`) injected from
-    // `fnmatch_py.py` by the `@inject` post-load hook.
-    fnmatch @inject,
+    // `fnmatch` (issues #3148, #3452): Unix shell-style filename pattern
+    // matching (`fnmatch`, `fnmatchcase`, `filter`, `translate`) implemented
+    // 100% natively in Rust (`fnmatch.rs`).
+    fnmatch,
     // `glob` (issue #3148): pure-Python pathname pattern expansion (`glob`,
     // `iglob`, `escape`, `has_magic`, `glob0`, `glob1`) injected from
     // `glob_py.py` by the `@inject` post-load hook.
