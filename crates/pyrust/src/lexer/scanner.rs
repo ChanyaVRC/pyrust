@@ -273,7 +273,7 @@ impl Lexer {
                 }
                 (n, n, n)
             } else {
-                count_indent_chars(&chars, pos)
+                count_indent_chars(chars, pos)
             };
             pos += indent_chars;
 
@@ -334,7 +334,7 @@ impl Lexer {
             pos = content_start; // reset to after-indent start
             let _ = line_start; // silence unused-variable warning
             let new_depth;
-            (pos, new_depth) = self.lex_line_tokens(&chars, pos, paren_depth, suppress_newlines)?;
+            (pos, new_depth) = self.lex_line_tokens(chars, pos, paren_depth, suppress_newlines)?;
             paren_depth = new_depth;
         }
 
@@ -541,7 +541,10 @@ impl Lexer {
                     // Bare CR: skip (CRLF handled by consuming \r then \n above)
                     pos += 1;
                 }
-                Some(' ') | Some('\t') => {
+                // A form feed inside a line is whitespace too, as in CPython
+                // (`eval("1\x0c")`, which no longer has its whitespace trimmed
+                // before lexing, #3402).
+                Some(' ') | Some('\t') | Some('\x0c') => {
                     pos += 1;
                 }
                 Some('#') => {

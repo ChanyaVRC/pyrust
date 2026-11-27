@@ -257,8 +257,9 @@ impl Parser {
         let mut ranges = Vec::new();
         let mut depth = 0usize;
         let mut item_start = start;
-        for index in start..end.min(self.tokens.len()) {
-            match self.tokens[index] {
+        let end_index = end.min(self.tokens.len());
+        for (index, token) in self.tokens[..end_index].iter().enumerate().skip(start) {
+            match token {
                 Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
                 Token::RParen | Token::RBracket | Token::RBrace => {
                     depth = depth.saturating_sub(1);
@@ -294,6 +295,88 @@ impl Parser {
     pub fn parse_program_with_linenos(&mut self) -> Result<(Vec<Stmt>, Vec<u32>)> {
         self.parse_program_with_linenos_unlocated()
             .map_err(|error| self.locate_error(error))
+    }
+
+    /// Parse `eval`-mode input: like CPython 3.12's `eval` rule
+    /// (`expressions NEWLINE* ENDMARKER`), it must be one expression (list)
+    /// followed only by newlines.
+    ///
+    /// The input is parsed as a program and accepted when that yields exactly
+    /// one expression statement without a `;`, so a valid expression gets the
+    /// same AST as an `exec`-mode expression statement.  Anything else is
+    /// rejected the way CPython's parser rejects it (#3402): see
+    /// [`Parser::eval_error`].
+    pub fn parse_eval_with_linenos(&mut self) -> Result<(Vec<Stmt>, Vec<u32>)> {
+        match self.parse_program_with_linenos_unlocated() {
+            Ok((stmts, linenos))
+                if matches!(stmts.as_slice(), [Stmt::Expr(_)])
+                    && !self.tokens.iter().any(|t| matches!(t, Token::Semicolon)) =>
+            {
+                Ok((stmts, linenos))
+            }
+            Ok(_) => Err(self.eval_error(None)),
+            Err(error) => {
+                let error = self.locate_error(error);
+                Err(self.eval_error(Some(error)))
+            }
+        }
+    }
+
+    /// The `SyntaxError` for `eval`-mode input that is not a lone expression
+    /// list.  `program_error` is the (located) failure of the program parse,
+    /// if it failed.
+    ///
+    /// CPython parses a comma-separated list of (unstarred, walrus-free)
+    /// expressions from the start and fails on the first token that cannot
+    /// continue it, so the input is re-parsed that way and the error lands
+    /// where CPython's does:
+    /// - no tokens at all: CPython's end-of-input location;
+    /// - the list ends: `invalid syntax` on the next token after any newlines
+    ///   (`x = 1` stops at `=`), or `unexpected indent` on an INDENT;
+    /// - an item cannot even start (`pass`, `import x`, `*a`): `invalid
+    ///   syntax` on its first token, or `unexpected indent` on indentation;
+    /// - an item fails part-way: the same failure the program parse hit
+    ///   (`'(' was never closed`, a trailing operator).
+    #[cold]
+    fn eval_error(&mut self, program_error: Option<PyError>) -> PyError {
+        self.pos = 0;
+        self.skip_newlines();
+        if self.is(&Token::Eof) || self.tokens.is_empty() {
+            return PyError::syntax(crate::error::SyntaxErrorInfo::empty_input("invalid syntax"));
+        }
+        loop {
+            if self.is(&Token::Star) || self.is(&Token::Indent) {
+                break;
+            }
+            let item_start = self.pos;
+            if let Err(item_error) = self.parse_expr_no_walrus() {
+                if self.pos == item_start {
+                    break;
+                }
+                return program_error.unwrap_or_else(|| self.locate_error(item_error));
+            }
+            if !self.is(&Token::Comma) {
+                self.skip_newlines();
+                break;
+            }
+            self.bump();
+            if self.at_stmt_end() {
+                self.skip_newlines();
+                break;
+            }
+        }
+        if self.is(&Token::Eof) {
+            // Not reachable for input the program parse accepted as one
+            // expression; keep whatever that parse reported.
+            return program_error
+                .unwrap_or_else(|| self.locate_error(PyError::parse("invalid syntax".into())));
+        }
+        let msg = if self.is(&Token::Indent) {
+            "unexpected indent"
+        } else {
+            "invalid syntax"
+        };
+        self.locate_error(PyError::parse(msg.to_string()))
     }
 
     fn parse_program_with_linenos_unlocated(&mut self) -> Result<(Vec<Stmt>, Vec<u32>)> {
@@ -339,7 +422,10 @@ impl Parser {
     ) -> Result<(Vec<Stmt>, Vec<u32>)> {
         self.skip_newlines();
         if self.is(&Token::Eof) {
-            return Err(PyError::parse("invalid syntax".to_string()));
+            // Located on CPython's ENDMARKER once the source is known (#3402).
+            return Err(PyError::syntax(crate::error::SyntaxErrorInfo::empty_input(
+                "invalid syntax",
+            )));
         }
         let stmt_lineno = self.current_lineno();
         let stmts = self.parse_stmt_sequence()?;
@@ -370,14 +456,24 @@ impl Parser {
                 return Err(PyError::parse("invalid syntax".to_string()));
             }
         }
+        let stmt_end = self.pos;
         self.skip_newlines();
         if !self.is(&Token::Eof) {
-            let msg = if has_compound {
-                "invalid syntax"
-            } else {
-                "multiple statements found while compiling a single statement"
-            };
-            return Err(PyError::parse(msg.to_string()));
+            if has_compound {
+                return Err(PyError::parse("invalid syntax".to_string()));
+            }
+            // CPython reports this on the NEWLINE that ends the first
+            // statement (#3402).
+            let error = PyError::parse(
+                "multiple statements found while compiling a single statement".to_string(),
+            );
+            let line = self.line_nos.get(stmt_end).copied().unwrap_or(0);
+            return Err(match (self.tokens.get(stmt_end), self.cols.get(stmt_end)) {
+                (Some(Token::Newline), Some(&col)) if line != 0 => {
+                    located_parse_error(error, (line, col), (line, col + 1), line)
+                }
+                _ => error,
+            });
         }
         let linenos = vec![stmt_lineno; stmts.len()];
         Ok((stmts, linenos))

@@ -58,14 +58,10 @@ pub(crate) enum SourceMode {
 /// The source a lexer/parser error is resolved against (#3402).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SyntaxErrorSource<'a> {
-    /// The text CPython's tokenizer sees.
+    /// The text CPython's tokenizer sees, which is also the text pyrust lexed.
     pub(crate) source: &'a str,
     pub(crate) filename: &'a str,
     pub(crate) mode: SourceMode,
-    /// The part of `source` pyrust stripped before lexing (`eval` trims its
-    /// input): the parsed text's lines shift down by the newlines in it, and
-    /// its first line shifts right by the chars after its last newline.
-    pub(crate) parsed_prefix: &'a str,
 }
 
 /// Resolve a lexer/parser error into the `SyntaxError` (or `IndentationError`
@@ -82,24 +78,30 @@ pub(crate) fn resolve_syntax_error(e: PyError, src: SyntaxErrorSource<'_>) -> Py
     if info.class_name == "SyntaxError" {
         info.class_name = syntax_error_class(&info.msg);
     }
-    let Some(pyrust_core::SyntaxErrorPending::Text {
-        rule,
-        newline_token,
-    }) = info.pending.take()
-    else {
-        return lex_parse_to_exc(PyError::new(pyrust_core::PyErrorKind::Syntax(info)));
-    };
-
-    let (line_shift, col_shift) = prefix_shift(src.parsed_prefix);
-    let shift = |lineno: Option<i64>, offset: Option<i64>| match (lineno, offset) {
-        (Some(1), Some(offset)) if offset > 0 => (Some(1 + line_shift), Some(offset + col_shift)),
-        (Some(lineno), offset) => (Some(lineno + line_shift), offset),
-        other => other,
-    };
-    (info.lineno, info.offset) = shift(info.lineno, info.offset);
-    (info.end_lineno, info.end_offset) = shift(info.end_lineno, info.end_offset);
-
     let lines: Vec<&str> = src.source.split_inclusive('\n').collect();
+    let (rule, newline_token) = match info.pending.take() {
+        Some(pyrust_core::SyntaxErrorPending::Text {
+            rule,
+            newline_token,
+        }) => (rule, newline_token),
+        Some(pyrust_core::SyntaxErrorPending::EmptyInput) => {
+            // CPython's ENDMARKER location: the last line, column 0, with
+            // the tokenizer's newline translation applied to `text`.
+            let lineno = lines.len() as i64;
+            let last = lines.last().copied().unwrap_or("");
+            let text = match last.strip_suffix("\r\n") {
+                Some(line) => format!("{line}\n"),
+                None => last.to_string(),
+            };
+            info.filename = Some(src.filename.to_string());
+            (info.lineno, info.offset) = (Some(lineno), Some(0));
+            (info.end_lineno, info.end_offset) = (Some(lineno), Some(0));
+            info.text = Some(text);
+            return PyError::new(pyrust_core::PyErrorKind::Syntax(info));
+        }
+        _ => return lex_parse_to_exc(PyError::new(pyrust_core::PyErrorKind::Syntax(info))),
+    };
+
     let lineno = info.lineno.unwrap_or(0);
     let line = usize::try_from(lineno)
         .ok()
@@ -117,7 +119,7 @@ pub(crate) fn resolve_syntax_error(e: PyError, src: SyntaxErrorSource<'_>) -> Py
         pyrust_core::SyntaxTextRule::ParserLine { tokenizer_lineno } => {
             let tokenizer_lineno = match tokenizer_lineno {
                 0 => lines.len() as i64,
-                n => i64::from(n) + line_shift,
+                n => i64::from(n),
             };
             let from_file = (src.mode == SourceMode::Exec)
                 .then(|| program_text_line(src.filename, lineno))
@@ -140,11 +142,37 @@ pub(crate) fn resolve_syntax_error(e: PyError, src: SyntaxErrorSource<'_>) -> Py
     PyError::new(pyrust_core::PyErrorKind::Syntax(info))
 }
 
-/// `(line shift, first-line column shift)` for text that followed `prefix`.
-fn prefix_shift(prefix: &str) -> (i64, i64) {
-    let line_shift = prefix.matches('\n').count() as i64;
-    let tail = prefix.rsplit('\n').next().unwrap_or("");
-    (line_shift, tail.chars().count() as i64)
+/// In `eval` / `single` input (no newline appended), CPython's tokenizer
+/// reads a last line of only spaces, tabs and form feeds with no newline
+/// after it as indentation, so input ending that way fails with `unexpected
+/// indent` on that line once everything before it has parsed (#3402);
+/// pyrust's lexer treats such a line as blank.  `None` for other input.
+pub(crate) fn trailing_indent_error(source: &str) -> Option<PyError> {
+    let last = source.rsplit('\n').next().unwrap_or(source);
+    if last.is_empty() || !last.chars().all(|c| matches!(c, ' ' | '\t' | '\x0c')) {
+        return None;
+    }
+    let lineno = u32::try_from(source.matches('\n').count() + 1).ok()?;
+    let col = i64::try_from(last.chars().count()).ok()?;
+    Some(PyError::syntax(pyrust_core::SyntaxErrorInfo::at_lines(
+        "unexpected indent",
+        (lineno, col),
+        (lineno, -1),
+        pyrust_core::SyntaxTextRule::ParserLine {
+            tokenizer_lineno: lineno,
+        },
+        false,
+    )))
+}
+
+/// Whether `error` is the location-pending error for `eval` / `single` input
+/// without any statement.
+pub(crate) fn is_empty_input_error(error: &PyError) -> bool {
+    matches!(
+        error.kind(),
+        pyrust_core::PyErrorKind::Syntax(info)
+            if info.pending == Some(pyrust_core::SyntaxErrorPending::EmptyInput)
+    )
 }
 
 /// Line `lineno` (with its newline) of the file `filename`, as CPython's

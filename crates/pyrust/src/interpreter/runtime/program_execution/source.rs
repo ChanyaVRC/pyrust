@@ -34,38 +34,35 @@ impl Interpreter {
             source,
             filename,
             mode: SourceMode::Exec,
-            parsed_prefix: "",
         };
-        self.parse_program_source_with_warnings(source, origin)
+        self.parse_program_source_with_warnings(origin)
     }
 
-    /// Parse an expression source for `eval()` / `compile(..., 'eval')`.
-    ///
-    /// Surrounding whitespace is trimmed before parsing; a syntax error is
-    /// still located within the untrimmed `source` (#3402), which is the text
-    /// CPython's tokenizer sees (`eval()` itself strips leading spaces and
-    /// tabs before calling here, as CPython's `builtin_eval` does).
+    /// Parse an expression source for `eval()` / `compile(..., 'eval')`: one
+    /// expression list followed only by blank lines, as CPython's `eval`
+    /// grammar rule requires.  The source is parsed as written, so leading
+    /// indentation is an `unexpected indent` like in CPython (`eval()` itself
+    /// strips leading spaces and tabs before calling here, as CPython's
+    /// `builtin_eval` does), and a syntax error is located within it (#3402).
     pub(crate) fn parse_eval_source_to_stmts_with_warnings(
         &mut self,
         source: &str,
         filename: &str,
     ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
-        let trimmed = source.trim();
         let origin = SyntaxErrorSource {
             source,
             filename,
             mode: SourceMode::Eval,
-            parsed_prefix: &source[..source.len() - source.trim_start().len()],
         };
-        self.parse_program_source_with_warnings(trimmed, origin)
+        self.parse_program_source_with_warnings(origin)
     }
 
+    /// Lex and parse `origin.source` in `exec` or `eval` mode.
     fn parse_program_source_with_warnings(
         &mut self,
-        parsed: &str,
         origin: SyntaxErrorSource<'_>,
     ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
-        let (tokens, line_nos, cols, cols_end, warnings) = crate::lexer::Lexer::new(parsed)
+        let (tokens, line_nos, cols, cols_end, warnings) = crate::lexer::Lexer::new(origin.source)
             .map_err(|e| resolve_syntax_error(e, origin))?
             .into_tokens_with_pos_and_warnings();
         for (lineno, msg) in warnings {
@@ -77,9 +74,18 @@ impl Interpreter {
             )?;
         }
         let mut parser = crate::parser::Parser::new_with_pos(tokens, line_nos, cols, cols_end);
-        parser
-            .parse_program_with_linenos()
-            .map_err(|e| resolve_syntax_error(e, origin))
+        let parsed = if origin.mode == SourceMode::Eval {
+            match parser.parse_eval_with_linenos() {
+                Ok(parsed) => trailing_indent_error(origin.source).map_or(Ok(parsed), Err),
+                Err(e) if is_empty_input_error(&e) => {
+                    Err(trailing_indent_error(origin.source).unwrap_or(e))
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            parser.parse_program_with_linenos()
+        };
+        parsed.map_err(|e| resolve_syntax_error(e, origin))
     }
 
     /// Parse a Python source string as a single interactive statement for
@@ -94,7 +100,6 @@ impl Interpreter {
             source,
             filename,
             mode: SourceMode::Single,
-            parsed_prefix: "",
         };
         let (tokens, line_nos, cols, cols_end, warnings) = crate::lexer::Lexer::new(source)
             .map_err(|e| resolve_syntax_error(e, origin))?
@@ -111,6 +116,11 @@ impl Interpreter {
         let ends_with_newline = source.ends_with('\n') || source.ends_with('\r');
         parser
             .parse_single_with_linenos(ends_with_newline)
+            .map_err(|e| match trailing_indent_error(source) {
+                // Blank-only input ending in indentation (#3402).
+                Some(indent) if is_empty_input_error(&e) => indent,
+                _ => e,
+            })
             .map_err(|e| resolve_syntax_error(e, origin))
     }
 
@@ -248,9 +258,9 @@ impl Interpreter {
     ) -> Result<Value> {
         let _int_max_str_digits_guard = IntMaxStrDigitsExecutionGuard::enter(self);
         // CPython's `builtin_eval` strips leading spaces and tabs before
-        // compiling, so syntax-error columns are relative to the stripped text
-        // (#3402); the parse itself trims all surrounding whitespace, so
-        // `eval("  1 + 2  ")` and `eval("1 + 2\n")` both work.
+        // compiling, so `eval("  1 + 2")` works and syntax-error columns are
+        // relative to the stripped text (#3402).  Trailing whitespace and
+        // blank lines are accepted by the `eval` grammar itself.
         let source = source.trim_start_matches([' ', '\t']);
         let (program, linenos) =
             self.parse_eval_source_to_stmts_with_warnings(source, "<string>")?;

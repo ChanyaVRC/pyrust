@@ -189,6 +189,11 @@ pub enum SyntaxErrorPending {
         rule: SyntaxTextRule,
         newline_token: bool,
     },
+    /// `eval` / `single` input holding nothing but blank lines and comments.
+    /// CPython reports its ENDMARKER: `lineno` is the number of source lines
+    /// (`0` for empty input), both offsets are `0`, and `text` is the last
+    /// line as written.
+    EmptyInput,
 }
 
 /// Structured payload of [`PyErrorKind::Syntax`]: the exception class plus the
@@ -253,6 +258,23 @@ impl SyntaxErrorInfo {
                 rule,
                 newline_token,
             }),
+        }
+    }
+
+    /// A `SyntaxError` for `eval` / `single` input without any statement,
+    /// located once the source is known (see
+    /// [`SyntaxErrorPending::EmptyInput`]).
+    pub fn empty_input(msg: impl Into<String>) -> Self {
+        Self {
+            class_name: "SyntaxError",
+            msg: msg.into(),
+            filename: None,
+            lineno: None,
+            offset: None,
+            text: None,
+            end_lineno: None,
+            end_offset: None,
+            pending: Some(SyntaxErrorPending::EmptyInput),
         }
     }
 }

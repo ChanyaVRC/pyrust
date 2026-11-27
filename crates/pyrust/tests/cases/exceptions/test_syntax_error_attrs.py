@@ -170,6 +170,43 @@ where("bad-escape-line2", "y = 1\nx = 'ab\\u12'")
 where("bytes-escape", "x = b'\\x1'")
 where("bytes-non-ascii", "x = b'\u00e9'")
 
+print("--- eval mode: input that is not one expression")
+# CPython's `eval` rule parses an expression list and fails on the first
+# token that cannot continue it.
+for src in ["x = 1", "x = 1\n", "pass", "pass;", "1;", "1\n2", "1\n\n2\n", "a b",
+            "x = 1 +", "x = (1,\n2 +", "x = [\n1,\n2\n", "import x", "if 1: pass",
+            "x += 1", "x: int", "1, 2 = 3", "del x", "1 = 2", "f() = 3", "return",
+            "lambda: 1 = 2", "*a = b", "*a, b", "1, *a", "*a", "1 if 2 else 3 = 4",
+            "def f(): pass", "@d", "for x in y: pass", "(1) (2"]:
+    full("eval " + ascii(src), src, "eval")
+print("--- eval mode: empty input")
+for src in ["", "\n", "\n\n", "  \n", "#c", "#c\n", "\n#c\n", "\r\n"]:
+    full("eval " + ascii(src), src, "eval")
+print("--- eval mode: indentation (location only)")
+for src in ["   ", "\t", "  x = 1", "\tx = 1", "\n  x = 1", "x\n  y", "#c\n  1",
+            "1\n   ", "1\n \t"]:
+    where("eval " + ascii(src), src, "eval")
+print("--- eval mode: accepted")
+for src in ["1   ", "1 \n \n", "1\n  \n", "\n\n1", "1\r\n", "1\r\n\r\n", "\x0c1",
+            "1\x0c", "1\n  #c", "1\n  #c\n", "(1\n)", "1,", "1, 2", "(*a, b)",
+            "lambda: 0", "[i for i in x]"]:
+    try:
+        compile(src, "<test>", "eval")
+    except SyntaxError as exc:
+        print("eval", ascii(src), "error", ascii(exc.args))
+    else:
+        print("eval", ascii(src), "ok")
+print("x\x0c= 1", "exec ok" if compile("x\x0c= 1", "<test>", "exec") else "")
+
+print("--- single mode")
+for src in ["x = 1\ny = 2\n", "x = 1\ny = 2", "x = 1; y = 2\nz\n", "x = 1\n\n\ny = 2\n",
+            "x = 1;\ny\n", "x\n  y\n", "if 1:\n  pass\nx\n", "", "\n", "#c"]:
+    full("single " + ascii(src), src, "single")
+where("single '   '", "   ", "single")
+where("single '1 +'", "1 +", "single")
+compile("x\n   ", "<test>", "single")
+print("single 'x\\n   ' ok")
+
 print("--- exec / eval builtins")
 # eval() strips leading spaces and tabs before compiling, like CPython.
 run("eval", lambda: eval("1 +"), wording=False)
@@ -182,6 +219,14 @@ run("exec", lambda: exec("1 +"), wording=False)
 run("exec-unindent", lambda: exec("if 1:\n  a\n b\n"))
 run("exec-number", lambda: exec("x = 0x"))
 run("exec-code-filename", lambda: exec(compile("x = (", "<named>", "exec")))
+for src in ["", "\n", "   ", "  \n", "x = 1", "  x = 1", "pass", "\t1;"]:
+    run("eval " + ascii(src), lambda: eval(src))
+for src in ["\n x = 1", " \n x"]:
+    try:
+        eval(src)
+    except SyntaxError as exc:
+        print("eval", ascii(src), ascii(exc.args[0]), ascii(attrs(exc)))
+print(eval("  1 + 2  "), eval("1 + 2\n"), eval("\t3\n\n"), eval("\n4"))
 
 print("--- exception object")
 try:
