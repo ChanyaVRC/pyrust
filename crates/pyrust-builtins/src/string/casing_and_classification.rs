@@ -297,9 +297,10 @@ fn is_python_space(c: char) -> bool {
 }
 
 /// [`is_python_space`] on a raw codepoint, so lone surrogates (never
-/// whitespace) can be classified without building a `char`.
+/// whitespace) can be classified without building a `char`.  Also `\s` of a
+/// Python `str` regex (shared with the native `fractions` parser).
 #[inline]
-fn is_python_space_cp(cp: u32) -> bool {
+pub fn is_python_space_cp(cp: u32) -> bool {
     matches!(
         cp,
         0x09..=0x0D
