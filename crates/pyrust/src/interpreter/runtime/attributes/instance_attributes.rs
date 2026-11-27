@@ -434,8 +434,18 @@ impl Interpreter {
         // CPython only allows __class__ reassignment between mutable
         // (heap) types.  Re-typing to a built-in immutable class
         // (int / str / list / object / …) raises TypeError.
-        if crate::interpreter::is_primitive_class(&new_class)
-            || Rc::ptr_eq(&new_class, &object_class_singleton())
+        // A `ModuleType` subclass instance may be put back to plain
+        // `ModuleType` (`importlib.util._LazyModule` does so once its module
+        // has loaded); every other primitive target stays rejected.
+        let module_type = crate::interpreter::module_type_singleton();
+        let back_to_module_type = Rc::ptr_eq(&new_class, &module_type) && {
+            let old_class = Rc::clone(&instance.borrow().class);
+            !Rc::ptr_eq(&old_class, &module_type)
+                && crate::interpreter::class_is_subclass_of(&old_class, &module_type)
+        };
+        if !back_to_module_type
+            && (crate::interpreter::is_primitive_class(&new_class)
+                || Rc::ptr_eq(&new_class, &object_class_singleton()))
         {
             return Err(pyrust_core::type_err!(
                 "__class__ assignment only supported for mutable types or ModuleType subclasses"

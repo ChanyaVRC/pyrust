@@ -28,15 +28,6 @@ thread_local! {
     static IMPORT_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
-fn fnv1a_64_with_key(key: u64, data: &[u8]) -> [u8; 8] {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325 ^ key;
-    for &b in data {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash.to_le_bytes()
-}
-
 pyrust_module! {
     constants {
         "check_hash_based_pycs" => Value::string("default"),
@@ -130,13 +121,27 @@ pyrust_module! {
         Ok(Value::bool_(held))
     }
 
-    fn source_hash(
-        #[positional_only] key: PyIndex,
-        #[positional_only] source: PyBytesLike<'_>,
-    ) -> Result<Value> {
+    /// Return the SipHash-1-3 of `source` keyed with `key` (PEP 552), as
+    /// 8 little-endian bytes.
+    fn source_hash(key: PyIndex, source: PyBytesLike<'_>) -> Result<Value> {
         let _ = _interp;
         let k = key.expect_i64(FN_NAME, "key")? as u64;
-        let digest = fnv1a_64_with_key(k, source.as_bytes());
-        Ok(Value::bytes(digest.to_vec()))
+        let digest = crate::builtin_modules::py_compile::siphash13(k, source.as_bytes());
+        Ok(Value::bytes(digest.to_le_bytes().to_vec()))
+    }
+
+    /// Override the multi-interpreter extension check.  CPython 3.12 only
+    /// allows this from a subinterpreter, and this runtime only has the main
+    /// interpreter, so it always raises (`importlib.util`'s
+    /// `_incompatible_extension_module_restrictions` therefore does too).
+    fn _override_multi_interp_extensions_check(
+        #[positional_only] override_: PyIndex,
+    ) -> Result<Value> {
+        let _ = _interp;
+        override_.expect_i64(FN_NAME, "override")?;
+        Err(PyError::named(
+            "RuntimeError",
+            "_imp._override_multi_interp_extensions_check() cannot be used in the main interpreter",
+        ))
     }
 }

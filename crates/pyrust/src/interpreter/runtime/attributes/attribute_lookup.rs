@@ -31,7 +31,7 @@ impl Interpreter {
                 {
                     let class = { Rc::clone(&instance.borrow().class) };
                     if let Some(getattribute_val) = lookup_class_attr(&class, "__getattribute__")
-                        && matches!(getattribute_val.kind(), ValueKind::UserFunction(_))
+                        && is_custom_getattribute(&getattribute_val)
                     {
                         let result = invoke_class_method(
                             self,
