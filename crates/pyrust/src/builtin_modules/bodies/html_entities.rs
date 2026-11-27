@@ -9,7 +9,7 @@ use crate::value::{PyDict, PyKey, Value};
 use pyrust_derive::pyrust_module;
 
 #[path = "html_entities/tables.rs"]
-mod tables;
+pub(crate) mod tables;
 
 fn build_all() -> Value {
     Value::list(vec![

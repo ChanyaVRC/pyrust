@@ -5,7 +5,7 @@
 // Python dict literals on `import html` / `import html.entities` while
 // preserving exact CPython 3.12 insertion order and values.
 
-pub(super) const NAME2CODEPOINT: &[(&str, i64)] = &[
+pub(crate) const NAME2CODEPOINT: &[(&str, i64)] = &[
     ("AElig", 0x00c6),
     ("Aacute", 0x00c1),
     ("Acirc", 0x00c2),
@@ -260,7 +260,7 @@ pub(super) const NAME2CODEPOINT: &[(&str, i64)] = &[
     ("zwnj", 0x200c),
 ];
 
-pub(super) const HTML5: &[(&str, &str)] = &[
+pub(crate) const HTML5: &[(&str, &str)] = &[
     ("Aacute", "\u{00c1}"),
     ("aacute", "\u{00e1}"),
     ("Aacute;", "\u{00c1}"),
