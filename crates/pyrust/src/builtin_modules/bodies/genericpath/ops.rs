@@ -117,7 +117,7 @@ pub(crate) fn fspath_resolve(interp: &mut Interpreter, value: &Value) -> Result<
     ))
 }
 
-fn extract_str_or_bytes(value: &Value) -> Option<PathValue> {
+pub(crate) fn extract_str_or_bytes(value: &Value) -> Option<PathValue> {
     match value.kind() {
         ValueKind::Str(s) => Some(PathValue::Str(s.to_string())),
         ValueKind::Bytes(b) => Some(PathValue::Bytes(b.as_ref().clone())),
