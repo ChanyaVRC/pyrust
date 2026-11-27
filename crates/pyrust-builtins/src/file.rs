@@ -424,6 +424,11 @@ fn validate_open_options(opts: &FileOpenOptions<'_>) -> Result<ValidatedOpen> {
 
     let (encoding_norm, encoding_display) = match opts.encoding {
         None => (None, None),
+        // `encoding="locale"` (3.10+) asks for the locale encoding, which is
+        // UTF-8 here (the same mapping `subprocess` uses).
+        Some(enc) if normalise_encoding(enc) == "locale" => {
+            (Some("utf-8".to_string()), Some("UTF-8".to_string()))
+        }
         Some(enc) => {
             // Validate codec name up front via decode_bytes so unknown encodings
             // raise LookupError before touching the filesystem.
