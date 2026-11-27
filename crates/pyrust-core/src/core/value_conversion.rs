@@ -103,6 +103,7 @@ impl Value {
                 // Inline small tuples surface as `ValueKind::Tuple(&[Value])`
                 // so all existing match arms keep working without learning
                 // about the new variant.  See #281.
+                Opaque::SmallTuple1 { items, .. } => ValueKind::Tuple(&items[..]),
                 Opaque::SmallTuple2 { items, .. } => ValueKind::Tuple(&items[..]),
                 Opaque::SmallTuple3 { items, .. } => ValueKind::Tuple(&items[..]),
                 Opaque::BuiltinObject { ops, state } => {

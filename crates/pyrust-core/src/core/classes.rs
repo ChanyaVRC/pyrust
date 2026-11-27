@@ -216,6 +216,13 @@ pub struct PyClass {
     /// every instance drop when the class defines no `__del__`, while staying
     /// invalidated across any class or ancestor attribute mutation.
     pub del_slot_cache: Cell<Option<(u64, u64, bool)>>,
+    /// Cached `(mutation_version, class_epoch, classification bits)` stamp for
+    /// the interpreter's built-in-exception classification of this class
+    /// (issue #3426).  The bits are opaque here: the interpreter derives them
+    /// from the immutable exception tags and the `__new__` / `__init__`
+    /// attributes along the base chain, so the stamp goes stale exactly when
+    /// this class or any ancestor is mutated.
+    pub exception_kinds_cache: Cell<Option<(u64, u64, u16)>>,
     /// Issue #2335: mirrors CPython's sticky `tp_new == slot_tp_new` state.
     /// Set to `true` the first time `__new__` is assigned to or deleted from
     /// this class at runtime (via `cls.__new__ = ...` / `del cls.__new__`).
@@ -284,6 +291,7 @@ impl Default for PyClass {
             slots: None,
             construction_cache: RefCell::new(None),
             del_slot_cache: Cell::new(None),
+            exception_kinds_cache: Cell::new(None),
             new_slot_wrapped: Cell::new(false),
             override_repr: None,
             canonical_tag: None,
@@ -445,8 +453,12 @@ crate::gil_local! {
     /// Names outside those bounds simply get a fresh (non-shared) `Rc<str>`,
     /// which is still correct — interning is a memory optimisation, not a
     /// semantic requirement.
-    static ATTR_KEY_INTERN: RefCell<HashMap<Box<str>, Rc<str>>> =
-        RefCell::new(HashMap::new());
+    ///
+    /// Keys are short program-chosen identifiers in a capped table, so the
+    /// table uses the same fast non-cryptographic hasher as the per-instance
+    /// attribute index instead of SipHash.
+    static ATTR_KEY_INTERN: RefCell<HashMap<Box<str>, Rc<str>, FxBuildHasher>> =
+        RefCell::new(HashMap::with_hasher(FxBuildHasher));
 }
 
 /// Maximum byte length of an attribute name eligible for key interning.

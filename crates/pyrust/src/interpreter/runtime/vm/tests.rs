@@ -330,6 +330,172 @@ mod vm_tests {
         assert!(Rc::ptr_eq(&cached_plain_class_plan(&code), &plan));
     }
 
+    fn exception_args(value: &Value) -> Vec<Value> {
+        let pyrust_core::ValueKind::PyInstance(instance) = value.kind() else {
+            panic!("exception construction must return an instance");
+        };
+        let instance = instance.borrow();
+        instance
+            .attrs
+            .get_slot("args")
+            .and_then(Value::as_tuple)
+            .expect("an exception carries an args tuple")
+            .to_vec()
+    }
+
+    #[test]
+    fn base_layout_exception_call_records_construction_plan() {
+        use std::rc::Rc;
+
+        let class = crate::interpreter::lookup_exc_class("ValueError").unwrap();
+        let code = call_code(1);
+        let function = Value::py_class(Rc::clone(&class));
+        let payload = Value::list(vec![Value::int(1)]);
+
+        let first = execute_call(&code, function.clone(), vec![payload.clone()])
+            .expect("a built-in exception must construct");
+        assert_instance_of(&first, &class);
+        let plan = cached_plain_class_plan(&code);
+        assert!(plan.is_for_class(&class));
+        assert!(plan.is_current(&class));
+        assert!(plan.is_base_layout_exception());
+        assert!(plan.is_allocation_only());
+        assert!(!plan.has_finalizer());
+
+        // The warm call goes through the plan token alone and stores the
+        // argument by identity, exactly as the generic path does.
+        let warm_probe = Interpreter::probe_builtin_vectorcall(
+            &code,
+            0,
+            &function,
+            std::slice::from_ref(&payload),
+        );
+        assert!(matches!(
+            &warm_probe,
+            BuiltinCallProbe::PlainClass(token) if Rc::ptr_eq(token, &plan)
+        ));
+        let exclusive_cache_borrow = code.call_builtin_cache.borrow_mut();
+        let warm =
+            execute_call_with_probe(&code, function.clone(), vec![payload.clone()], warm_probe)
+                .expect("a plan token must not read the cache again");
+        drop(exclusive_cache_borrow);
+        assert_instance_of(&warm, &class);
+        assert!(!first.is_identical_to(&warm));
+        for exception in [&first, &warm] {
+            let args = exception_args(exception);
+            assert_eq!(args.len(), 1);
+            assert!(args[0].is_identical_to(&payload));
+        }
+    }
+
+    #[test]
+    fn base_layout_exception_plan_covers_every_arity() {
+        use std::rc::Rc;
+
+        let class = crate::interpreter::lookup_exc_class("KeyError").unwrap();
+        let function = Value::py_class(Rc::clone(&class));
+        for argc in 0..6u8 {
+            let code = call_code(argc);
+            let arguments: Vec<Value> = (0..i64::from(argc)).map(Value::int).collect();
+            for _ in 0..2 {
+                let exception = execute_call(&code, function.clone(), arguments.clone())
+                    .expect("a built-in exception must construct");
+                assert_instance_of(&exception, &class);
+                assert_eq!(exception_args(&exception), arguments);
+            }
+            assert!(cached_plain_class_plan(&code).is_base_layout_exception());
+        }
+    }
+
+    #[test]
+    fn exception_families_with_their_own_state_are_never_planned() {
+        use std::rc::Rc;
+
+        for name in [
+            "StopIteration",
+            "SystemExit",
+            "OSError",
+            "FileNotFoundError",
+            "NameError",
+            "ImportError",
+            "AttributeError",
+            "SyntaxError",
+        ] {
+            let class = crate::interpreter::lookup_exc_class(name).unwrap();
+            let code = call_code(1);
+            let function = Value::py_class(Rc::clone(&class));
+            for _ in 0..2 {
+                execute_call(&code, function.clone(), vec![Value::string("x")])
+                    .unwrap_or_else(|_| panic!("{name} must construct"));
+            }
+            assert!(
+                matches!(
+                    code.call_builtin_cache.borrow().get(0),
+                    Some(crate::interpreter::CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(cached))
+                        if cached.as_ptr() == Rc::as_ptr(&class)
+                ),
+                "{name} initialises attributes of its own and must stay generic"
+            );
+        }
+    }
+
+    #[test]
+    fn base_layout_exception_plan_is_demoted_when_a_constructor_appears() {
+        use std::rc::Rc;
+
+        let base = crate::interpreter::lookup_exc_class("ValueError").unwrap();
+        let class = Rc::new(std::cell::RefCell::new(pyrust_core::PyClass::new(
+            "Custom",
+            "Custom",
+            Some(base),
+            indexmap::IndexMap::new(),
+        )));
+        let code = call_code(1);
+        let function = Value::py_class(Rc::clone(&class));
+
+        let planned = execute_call(&code, function.clone(), vec![Value::int(1)])
+            .expect("a plain exception subclass must construct");
+        assert_eq!(exception_args(&planned), [Value::int(1)]);
+        let plan = cached_plain_class_plan(&code);
+        assert!(plan.is_base_layout_exception());
+
+        // `Custom.__init__ = <function>`: construction must run it from now on.
+        Interpreter::default()
+            .assign_attr(function.clone(), "__init__", cache_test_user_function())
+            .expect("a user class attribute must be assignable");
+        assert!(!plan.is_current(&class));
+        let _ = execute_call(&code, function.clone(), vec![Value::int(2)]);
+        assert!(
+            matches!(
+                code.call_builtin_cache.borrow().get(0),
+                Some(crate::interpreter::CallBuiltinCacheEntry::ClassAfterPrimitiveMiss(cached))
+                    if cached.as_ptr() == Rc::as_ptr(&class)
+            ),
+            "a class with a user __init__ must leave the plan path"
+        );
+    }
+
+    #[test]
+    fn base_layout_exception_plan_keeps_keyword_diagnostics_on_the_generic_path() {
+        let interpreter_source = "result = []\nfor _ in range(3):\n    try:\n        ValueError(msg='x')\n    except TypeError as err:\n        result.append(str(err))\n    result.append(ValueError('ok').args)\n";
+        let mut interpreter = Interpreter::default();
+        let tokens = crate::lexer::Lexer::new(interpreter_source)
+            .unwrap()
+            .into_tokens();
+        let program = crate::parser::Parser::new(tokens).parse_program().unwrap();
+        interpreter.exec_program(&program, false).unwrap();
+
+        let expected_message = Value::string("ValueError() takes no keyword arguments");
+        let expected_args = Value::tuple(vec![Value::string("ok")]);
+        let expected: Vec<Value> = (0..3)
+            .flat_map(|_| [expected_message.clone(), expected_args.clone()])
+            .collect();
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::list(expected))
+        );
+    }
+
     #[test]
     fn plain_class_plan_keeps_argument_diagnostics_on_the_generic_path() {
         use std::rc::Rc;

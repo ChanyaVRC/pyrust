@@ -119,8 +119,18 @@ impl Compiler {
         let mut handler_end_patches: Vec<usize> = Vec::new();
 
         if has_handlers {
-            let exc_tmp = self.alloc_temp();
-            self.emit(Insn::LoadExc(exc_tmp));
+            // The caught exception is copied into a register only when some
+            // handler binds it (`as VAR`); matching reads the VM's active
+            // exception directly.  An unbound copy would just keep the
+            // exception alive in a dead temporary until the frame exits,
+            // long after CPython has released it (issue #3426).
+            let exc_tmp = if handlers.iter().any(|handler| handler.name.is_some()) {
+                let exc_tmp = self.alloc_temp();
+                self.emit(Insn::LoadExc(exc_tmp));
+                Some(exc_tmp)
+            } else {
+                None
+            };
 
             for handler in handlers {
                 let skip_patch: Option<usize> = if let Some(kind_expr) = &handler.kind {
@@ -144,7 +154,9 @@ impl Compiler {
                 };
 
                 // Bind exception variable if `as VAR`
-                if let Some(var_name) = &handler.name {
+                if let Some(var_name) = &handler.name
+                    && let Some(exc_tmp) = exc_tmp
+                {
                     if let Some(reg) = self.local_reg(var_name) {
                         self.emit(Insn::Move(reg, exc_tmp));
                         self.mark_def(reg);
@@ -243,7 +255,9 @@ impl Compiler {
             // Restore the try-body lineno so the re-raise is attributed to the
             // failing statement in the try block, not to handler body code.
             self.set_lineno(try_body_lineno);
-            self.free_temp(exc_tmp);
+            if let Some(exc_tmp) = exc_tmp {
+                self.free_temp(exc_tmp);
+            }
             self.emit(Insn::RaiseReRaise);
         }
 

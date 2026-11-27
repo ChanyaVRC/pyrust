@@ -204,3 +204,157 @@ fn import_alias_binds_module_under_alias_name() {
         Some(Value::int(5))
     );
 }
+
+/// Run more source in an interpreter that already executed a program.
+fn run_more(interpreter: &mut Interpreter, src: &str) {
+    let tokens = Lexer::new(src).unwrap().into_tokens();
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse_program().unwrap();
+    interpreter.exec_program(&program, false).unwrap();
+}
+
+fn class_named(interpreter: &Interpreter, name: &str) -> Rc<RefCell<PyClass>> {
+    match interpreter.lookup_name(name).unwrap().unwrap().kind() {
+        ValueKind::PyClass(class) => Rc::clone(class),
+        _ => panic!("{name} must be a class"),
+    }
+}
+
+#[test]
+fn plain_builtin_exception_allocates_only_the_base_exception_slots() {
+    let class = lookup_exc_class("ValueError").unwrap();
+    let payload = Value::list(vec![Value::int(1)]);
+    let exception = instantiate_exception(class, vec![payload.clone()]);
+    let ValueKind::PyInstance(instance) = exception.kind() else {
+        panic!("an exception is an instance");
+    };
+    let instance = instance.borrow();
+
+    // `args` and `__traceback__` only: no visible `__dict__` entry, and the
+    // argument is stored by identity, not copied.
+    assert_eq!(instance.attrs.slot_len(), 2);
+    assert_eq!(instance.attrs.len(), 0);
+    let args = instance.attrs.get_slot("args").unwrap().as_tuple().unwrap();
+    assert_eq!(args.len(), 1);
+    assert!(args[0].is_identical_to(&payload));
+    assert!(instance.attrs.get_slot("__traceback__").unwrap().is_none());
+}
+
+#[test]
+fn exception_family_attributes_are_added_after_the_base_slots() {
+    let stop = instantiate_exception(
+        lookup_exc_class("StopIteration").unwrap(),
+        vec![Value::int(7)],
+    );
+    let ValueKind::PyInstance(instance) = stop.kind() else {
+        panic!("an exception is an instance");
+    };
+    let instance = instance.borrow();
+    let slots = instance.attrs.slots_snapshot();
+    let names: Vec<&str> = slots.iter().map(|(name, _)| name.as_ref()).collect();
+
+    assert_eq!(names, ["args", "__traceback__", "value"]);
+    assert_eq!(instance.attrs.get_slot("value"), Some(&Value::int(7)));
+}
+
+#[test]
+fn exception_classification_matches_the_canonical_chain_walk() {
+    let interpreter = run_program(
+        "class Plain:\n    pass\nclass Mine(KeyError):\n    pass\nclass Mixed(Plain, ValueError):\n    pass\n",
+    );
+    let mut classes: Vec<Rc<RefCell<PyClass>>> = BUILTINS_EXCEPTION_NAMES
+        .iter()
+        .filter_map(|name| lookup_exc_class(name))
+        .collect();
+    assert!(classes.len() > 50, "the built-in hierarchy must be covered");
+    for name in ["Plain", "Mine", "Mixed"] {
+        classes.push(class_named(&interpreter, name));
+    }
+    classes.push(object_class_singleton());
+
+    for class in &classes {
+        // Asked twice: the first answer fills the stamped cache, the second
+        // is served from it.
+        for _ in 0..2 {
+            assert_eq!(
+                is_exception_class(class),
+                pyrust_core::class_chain_contains_exception(class),
+                "{}",
+                class.borrow().name
+            );
+        }
+    }
+    assert!(!is_exception_class(&class_named(&interpreter, "Plain")));
+    assert!(is_exception_class(&class_named(&interpreter, "Mixed")));
+}
+
+#[test]
+fn exception_classification_cache_follows_class_and_base_mutation() {
+    let mut interpreter = run_program(
+        "class Parent(ValueError):\n    pass\nclass Child(Parent):\n    pass\ndef init(self, *args):\n    ValueError.__init__(self, 'patched', *args)\nfirst = Child(1).args\n",
+    );
+    let child = class_named(&interpreter, "Child");
+
+    let kinds = classify_exception_class(&child);
+    assert!(kinds.exception && kinds.has_base_layout_only());
+    assert!(!kinds.has_user_init && !kinds.has_user_new);
+    assert!(
+        child.borrow().exception_kinds_cache.get().is_some(),
+        "a classified class must carry its stamped classification"
+    );
+
+    // Patching an *ancestor* leaves the child's own version untouched; the
+    // class epoch is what must retire the child's cached classification.
+    run_more(
+        &mut interpreter,
+        "Parent.__init__ = init\nsecond = Child(2).args\n",
+    );
+    assert!(classify_exception_class(&child).has_user_init);
+
+    run_more(
+        &mut interpreter,
+        "del Parent.__init__\nthird = Child(3).args\n",
+    );
+    assert!(!classify_exception_class(&child).has_user_init);
+
+    let args = |name: &str| interpreter.lookup_name(name).unwrap().unwrap();
+    assert_eq!(args("first"), Value::tuple(vec![Value::int(1)]));
+    assert_eq!(
+        args("second"),
+        Value::tuple(vec![Value::string("patched"), Value::int(2)])
+    );
+    assert_eq!(args("third"), Value::tuple(vec![Value::int(3)]));
+}
+
+#[test]
+fn exception_classification_bits_round_trip_every_flag() {
+    let flags: [fn(&mut ExcClassKinds); 14] = [
+        |kinds| kinds.exception = true,
+        |kinds| kinds.stop_iteration = true,
+        |kinds| kinds.syntax_error = true,
+        |kinds| kinds.os_error = true,
+        |kinds| kinds.system_exit = true,
+        |kinds| kinds.unicode_decode_error = true,
+        |kinds| kinds.unicode_encode_error = true,
+        |kinds| kinds.unicode_translate_error = true,
+        |kinds| kinds.name_error = true,
+        |kinds| kinds.import_error = true,
+        |kinds| kinds.attribute_error = true,
+        |kinds| kinds.base_exception_group = true,
+        |kinds| kinds.has_user_new = true,
+        |kinds| kinds.has_user_init = true,
+    ];
+    let mut seen = std::collections::HashSet::new();
+    let mut all = ExcClassKinds::default();
+    for set in flags {
+        let mut one = ExcClassKinds::default();
+        set(&mut one);
+        set(&mut all);
+        let bits = one.to_bits();
+        assert_eq!(bits.count_ones(), 1);
+        assert!(seen.insert(bits), "every flag needs its own bit");
+        assert_eq!(ExcClassKinds::from_bits(bits), one);
+    }
+    assert_eq!(ExcClassKinds::from_bits(all.to_bits()), all);
+    assert_eq!(ExcClassKinds::default().to_bits(), 0);
+}

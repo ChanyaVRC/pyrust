@@ -177,7 +177,8 @@ impl WeakValueCache {
                 Opaque::Range { .. } | Opaque::Complex(..) => {
                     Some(Self(Kind::Owned(value.clone())))
                 }
-                Opaque::SmallTuple2 { .. }
+                Opaque::SmallTuple1 { .. }
+                | Opaque::SmallTuple2 { .. }
                 | Opaque::SmallTuple3 { .. }
                 | Opaque::BoundMethod { .. }
                 | Opaque::ClassBoundMethod { .. }

@@ -76,11 +76,14 @@ impl Interpreter {
     /// [`PlainClassPlan`] (issue #3383).
     ///
     /// The caller must have just checked `plan.is_current(class)`.  The plan
-    /// then guarantees that `type.__call__` is the default one, that the class
-    /// is neither abstract, an exception, nor primitive-backed, and that
+    /// then guarantees that `type.__call__` is the default one and that the
+    /// class is neither abstract nor primitive-backed.  For an ordinary class
     /// `__new__` is `object.__new__`, so this goes straight to allocation and
-    /// (when present) the ordinary-function `__init__` — the same observable
-    /// steps as `call_class_expanded`, minus the per-call re-derivation.
+    /// (when present) the ordinary-function `__init__`; for a built-in
+    /// exception that carries only `BaseException`'s own state (issue #3426)
+    /// the positional arguments become `args`.  Either way these are the same
+    /// observable steps as `call_class_expanded`, minus the per-call
+    /// re-derivation.
     ///
     /// Anything the plan does not cover is handed back to the generic path,
     /// which stays the single owner of every diagnostic.
@@ -90,6 +93,18 @@ impl Interpreter {
         plan: &PlainClassPlan,
         args: &[ExpandedCallArg],
     ) -> Result<Value> {
+        if plan.is_base_layout_exception() {
+            // The generic path owns the keyword-argument diagnostic.
+            if args.iter().any(|arg| arg.name.is_some()) {
+                return self.call_class_expanded(Rc::clone(class), args);
+            }
+            let values: smallvec::SmallVec<[Value; 4]> =
+                args.iter().map(|arg| arg.value.clone()).collect();
+            return Ok(instantiate_base_layout_exception(
+                Rc::clone(class),
+                Value::tuple_from_slice(&values),
+            ));
+        }
         let Some(init) = &plan.init else {
             if !args.is_empty() {
                 // `object.__new__` rejects the excess arguments (#2323).
@@ -220,13 +235,16 @@ impl Interpreter {
         if class.borrow().metatype.is_some() {
             self.reject_abstract_class(&class)?;
         }
-        if is_exception_class(&class) {
+        // One stamped classification answers both "is this an exception
+        // class?" and which construction rules apply to it (issue #3426).
+        let exception_kinds = classify_exception_class(&class);
+        if exception_kinds.exception {
             // Exception classes do not use the construction plan, so one
             // that defines `__del__` is counted here (issue #3341).
             if self.vm_hooks_flags & VM_HOOK_FINALIZER_ARMED != 0 {
                 self.note_possible_finalizable_instance(&class);
             }
-            return self.construct_exception_instance(class, args);
+            return self.construct_exception_instance(class, args, exception_kinds);
         }
 
         self.instantiate_normal_instance(class, args)

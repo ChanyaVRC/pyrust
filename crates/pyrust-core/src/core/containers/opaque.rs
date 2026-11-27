@@ -77,6 +77,15 @@ pub enum Opaque {
     Bytes(Rc<Vec<u8>>),
     /// A Python `complex` number stored as (real, imag).
     Complex(f64, f64),
+    /// Inline storage for a 1-element tuple.  Same rationale as
+    /// `SmallTuple2`; this is the shape of the `args` of every exception
+    /// constructed with one argument (`ValueError(msg)`, `KeyError(key)`),
+    /// so raising one no longer allocates a tuple header and a backing
+    /// `Vec` (issue #3426).
+    SmallTuple1 {
+        items: [Value; 1],
+        obj_id: u64,
+    },
     /// Inline storage for a 2-element tuple.  Eliminates the secondary
     /// `Vec<Value>` heap allocation for the most common Python tuple shape
     /// (e.g. `dict.items()` entries, `enumerate()` yields, `divmod()`).
@@ -269,6 +278,10 @@ impl Clone for Opaque {
             Opaque::Generator(state) => Opaque::Generator(Rc::clone(state)),
             Opaque::Bytes(rc) => Opaque::Bytes(Rc::clone(rc)),
             Opaque::Complex(re, im) => Opaque::Complex(*re, *im),
+            Opaque::SmallTuple1 { items, obj_id } => Opaque::SmallTuple1 {
+                items: [items[0].clone()],
+                obj_id: *obj_id,
+            },
             Opaque::SmallTuple2 { items, obj_id } => Opaque::SmallTuple2 {
                 items: [items[0].clone(), items[1].clone()],
                 obj_id: *obj_id,

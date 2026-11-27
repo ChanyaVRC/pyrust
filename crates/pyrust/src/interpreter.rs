@@ -1234,7 +1234,33 @@ pub(crate) struct VmFrameCache {
     /// prove ABA-safely that a catching frame is still live on `vm_frame_views`
     /// when `e.__traceback__` materializes (issue #3029).
     pub(crate) live_token: Rc<()>,
+    /// The still-empty cell through which this activation hands its locals to
+    /// the deferred tracebacks of exceptions it caught (issue #3426). The
+    /// activation keeps one cell and lends it to every such traceback, so a
+    /// traceback is waiting exactly while the cell has another owner; once
+    /// filled it is dropped from here and the next catch starts a new one.
+    pub(crate) pending_catch_locals: Option<Rc<PendingCatchLocals>>,
+    /// The deferred-traceback placeholder this activation last handed to an
+    /// exception it caught (issue #3426). Once that exception is gone the
+    /// activation is the placeholder's only owner and the next catch reuses
+    /// the object instead of allocating another one. Only a placeholder that
+    /// retains no frames, no carried traceback and no locals mapping is ever
+    /// parked here, so parking it keeps nothing alive that the running
+    /// activation does not already own.
+    pub(crate) spare_deferred_traceback: Option<Value>,
 }
+
+/// The `f_locals` mapping a catching function frame owes to deferred
+/// tracebacks that have not been materialised yet (issue #3426).
+///
+/// Catching an exception used to snapshot every local of the catching frame
+/// into a dict, even though the mapping is read only when the exception
+/// outlives that frame *and* its traceback is inspected afterwards. The
+/// tracebacks now share this cell instead; the activation fills it the next
+/// time its fast locals are synchronised, which is at the latest when the
+/// frame exits or suspends. A cell no traceback holds any more is never
+/// filled.
+pub(crate) type PendingCatchLocals = std::cell::OnceCell<Value>;
 
 /// Thin wrapper around `iter_values` matching pyrust-core's `IterValuesFn`
 /// signature (`&Value -> Result<Vec<Value>>`).  Installed at interpreter
