@@ -686,10 +686,10 @@ pyrust_builtin_modules! {
     // matching (`fnmatch`, `fnmatchcase`, `filter`, `translate`) implemented
     // 100% natively in Rust (`fnmatch.rs`).
     fnmatch,
-    // `glob` (issue #3148): pure-Python pathname pattern expansion (`glob`,
-    // `iglob`, `escape`, `has_magic`, `glob0`, `glob1`) injected from
-    // `glob_py.py` by the `@inject` post-load hook.
-    glob @inject,
+    // `glob` (issues #3148, #3463): pathname pattern expansion (`glob`,
+    // `iglob`, `escape`, `has_magic`, `glob0`, `glob1`) implemented 100%
+    // natively in Rust (`glob.rs`) with a lazy `iglob`; no Python injection.
+    glob,
     // `shutil` (issue #3148): high-level file/directory copy, move, rmtree,
     // `which`, and `get_terminal_size` injected from `shutil_py.py` backed by
     // minimal native OS helpers in `shutil.rs`.

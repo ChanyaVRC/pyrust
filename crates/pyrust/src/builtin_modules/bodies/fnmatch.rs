@@ -26,6 +26,9 @@ use std::rc::Rc;
 use pyrust_core::{cesu8_codepoints, push_codepoint};
 use pyrust_derive::pyrust_module;
 
+use crate::builtin_modules::genericpath::ops::PathValue;
+#[cfg(windows)]
+use crate::builtin_modules::genericpath::ops::fspath_resolve;
 use crate::builtin_modules::json::args::{self, Sig};
 use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{FromValue, PyBytesLike};
@@ -629,6 +632,60 @@ fn normcase(interp: &mut Interpreter, value: Value) -> Result<Value> {
     let path = interp.get_attr(&os, "path")?;
     let normcase = interp.get_attr(&path, "normcase")?;
     call_pos(interp, normcase, &[value])
+}
+
+// ---------------------------------------------------------------------------
+// Native entry point for `glob`
+// ---------------------------------------------------------------------------
+
+/// `os.path.normcase()` on an already resolved path operand.
+#[cfg(windows)]
+fn normcase_path(interp: &mut Interpreter, path: &PathValue) -> Result<PathValue> {
+    let normalized =
+        crate::builtin_modules::ntpath::ops::normcase(interp, &path.clone().into_value())?;
+    fspath_resolve(interp, &normalized)
+}
+
+/// `fnmatch.filter(names, pat)` for `glob`: the elements of `names` that match
+/// `pat`, in order.  Same matcher (and the same `TypeError`s for a `str`
+/// pattern against `bytes` names, or the reverse) as the public `filter`.
+pub(crate) fn filter_path_names(
+    interp: &mut Interpreter,
+    pat: &PathValue,
+    names: Vec<PathValue>,
+) -> Result<Vec<PathValue>> {
+    #[cfg(windows)]
+    let pat = normcase_path(interp, pat)?;
+    #[cfg(not(windows))]
+    let pat = pat.clone();
+    let (program, is_bytes) = compile_pattern(interp, &pat.into_value())?;
+    let mut buf: Vec<u32> = Vec::new();
+    let mut result = Vec::new();
+    for name in names {
+        #[cfg(windows)]
+        let subject = normcase_path(interp, &name)?;
+        #[cfg(not(windows))]
+        let subject = &name;
+        buf.clear();
+        match (&subject, is_bytes) {
+            (PathValue::Str(s), false) => buf.extend(cesu8_codepoints(s)),
+            (PathValue::Bytes(b), true) => buf.extend(b.iter().map(|&b| u32::from(b))),
+            (PathValue::Str(_), true) => {
+                return Err(type_error(
+                    "cannot use a bytes pattern on a string-like object",
+                ));
+            }
+            (PathValue::Bytes(_), false) => {
+                return Err(type_error(
+                    "cannot use a string pattern on a bytes-like object",
+                ));
+            }
+        }
+        if program.is_match(&buf) {
+            result.push(name);
+        }
+    }
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
