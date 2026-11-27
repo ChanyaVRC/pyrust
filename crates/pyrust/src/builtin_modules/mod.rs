@@ -338,6 +338,7 @@ macro_rules! pyrust_builtin_modules {
                 "_compression" => return _compression::post_load_init(interp, module),
                 "logging.handlers" => return logging_handlers::post_load_init(interp, module),
                 "logging.config" => return logging_config::post_load_init(interp, module),
+                "json" => return json::post_load_init(interp, module),
                 "json.scanner" => return json_scanner::post_load_init(interp, module),
                 "json.decoder" => return json_decoder::post_load_init(interp, module),
                 "json.encoder" => return json_encoder::post_load_init(interp, module),
@@ -540,10 +541,11 @@ pyrust_builtin_modules! {
     contextlib,
     "__future__" as future,
     warnings,
-    // `json` is a pure-Python module (issue #2620): an empty native
-    // `pyrust_module!` plus `json_py.py` injected by the `@inject` post-load
-    // hook.
-    json @inject,
+    // 100% native-Rust Python 3.12 `json` package (issues #2620, #3413): the
+    // `JSONEncoder` / `JSONDecoder` / `JSONDecodeError` classes live in
+    // `json.encoder` / `json.decoder` and are re-exported by `post_load_init`
+    // (no `@inject`).
+    json,
     // 100% native-Rust Python 3.12 `asyncio` (issues #2281, #3154, #3254):
     // event loop, streams, transports/protocols, TLS, Runner, subprocesses,
     // and 26 `asyncio.*` submodules (no `@inject`).

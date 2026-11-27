@@ -1410,7 +1410,7 @@ mod tests {
 
         // Not a module, a pure-Python module, and the flat `builtins`
         // module (tier 1) have no registrations to resolve.
-        for name in ["not_a_module", "json", "builtins", "math.sqrt", ""] {
+        for name in ["not_a_module", "dataclasses", "builtins", "math.sqrt", ""] {
             assert!(module_regs(name).is_none(), "{name:?} must have no row");
         }
     }
