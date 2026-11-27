@@ -313,6 +313,7 @@ macro_rules! pyrust_builtin_modules {
                 "quopri" => return quopri::post_load_init(interp, module),
                 "copyreg" => return copyreg::post_load_init(interp, module),
                 "types" => return types::post_load_init(interp, module),
+                "graphlib" => return graphlib::post_load_init(interp, module),
                 "csv" => return csv::post_load_init(interp, module),
                 "fractions" => return fractions::post_load_init(interp, module),
                 "contextvars" => return contextvars::post_load_init(interp, module),
@@ -830,12 +831,13 @@ pyrust_builtin_modules! {
     // framework (`BaseServer`, `TCPServer`, `UDPServer`, `ThreadingMixIn`,
     // `BaseRequestHandler`, `StreamRequestHandler`, `DatagramRequestHandler`).
     socketserver @inject,
-    // `copyreg`, `graphlib`, `threading`, and `queue` (issues #3208, #3459):
-    // Python 3.12 pickle/copy extension registry (`copyreg` is 100% native
-    // Rust in `copyreg.rs`, no Python injection), topological graph sorter,
-    // single-interpreter synchronization primitives, and synchronized queues.
+    // `copyreg`, `graphlib`, `threading`, and `queue` (issues #3208, #3459,
+    // #3462): Python 3.12 pickle/copy extension registry and topological graph
+    // sorter (`copyreg` and `graphlib` are 100% native Rust in `copyreg.rs` /
+    // `graphlib.rs`, no Python injection), single-interpreter synchronization
+    // primitives, and synchronized queues.
     copyreg,
-    graphlib @inject,
+    graphlib,
     threading @inject,
     queue @inject,
     // `stat` (issues #3209, #3355: 100% native Rust in `stat.rs`), `platform`,
