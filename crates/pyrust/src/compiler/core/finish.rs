@@ -128,6 +128,7 @@ impl Compiler {
             fmt_spec_cache: RefCell::new(crate::bytecode::SparsePcCache::new()),
             call_builtin_cache: RefCell::new(crate::bytecode::SiteCache::new()),
             builtin_method_cache: RefCell::new(crate::bytecode::SiteCache::new()),
+            super_method_cache: RefCell::new(crate::bytecode::SparsePcCache::new()),
             cached_code_object: RefCell::new(None),
             // Empty until the optimizer's `build_exc_table` pass runs; while
             // empty the VM uses the dynamic SetupExcept/PopExcept handler stack.

@@ -6,6 +6,7 @@ mod builtin_method;
 mod global;
 mod kw_call;
 mod storage;
+mod super_method;
 
 pub use attr::AttrCacheEntry;
 pub use attr::{NativeClassMethodCacheEntry, PropertyGetCacheEntry, SlotAttrCacheEntry};
@@ -20,6 +21,7 @@ pub use kw_call::{KwCallExArgsCache, KwCallExSimpleCache, KwCallSimpleCache};
 pub(crate) use storage::{
     SiteCache, SparsePcCache, is_attr_cache_site, is_call_builtin_cache_site,
 };
+pub(crate) use super_method::{SuperMethodProbe, SuperMethodSite};
 
 #[cfg(test)]
 mod tests;

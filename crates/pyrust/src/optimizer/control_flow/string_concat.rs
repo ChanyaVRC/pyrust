@@ -68,6 +68,11 @@ fn apply_str_regs_transfer(
                 str_regs.remove(dst);
             }
         }
+        // Two destinations, so `writable_dst` cannot report them.
+        Insn::LoadSuperMethod { func, recv, .. } => {
+            str_regs.remove(func);
+            str_regs.remove(recv);
+        }
         // Any other instruction that writes a register clears its string-ness.
         other => {
             if let Some(dst) = writable_dst(other, descs) {

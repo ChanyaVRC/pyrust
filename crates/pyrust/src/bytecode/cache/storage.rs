@@ -22,13 +22,21 @@ pub(crate) fn is_attr_cache_site(insn: &Insn) -> bool {
             | Insn::SetAttr(..)
             | Insn::CallMethod { .. }
             | Insn::CallMethodKw(..)
+            // Generic form: a `CallMethod` on the `super` object.
+            | Insn::CallSuperMethod(..)
     )
 }
 
 /// Returns `true` if `insn` can populate [`crate::bytecode::FnCode::call_builtin_cache`].
 #[inline]
 pub(crate) fn is_call_builtin_cache_site(insn: &Insn) -> bool {
-    matches!(insn, Insn::Call(..) | Insn::CallMemo(..))
+    matches!(
+        insn,
+        Insn::Call(..)
+            | Insn::CallMemo(..)
+            // Generic form: a zero-argument `Call` of the loaded `super`.
+            | Insn::LoadSuperMethod { .. }
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +270,24 @@ impl<T> SparsePcCache<T> {
                 .ok()
                 .map(|idx| &self.entries[idx].1)
         }
+    }
+
+    /// Mutable access to the entry at `pc`, inserting `T::default()` when the
+    /// site has none yet. `None` only for a `pc` beyond `u32::MAX`.
+    #[inline]
+    pub(crate) fn entry_or_default(&mut self, pc: usize) -> Option<&mut T>
+    where
+        T: Default,
+    {
+        let pc = u32::try_from(pc).ok()?;
+        let idx = match self.entries.binary_search_by_key(&pc, |(k, _)| *k) {
+            Ok(idx) => idx,
+            Err(idx) => {
+                self.entries.insert(idx, (pc, T::default()));
+                idx
+            }
+        };
+        Some(&mut self.entries[idx].1)
     }
 
     /// Insert or replace the entry at `pc`.

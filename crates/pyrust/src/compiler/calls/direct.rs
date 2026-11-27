@@ -263,6 +263,117 @@ impl Compiler {
         dst_reg
     }
 
+    /// Whether a bare `super` read in this scope compiles to `LoadGlobal`:
+    /// the name is not a local, a cell, or a captured free variable here.
+    /// Mirrors the name dispatch in `compile_var_expr` without its side
+    /// effects (resolving a free variable allocates its cell slot).
+    ///
+    /// Only function scopes qualify: zero-argument `super()` needs a function
+    /// frame, and class/module bodies resolve names differently.
+    fn super_reads_as_global(&self, name: &Symbol) -> bool {
+        if !self.is_function_scope || self.is_class_body || self.is_module_scope {
+            return false;
+        }
+        if self.shadowed_type_params.contains(name) || self.local_reg(name.as_str()).is_some() {
+            return false;
+        }
+        self.global_names.contains(name)
+            || !(self.cell_slot_map.contains_key(name)
+                || (self.enclosing_cell_names.contains(name)
+                    && !self.local_index.contains_key(name.as_str())))
+    }
+
+    /// Lower `super().name(<positional args>)` to the fused
+    /// `LoadSuperMethod` / `CallSuperMethod` pair (#3424).
+    ///
+    /// Applies when the receiver is a zero-argument call of a `super` that is
+    /// read as a global. Whether that global is the real builtin is decided
+    /// at run time by `LoadSuperMethod`, which otherwise performs the plain
+    /// call, so a rebound `super` behaves exactly as before.
+    ///
+    /// `super` is loaded and called (or resolved) first, then the arguments
+    /// are evaluated, then the call is made. A method the load resolved is
+    /// therefore fixed before the arguments run, as with CPython 3.12's
+    /// `LOAD_SUPER_ATTR`; the generic form keeps looking the attribute up at
+    /// the call, as `CallMethod` does.
+    fn try_compile_super_method_call(
+        &mut self,
+        target: &Expr,
+        method_name: &str,
+        args: &[crate::ast::CallArg],
+        span: Option<crate::ast::CaretSpan>,
+        lineno: u32,
+    ) -> Option<Reg> {
+        let Expr::Call {
+            func: super_func,
+            args: super_args,
+            span: super_span,
+            lineno: super_lineno,
+        } = target
+        else {
+            return None;
+        };
+        let Expr::Var(super_name, _) = &**super_func else {
+            return None;
+        };
+        if !super_args.is_empty()
+            || super_name.as_str() != "super"
+            || !self.super_reads_as_global(super_name)
+        {
+            return None;
+        }
+
+        // Frame: [func, recv, arg0, arg1, ...]; the result reuses `func`.
+        let nargs = args.len() as u8;
+        let base = self.reserve_call_frame(2 + Reg::from(nargs))?;
+        let saved = self.next_temp;
+        let load_at = self.insns.len();
+        self.compile_expr_into(super_func, base);
+        self.next_temp = saved;
+        debug_assert!(
+            self.failed
+                || (self.insns.len() == load_at + 1
+                    && matches!(self.insns[load_at], Insn::LoadGlobal(dst, _) if dst == base)),
+            "`super` must load as a single LoadGlobal into the call frame"
+        );
+
+        // The instruction that replaces `super()` takes that call's line and
+        // caret span, so an error it raises is reported on the same source.
+        let name_idx = self.intern_name(method_name);
+        let saved_lineno = self.current_lineno;
+        if *super_lineno != 0 {
+            self.set_lineno(*super_lineno);
+        }
+        self.set_col_span_for_next(*super_span);
+        self.emit(Insn::LoadSuperMethod {
+            func: base,
+            recv: base + 1,
+            callee: base,
+            name_idx,
+        });
+        self.set_lineno(saved_lineno);
+
+        for (i, arg) in (0u32..).zip(args.iter()) {
+            self.compile_call_arg_into(&arg.value, base + 2 + i);
+        }
+        if lineno != 0 {
+            self.set_lineno(lineno);
+        }
+        self.set_col_span_for_next(span);
+        let desc_idx = self.push_desc(InsnDesc::CallSuperMethod(CallSuperMethodDesc {
+            dst: base,
+            func: base,
+            recv: base + 1,
+            args_base: base + 2,
+            nargs,
+            name_idx,
+        }));
+        self.emit(Insn::CallSuperMethod(desc_idx));
+        self.set_lineno(saved_lineno);
+        self.next_temp = base + 1;
+        Some(base)
+    }
+
     fn compile_method_call(
         &mut self,
         target: &Expr,
@@ -271,6 +382,14 @@ impl Compiler {
         span: Option<crate::ast::CaretSpan>,
         lineno: u32,
     ) -> Reg {
+        if let Some(result) =
+            self.try_compile_super_method_call(target, method_name, args, span, lineno)
+        {
+            return result;
+        }
+        if self.failed {
+            return 0;
+        }
         let nargs = args.len() as u8;
         let Some((obj_reg, dst_reg, args_base)) =
             self.setup_method_receiver_frame(target, Reg::from(nargs))

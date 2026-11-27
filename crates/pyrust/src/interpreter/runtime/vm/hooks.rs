@@ -326,6 +326,30 @@ fn insn_reg_access(
                 RegAccess::None
             }
         }
+        Insn::LoadSuperMethod {
+            func, recv, callee, ..
+        } => {
+            if *callee == target {
+                RegAccess::Reads
+            } else if *func == target || *recv == target {
+                RegAccess::WritesOnly
+            } else {
+                RegAccess::None
+            }
+        }
+        Insn::CallSuperMethod(desc_idx) => {
+            let d = code.descs[*desc_idx as usize].as_call_super_method();
+            if d.func == target
+                || d.recv == target
+                || reg_in_range(target, d.args_base, u32::from(d.nargs))
+            {
+                RegAccess::Reads
+            } else if d.dst == target {
+                RegAccess::WritesOnly
+            } else {
+                RegAccess::None
+            }
+        }
         Insn::MatchClassPositional(desc_idx) => {
             let d = code.descs[*desc_idx as usize].as_match_class_positional();
             if d.subj == target || d.cls == target {

@@ -202,6 +202,19 @@ fn pass_copy_prop(insns: Vec<Insn>, descs: &mut Vec<InsnDesc>, num_locals: u32) 
                     Insn::MatchExceptStar(push_desc(descs, InsnDesc::MatchExceptStar(updated)), k)
                 }
             }
+            // Only the `super` callee is a pure read; `func` / `recv` are the
+            // two registers this instruction defines.
+            Insn::LoadSuperMethod {
+                func,
+                recv,
+                callee,
+                name_idx,
+            } => Insn::LoadSuperMethod {
+                func,
+                recv,
+                callee: s(&copies, callee),
+                name_idx,
+            },
             Insn::StoreGlobal(n, src) => Insn::StoreGlobal(n, s(&copies, src)),
             Insn::StoreCell(n, src) => Insn::StoreCell(n, s(&copies, src)),
             Insn::SyncModuleGlobal(reg, name_idx) => {
@@ -265,6 +278,10 @@ fn pass_copy_prop(insns: Vec<Insn>, descs: &mut Vec<InsnDesc>, num_locals: u32) 
             let src = desc.src_group;
             let dst = desc.matched_dst;
             copies.retain(|k, v| *k != src && *v != src && *k != dst && *v != dst);
+        }
+        // LoadSuperMethod writes both `func` and `recv`.
+        if let Insn::LoadSuperMethod { func, recv, .. } = &insn {
+            copies.retain(|k, v| *k != *func && *v != *func && *k != *recv && *v != *recv);
         }
         // LoadConst writes dst (not in writable_dst so handled here).
         if let Insn::LoadConst(dst, _) = &insn {

@@ -88,96 +88,70 @@ impl Interpreter {
                 // B.method calls super().method, the next in D's MRO is C (not
                 // A), so super() must walk D's full MRO rather than just B.base.
                 let instance_class = Rc::clone(&instance.borrow().class);
-                let mro = class_mro_items(&instance_class)?;
-                // Find `class` in the MRO, then search from the next entry.
-                let start = mro_search_start(&mro, &class);
-                for mro_entry in mro.iter().skip(start) {
-                    let entry_class = match mro_entry.kind() {
-                        ValueKind::PyClass(c) => Rc::clone(c),
-                        _ => continue,
-                    };
-                    let value = entry_class.borrow().attrs.get(name).cloned().or_else(|| {
-                        super::builtin_methods::primitive_class_direct_object_dunder(
-                            &entry_class,
-                            name,
-                        )
-                        .map(Value::builtin_function)
-                    });
-                    if let Some(value) = value {
-                        let user_fn = match value.kind() {
-                            ValueKind::UserFunction(f) => Some(Rc::clone(f)),
-                            _ => None,
-                        };
-                        return Ok(match user_fn {
-                            Some(f) => match f.kind {
-                                UserFunctionKind::Regular => {
-                                    Value::bound_method(Rc::clone(&f), instance)
-                                }
-                                UserFunctionKind::ClassMethod => {
-                                    // CPython binds `cls` to type(instance) (the
-                                    // runtime type of self), not the MRO entry
-                                    // where the classmethod is defined (issue #2609).
-                                    Value::class_bound_method(
-                                        Rc::clone(&f),
-                                        Rc::clone(&instance_class),
-                                    )
-                                }
-                                UserFunctionKind::StaticMethod => {
-                                    if let Some(inner) = f.wrapped_func.as_ref() {
-                                        Value::user_function(Rc::clone(inner))
-                                    } else {
-                                        Value::with_function_kind(
-                                            Rc::clone(&f),
-                                            UserFunctionKind::Regular,
-                                        )
-                                    }
-                                }
-                                UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
-                            },
-                            // Issue #988: bind BuiltinFunction sentinels (e.g.
-                            // `list.__init__`) to the instance so that
-                            // `call_function_expanded` prepends `self` before
-                            // calling the registry dispatch.  A plain
-                            // `BuiltinFunction` sentinel carries no self; we wrap
-                            // it in a `super_bound_builtin` BuiltinObject that
-                            // the interpreter intercepts in
-                            // `call_function_expanded` before the registry probe.
-                            None => match value.kind() {
-                                ValueKind::BuiltinFunction(fn_name)
-                                    if builtin_callable_metadata(fn_name).kind
-                                        == crate::builtin_registry::BuiltinCallableKind::MethodDescriptor =>
-                                {
-                                    pyrust_builtins::super_bound_builtin::super_bound_builtin(
-                                        fn_name.to_string(),
-                                        Value::py_instance(Rc::clone(&instance)),
-                                    )
-                                }
-                                // CPython super.__getattribute__ runs the descriptor
-                                // protocol on the resolved base-class attribute: a
-                                // `property` / data / non-data descriptor has its
-                                // `__get__(instance, type(instance))` invoked
-                                // (issue #2598).  `instance` is the receiver, the
-                                // owner is its concrete class.
-                                _ if is_data_descriptor(&value)
-                                    || is_non_data_descriptor(&value) =>
-                                {
-                                    return call_descriptor_get(
-                                        self,
-                                        &value,
-                                        Value::py_instance(Rc::clone(&instance)),
-                                        Value::py_class(Rc::clone(&instance_class)),
-                                        name,
-                                    );
-                                }
-                                _ => value.clone(),
-                            },
-                        });
-                    }
-                }
-                Err(pyrust_core::py_err!(
-                    "AttributeError",
-                    "'super' object has no attribute '{name}'"
-                ))
+                let Some(value) = super_instance_mro_lookup(&instance_class, &class, name)? else {
+                    return Err(pyrust_core::py_err!(
+                        "AttributeError",
+                        "'super' object has no attribute '{name}'"
+                    ));
+                };
+                let user_fn = match value.kind() {
+                    ValueKind::UserFunction(f) => Some(Rc::clone(f)),
+                    _ => None,
+                };
+                Ok(match user_fn {
+                    Some(f) => match f.kind {
+                        UserFunctionKind::Regular => Value::bound_method(Rc::clone(&f), instance),
+                        UserFunctionKind::ClassMethod => {
+                            // CPython binds `cls` to type(instance) (the
+                            // runtime type of self), not the MRO entry
+                            // where the classmethod is defined (issue #2609).
+                            Value::class_bound_method(Rc::clone(&f), Rc::clone(&instance_class))
+                        }
+                        UserFunctionKind::StaticMethod => {
+                            if let Some(inner) = f.wrapped_func.as_ref() {
+                                Value::user_function(Rc::clone(inner))
+                            } else {
+                                Value::with_function_kind(Rc::clone(&f), UserFunctionKind::Regular)
+                            }
+                        }
+                        UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
+                    },
+                    // Issue #988: bind BuiltinFunction sentinels (e.g.
+                    // `list.__init__`) to the instance so that
+                    // `call_function_expanded` prepends `self` before
+                    // calling the registry dispatch.  A plain
+                    // `BuiltinFunction` sentinel carries no self; we wrap
+                    // it in a `super_bound_builtin` BuiltinObject that
+                    // the interpreter intercepts in
+                    // `call_function_expanded` before the registry probe.
+                    None => match value.kind() {
+                        ValueKind::BuiltinFunction(fn_name)
+                            if builtin_callable_metadata(fn_name).kind
+                                == crate::builtin_registry::BuiltinCallableKind::MethodDescriptor =>
+                        {
+                            pyrust_builtins::super_bound_builtin::super_bound_builtin(
+                                fn_name.to_string(),
+                                Value::py_instance(Rc::clone(&instance)),
+                            )
+                        }
+                        // CPython super.__getattribute__ runs the descriptor
+                        // protocol on the resolved base-class attribute: a
+                        // `property` / data / non-data descriptor has its
+                        // `__get__(instance, type(instance))` invoked
+                        // (issue #2598).  `instance` is the receiver, the
+                        // owner is its concrete class.
+                        _ if is_data_descriptor(&value) || is_non_data_descriptor(&value) => {
+                            return call_descriptor_get(
+                                self,
+                                &value,
+                                Value::py_instance(Rc::clone(&instance)),
+                                Value::py_class(Rc::clone(&instance_class)),
+                                name,
+                            );
+                        }
+                        _ => value.clone(),
+                    },
+                })
             }
             ValueKind::SuperProxyClass { class, obj_class } => {
                 let class = Rc::clone(class);

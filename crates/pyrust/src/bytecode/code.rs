@@ -413,6 +413,11 @@ pub struct FnCode {
     /// method call populates an entry. See
     /// [`crate::bytecode::BuiltinMethodCacheEntry`].
     pub(crate) builtin_method_cache: RefCell<SiteCache<crate::bytecode::BuiltinMethodCacheEntry>>,
+    /// Sparse per-site cache of the method a fused zero-argument
+    /// `super().name(...)` call resolved (#3424), keyed by the
+    /// `LoadSuperMethod` pc. Allocates 0 heap bytes until such a site runs.
+    /// See [`crate::bytecode::SuperMethodSite`].
+    pub(crate) super_method_cache: RefCell<SparsePcCache<crate::bytecode::SuperMethodSite>>,
     /// Weakly cached `types.CodeType` object for this compiled body so
     /// repeated `f.__code__`, `g.gi_code`, and `frame.f_code` reads share one
     /// Python object identity without introducing strong ownership cycles.

@@ -18,8 +18,8 @@ pub use cache::{
 };
 pub(crate) use cache::{
     BINOP_SPEC_THRESHOLD, BinOpCacheEntry, BinopTypeTag, BuiltinMethodCacheEntry, GlobalCacheEntry,
-    GlobalStoreCacheEntry, NativeMethodCacheEntry, SiteCache, SparsePcCache,
-    global_cache_interest_mask, is_attr_cache_site, is_builtin_method_cache_site,
+    GlobalStoreCacheEntry, NativeMethodCacheEntry, SiteCache, SparsePcCache, SuperMethodProbe,
+    SuperMethodSite, global_cache_interest_mask, is_attr_cache_site, is_builtin_method_cache_site,
     is_call_builtin_cache_site,
 };
 pub use code::FnCode;
@@ -33,11 +33,11 @@ pub use function::{
 };
 pub(crate) use instruction::push_desc;
 pub use instruction::{
-    CallExArgsDesc, CallInlineBinOpDesc, CallMethodExpandedDesc, CallMethodKwDesc, DescIdx,
-    DictKeyKindHint, DictMergeKwCallDesc, Insn, InsnDesc, IntRangeExactGuard, KwCallName,
-    ListExtendCallDesc, MakeClassDesc, MakeFunctionDesc, MatchClassPositionalDesc,
-    MatchExceptStarDesc, NO_ARGS_SPLAT, NO_ASSERT_MSG, NO_CLASS_LOCAL, NO_KWARGS, NO_METACLASS,
-    Reg, SetItemKwCallDesc,
+    CallExArgsDesc, CallInlineBinOpDesc, CallMethodExpandedDesc, CallMethodKwDesc,
+    CallSuperMethodDesc, DescIdx, DictKeyKindHint, DictMergeKwCallDesc, Insn, InsnDesc,
+    IntRangeExactGuard, KwCallName, ListExtendCallDesc, MakeClassDesc, MakeFunctionDesc,
+    MatchClassPositionalDesc, MatchExceptStarDesc, NO_ARGS_SPLAT, NO_ASSERT_MSG, NO_CLASS_LOCAL,
+    NO_KWARGS, NO_METACLASS, Reg, SetItemKwCallDesc,
 };
 
 #[cfg(test)]

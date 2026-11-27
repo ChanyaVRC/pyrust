@@ -639,6 +639,11 @@ work(1, 2)
             "{stage}: builtin_method_cache must start unallocated"
         );
         assert_eq!(
+            code.super_method_cache.borrow().capacity(),
+            0,
+            "{stage}: super_method_cache must start unallocated"
+        );
+        assert_eq!(
             code.exc_table.capacity(),
             0,
             "{stage}: handler-free exc_table must allocate 0 bytes"
@@ -651,6 +656,7 @@ work(1, 2)
             assert_eq!(proto.code.fmt_spec_cache.borrow().capacity(), 0);
             assert!(proto.code.call_builtin_cache.borrow().is_empty());
             assert!(proto.code.builtin_method_cache.borrow().is_empty());
+            assert_eq!(proto.code.super_method_cache.borrow().capacity(), 0);
             assert_eq!(proto.code.exc_table.capacity(), 0);
         }
     };
@@ -815,5 +821,191 @@ for _ in range(4):
     assert!(
         cold.builtin_method_cache.borrow().is_empty(),
         "an unexecuted function must pay 0 heap bytes for the cache"
+    );
+}
+
+/// The compiled body of `class_name.method_name` after `interp` ran a script.
+fn executed_method_code(
+    interp: &mut crate::interpreter::Interpreter,
+    class_name: &str,
+    method_name: &str,
+) -> (Value, *const crate::bytecode::FnCode) {
+    let class = interp
+        .lookup_name(class_name)
+        .expect("lookup succeeds")
+        .unwrap_or_else(|| panic!("{class_name} must be defined"));
+    let pyrust_core::ValueKind::PyClass(class) = class.kind() else {
+        panic!("{class_name} must be a class");
+    };
+    let function = class
+        .borrow()
+        .attrs
+        .get(method_name)
+        .cloned()
+        .unwrap_or_else(|| panic!("{class_name}.{method_name} must be defined"));
+    let pyrust_core::ValueKind::UserFunction(f) = function.kind() else {
+        panic!("{class_name}.{method_name} must be a UserFunction");
+    };
+    let code: *const crate::bytecode::FnCode = f
+        .precompiled_code
+        .as_deref()
+        .and_then(|any| any.downcast_ref::<crate::bytecode::FnCode>())
+        .unwrap_or_else(|| panic!("{class_name}.{method_name} must have precompiled FnCode"));
+    (function, code)
+}
+
+/// Issue #3424: each fused `super().name(...)` site caches the method it
+/// resolved per `(receiver class, defining class)` pair, stays generic for a
+/// target that is not a plain method, and allocates nothing until it runs.
+#[test]
+fn super_method_cache_records_resolutions_per_site() {
+    use crate::bytecode::SuperMethodSite;
+
+    let mut interp = crate::interpreter::Interpreter::default();
+    interp
+        .exec_source(
+            r#"
+class A:
+    def f(self, x):
+        return x
+
+    @property
+    def prop(self):
+        return lambda: "prop"
+
+    @classmethod
+    def cm(cls):
+        return cls.__name__
+
+
+class B(A):
+    def mono(self, x):
+        return super().f(x)
+
+    def poly(self, x):
+        return super().f(x)
+
+    def mega(self, x):
+        return super().f(x)
+
+    def to_property(self):
+        return super().prop()
+
+    def to_classmethod(self):
+        return super().cm()
+
+    def to_builtin(self):
+        return super().__repr__()
+
+    def mixed(self):
+        return super().f(1)
+
+    def patched(self):
+        return super().f(1)
+
+    def never(self):
+        return super().f(0)
+
+
+subclasses = [type(f"S{i}", (B,), {}) for i in range(10)]
+b = B()
+for _ in range(4):
+    assert b.mono(1) == 1
+    assert b.to_property() == "prop"
+    assert b.to_classmethod() == "B"
+    assert b.to_builtin().startswith("<")
+    for cls in subclasses[:2]:
+        assert cls().poly(2) == 2
+    for cls in subclasses:
+        assert cls().mega(3) == 3
+
+# A class mutation invalidates the stamp: the same pair is resolved again and
+# must replace its stale entry rather than take a second way.
+assert b.patched() == 1
+A.unrelated = 1
+assert b.patched() == 1
+
+
+class Mixin(A):
+    f = property(lambda self: (lambda x: "mixin"))
+
+
+class Leaf(B, Mixin):
+    pass
+
+
+# `mixed` runs for `B` (next in the MRO is `A.f`, a plain method) and for
+# `Leaf` (next in the MRO is `Mixin.f`, a property).
+assert b.mixed() == 1
+assert Leaf().mixed() == "mixin"
+assert b.mixed() == 1
+"#,
+            None,
+            None,
+        )
+        .expect("super cache probe script must execute");
+
+    let site_of = |method: &str, interp: &mut crate::interpreter::Interpreter| {
+        let (_keepalive, code) = executed_method_code(interp, "B", method);
+        // SAFETY: `_keepalive` holds the function (and so its `FnCode`) alive
+        // for the duration of this closure.
+        let code = unsafe { &*code };
+        let pc = code
+            .insns
+            .iter()
+            .position(|insn| matches!(insn, crate::bytecode::Insn::LoadSuperMethod { .. }))
+            .expect("method body must contain a fused super call");
+        code.super_method_cache.borrow().get(pc).cloned()
+    };
+
+    assert_eq!(
+        site_of("mono", &mut interp)
+            .as_ref()
+            .and_then(SuperMethodSite::cached_pairs),
+        Some((1, 0)),
+        "one receiver class resolves to one cached plain method"
+    );
+    assert_eq!(
+        site_of("poly", &mut interp)
+            .as_ref()
+            .and_then(SuperMethodSite::cached_pairs),
+        Some((2, 0)),
+        "each receiver class gets its own entry"
+    );
+    assert!(
+        matches!(
+            site_of("mega", &mut interp),
+            Some(SuperMethodSite::Megamorphic)
+        ),
+        "more receiver classes than ways stops caching"
+    );
+    for method in ["to_property", "to_classmethod", "to_builtin"] {
+        assert!(
+            matches!(site_of(method, &mut interp), Some(SuperMethodSite::Generic)),
+            "{method}: a target that is not a plain method keeps the site generic"
+        );
+    }
+    assert_eq!(
+        site_of("patched", &mut interp)
+            .as_ref()
+            .and_then(SuperMethodSite::cached_pairs),
+        Some((1, 0)),
+        "a class mutation re-resolves the same pair in place"
+    );
+    assert_eq!(
+        site_of("mixed", &mut interp)
+            .as_ref()
+            .and_then(SuperMethodSite::cached_pairs),
+        Some((1, 1)),
+        "a later non-method resolution is remembered beside the method"
+    );
+
+    let (_keepalive, cold) = executed_method_code(&mut interp, "B", "never");
+    // SAFETY: `_keepalive` keeps the function's `FnCode` alive.
+    let cold = unsafe { &*cold };
+    assert_eq!(
+        cold.super_method_cache.borrow().capacity(),
+        0,
+        "an unexecuted site must pay 0 heap bytes for the cache"
     );
 }
