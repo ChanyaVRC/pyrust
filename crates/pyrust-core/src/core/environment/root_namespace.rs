@@ -159,10 +159,33 @@ struct RootNamespaceState {
     /// instead of leaving every later ordinary dict mutation to probe stale
     /// entries forever.
     alias_identities: RefCell<Vec<usize>>,
-    /// Once the globals mapping is exposed, arbitrary aliases can mutate it
-    /// without passing through the interpreter's assignment helpers.  Such a
-    /// namespace remains uncached for the rest of its lifetime.
+    /// Set for an explicit `exec`/`eval` provider: its caller-owned
+    /// dictionaries are the whole namespace, and no `LoadGlobal` cache entry
+    /// is ever filled or probed for this root.
     cache_disabled: Cell<bool>,
+    /// Set once a normal provider's globals mapping has escaped to Python
+    /// (`globals()`, `module.__dict__`, `function.__globals__`, ...). From then
+    /// on that dictionary is the authoritative namespace and every controlled
+    /// write mirrors into it.
+    ///
+    /// Exposure does not disable the `LoadGlobal` caches (#3425): the mapping
+    /// is registered as a namespace alias, so each mutation performed through
+    /// any alias reports to this root at the dictionary-storage boundary and
+    /// advances the structure generation. A namespace that is only read
+    /// through its mapping therefore keeps every cache entry valid.
+    globals_exposed: Cell<bool>,
+    /// True only while this root itself writes one binding into its exposed
+    /// mapping. The resulting storage notification then skips this root: the
+    /// owner has already advanced the generations its cache-interest masks
+    /// require and updates its own Script mirrors, exactly as it does before
+    /// exposure. Other roots aliasing the same dictionary are still notified.
+    owner_write: Cell<bool>,
+    /// Set, and never cleared, once a dictionary this root registered as a
+    /// namespace alias is also registered by another root: an
+    /// `exec(code, globals())` namespace sharing a module's globals mapping.
+    /// While it is false this root is the only one to notify, so its owner
+    /// writes skip the alias-owner lookup altogether.
+    alias_shared: Cell<bool>,
     /// Lazily allocated so placeholder environments used by interned builtin
     /// callables do not each pay for an otherwise-unused dictionary.
     globals_provider: RefCell<Option<NamespaceGlobalsProvider>>,
@@ -172,7 +195,8 @@ struct RootNamespaceState {
     filesystem_module_backing: Cell<bool>,
     /// Precomputed conservative mask for `Insn::SyncModuleGlobal` (#2924).
     ///
-    /// Equal to `u64::MAX` whenever `cache_disabled`, `filesystem_module_backing`,
+    /// Equal to `u64::MAX` whenever `cache_disabled`, `globals_exposed`,
+    /// `filesystem_module_backing`,
     /// `active_mirror_count > 1`, or `has_binding_order` is active; otherwise
     /// the bitwise OR of `fallback_cache_interest`, `value_cache_interest`, and
     /// `env_binding_interest`. When `(mask & name_mask) != name_mask`, a module
@@ -210,6 +234,9 @@ impl RootNamespaceState {
             next_mirror_id: Cell::new(1),
             alias_identities: RefCell::new(Vec::new()),
             cache_disabled: Cell::new(false),
+            globals_exposed: Cell::new(false),
+            owner_write: Cell::new(false),
+            alias_shared: Cell::new(false),
             globals_provider: RefCell::new(None),
             filesystem_module_backing: Cell::new(false),
             sync_fast_check_mask: Cell::new(0),
@@ -219,9 +246,17 @@ impl RootNamespaceState {
         }
     }
 
+    /// Whether a Python-visible dictionary, rather than the register files
+    /// and `EnvValues`, is the authoritative namespace: an explicit provider,
+    /// or a normal provider whose globals mapping has escaped.
+    #[inline]
+    fn mapping_authoritative(&self) -> bool {
+        self.cache_disabled.get() || self.globals_exposed.get()
+    }
+
     #[inline]
     fn recompute_sync_fast_check_mask(&self) {
-        let mask = if self.cache_disabled.get()
+        let mask = if self.mapping_authoritative()
             || self.filesystem_module_backing.get()
             || self.active_mirror_count.get() > 1
             || self.has_binding_order.get()
@@ -311,7 +346,7 @@ impl RootNamespaceState {
     }
 
     fn synchronize_alias_key_mutation(&self, candidate: &Rc<RefCell<PyDict>>, name: &str) {
-        if !self.candidate_is_authoritative_locals(candidate) {
+        if self.owner_write.get() || !self.candidate_is_authoritative_locals(candidate) {
             return;
         }
 
@@ -425,6 +460,11 @@ fn register_namespace_alias(root: &Rc<RootNamespaceState>, value: &Value) {
                 .is_some_and(|provider| Rc::ptr_eq(&provider, root))
         }) {
             providers.push(Rc::downgrade(root));
+        }
+        if providers.len() > 1 {
+            for provider in providers.iter().filter_map(Weak::upgrade) {
+                provider.alias_shared.set(true);
+            }
         }
     });
     {

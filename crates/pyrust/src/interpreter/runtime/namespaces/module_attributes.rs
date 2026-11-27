@@ -24,8 +24,9 @@ impl Interpreter {
     /// Expose the one live dictionary owned by a filesystem-backed module.
     ///
     /// While the loader's child environment is alive, route through the root
-    /// exposure helper so `LoadGlobal` caches and the module mutation token are
-    /// permanently disabled before arbitrary dict aliases can mutate it. A
+    /// exposure helper so the dictionary is registered for alias-mutation
+    /// invalidation of the `LoadGlobal` caches and the module mutation token
+    /// is saturated before arbitrary dict aliases can mutate it. A
     /// data-only module may outlive that environment; its strongly-owned
     /// dictionary remains the complete namespace in that case.
     pub(crate) fn filesystem_module_globals(

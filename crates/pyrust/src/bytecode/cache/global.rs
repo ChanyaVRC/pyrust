@@ -19,9 +19,11 @@ use crate::value::Value;
 /// obsolete global alive (or close a function -> code -> cache -> function
 /// cycle). A dead weak value is a normal miss; representations without a
 /// weak-capable backing leave the slot empty.
-/// Explicit dictionaries and namespaces exposed through `globals()` never
-/// populate this cache. Saturated namespace or provider generations produce
-/// `Empty` and can never validate a hit.
+/// Explicit `exec`/`eval` dictionaries never populate this cache. A namespace
+/// exposed through `globals()` does (#3425): every mutation through an alias
+/// of its dictionary advances the generations these entries guard. Saturated
+/// namespace or provider generations produce `Empty` and can never validate a
+/// hit.
 #[derive(Clone)]
 pub(crate) enum GlobalCacheEntry {
     Empty,

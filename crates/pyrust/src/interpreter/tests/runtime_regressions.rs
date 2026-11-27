@@ -1085,3 +1085,230 @@ fn trampolined_global_writer_updates_the_module_binding() {
         "trampolined global stores must stay on the cached slot: {generation}"
     );
 }
+
+/// Environment and structure generations of the interpreter's root namespace.
+fn root_generations(interpreter: &Interpreter) -> (u64, u64) {
+    let snapshot = interpreter.env.borrow().namespace_cache_snapshot();
+    (snapshot.1, snapshot.2)
+}
+
+/// The `LoadGlobal` cache entry the module-level function `function` holds
+/// for `name`.
+fn load_global_entry(interpreter: &Interpreter, function: &str, name: &str) -> GlobalCacheEntry {
+    let code = function_code(interpreter, function);
+    let code = code
+        .downcast_ref::<crate::bytecode::FnCode>()
+        .expect("function code");
+    let slot = code
+        .names
+        .iter()
+        .position(|candidate| candidate.as_str() == name)
+        .unwrap_or_else(|| panic!("{name} must be in the name pool of {function}"));
+    code.global_cache
+        .borrow()
+        .get(slot)
+        .cloned()
+        .unwrap_or(GlobalCacheEntry::Empty)
+}
+
+fn list_items(interpreter: &Interpreter, name: &str) -> Vec<Value> {
+    let value = interpreter
+        .lookup_name(name)
+        .unwrap()
+        .unwrap_or_else(|| panic!("missing binding {name}"));
+    value
+        .as_list()
+        .unwrap_or_else(|| panic!("{name} must be a list"))
+        .to_vec()
+}
+
+/// Issue #3425: materializing `globals()` without mutating it keeps the root
+/// global inline caches enabled. Functions first called after the exposure
+/// still fill their `LoadGlobal` entries, and further read-only use of the
+/// dictionary advances no cache generation, so those entries keep hitting.
+#[test]
+fn read_only_globals_exposure_keeps_load_global_caches_hot() {
+    let program = "K = 3\nout = []\n\
+         def helper(a):\n    return a\n\
+         def g2(a, b):\n    return helper(a) + K\n\
+         def run(n):\n    total = 0\n    for i in range(n):\n        total += g2(i, i)\n    return total\n\
+         def peek(n):\n    seen = 0\n    for i in range(n):\n        seen += len(globals()) + ('K' in globals()) + len(list(globals().items()))\n    return seen > 0\n\
+         out.append(len(list(globals().items())))\n\
+         out.append(run(2000))\n";
+    let interpreter = run_program(program);
+    assert_eq!(list_items(&interpreter, "out")[1], Value::int(2_005_000));
+    assert!(
+        interpreter.env.borrow().namespace_globals_exposed(),
+        "the program must have exposed its globals dictionary"
+    );
+    assert!(
+        !interpreter.env.borrow().namespace_cache_snapshot().4,
+        "exposure must leave the root global caches enabled"
+    );
+    for (function, name) in [("g2", "helper"), ("g2", "K"), ("run", "g2")] {
+        let entry = load_global_entry(&interpreter, function, name);
+        assert!(
+            matches!(entry, GlobalCacheEntry::Environment { .. }),
+            "{function} must cache its load of {name} after globals(): {entry:?}"
+        );
+    }
+    let entry = load_global_entry(&interpreter, "run", "range");
+    assert!(
+        matches!(entry, GlobalCacheEntry::BuiltinModule { .. }),
+        "run must cache its builtin load after globals(): {entry:?}"
+    );
+
+    // The same program followed by many more read-only uses of the
+    // dictionary and more cached reads ends at the same generations.
+    let longer = run_program(&format!(
+        "{program}out.append(peek(200))\nout.append(run(10))\nout.append(peek(200))\n"
+    ));
+    assert_eq!(
+        list_items(&longer, "out")[2..],
+        [Value::bool_(true), Value::int(75), Value::bool_(true)]
+    );
+    assert_eq!(
+        root_generations(&longer),
+        root_generations(&interpreter),
+        "read-only globals() must not invalidate any cached global"
+    );
+}
+
+/// Issue #3425: a write through the exposed dictionary invalidates the cached
+/// resolutions at once, the next read observes the new binding, and that read
+/// fills the cache again.
+#[test]
+fn alias_write_invalidates_and_refills_load_global_caches() {
+    let prefix = "K = 3\nout = []\n\
+         def g2(a):\n    return a + K\n\
+         def run(n):\n    total = 0\n    for i in range(n):\n        total += g2(i)\n    return total\n\
+         d = globals()\n\
+         out.append(run(100))\n";
+    // A stale cached resolution would keep returning the value bound at the
+    // first run (`K == 3`) instead of the outcome expected here.
+    for (mutation, expected) in [
+        ("d['K'] = 10\n", Some(5_950)),
+        ("d.update(K=10)\n", Some(5_950)),
+        ("d |= {'K': 10}\n", Some(5_950)),
+        (
+            "d.setdefault('K', 10)\nd.__setitem__('K', 10)\n",
+            Some(5_950),
+        ),
+        ("exec('K = 10', d)\n", Some(5_950)),
+        ("d.pop('K')\n", None),
+        ("del d['K']\n", None),
+    ] {
+        let label = mutation.trim_end();
+        let Some(expected) = expected else {
+            let interpreter = run_program(&format!(
+                "{prefix}{mutation}try:\n    run(1)\nexcept NameError as error:\n    out.append(str(error))\n"
+            ));
+            assert_eq!(
+                list_items(&interpreter, "out")[1].as_str(),
+                Some("name 'K' is not defined"),
+                "`{label}` must be observed by the next read"
+            );
+            continue;
+        };
+        let interpreter = run_program(&format!("{prefix}{mutation}out.append(run(100))\n"));
+        assert_eq!(
+            list_items(&interpreter, "out"),
+            [Value::int(5_250), Value::int(expected)],
+            "`{label}` must be observed by the next read"
+        );
+        let entry = load_global_entry(&interpreter, "g2", "K");
+        assert!(
+            matches!(entry, GlobalCacheEntry::Environment { .. }),
+            "the read after `{label}` must fill the cache again: {entry:?}"
+        );
+    }
+}
+
+/// Issue #3425: an exposed namespace keeps its in-place `StoreGlobal`. The
+/// store mirrors into the dictionary on every iteration without advancing a
+/// cache generation, so the loop's other cached loads stay valid.
+#[test]
+fn hot_global_store_stays_cached_after_globals_exposure() {
+    let interpreter = run_program(
+        "G = 0\nd = globals()\nseen = []\nout = []\n\
+         def step(x):\n    return x + 1\n\
+         def loop(n):\n    global G\n    for i in range(n):\n        G = step(G)\n        if d['G'] != G:\n            seen.append(i)\n\
+         loop(5000)\n\
+         out.append((G, d['G']))\n",
+    );
+    assert_eq!(
+        list_items(&interpreter, "out"),
+        [Value::tuple(vec![Value::int(5000), Value::int(5000)])]
+    );
+    assert!(
+        list_items(&interpreter, "seen").is_empty(),
+        "the dictionary must observe every in-place store"
+    );
+    let generation = root_structure_generation(&interpreter);
+    assert!(
+        generation < 100,
+        "5000 mirrored stores must not each advance the structure generation: {generation}"
+    );
+    let code = function_code(&interpreter, "loop");
+    let code = code
+        .downcast_ref::<crate::bytecode::FnCode>()
+        .expect("function code");
+    assert!(
+        code.global_store_cache
+            .borrow()
+            .iter()
+            .any(|entry| matches!(entry, GlobalStoreCacheEntry::RootSlot { .. })),
+        "the store site must have cached its root slot"
+    );
+    let entry = load_global_entry(&interpreter, "loop", "G");
+    assert!(
+        matches!(entry, GlobalCacheEntry::EnvironmentSlot { .. }),
+        "the rebound global must be read by slot locator: {entry:?}"
+    );
+    let entry = load_global_entry(&interpreter, "loop", "step");
+    assert!(
+        matches!(entry, GlobalCacheEntry::Environment { .. }),
+        "the callee load must stay on the value lane: {entry:?}"
+    );
+}
+
+/// Issue #3425: after exposure a module-level assignment still mirrors into
+/// the dictionary, but as an owner write: it invalidates only caches that
+/// registered interest in the assigned name.
+#[test]
+fn module_writes_after_globals_exposure_keep_unrelated_caches_valid() {
+    let mask_of = pyrust_core::namespace_name_interest_mask;
+    let cached = ["globals", "range", "K", "g2", "run"]
+        .iter()
+        .fold(0_u64, |mask, name| mask | mask_of(name));
+    for written in ["step", "acc"] {
+        assert_ne!(
+            mask_of(written) & !cached,
+            0,
+            "{written} must not collide with the cached names' interest masks"
+        );
+    }
+    let interpreter = run_program(
+        "K = 3\nout = []\n\
+         def g2(a):\n    return a + K\n\
+         def run(n):\n    total = 0\n    for i in range(n):\n        total += g2(i)\n    return total\n\
+         d = globals()\n\
+         acc = 0\n\
+         for step in range(3000):\n    acc = run(2)\n\
+         out.append((acc, step, d['acc'], d['step']))\n",
+    );
+    assert_eq!(
+        list_items(&interpreter, "out"),
+        [Value::tuple(vec![
+            Value::int(7),
+            Value::int(2999),
+            Value::int(7),
+            Value::int(2999),
+        ])]
+    );
+    let generation = root_structure_generation(&interpreter);
+    assert!(
+        generation < 100,
+        "6000 mirrored module writes must not each advance the structure generation: {generation}"
+    );
+}

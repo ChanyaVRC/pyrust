@@ -32,9 +32,24 @@ mod tests {
         assert_eq!(child.borrow().namespace_cache_snapshot().2, 1);
 
         let globals = child.borrow().expose_namespace_globals();
-        assert!(root.borrow().namespace_cache_disabled());
+        assert!(
+            !root.borrow().namespace_cache_disabled(),
+            "exposure keeps the root global caches enabled (#3425)"
+        );
         assert!(root.borrow().namespace_globals_exposed());
+        assert!(root.borrow().namespace_mapping_authoritative());
         assert!(globals.is_dict());
+        assert_eq!(
+            root.borrow().namespace_cache_snapshot().2,
+            2,
+            "the first exposure advances the structure generation once"
+        );
+        let _ = child.borrow().expose_namespace_globals();
+        assert_eq!(
+            root.borrow().namespace_cache_snapshot().2,
+            2,
+            "a repeated read-only exposure must leave every cache entry valid"
+        );
     }
 
     #[test]
@@ -819,7 +834,7 @@ mod tests {
     /// Issue #3423: every way the located binding can stop being the
     /// assignment target is a miss that changes nothing.
     #[test]
-    fn store_slot_misses_after_delete_rebind_exposure_or_namespace_change() {
+    fn store_slot_misses_after_delete_rebind_explicit_provider_or_namespace_change() {
         let mask = super::namespace_name_interest_mask("counter");
         let bind = |root: &super::EnvRef| {
             for name in ["first", "counter"] {
@@ -869,10 +884,12 @@ mod tests {
         );
         assert_eq!(value_of(&root), Some(1));
 
-        // Once `globals()` exposes the dictionary it is authoritative.
+        // An explicit provider's caller-owned dictionaries are its only
+        // storage: nothing is overwritten in place.
         let root = Environment::new(None);
         let slot = bind(&root);
-        let _globals = root.borrow().expose_namespace_globals();
+        root.borrow()
+            .configure_explicit_namespace(Value::dict(PyDict::default()), None);
         assert!(
             root.borrow_mut()
                 .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(2))
@@ -1024,6 +1041,260 @@ mod tests {
             .globals
             .expect("the module dictionary must be mirrored");
         assert!(target.is_identical_to(&globals));
+    }
+
+    fn generations(root: &super::EnvRef) -> (u64, u64) {
+        let snapshot = root.borrow().namespace_cache_snapshot();
+        (snapshot.1, snapshot.2)
+    }
+
+    fn mapping_int(mapping: &Value, name: &str) -> Option<i64> {
+        mapping
+            .dict_with(|dict| dict.get(&crate::object_model::StrKey(name)).cloned())
+            .flatten()
+            .and_then(|value| value.as_int())
+    }
+
+    /// Issue #3425: exposing the globals mapping keeps the root's caches
+    /// enabled. Reading the mapping and the root's own controlled writes
+    /// advance no generation; every mutation through the mapping does.
+    #[test]
+    fn exposed_namespace_invalidates_only_on_alias_mutation() {
+        let root = Environment::new(None);
+        let mask = super::namespace_name_interest_mask("value");
+        let globals = root.borrow().expose_namespace_globals();
+        let layout = Rc::new(HashMap::from([("value".to_string(), 0_u32)]));
+        let mut regs = vec![Value::int(1)];
+        let regs_ptr = NonNull::new(regs.as_mut_ptr()).expect("Vec storage is non-null");
+        let _guard = unsafe {
+            root.borrow()
+                .register_namespace_fastlocals(regs_ptr, regs.len(), &layout)
+        };
+        globals
+            .dict_insert(PyKey::str_from("value"), Value::int(1))
+            .unwrap();
+        root.borrow().activate_namespace_globals_alias(&globals);
+        assert!(!root.borrow().namespace_cache_disabled());
+        assert!(!root.borrow().namespace_cache_snapshot().4);
+        let exposed = generations(&root);
+
+        // Read-only use of the mapping, including exposing it again.
+        assert_eq!(mapping_int(&globals, "value"), Some(1));
+        assert!(
+            root.borrow()
+                .expose_namespace_globals()
+                .is_identical_to(&globals)
+        );
+        assert_eq!(generations(&root), exposed);
+
+        // A controlled write of a name no cache is interested in: the mapping
+        // is mirrored through an owner write and nothing is invalidated.
+        let target = root
+            .borrow()
+            .prepare_namespace_module_write(mask)
+            .expect("an exposed namespace mirrors controlled writes");
+        assert!(target.is_identical_to(&globals));
+        let displaced =
+            root.borrow()
+                .write_namespace_mapping_binding(&target, "value", Value::int(2));
+        assert_eq!(displaced.and_then(|value| value.as_int()), Some(1));
+        assert_eq!(mapping_int(&globals, "value"), Some(2));
+        assert_eq!(
+            regs[0].as_int(),
+            Some(1),
+            "the owner keeps its own registers current; the notification must skip it"
+        );
+        assert!(
+            root.borrow()
+                .write_namespace_mapping_binding(&target, "fresh", Value::int(7))
+                .is_none(),
+            "a new key has nothing to displace"
+        );
+        assert_eq!(mapping_int(&globals, "fresh"), Some(7));
+        assert_eq!(
+            generations(&root),
+            exposed,
+            "an owner write must not invalidate its own root"
+        );
+
+        // Once a cache registered interest, the controlled write invalidates
+        // exactly as it does before exposure.
+        root.borrow().register_namespace_value_cache_interest(mask);
+        assert!(root.borrow().prepare_namespace_module_write(mask).is_some());
+        assert_eq!(generations(&root), (exposed.0 + 1, exposed.1));
+
+        // Every mutation through the mapping itself advances the structure
+        // generation and refreshes the live register.
+        let mut expected = generations(&root);
+        let mut alias_mutation = |mutate: &dyn Fn(), register: Option<i64>| {
+            mutate();
+            expected = (expected.0 + 1, expected.1 + 1);
+            assert_eq!(generations(&root), expected);
+            let seen = (!regs[0].is_unset()).then(|| regs[0].as_int()).flatten();
+            assert_eq!(seen, register);
+        };
+        alias_mutation(
+            &|| {
+                globals
+                    .dict_insert(PyKey::str_from("value"), Value::int(3))
+                    .unwrap();
+            },
+            Some(3),
+        );
+        alias_mutation(
+            &|| {
+                globals
+                    .dict_replace_existing(
+                        &crate::object_model::StrKey("value"),
+                        true,
+                        Some("value"),
+                        Value::int(4),
+                    )
+                    .unwrap()
+                    .unwrap();
+            },
+            Some(4),
+        );
+        alias_mutation(
+            &|| {
+                globals
+                    .dict_shift_remove(&PyKey::str_from("value"))
+                    .unwrap();
+            },
+            None,
+        );
+        alias_mutation(
+            &|| {
+                globals
+                    .dict_extend(vec![(PyKey::str_from("value"), Value::int(5))])
+                    .unwrap();
+            },
+            Some(5),
+        );
+        alias_mutation(
+            &|| {
+                globals.dict_with_mut(|dict| {
+                    dict.insert(PyKey::str_from("value"), Value::int(6));
+                });
+            },
+            Some(6),
+        );
+        alias_mutation(&|| globals.dict_clear().unwrap(), None);
+    }
+
+    /// Issue #3425: an owner write skips only the writing root. A second root
+    /// that aliases the same mapping (`exec(code, globals())`) is still
+    /// notified, and that root's own writes are reported to the owner.
+    #[test]
+    fn owner_write_still_notifies_other_roots_sharing_the_mapping() {
+        let owner = Environment::new(None);
+        let globals = owner.borrow().expose_namespace_globals();
+        globals
+            .dict_insert(PyKey::str_from("value"), Value::int(1))
+            .unwrap();
+        owner.borrow().activate_namespace_globals_alias(&globals);
+
+        let explicit = Environment::new(None);
+        explicit
+            .borrow()
+            .configure_explicit_namespace(globals.clone(), None);
+        let layout = Rc::new(HashMap::from([("value".to_string(), 0_u32)]));
+        let mut regs = vec![Value::int(1)];
+        let regs_ptr = NonNull::new(regs.as_mut_ptr()).expect("Vec storage is non-null");
+        let _guard = unsafe {
+            explicit
+                .borrow()
+                .register_namespace_fastlocals(regs_ptr, regs.len(), &layout)
+        };
+
+        let owner_before = generations(&owner);
+        let explicit_before = generations(&explicit);
+        let _ = owner
+            .borrow()
+            .write_namespace_mapping_binding(&globals, "value", Value::int(2));
+        assert_eq!(mapping_int(&globals, "value"), Some(2));
+        assert_eq!(generations(&owner), owner_before);
+        assert_eq!(
+            regs[0].as_int(),
+            Some(2),
+            "the sharing root's live Script register must follow the owner write"
+        );
+        assert!(generations(&explicit).1 > explicit_before.1);
+
+        let _ = explicit
+            .borrow()
+            .write_namespace_mapping_binding(&globals, "value", Value::int(3));
+        assert_eq!(mapping_int(&globals, "value"), Some(3));
+        assert_eq!(regs[0].as_int(), Some(3));
+        assert!(
+            generations(&owner).1 > owner_before.1,
+            "a write by another root is an alias mutation for the owner"
+        );
+    }
+
+    /// Issue #3425: an exposed normal namespace keeps its in-place global
+    /// store. The overwrite reports the exposed mapping, and mirroring into it
+    /// is an owner write that advances no generation.
+    #[test]
+    fn store_slot_stays_cacheable_after_exposure_and_reports_the_mapping() {
+        let root = Environment::new(None);
+        let mask = super::namespace_name_interest_mask("counter");
+        root.borrow_mut()
+            .namespace_values_mut()
+            .insert("counter", Value::int(0));
+        let globals = root.borrow().expose_namespace_globals();
+        globals
+            .dict_insert(PyKey::str_from("counter"), Value::int(0))
+            .unwrap();
+        root.borrow().activate_namespace_globals_alias(&globals);
+
+        let slot = root
+            .borrow()
+            .namespace_store_slot("counter")
+            .expect("an exposed normal namespace stays cacheable");
+        let store = |value: i64| {
+            let outcome = root
+                .borrow_mut()
+                .overwrite_namespace_store_slot(&slot, "counter", mask, &Value::int(value))
+                .expect("the overwrite is accepted");
+            let target = outcome
+                .globals
+                .expect("the exposed mapping must be mirrored");
+            assert!(target.is_identical_to(&globals));
+            let before = generations(&root);
+            let _ = root.borrow().write_namespace_mapping_binding(
+                &target,
+                "counter",
+                Value::int(value),
+            );
+            assert_eq!(generations(&root), before);
+            assert_eq!(mapping_int(&globals, "counter"), Some(value));
+        };
+
+        let before = generations(&root);
+        store(1);
+        assert_eq!(
+            generations(&root),
+            (before.0 + 1, before.1 + 1),
+            "the first overwrite moves the name's readers to the locator lane"
+        );
+        store(2);
+        store(3);
+        assert_eq!(generations(&root), (before.0 + 1, before.1 + 1));
+
+        // An alias delete leaves the stale root binding behind; the next
+        // overwrite re-creates the key at the end of the mapping.
+        globals
+            .dict_shift_remove(&PyKey::str_from("counter"))
+            .unwrap();
+        globals
+            .dict_insert(PyKey::str_from("later"), Value::int(0))
+            .unwrap();
+        store(4);
+        let last_key = globals
+            .dict_with(|dict| dict.keys().last().cloned())
+            .flatten();
+        assert_eq!(last_key, Some(PyKey::str_from("counter")));
     }
 
     #[test]
