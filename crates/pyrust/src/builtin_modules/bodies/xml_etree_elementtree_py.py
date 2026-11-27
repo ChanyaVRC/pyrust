@@ -93,6 +93,36 @@ def _assert_is_element(e):
         raise TypeError("expected an Element, not %s" % type(e).__name__)
 
 
+def _checkpath(tag):
+    """``checkpath()`` from ``_elementtree.c``: whether *tag* may be an
+    ElementPath expression rather than a plain tag."""
+    if isinstance(tag, str):
+        brace, close, star = "{", "}", "*"
+        pathchars = ("/", "*", "[", "@", ".")
+    elif isinstance(tag, bytes):
+        brace, close, star = b"{", b"}", b"*"
+        pathchars = (b"/", b"*", b"[", b"@", b".")
+    else:
+        return True  # unknown type; might be path expression
+    if len(tag) >= 3 and tag[:1] == brace and (
+            tag[1:2] == close or (tag[1:2] == star and tag[2:3] == close)):
+        return True  # wildcard: '{}tag' or '{*}tag'
+    # Path characters only count outside '{...}' namespace sections.
+    start = 0
+    while True:
+        end = tag.find(brace, start)
+        segment = tag[start:] if end < 0 else tag[start:end]
+        for ch in pathchars:
+            if ch in segment:
+                return True
+        if end < 0:
+            return False
+        start = tag.find(close, end + 1)
+        if start < 0:
+            return False
+        start += 1
+
+
 class Element:
     """An XML element."""
 
@@ -194,16 +224,35 @@ class Element:
         """Remove matching subelement (by identity)."""
         self._children.remove(subelement)
 
+    # Like the C accelerator, a plain tag (``_checkpath`` false) with no
+    # namespace map is matched against the children directly; anything else
+    # goes through ElementPath.
+
     def find(self, path, namespaces=None):
         """Find first matching element by tag name or path."""
+        if namespaces is None and not _checkpath(path):
+            for e in self._children:
+                t = e.tag
+                if t is path or t == path:
+                    return e
+            return None
         return ElementPath.find(self, path, namespaces)
 
     def findtext(self, path, default=None, namespaces=None):
         """Find text for first matching element by tag name or path."""
+        if namespaces is None and not _checkpath(path):
+            for e in self._children:
+                t = e.tag
+                if t is path or t == path:
+                    text = e.text
+                    return "" if text is None else text
+            return default
         return ElementPath.findtext(self, path, default, namespaces)
 
     def findall(self, path, namespaces=None):
         """Find all matching subelements by tag name or path."""
+        if namespaces is None and not _checkpath(path):
+            return [e for e in self._children if e.tag is path or e.tag == path]
         return ElementPath.findall(self, path, namespaces)
 
     def iterfind(self, path, namespaces=None):
