@@ -517,6 +517,7 @@ print("base map type:", type(selectors.SelectSelector().get_map()).__name__)
 
 # 12. Platform selectors through the same API ------------------------------------
 real = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+real.bind(("127.0.0.1", 0))
 FD = real.fileno()
 for name in ("PollSelector", "EpollSelector", "KqueueSelector"):
     cls = getattr(selectors, name, None)
