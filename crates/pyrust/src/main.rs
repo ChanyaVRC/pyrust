@@ -915,10 +915,11 @@ fn last_line_is_indented(buf: &str) -> bool {
 
 fn is_incomplete(err: &PyError) -> bool {
     // "found Eof" — input cut off mid-expression
-    // "expected Indent, found" — block header (e.g. "for x:") with no body yet;
+    // "expected an indented block" — block header (e.g. "for x:") with no body yet;
     //   the trailing \n produces an extra Newline token instead of Eof
-    err.syntax_message()
-        .is_some_and(|msg| msg.contains("found Eof") || msg.contains("expected Indent, found"))
+    err.syntax_message().is_some_and(|msg| {
+        msg.contains("found Eof") || msg.starts_with("expected an indented block")
+    })
 }
 
 fn normalize_repl_error(error: PyError) -> PyError {
@@ -1143,7 +1144,7 @@ mod tests {
         // produced when a block header line ends with '\n' and the lexer emits
         // an extra Newline token instead of Eof
         assert!(is_incomplete(&PyError::parse(
-            "expected Indent, found Some(Newline)".into()
+            "expected an indented block after 'if' statement on line 1".into()
         )));
     }
 

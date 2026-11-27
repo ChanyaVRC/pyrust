@@ -196,7 +196,16 @@ impl Parser {
                 false,
             ));
         }
-        let index = self.pos.min(self.tokens.len() - 1);
+        let mut index = self.pos.min(self.tokens.len() - 1);
+        // The DEDENTs closing the open blocks at the end of the input carry no
+        // position of their own: CPython reports them at the end of input.
+        if matches!(self.tokens[index], Token::Dedent)
+            && self.tokens[index..]
+                .iter()
+                .all(|t| matches!(t, Token::Dedent | Token::Eof))
+        {
+            index = self.tokens.len() - 1;
+        }
         let line = token_line(index);
         if line == 0 {
             return error;
@@ -206,7 +215,7 @@ impl Parser {
             Token::Newline => ((col + 1, col + 2), true),
             // Both record the tokenizer cursor itself (just past the
             // indentation / past the last line's newline), not a token start.
-            Token::Indent | Token::Eof => ((col, -1), false),
+            Token::Indent | Token::Dedent | Token::Eof => ((col, -1), false),
             _ => {
                 let end = self.end_col_at(index).map_or(col + 1, i64::from);
                 ((col + 1, end + 1), false)
@@ -221,6 +230,99 @@ impl Parser {
             },
             newline_token,
         ))
+    }
+
+    /// The `IndentationError` CPython raises when the block of the compound
+    /// statement whose header ends (just past its `:`) at token `header_end`
+    /// has no indented body (#3403): `expected an indented block after
+    /// 'if' statement on line 1` and its siblings.  The error is left to
+    /// [`Parser::locate_error`], which anchors it on the token the parser
+    /// stopped at, as CPython does.
+    #[cold]
+    fn missing_block_error(&self, header_end: usize) -> PyError {
+        // A logical line's tokens follow the NEWLINE / INDENT / DEDENT that
+        // precede it, so the header starts right after the nearest of those.
+        let mut start = header_end.saturating_sub(1);
+        while start > 0
+            && !matches!(
+                self.tokens[start - 1],
+                Token::Newline | Token::Indent | Token::Dedent
+            )
+        {
+            start -= 1;
+        }
+        // `async def` / `async for` / `async with` name the keyword after it.
+        if matches!(&self.tokens.get(start), Some(Token::Ident(kw)) if kw == "async") {
+            start += 1;
+        }
+        let what = match self.tokens.get(start) {
+            Some(Token::Def) => "function definition",
+            Some(Token::Class) => "class definition",
+            Some(Token::If) => "'if' statement",
+            Some(Token::Elif) => "'elif' statement",
+            Some(Token::Else) => "'else' statement",
+            Some(Token::While) => "'while' statement",
+            Some(Token::For) => "'for' statement",
+            Some(Token::Try) => "'try' statement",
+            Some(Token::Except) if matches!(self.tokens.get(start + 1), Some(Token::Star)) => {
+                "'except*' statement"
+            }
+            Some(Token::Except) => "'except' statement",
+            Some(Token::Finally) => "'finally' statement",
+            Some(Token::With) => "'with' statement",
+            Some(Token::Ident(kw)) if kw == "match" => "'match' statement",
+            Some(Token::Ident(kw)) if kw == "case" => "'case' statement",
+            _ => return PyError::parse("expected an indented block".to_string()),
+        };
+        self.indented_block_error(what, start)
+    }
+
+    #[cold]
+    fn indented_block_error(&self, what: &str, header: usize) -> PyError {
+        match self.line_nos.get(header).copied().filter(|&line| line != 0) {
+            Some(line) => PyError::parse(format!(
+                "expected an indented block after {what} on line {line}"
+            )),
+            None => PyError::parse(format!("expected an indented block after {what}")),
+        }
+    }
+
+    /// The error for a `match` header [`Parser::match_missing_block`] found,
+    /// with the parser left on the token that should have been the INDENT.
+    #[cold]
+    fn match_missing_block_error(&mut self) -> PyError {
+        let error = self.indented_block_error("'match' statement", self.pos);
+        if let Some(index) = self.match_missing_block() {
+            self.pos = index;
+        }
+        error
+    }
+
+    /// For a `match <subject>:` header that is followed by a NEWLINE but no
+    /// indented block, the index of the token that should have been the
+    /// INDENT (#3403).  `match` is a soft keyword, so such a header is only
+    /// told apart from an ordinary expression statement by this shape.
+    fn match_missing_block(&self) -> Option<usize> {
+        let mut i = self.pos + 1;
+        let mut depth = 0usize;
+        loop {
+            match self.tokens.get(i)? {
+                Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                Token::RParen | Token::RBracket | Token::RBrace => depth = depth.checked_sub(1)?,
+                Token::Colon if depth == 0 => break,
+                Token::Newline | Token::Eof => return None,
+                _ => {}
+            }
+            i += 1;
+        }
+        if i == self.pos + 1 || !matches!(self.tokens.get(i + 1), Some(Token::Newline)) {
+            return None;
+        }
+        i += 1;
+        while matches!(self.tokens.get(i), Some(Token::Newline)) {
+            i += 1;
+        }
+        (!matches!(self.tokens.get(i), Some(Token::Indent))).then_some(i)
     }
 
     /// Locate a parse failure on the tokens `start..end` — a construct the
@@ -557,6 +659,10 @@ impl Parser {
             Some(Token::Ident(kw)) if kw == "match" && self.is_match_stmt() => {
                 Ok(vec![self.parse_match()?])
             }
+            Some(Token::Ident(kw)) if kw == "match" && self.match_missing_block().is_some() => {
+                Err(self.match_missing_block_error())
+            }
+            Some(Token::Indent) => Err(PyError::parse("unexpected indent".to_string())),
             // `type` is a soft keyword (PEP 695): `type <name> = <expr>`.
             // Only treat it as a type alias when followed by an identifier and `=`.
             Some(Token::Ident(kw)) if kw == "type" && self.is_type_alias_stmt() => {
