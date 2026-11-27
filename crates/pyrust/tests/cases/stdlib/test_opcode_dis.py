@@ -355,3 +355,98 @@ finally:
         sys.last_traceback = saved_last_tb
     if saved_last_exc is not None:
         sys.last_exc = saved_last_exc
+
+
+# ── 7. Native `opcode` module surface (issue #3411) ──────────────────────────
+
+import hashlib
+
+print("opcode public names:", sorted(n for n in dir(opcode) if not n.startswith("__")))
+for _name in (
+    "__all__", "cmp_op", "hasarg", "hasconst", "hasname", "hasjrel", "hasjabs",
+    "haslocal", "hascompare", "hasfree", "hasexc", "ENABLE_SPECIALIZATION",
+    "opmap", "_pseudo_ops", "HAVE_ARGUMENT", "EXTENDED_ARG",
+    "MIN_INSTRUMENTED_OPCODE", "MIN_PSEUDO_OPCODE", "MAX_PSEUDO_OPCODE",
+    "opname", "op", "i", "_nb_ops", "_intrinsic_1_descs", "_intrinsic_2_descs",
+    "_specializations", "_specialized_instructions", "_cache_format",
+    "_inline_cache_entries",
+):
+    _val = getattr(opcode, _name)
+    print(_name, type(_val).__name__, repr(_val))
+print("opcode __doc__:", repr(opcode.__doc__))
+
+# `oplists` aliases the exact has* list objects, in CPython's order.
+print("oplists identity:", [
+    a is b for a, b in zip(
+        opcode.oplists,
+        [opcode.hasarg, opcode.hasconst, opcode.hasname, opcode.hasjrel,
+         opcode.hasjabs, opcode.haslocal, opcode.hascompare, opcode.hasfree,
+         opcode.hasexc],
+    )
+])
+print("oplists len:", len(opcode.oplists))
+
+# The containers are ordinary mutable Python objects, one per name.
+print("distinct containers:", len({
+    id(x) for x in (opcode.hasarg, opcode.hasconst, opcode.hasname,
+                    opcode.hasjrel, opcode.hasjabs, opcode.haslocal,
+                    opcode.hascompare, opcode.hasfree, opcode.hasexc)
+}))
+print("opcode.__all__ star-import:", sorted(
+    n for n in opcode.__all__ if hasattr(opcode, n)) == sorted(opcode.__all__))
+
+# is_pseudo
+print("is_pseudo:", [opcode.is_pseudo(x) for x in (
+    0, 255, 256, 260, 266, 267, True, 260.5, 10 ** 30, -1)])
+print("is_pseudo str:", expect_exc(opcode.is_pseudo, "a"))
+
+# stack_effect: exhaustive grid incl. negative / extreme opargs and every jump
+# mode (CPython derives effects from pop/push counts, so invalid counts raise).
+_se = opcode.stack_effect
+
+
+class _Idx:
+    def __index__(self):
+        return 100
+
+
+_rows = []
+for _op in list(range(-3, 300)) + [2 ** 31 - 1, 2 ** 31, -2 ** 31, -2 ** 31 - 1, 2 ** 70]:
+    _rows.append((_op, expect_exc(_se, _op)))
+    for _arg in (None, 0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 255, 256, 257, 65535,
+                 65536, -1, -3, 2 ** 31 - 1, True, False):
+        for _jump in (None, True, False):
+            _rows.append((_op, _arg, _jump, expect_exc(_se, _op, _arg, jump=_jump)))
+    _rows.append((
+        _op, expect_exc(_se, _op, 1.5), expect_exc(_se, _op, "x"),
+        expect_exc(_se, _op, _Idx()), expect_exc(_se, _op, 1, jump=1),
+        expect_exc(_se, _op, 1, jump=0), expect_exc(_se, _op, 1, jump="x"),
+    ))
+print("stack_effect grid:", len(_rows),
+      hashlib.sha256(repr(_rows).encode()).hexdigest())
+
+# Negative / overflowing opargs are invalid, not silently computed.
+for _name, _arg in (("UNPACK_SEQUENCE", -1), ("COPY", -1), ("SWAP", -1),
+                    ("SWAP", 0), ("BUILD_MAP", 2 ** 31 - 1),
+                    ("CALL", 2 ** 31 - 1), ("CALL", -1), ("RAISE_VARARGS", -1),
+                    ("LIST_APPEND", 0), ("RERAISE", 0), ("UNPACK_EX", -65536)):
+    print("se oparg", _name, _arg, expect_exc(_se, opcode.opmap[_name], _arg))
+
+# Signature / argument errors.
+print("se args:", [
+    expect_exc(_se),
+    expect_exc(_se, 1, 2, 3),
+    expect_exc(_se, 1, jump=1),
+    expect_exc(_se, 1, foo=1),
+    expect_exc(_se, opcode=1),
+    expect_exc(_se, 1.0),
+    expect_exc(_se, "a"),
+    expect_exc(_se, None),
+    expect_exc(_se, 100, oparg=0),
+    expect_exc(_se, _Idx(), 3),
+    expect_exc(_se, 100, _Idx()),
+    expect_exc(_se, 100, 2 ** 64),
+    expect_exc(_se, 2 ** 31),
+    expect_exc(_se, 1, None),
+    expect_exc(_se, 100, None),
+])
