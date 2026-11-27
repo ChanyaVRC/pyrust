@@ -31,7 +31,11 @@ pub struct NamespaceStoreOutcome {
     pub displaced: Value,
     /// Previous value of the mirroring Script register, if one was written.
     pub displaced_register: Option<Value>,
-    /// Filesystem-module globals dictionary that must receive the same write.
+    /// Globals dictionary that must receive the same write: a filesystem
+    /// module's shared backing, or a normal provider's exposed mapping. The
+    /// caller mirrors into it with
+    /// [`Environment::write_namespace_mapping_binding`], an owner write that
+    /// advances no generation of this root.
     pub globals: Option<Value>,
 }
 
@@ -136,9 +140,14 @@ impl Environment {
     /// the name to the locator lane.
     ///
     /// Returns `None` whenever a later overwrite could not be proven
-    /// equivalent to the full assignment path: an exposed or explicit
-    /// namespace (whose dictionary is authoritative), a saturated identity or
-    /// mirror epoch, or more than one live Script mirror.
+    /// equivalent to the full assignment path: an explicit namespace (whose
+    /// caller-owned dictionaries are the only storage), a saturated identity
+    /// or mirror epoch, or more than one live Script mirror.
+    ///
+    /// An exposed normal namespace stays eligible (#3425). Its dictionary is
+    /// authoritative, but the overwrite still lands in the same root binding
+    /// and Script register a full assignment writes, and reports the
+    /// dictionary to mirror through [`NamespaceStoreOutcome::globals`].
     pub fn namespace_store_slot(&self, name: &str) -> Option<NamespaceStoreSlot> {
         let root = &*self.root_namespace;
         if self.parent.is_some() || root.id == u64::MAX || root.cache_disabled.get() {
@@ -183,7 +192,7 @@ impl Environment {
     /// already-bound name (#3423).
     ///
     /// Returns `None`, having changed nothing, when any guard fails: a
-    /// different or exposed namespace, a changed set of live Script frames, or
+    /// different or explicit namespace, a changed set of live Script frames, or
     /// a binding that was removed or re-inserted since the locator was built.
     ///
     /// A repeated overwrite advances no cache generation. The first overwrite
@@ -241,7 +250,7 @@ impl Environment {
         // pointers only, so no `&mut [Value]` aliases this slot.
         let displaced_register =
             register.map(|mut slot| std::mem::replace(unsafe { slot.as_mut() }, value.clone()));
-        let globals = if root.filesystem_module_backing.get() {
+        let globals = if root.filesystem_module_backing.get() || root.globals_exposed.get() {
             self.bump_filesystem_module_mutation();
             Some(root.globals_provider_snapshot().0)
         } else {

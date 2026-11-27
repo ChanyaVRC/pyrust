@@ -27,10 +27,11 @@ impl Interpreter {
         ) = {
             let env = self.env.borrow();
             let snapshot = env.namespace_cache_snapshot();
-            // Once globals() has exposed the backing dict, arbitrary alias methods
-            // (e.g. update/clear) can mutate it without an interpreter callback.
-            // Keep those uncommon namespaces uncached instead of installing a
-            // process-wide dict mutation watcher on every normal program.
+            // Only an explicit exec/eval namespace is uncached. A namespace
+            // whose dict escaped through globals() keeps its entries (#3425):
+            // every mutation through an alias of that dict (update/clear/...)
+            // reports to the root at the dictionary-storage boundary and
+            // advances the generations probed here.
             if !snapshot.4 {
                 let cached = code.global_cache.borrow().get(slot).and_then(|entry| {
                     entry.lookup_with_fastlocal(

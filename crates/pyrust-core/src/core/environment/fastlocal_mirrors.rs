@@ -220,7 +220,7 @@ impl Environment {
     /// so the newly bound key lands at its runtime binding point rather than
     /// before declared fast-local slots.
     pub fn record_namespace_out_of_order_insert(&self, name: &str) {
-        if self.root_namespace.cache_disabled.get() {
+        if self.root_namespace.mapping_authoritative() {
             return;
         }
         self.ensure_binding_order_initialized();
@@ -239,7 +239,7 @@ impl Environment {
     /// a later re-bind of the same name appends at the end instead of reusing
     /// its static register position.
     pub fn record_namespace_binding_order_delete(&self, name: &str) {
-        if self.root_namespace.cache_disabled.get() {
+        if self.root_namespace.mapping_authoritative() {
             return;
         }
         self.ensure_binding_order_initialized();

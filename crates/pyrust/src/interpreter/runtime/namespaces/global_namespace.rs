@@ -65,10 +65,15 @@ impl Interpreter {
     /// Resolve the root namespace backing the currently active lexical frame.
     pub(crate) fn prepare_global_namespace(&self, name: &str) -> GlobalNamespace {
         let root = module_env(&self.env);
-        let (globals, locals, is_explicit, cache_disabled) = {
+        let (globals, locals, is_explicit, mapping_authoritative) = {
             let root = root.borrow();
             let (globals, locals, explicit) = root.namespace_globals_provider();
-            (globals, locals, explicit, root.namespace_cache_disabled())
+            (
+                globals,
+                locals,
+                explicit,
+                root.namespace_mapping_authoritative(),
+            )
         };
         // A list / set / dict comprehension in module-level exec/eval code is
         // inlined into that script frame by CPython 3.12 (PEP 709), so its
@@ -81,9 +86,10 @@ impl Interpreter {
             globals,
             lookup_locals: at_explicit_script_scope.then_some(locals).flatten(),
             explicit: is_explicit,
-            // Explicit dicts and exposed normal globals are authoritative and
-            // may be mutated without an interpreter callback.
-            sync_backing: cache_disabled,
+            // Explicit dicts and exposed normal globals are authoritative:
+            // an alias may have changed the binding since `EnvValues` last
+            // saw it, so a cache miss refreshes it from the dictionary.
+            sync_backing: mapping_authoritative,
         };
         namespace.sync_name(name);
         namespace
@@ -112,7 +118,8 @@ impl Interpreter {
     ///
     /// Python-visible access through function.__globals__, frame.f_globals, or
     /// generator/traceback frames has the same alias-mutation surface as
-    /// globals(). Normal roots are synchronized and permanently uncached.
+    /// globals(). Normal roots are synchronized once and stay cached: from
+    /// then on each alias mutation invalidates at the storage boundary.
     /// Explicit exec/eval globals are already authoritative and must not be
     /// overwritten from their captured EnvValues snapshot.
     pub(crate) fn globals_for_environment(&self, env: &EnvRef) -> Value {

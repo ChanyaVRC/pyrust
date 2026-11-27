@@ -131,14 +131,31 @@ namespace and hides which domain a caller depends on.
     general object-graph collection concern; this link must not add a second
     strong module/environment edge.
     Built-in modules keep their direct `attrs` storage and generation fast path.
-    Exposing the filesystem dictionary disables both root global caches and the
-    linked module mutation generation before arbitrary alias writes can occur.
+    Exposing a normal root's globals dictionary (`globals()`, `module.__dict__`,
+    `vars(module)`, `function.__globals__`, `frame.f_globals`) makes that
+    dictionary the authoritative namespace but keeps the root global caches
+    enabled: the first exposure advances the structure generation once, and
+    from then on rule 26 invalidates them on mutation. A namespace that is
+    only read through its dictionary keeps every `LoadGlobal` entry. Exposure
+    still saturates the linked module mutation generation before arbitrary
+    alias writes can occur, and an explicit `exec`/`eval` provider remains
+    uncached for its whole lifetime.
 26. A dictionary that aliases a live globals or locals namespace reports
     mutations at the core dictionary-storage boundary. Single-string-key
     writes use keyed notifications; opaque or batched mutation uses a full
     refresh. Interpreter adapters must not duplicate these hooks, because
     aliases can be mutated through instance attributes, module dictionaries,
     or another interpreter.
+    Every such report advances the owning root's structure generation and
+    refreshes its live Script mirrors; this is the only invalidation an
+    exposed namespace's `LoadGlobal` caches have for alias writes, so a
+    dictionary mutation path that skips the storage boundary is a stale-read
+    bug, not a missed optimization. The one exemption is an owner write
+    (`Environment::write_namespace_mapping_binding`): the root mirroring its
+    own controlled assignment into its dictionary has already advanced the
+    generations its cache-interest masks require and updates its own mirrors,
+    so the report skips that root and still reaches every other root that
+    aliases the dictionary.
 27. A live script frame registers its fast-local layout with the root namespace
     through an RAII mirror guard. The root advances a non-wrapping mirror epoch
     whenever that stack changes. A global-cache entry may retain weak layout

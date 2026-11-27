@@ -266,7 +266,14 @@ impl Interpreter {
                 .update_if_present(name, env_value);
         }
         if let Some(target) = write_target {
-            let _ = target.dict_insert(PyKey::str_from(name), value.clone());
+            // An owner write: `prepare_namespace_module_write_flags` already
+            // advanced the generations this name's cache interest requires,
+            // so an exposed namespace keeps every unrelated cache entry.
+            let displaced =
+                self.env
+                    .borrow()
+                    .write_namespace_mapping_binding(&target, name, value.clone());
+            drop(displaced);
         }
         if synchronize_siblings {
             self.env.borrow().synchronize_namespace_fastlocal_binding(
@@ -309,7 +316,7 @@ impl Interpreter {
             .ok()
             .flatten();
         bump_global_struct_version(self);
-        if !self.env.borrow().namespace_cache_disabled() {
+        if !self.env.borrow().namespace_mapping_authoritative() {
             self.env
                 .borrow()
                 .synchronize_namespace_fastlocal_binding(name, &Value::unset(), None);
@@ -481,7 +488,7 @@ impl Interpreter {
                 .ok()
                 .flatten();
             bump_global_struct_version(self);
-            if !me.borrow().namespace_cache_disabled() {
+            if !me.borrow().namespace_mapping_authoritative() {
                 me.borrow().synchronize_namespace_fastlocal_binding(
                     name.as_str(),
                     &Value::unset(),
@@ -540,7 +547,7 @@ impl Interpreter {
             });
             if is_module_scope {
                 bump_global_struct_version(self);
-                if !self.env.borrow().namespace_cache_disabled() {
+                if !self.env.borrow().namespace_mapping_authoritative() {
                     self.env.borrow().synchronize_namespace_fastlocal_binding(
                         name.as_str(),
                         &Value::unset(),

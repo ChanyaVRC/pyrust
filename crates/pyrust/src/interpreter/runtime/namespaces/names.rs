@@ -40,7 +40,7 @@ impl Interpreter {
                 let root_ref = root.borrow();
                 if root_ref.namespace_has_binding_order() {
                     root_ref.record_namespace_binding_order_insert(name);
-                } else if !root_ref.namespace_cache_disabled()
+                } else if !root_ref.namespace_mapping_authoritative()
                     && root_ref.namespace_has_active_fastlocal_mirror()
                     && root_ref.namespace_values().get(name).is_none()
                     && root_ref.namespace_fastlocal_value(name).is_none()
@@ -58,13 +58,11 @@ impl Interpreter {
             bump_global_struct_version(self);
             // Mirror into the live module globals dict only when globals() has
             // been called.
-            if let Some(globals) = self.globals_write_target_for_environment(&self.env) {
-                let _ = globals.dict_insert(PyKey::str_from(name), value.clone());
-            }
-            // Before the namespace mapping escapes there is no storage-level
-            // callback, so propagate a function's global write to every live
-            // Script mirror owned by the root. Once exposed, dict insertion
-            // above performs the same update at the storage boundary.
+            self.mirror_global_write(name, &value);
+            // A normal root propagates a function's global write to every
+            // live Script mirror it owns itself: the dictionary write above is
+            // an owner write, which the storage notification skips. Only an
+            // explicit provider relies on that notification.
             if !root.borrow().namespace_cache_disabled() {
                 root.borrow()
                     .synchronize_namespace_fastlocal_binding(name, &value, None);
@@ -79,7 +77,7 @@ impl Interpreter {
                 let env_ref = self.env.borrow();
                 if env_ref.namespace_has_binding_order() {
                     env_ref.record_namespace_binding_order_insert(name);
-                } else if !env_ref.namespace_cache_disabled()
+                } else if !env_ref.namespace_mapping_authoritative()
                     && env_ref.namespace_has_active_fastlocal_mirror()
                     && env_ref.namespace_values().get(name).is_none()
                     && !env_ref.namespace_fastlocal_declares(name)
@@ -89,9 +87,7 @@ impl Interpreter {
             }
             // Invalidate the LoadGlobal inline cache for module-scope writes.
             bump_global_struct_version(self);
-            if let Some(globals) = self.globals_write_target_for_environment(&self.env) {
-                let _ = globals.dict_insert(PyKey::str_from(name), value.clone());
-            }
+            self.mirror_global_write(name, &value);
             if !self.env.borrow().namespace_cache_disabled() {
                 self.env
                     .borrow()
@@ -99,6 +95,26 @@ impl Interpreter {
             }
         }
         env_assign_local(&self.env, name, value);
+    }
+
+    /// Mirror one global binding this interpreter has just written into the
+    /// dictionary that must stay live for it, if any.
+    ///
+    /// The write is an owner write (see
+    /// [`Environment::write_namespace_mapping_binding`]): the caller has
+    /// already advanced the cache generations and updates the root's Script
+    /// mirrors itself, so an exposed normal namespace is not invalidated a
+    /// second time at the dictionary-storage boundary.
+    #[inline]
+    fn mirror_global_write(&self, name: &str, value: &Value) {
+        let Some(globals) = self.globals_write_target_for_environment(&self.env) else {
+            return;
+        };
+        let displaced =
+            self.env
+                .borrow()
+                .write_namespace_mapping_binding(&globals, name, value.clone());
+        drop(displaced);
     }
 
     /// Repeat a completed [`Self::assign_name`] as an in-place overwrite of the
@@ -161,8 +177,9 @@ impl Interpreter {
 
     /// Complete an in-place global overwrite after every borrow of the root
     /// environment and of the bytecode cache has been released: mirror the
-    /// write into a filesystem module's shared globals dictionary, then drop
-    /// the displaced values.
+    /// write into the globals dictionary that must stay live (a filesystem
+    /// module's shared backing or an exposed mapping), then drop the displaced
+    /// values.
     #[inline]
     pub(crate) fn finish_cached_global_store(
         &self,
@@ -171,16 +188,14 @@ impl Interpreter {
         outcome: pyrust_core::NamespaceStoreOutcome,
     ) {
         if let Some(globals) = &outcome.globals {
-            // The name is normally already a key of the module dictionary, so
-            // replace its value without allocating an owned key. Both calls
-            // report the mutation at the dictionary-storage boundary.
-            match globals.dict_replace_existing(&StrKey(name), true, Some(name), value) {
-                Ok(Ok(_displaced)) => {}
-                Ok(Err(value)) => {
-                    let _ = globals.dict_insert(PyKey::str_from(name), value);
-                }
-                Err(_) => {}
-            }
+            // An owner write: the in-place overwrite already updated the root
+            // binding and its Script register, and it advances no generation,
+            // so the storage notification must not invalidate this root.
+            let displaced = self
+                .env
+                .borrow()
+                .write_namespace_mapping_binding(globals, name, value);
+            drop(displaced);
         }
     }
 
