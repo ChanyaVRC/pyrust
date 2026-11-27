@@ -48,7 +48,8 @@ mod sha3;
 
 use self::args::{Sig, no_args, one_arg, unpack};
 use self::blake2::Blake2Params;
-use self::engine::{HashState, hex_encode, hmac_oneshot, pbkdf2_hmac};
+use self::engine::{HashState, hex_encode, pbkdf2_hmac};
+pub(crate) use self::engine::{HmacAlgo, HmacState};
 
 type ClassRc = Rc<RefCell<PyClass>>;
 
@@ -214,20 +215,44 @@ fn wrap_state(state: HashState) -> Result<Value> {
 
 // ── Shared helpers for `hmac` fast path ──────────────────────────────────────
 
-/// Compute a one-shot HMAC in native Rust for any built-in non-XOF hash name.
-/// Returns `Ok(Some(digest))` if recognized, `Ok(None)` if unknown, or `Err`
-/// if the algorithm is an XOF (`shake_128`/`shake_256`) that HMAC rejects.
-pub(crate) fn hmac_oneshot_by_name(name: &str, key: &[u8], msg: &[u8]) -> Result<Option<Vec<u8>>> {
-    let Some(state) = HashState::from_name(name) else {
-        return Ok(None);
-    };
-    if state.is_shake() {
-        return Err(PyError::named(
-            "ValueError",
-            format!("unsupported hash type {name}"),
-        ));
+/// Names of the `hashlib` constructors `hmac` runs natively.
+const HMAC_CONSTRUCTOR_NAMES: [&str; 14] = [
+    "md5",
+    "sha1",
+    "sha224",
+    "sha256",
+    "sha384",
+    "sha512",
+    "sha3_224",
+    "sha3_256",
+    "sha3_384",
+    "sha3_512",
+    "shake_128",
+    "shake_256",
+    "blake2b",
+    "blake2s",
+];
+
+/// The `hashlib` algorithm name behind `ctor` when it is one of the named
+/// `hashlib` constructors themselves (`hashlib.sha256`, `hashlib.blake2b`, ...),
+/// the objects `hmac` maps straight onto its native engine.
+pub(crate) fn builtin_constructor_name(
+    interp: &mut Interpreter,
+    ctor: &Value,
+) -> Result<Option<&'static str>> {
+    let module = interp.load_module("hashlib")?;
+    for name in HMAC_CONSTRUCTOR_NAMES {
+        let candidate = interp.get_attr(&module, name)?;
+        if candidate.is_identical_to(ctor) {
+            return Ok(Some(name));
+        }
     }
-    Ok(Some(hmac_oneshot(&state, key, msg)))
+    Ok(None)
+}
+
+/// Lowercase hexadecimal rendering of `bytes`.
+pub(crate) fn hex_digest(bytes: &[u8]) -> String {
+    hex_encode(bytes)
 }
 
 /// Compute a one-shot lowercase hexadecimal MD5 digest in native Rust.
@@ -301,7 +326,7 @@ pub(crate) fn extract_bytes_like(val: &Value) -> Result<Vec<u8>> {
 
 /// The buffer argument of a hash constructor / `update`: `str` is rejected
 /// with CPython's dedicated wording.
-fn extract_hash_input(val: &Value) -> Result<Vec<u8>> {
+pub(crate) fn extract_hash_input(val: &Value) -> Result<Vec<u8>> {
     if is_str_value(val) {
         return Err(type_error("Strings must be encoded before hashing"));
     }

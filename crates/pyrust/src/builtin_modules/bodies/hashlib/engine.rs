@@ -176,31 +176,96 @@ struct PreparedHmac {
     digest_size: usize,
 }
 
+/// Inner / outer contexts of an RFC 2104 HMAC keyed with `key`, each already
+/// fed its padded key block.
+fn keyed_contexts(base: &HashState, key: &[u8]) -> (HashState, HashState) {
+    let block_size = base.block_size();
+    let mut key_block = vec![0u8; block_size];
+    if key.len() > block_size {
+        let mut h = base.clone();
+        h.update(key);
+        let hashed = h.digest();
+        key_block[..hashed.len()].copy_from_slice(&hashed);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = vec![0x36u8; block_size];
+    let mut opad = vec![0x5cu8; block_size];
+    for i in 0..block_size {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+
+    let mut inner = base.clone();
+    inner.update(&ipad);
+    let mut outer = base.clone();
+    outer.update(&opad);
+    (inner, outer)
+}
+
+/// A built-in hash algorithm usable as an `hmac` `digestmod`.
+#[derive(Clone)]
+pub(crate) struct HmacAlgo(HashState);
+
+impl HmacAlgo {
+    /// Resolve a `hashlib.new()` algorithm name.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        HashState::from_name(name).map(Self)
+    }
+
+    /// `shake_128` / `shake_256`: variable-length digests HMAC rejects.
+    pub(crate) fn is_xof(&self) -> bool {
+        self.0.is_shake()
+    }
+
+    /// One-shot HMAC of `msg` under `key`.
+    pub(crate) fn oneshot(&self, key: &[u8], msg: &[u8]) -> Vec<u8> {
+        hmac_oneshot(&self.0, key, msg)
+    }
+}
+
+/// Incremental RFC 2104 HMAC over a built-in hash (the state behind
+/// `hmac.HMAC` objects).  `digest()` never mutates it.
+#[derive(Clone)]
+pub(crate) struct HmacState {
+    inner: HashState,
+    outer: HashState,
+}
+
+impl HmacState {
+    pub(crate) fn new(algo: &HmacAlgo, key: &[u8]) -> Self {
+        let (inner, outer) = keyed_contexts(&algo.0, key);
+        Self { inner, outer }
+    }
+
+    pub(crate) fn update(&mut self, data: &[u8]) {
+        self.inner.update(data);
+    }
+
+    pub(crate) fn digest(&self) -> Vec<u8> {
+        let mut outer = self.outer.clone();
+        outer.update(&self.inner.digest());
+        outer.digest()
+    }
+
+    pub(crate) fn digest_size(&self) -> usize {
+        self.inner.digest_size()
+    }
+
+    pub(crate) fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+
+    /// The wrapped hash's `hashlib` name (`sha256`).
+    pub(crate) fn hash_name(&self) -> &'static str {
+        self.inner.name()
+    }
+}
+
 impl PreparedHmac {
     fn new(base: &HashState, key: &[u8]) -> Self {
-        let block_size = base.block_size();
-        let mut key_block = vec![0u8; block_size];
-        if key.len() > block_size {
-            let mut h = base.clone();
-            h.update(key);
-            let hashed = h.digest();
-            key_block[..hashed.len()].copy_from_slice(&hashed);
-        } else {
-            key_block[..key.len()].copy_from_slice(key);
-        }
-
-        let mut ipad = vec![0x36u8; block_size];
-        let mut opad = vec![0x5cu8; block_size];
-        for i in 0..block_size {
-            ipad[i] ^= key_block[i];
-            opad[i] ^= key_block[i];
-        }
-
-        let mut inner = base.clone();
-        inner.update(&ipad);
-        let mut outer = base.clone();
-        outer.update(&opad);
-
+        let (inner, outer) = keyed_contexts(base, key);
         Self {
             inner,
             outer,
