@@ -284,6 +284,14 @@ with Patch(uname=lambda: ("SunOS", "n", "5.11", "v", "m", "p")):
 # ── python_* / _sys_version ──────────────────────────────────────────────────
 print("== python_* ==")
 CPY = "3.12.3 (main, Apr 15 2024, 17:48:16) [MSC v.1929 64 bit (AMD64)]"
+
+
+def sysver(text):
+    # branch and revision come from the host `sys._git`, which differs per host
+    info = platform._sys_version(text)
+    return info[:2] + info[4:]
+
+
 for text in (
     CPY,
     "2.4.3 (#1, Jun 21 2006, 13:54:21) \n[GCC 3.3.4 (pre 3.3.5 20040809)]",
@@ -297,7 +305,7 @@ for text in (
     "2.7.1 (r271:86832, Feb  4 2011, 11:10:13) \n[PyPy 1.5.0-alpha0 with GCC 4.4]",
     "3.9.0 (7e0b2c3, Oct 10 2020, 12:00:00)\n[PyPy 7.3.3 with MSC v.1927 64 bit (AMD64)]",
 ):
-    show_error(repr(text[:34]), platform._sys_version, text)
+    show_error(repr(text[:34]), sysver, text)
 for text in ("", "garbage", "PyRust 0.2", "3.12.3 main", "3.12.3 (main) no brackets", "PyPy bad"):
     show_error("bad %r" % text, platform._sys_version, text)
 print("cache entries:", CPY in platform._sys_version_cache, "garbage" in platform._sys_version_cache)
@@ -321,7 +329,7 @@ with Patch(_sys_version=lambda *a: ("PyPy", "7.3.3", "", "", "x", "y", "")):
 old_platform = sys.platform
 sys.platform = "java1.8"
 try:
-    show_error("jython", platform._sys_version, "2.5.1 (Release_2_5_1:1, Jul 3 2009, 12:00:00) \n[Java HotSpot]")
+    show_error("jython", sysver, "2.5.1 (Release_2_5_1:1, Jul 3 2009, 12:00:00) \n[Java HotSpot]")
     show_error("jython bad", platform._sys_version, "nonsense")
 finally:
     sys.platform = old_platform
