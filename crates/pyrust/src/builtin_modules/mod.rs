@@ -937,10 +937,12 @@ pyrust_builtin_modules! {
     zoneinfo @inject,
     locale @inject,
     gettext @inject,
-    // `linecache`, `pkgutil`, `runpy`, and `sysconfig` (issue #3229): Python
-    // 3.12 source-line cache, package discovery/resolution utilities, module/
-    // script runner, and build/install-scheme configuration interface.
-    linecache @inject,
+    // `linecache` (issues #3229, #3445): the whole CPython 3.12 source-line
+    // cache implemented 100% natively in Rust (`linecache.rs`).
+    linecache,
+    // `pkgutil`, `runpy`, and `sysconfig` (issue #3229): Python 3.12 package
+    // discovery/resolution utilities, module/script runner, and
+    // build/install-scheme configuration interface.
     pkgutil @inject,
     runpy @inject,
     sysconfig @inject,
