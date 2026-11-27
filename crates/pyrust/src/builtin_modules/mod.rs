@@ -918,7 +918,7 @@ pyrust_builtin_modules! {
     // `get_instructions`, `show_code`, `code_info`, `pretty_flags`,
     // `findlabels`, `findlinestarts`).
     timeit @inject,
-    opcode @inject,
+    opcode,
     dis @inject,
     // `codeop`, `code`, `cmd`, and `rlcompleter` (issue #3228): Python 3.12
     // interactive interpreter, command-shell, and readline-completion stdlib
