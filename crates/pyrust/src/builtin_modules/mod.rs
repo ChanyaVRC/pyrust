@@ -645,10 +645,10 @@ pyrust_builtin_modules! {
     // (MD5, SHA-1, SHA-2, SHA-3/SHAKE, BLAKE2b/s, PBKDF2-HMAC, scrypt) and the
     // whole CPython 3.12 `hashlib` surface implemented 100% natively in Rust.
     hashlib,
-    // `hmac` (issue #3146): constant-time `compare_digest` and native HMAC
-    // fast path in `hmac.rs` plus `HMAC`, `new`, and `digest` injected from
-    // `hmac_py.py`.
-    hmac @inject,
+    // `hmac` (issues #3146, #3444): the whole CPython 3.12 `hmac` surface
+    // (`HMAC`, `new`, `digest`, `compare_digest`) implemented 100% natively in
+    // Rust on top of the `hashlib` engine.
+    hmac,
     // `secrets` (issue #3146): cryptographically strong token and random
     // helpers built on `base64`, `hmac.compare_digest`, and `random.SystemRandom`
     // injected from `secrets_py.py`.
