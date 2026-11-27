@@ -314,6 +314,7 @@ macro_rules! pyrust_builtin_modules {
                 "copyreg" => return copyreg::post_load_init(interp, module),
                 "types" => return types::post_load_init(interp, module),
                 "graphlib" => return graphlib::post_load_init(interp, module),
+                "platform" => return platform::post_load_init(interp, module),
                 "csv" => return csv::post_load_init(interp, module),
                 "fractions" => return fractions::post_load_init(interp, module),
                 "contextvars" => return contextvars::post_load_init(interp, module),
@@ -840,11 +841,12 @@ pyrust_builtin_modules! {
     graphlib,
     threading @inject,
     queue @inject,
-    // `stat` (issues #3209, #3355: 100% native Rust in `stat.rs`), `platform`,
-    // `atexit`, and `signal` (issue #3209): Python 3.12
+    // `stat` (issues #3209, #3355) and `platform` (issues #3209, #3469) are 100%
+    // native Rust in `stat.rs` / `platform.rs`, no Python injection;
+    // `atexit` and `signal` (issue #3209): Python 3.12
     // OS/system utility stdlib modules.
     stat,
-    platform @inject,
+    platform,
     atexit,
     signal @inject,
     // `http`, `http.client`, `http.server`, and `http.cookies` (issue #3207):
