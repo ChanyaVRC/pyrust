@@ -703,7 +703,7 @@ pyrust_builtin_modules! {
     // exposed as submodules on the `urllib` parent package.
     "urllib.parse" as urllib_parse @inject,
     "urllib.response" as urllib_response,
-    "urllib.error" as urllib_error @inject,
+    "urllib.error" as urllib_error,
     "urllib.request" as urllib_request @inject,
     "urllib.robotparser" as urllib_robotparser,
     urllib,
