@@ -306,6 +306,7 @@ macro_rules! pyrust_builtin_modules {
             match name {
                 "os" => return os::post_load_init(interp, module),
                 "numbers" => return numbers::post_load_init(interp, module),
+                "selectors" => return selectors::post_load_init(interp, module),
                 "array" => return array::post_load_init(interp, module),
                 "string" => return string::post_load_init(interp, module),
                 "html" => return html::post_load_init(interp, module),
@@ -811,14 +812,14 @@ pyrust_builtin_modules! {
     token,
     tokenize @inject,
     ast @inject,
-    // `ipaddress`, `socket`, and `selectors` (issue #3205): Python 3.12
+    // `ipaddress`, `socket`, and `selectors` (issues #3205, #3453): Python 3.12
     // networking foundation modules — IPv4/IPv6 address/network/interface
     // arithmetic in `ipaddress_py.py`, Rust `std::net`-backed `socket` in
-    // `socket.rs`/`socket_py.py`, and OS-backed I/O multiplexing in
-    // `selectors.rs`/`selectors_py.py`.
+    // `socket.rs`/`socket_py.py`, and `selectors`, which is 100% native Rust
+    // in `selectors.rs` (no Python injection).
     ipaddress @inject,
     socket @inject,
-    selectors @inject,
+    selectors,
     // `socketserver` (issue #3223): Python 3.12 generic TCP/UDP socket server
     // framework (`BaseServer`, `TCPServer`, `UDPServer`, `ThreadingMixIn`,
     // `BaseRequestHandler`, `StreamRequestHandler`, `DatagramRequestHandler`).
