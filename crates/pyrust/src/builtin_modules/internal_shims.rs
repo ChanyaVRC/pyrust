@@ -13,7 +13,7 @@ use pyrust_derive::pyrust_module;
 
 use crate::builtin_registry::ModuleRegs;
 use crate::error::{PyError, Result};
-use crate::interpreter::builtin_args::{PyBool, PyIndex, PyNumber, PyStr, PyValue, PyValueRef};
+use crate::interpreter::builtin_args::{PyIndex, PyNumber, PyValue, PyValueRef};
 use crate::interpreter::{ExpandedCallArg, Interpreter, lookup_exc_class};
 use crate::value::{PyDict, PyModule, Value, ValueKind};
 
@@ -200,110 +200,6 @@ fn normal_dist_inv_cdf(p: f64, mu: f64, sigma: f64) -> Result<f64> {
         if q < 0.0 { -val } else { val }
     };
     Ok(mu + x * sigma)
-}
-
-fn json_escape_string(s: &str, ensure_ascii: bool) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\x08' => out.push_str("\\b"),
-            '\x0c' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if ensure_ascii && !c.is_ascii() => {
-                let cp = c as u32;
-                if cp < 0x10000 {
-                    out.push_str(&format!("\\u{cp:04x}"));
-                } else {
-                    let n = cp - 0x10000;
-                    let hi = 0xD800 + (n >> 10);
-                    let lo = 0xDC00 + (n & 0x3FF);
-                    out.push_str(&format!("\\u{hi:04x}\\u{lo:04x}"));
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-fn json_scanstring(s: &str, end_idx: usize, strict: bool) -> Result<(String, usize)> {
-    let chars: Vec<char> = s.chars().collect();
-    if end_idx > chars.len() {
-        return Err(PyError::named("ValueError", "Unterminated string"));
-    }
-    let mut i = end_idx;
-    let mut out = String::new();
-    while i < chars.len() {
-        let ch = chars[i];
-        i += 1;
-        match ch {
-            '"' => return Ok((out, i)),
-            '\\' => {
-                if i >= chars.len() {
-                    return Err(PyError::named("ValueError", "Unterminated string"));
-                }
-                let esc = chars[i];
-                i += 1;
-                match esc {
-                    '"' => out.push('"'),
-                    '\\' => out.push('\\'),
-                    '/' => out.push('/'),
-                    'b' => out.push('\x08'),
-                    'f' => out.push('\x0c'),
-                    'n' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    'u' => {
-                        if i + 4 > chars.len() {
-                            return Err(PyError::named("ValueError", "Invalid \\uXXXX escape"));
-                        }
-                        let hex: String = chars[i..i + 4].iter().collect();
-                        let code = u32::from_str_radix(&hex, 16)
-                            .map_err(|_| PyError::named("ValueError", "Invalid \\uXXXX escape"))?;
-                        i += 4;
-                        if (0xD800..=0xDBFF).contains(&code)
-                            && i + 6 <= chars.len()
-                            && chars[i] == '\\'
-                            && chars[i + 1] == 'u'
-                        {
-                            let hex2: String = chars[i + 2..i + 6].iter().collect();
-                            if let Ok(low) = u32::from_str_radix(&hex2, 16)
-                                && (0xDC00..=0xDFFF).contains(&low)
-                            {
-                                let full = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-                                if let Some(c) = char::from_u32(full) {
-                                    out.push(c);
-                                    i += 6;
-                                    continue;
-                                }
-                            }
-                        }
-                        out.push_str(&pyrust_core::cesu8_encode_codepoint(code));
-                    }
-                    other => {
-                        return Err(PyError::named(
-                            "ValueError",
-                            format!("Invalid \\escape: {other:?}"),
-                        ));
-                    }
-                }
-            }
-            c if strict && (c as u32) < 0x20 => {
-                return Err(PyError::named("ValueError", "Invalid control character"));
-            }
-            c => out.push(c),
-        }
-    }
-    Err(PyError::named("ValueError", "Unterminated string"))
 }
 
 // ── Shims with Native Extra Functions ────────────────────────────────────────
@@ -568,36 +464,34 @@ pub mod _json {
     pyrust_module_identity!("_json");
 
     pyrust_module! {
-        fn encode_basestring(#[positional_only] string: PyStr<'_>) -> Result<Value> {
-            let _ = _interp;
-            Ok(Value::string(json_escape_string(&string, false)))
-        }
-
-        fn encode_basestring_ascii(#[positional_only] string: PyStr<'_>) -> Result<Value> {
-            let _ = _interp;
-            Ok(Value::string(json_escape_string(&string, true)))
-        }
-
-        fn scanstring(
-            #[positional_only] string: PyStr<'_>,
-            #[positional_only] end: PyIndex,
-            #[default(true.into())] strict: PyBool,
-        ) -> Result<Value> {
-            let _ = _interp;
-            let end_i = end.expect_i64(FN_NAME, "end")?.max(0) as usize;
-            let (decoded, next_idx) = json_scanstring(&string, end_i, strict.0)?;
-            Ok(Value::tuple(vec![
-                Value::string(decoded),
-                Value::int(next_idx as i64),
-            ]))
+        constants {
+            "__doc__" => Value::string("json speedups\n"),
         }
     }
 
+    /// `_json` is the accelerator the native `json` package already is: bind
+    /// the very objects `json.encoder`, `json.scanner` and `json.decoder`
+    /// import from it in CPython (`c_encode_basestring`, `c_make_scanner`,
+    /// `c_scanstring`, ...).
     pub(crate) fn init_shim(
         interp: &mut Interpreter,
         module: &Rc<RefCell<PyModule>>,
     ) -> Result<()> {
-        copy_all_from(interp, "json", module)
+        for (name, source, attr) in [
+            ("encode_basestring", "json.encoder", "c_encode_basestring"),
+            (
+                "encode_basestring_ascii",
+                "json.encoder",
+                "c_encode_basestring_ascii",
+            ),
+            ("make_scanner", "json.scanner", "c_make_scanner"),
+            ("scanstring", "json.decoder", "c_scanstring"),
+        ] {
+            let source = interp.load_module(source)?;
+            let value = interp.get_attr(&source, attr)?;
+            module.borrow_mut().insert_attr(name.to_string(), value);
+        }
+        Ok(())
     }
 }
 

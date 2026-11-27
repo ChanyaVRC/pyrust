@@ -6,7 +6,8 @@
 /// Supported encodings: `utf-8` (and aliases), `utf-8-sig`, `latin-1` (and
 /// aliases), `ascii`, `utf-16` (LE/BE/BOM), `utf-32` (LE/BE/BOM).
 /// Supported error handlers: `strict`, `replace`, `ignore`,
-/// `backslashreplace`, `surrogateescape`.
+/// `backslashreplace`, `surrogateescape`, and `surrogatepass` for the UTF-8 /
+/// UTF-16 / UTF-32 codecs.
 pub fn decode_bytes(bytes: &[u8], encoding: &str, errors: &str) -> Result<Value> {
     // Normalise encoding name (strip hyphens/underscores, lowercase).
     let enc_norm: String = encoding

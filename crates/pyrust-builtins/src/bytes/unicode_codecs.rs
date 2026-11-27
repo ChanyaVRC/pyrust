@@ -2,32 +2,8 @@
 /// applying the specified error handler.
 fn decode_utf8_with_errors(bytes: &[u8], errors: &str, codec_name: &str) -> Result<Value> {
     match errors {
-        "strict" => {
-            let e = std::str::from_utf8(bytes).unwrap_err();
-            let start = e.valid_up_to();
-            let end = start + e.error_len().unwrap_or(bytes.len() - start);
-            let reason = if e.error_len().is_none() {
-                "unexpected end of data"
-            } else {
-                let b = bytes[start];
-                // CPython 3.12 reports "invalid continuation byte" when the
-                // byte at `start` is a valid multi-byte sequence start
-                // (0xC2..=0xF4) but the bytes that follow are not valid
-                // continuation bytes.  All other cases are "invalid start byte".
-                if matches!(b, 0xC2..=0xF4) {
-                    "invalid continuation byte"
-                } else {
-                    "invalid start byte"
-                }
-            };
-            Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
-                encoding: codec_name.to_string(),
-                object: bytes.to_vec(),
-                start,
-                end,
-                reason: reason.to_string(),
-            }))
-        }
+        "strict" => Err(utf8_strict_error(bytes, 0, codec_name)),
+        "surrogatepass" => decode_utf8_surrogatepass(bytes, codec_name),
         "ignore" => Ok(Value::string(bytes_decode_utf8_ignore(bytes))),
         "replace" => Ok(Value::string(String::from_utf8_lossy(bytes).as_ref())),
         "backslashreplace" => Ok(Value::string(bytes_decode_utf8_backslashreplace(bytes))),
@@ -36,6 +12,69 @@ fn decode_utf8_with_errors(bytes: &[u8], errors: &str, codec_name: &str) -> Resu
             "LookupError",
             format!("unknown error handler name '{errors}'"),
         )),
+    }
+}
+
+/// The strict `UnicodeDecodeError` for the first invalid UTF-8 sequence at or
+/// after byte offset `from` (which must not be valid UTF-8 to the end).
+fn utf8_strict_error(bytes: &[u8], from: usize, codec_name: &str) -> PyError {
+    let e = std::str::from_utf8(&bytes[from..]).unwrap_err();
+    let start = from + e.valid_up_to();
+    let end = start + e.error_len().unwrap_or(bytes.len() - start);
+    let reason = if e.error_len().is_none() {
+        "unexpected end of data"
+    } else {
+        let b = bytes[start];
+        // CPython 3.12 reports "invalid continuation byte" when the
+        // byte at `start` is a valid multi-byte sequence start
+        // (0xC2..=0xF4) but the bytes that follow are not valid
+        // continuation bytes.  All other cases are "invalid start byte".
+        if matches!(b, 0xC2..=0xF4) {
+            "invalid continuation byte"
+        } else {
+            "invalid start byte"
+        }
+    };
+    PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
+        encoding: codec_name.to_string(),
+        object: bytes.to_vec(),
+        start,
+        end,
+        reason: reason.to_string(),
+    })
+}
+
+/// Decode UTF-8 with `surrogatepass`: an encoded lone surrogate
+/// (`ED [A0-BF] [80-BF]`) decodes to that surrogate — which is already
+/// pyrust's CESU-8 string representation — and any other invalid sequence
+/// raises the strict error, as CPython's handler re-raises it.
+fn decode_utf8_surrogatepass(bytes: &[u8], codec_name: &str) -> Result<Value> {
+    let mut out = String::with_capacity(bytes.len());
+    let mut pos = 0;
+    loop {
+        match std::str::from_utf8(&bytes[pos..]) {
+            Ok(rest) => {
+                out.push_str(rest);
+                return Ok(Value::string(out));
+            }
+            Err(e) => {
+                let valid = pos + e.valid_up_to();
+                out.push_str(std::str::from_utf8(&bytes[pos..valid]).expect("valid UTF-8 prefix"));
+                let rest = &bytes[valid..];
+                let is_surrogate = rest.len() >= 3
+                    && rest[0] == 0xED
+                    && (0xA0..=0xBF).contains(&rest[1])
+                    && (0x80..=0xBF).contains(&rest[2]);
+                if !is_surrogate {
+                    return Err(utf8_strict_error(bytes, valid, codec_name));
+                }
+                // SAFETY: the three bytes are a well-formed CESU-8 lone
+                // surrogate, the representation pyrust uses for surrogate
+                // code points throughout the runtime.
+                unsafe { out.as_mut_vec().extend_from_slice(&rest[..3]) };
+                pos = valid + 3;
+            }
+        }
     }
 }
 
@@ -265,7 +304,9 @@ fn decode_utf16(
                 let _ = write!(s, "\\x{:02x}", bytes[bytes.len() - 1]);
                 return Ok(Value::string(&s));
             }
-            "strict" | "surrogateescape" => {
+            // `surrogatepass` only passes a whole surrogate code unit, so a
+            // truncated trailing byte stays an error.
+            "strict" | "surrogateescape" | "surrogatepass" => {
                 return Err(PyError::new(pyrust_core::PyErrorKind::UnicodeDecodeError {
                     encoding: codec_name.to_string(),
                     object: original_bytes.to_vec(),
@@ -326,6 +367,28 @@ fn decode_utf16_units_to_string(
     // an unknown handler always raises LookupError (matching CPython's behaviour
     // where the handler is validated regardless of whether any error occurs).
     // We do this check inside the error arms below; see the `_` arm.
+    if errors == "surrogatepass" {
+        // Every unpaired surrogate code unit decodes to itself.
+        let mut out = String::with_capacity(units.len());
+        let mut i = 0;
+        while i < units.len() {
+            let u = u32::from(units[i]);
+            if (0xD800..=0xDBFF).contains(&u)
+                && let Some(&low) = units.get(i + 1)
+                && (0xDC00..=0xDFFF).contains(&low)
+            {
+                pyrust_core::push_codepoint(
+                    &mut out,
+                    0x10000 + ((u - 0xD800) << 10) + (u32::from(low) - 0xDC00),
+                );
+                i += 2;
+                continue;
+            }
+            pyrust_core::push_codepoint(&mut out, u);
+            i += 1;
+        }
+        return Ok(out);
+    }
     let mut out = String::with_capacity(units.len());
     let mut iter = units.iter().copied().enumerate();
     while let Some((i, u)) = iter.next() {
@@ -569,6 +632,9 @@ fn decode_utf32(
         let cp = to_u32([chunk[0], chunk[1], chunk[2], chunk[3]]);
         match char::from_u32(cp) {
             Some(c) => out.push(c),
+            None if errors == "surrogatepass" && (0xD800..=0xDFFF).contains(&cp) => {
+                pyrust_core::push_codepoint(&mut out, cp);
+            }
             None => match errors {
                 "replace" => out.push('\u{FFFD}'),
                 "ignore" => {}
@@ -579,7 +645,7 @@ fn decode_utf32(
                     }
                 }
                 _ => {
-                    if errors != "strict" && errors != "surrogateescape" {
+                    if !matches!(errors, "strict" | "surrogateescape" | "surrogatepass") {
                         return Err(PyError::named(
                             "LookupError",
                             format!("unknown error handler name '{errors}'"),
@@ -608,7 +674,7 @@ fn decode_utf32(
                 }
             }
             _ => {
-                if errors != "strict" && errors != "surrogateescape" {
+                if !matches!(errors, "strict" | "surrogateescape" | "surrogatepass") {
                     return Err(PyError::named(
                         "LookupError",
                         format!("unknown error handler name '{errors}'"),

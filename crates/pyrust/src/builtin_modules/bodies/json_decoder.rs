@@ -1,10 +1,15 @@
 // `json.decoder` submodule — 100% native Rust implementation of Python 3.12's
-// `json.decoder` module (issue #3251).
+// `json.decoder` module (issues #3251, #3413).
 //
-// Exposes `JSONDecoder`, `JSONDecodeError`, `WHITESPACE`, `WHITESPACE_STR`,
-// `BACKSLASH`, `NaN`, `PosInf`, `NegInf`, `scanstring`, `py_scanstring`,
-// `JSONObject`, and `JSONArray`. Shares the canonical `JSONDecoder` and
-// `JSONDecodeError` classes with `json`.
+// Defines the canonical `JSONDecoder` and `JSONDecodeError` classes
+// (re-exported by `json`, like CPython's `from .decoder import ...`), plus
+// `scanstring` (`_json.scanstring`, also bound as `c_scanstring`),
+// `py_scanstring`, `JSONObject`, `JSONArray`, `WHITESPACE`, `WHITESPACE_STR`,
+// `BACKSLASH`, `FLAGS`, `NaN`, `PosInf`, `NegInf` and `_CONSTANTS`.
+// `JSONDecoder` decodes through `self.scan_once` — by default the native
+// `_json.Scanner` from `json.scanner.make_scanner` — and, like the
+// pure-Python class, dispatches `decode` → `self.raw_decode` → `self.scan_once`
+// so subclasses may override either step.
 //
 // Reference: <https://github.com/python/cpython/blob/3.12/Lib/json/decoder.py>
 
@@ -13,212 +18,16 @@ use std::rc::Rc;
 
 use pyrust_derive::pyrust_module;
 
+use crate::ast::BinaryOp;
+use crate::builtin_modules::json::args::{self, Sig};
+use crate::builtin_modules::json::scan::{self, Doc, ScanError};
+use crate::builtin_modules::json::{docs, support};
+use crate::builtin_modules::json_scanner;
 use crate::error::{PyError, Result};
-use crate::interpreter::builtin_args::{OptValueRef, OptionalArg, PyBool, PyIndex, PyStr, PyValue};
 use crate::interpreter::{ExpandedCallArg, Interpreter};
-use crate::value::{PyDict, PyKey, PyModule, Value};
+use crate::value::{PyDict, PyKey, PyModule, Value, ValueKind};
 
 const WHITESPACE_STR_VAL: &str = " \t\n\r";
-
-fn call_pos(interp: &mut Interpreter, callee: Value, args: &[Value]) -> Result<Value> {
-    let expanded: Vec<ExpandedCallArg> = args
-        .iter()
-        .cloned()
-        .map(|value| ExpandedCallArg { name: None, value })
-        .collect();
-    interp.call_function_expanded(callee, &expanded)
-}
-
-fn call_method(
-    interp: &mut Interpreter,
-    obj: &Value,
-    method: &str,
-    args: &[Value],
-) -> Result<Value> {
-    let f = interp.get_attr(obj, method)?;
-    call_pos(interp, f, args)
-}
-
-fn raise_decode_error(interp: &mut Interpreter, msg: &str, doc: &str, pos: usize) -> PyError {
-    if let Ok(dec_mod) = interp.load_module("json.decoder")
-        && let Ok(cls) = interp.get_attr(&dec_mod, "JSONDecodeError")
-        && let Ok(inst) = call_pos(
-            interp,
-            cls,
-            &[
-                Value::string(msg),
-                Value::string(doc),
-                Value::int(pos as i64),
-            ],
-        )
-    {
-        return PyError::raised(inst);
-    }
-    PyError::named("ValueError", format!("{msg}: char {pos}"))
-}
-
-fn parse_u4(chars: &[char], idx: usize, doc: &str, interp: &mut Interpreter) -> Result<u32> {
-    if idx + 4 > chars.len() {
-        return Err(raise_decode_error(
-            interp,
-            "Invalid \\uXXXX escape",
-            doc,
-            idx.saturating_sub(1),
-        ));
-    }
-    let mut acc: u32 = 0;
-    for &ch in &chars[idx..idx + 4] {
-        let digit = ch.to_digit(16).ok_or_else(|| {
-            raise_decode_error(interp, "Invalid \\uXXXX escape", doc, idx.saturating_sub(1))
-        })?;
-        acc = (acc << 4) | digit;
-    }
-    Ok(acc)
-}
-
-/// Core implementation of `json.decoder.scanstring(s, end, strict=True)`.
-/// `end` is the character index immediately after the opening `"`.
-fn scanstring_impl(
-    interp: &mut Interpreter,
-    s: &str,
-    end: usize,
-    strict: bool,
-) -> Result<(String, usize)> {
-    let chars: Vec<char> = s.chars().collect();
-    let n = chars.len();
-    let begin = end.saturating_sub(1);
-    let mut idx = end;
-    let mut out = String::new();
-
-    while idx < n {
-        let ch = chars[idx];
-        if ch == '"' {
-            return Ok((out, idx + 1));
-        }
-        if ch == '\\' {
-            idx += 1;
-            if idx >= n {
-                return Err(raise_decode_error(
-                    interp,
-                    "Unterminated string starting at",
-                    s,
-                    begin,
-                ));
-            }
-            let esc = chars[idx];
-            match esc {
-                '"' => {
-                    out.push('"');
-                    idx += 1;
-                }
-                '\\' => {
-                    out.push('\\');
-                    idx += 1;
-                }
-                '/' => {
-                    out.push('/');
-                    idx += 1;
-                }
-                'b' => {
-                    out.push('\x08');
-                    idx += 1;
-                }
-                'f' => {
-                    out.push('\x0c');
-                    idx += 1;
-                }
-                'n' => {
-                    out.push('\n');
-                    idx += 1;
-                }
-                'r' => {
-                    out.push('\r');
-                    idx += 1;
-                }
-                't' => {
-                    out.push('\t');
-                    idx += 1;
-                }
-                'u' => {
-                    let mut uni = parse_u4(&chars, idx + 1, s, interp)?;
-                    idx += 5;
-                    if (0xd800..=0xdbff).contains(&uni)
-                        && idx + 6 <= n
-                        && chars[idx] == '\\'
-                        && chars[idx + 1] == 'u'
-                    {
-                        let uni2 = parse_u4(&chars, idx + 2, s, interp)?;
-                        if (0xdc00..=0xdfff).contains(&uni2) {
-                            uni = 0x10000 + (((uni - 0xd800) << 10) | (uni2 - 0xdc00));
-                            idx += 6;
-                        }
-                    }
-                    let decoded_ch = char::from_u32(uni).ok_or_else(|| {
-                        raise_decode_error(
-                            interp,
-                            "Invalid \\uXXXX escape",
-                            s,
-                            idx.saturating_sub(5),
-                        )
-                    })?;
-                    out.push(decoded_ch);
-                }
-                other => {
-                    let msg = format!("Invalid \\escape: '{other}'");
-                    return Err(raise_decode_error(interp, &msg, s, idx));
-                }
-            }
-        } else {
-            if strict && (ch as u32) < 0x20 {
-                let msg = format!("Invalid control character {:?} at", ch.to_string());
-                return Err(raise_decode_error(interp, &msg, s, idx));
-            }
-            out.push(ch);
-            idx += 1;
-        }
-    }
-
-    Err(raise_decode_error(
-        interp,
-        "Unterminated string starting at",
-        s,
-        begin,
-    ))
-}
-
-fn skip_ws(chars: &[char], mut idx: usize) -> usize {
-    while idx < chars.len() && matches!(chars[idx], ' ' | '\t' | '\n' | '\r') {
-        idx += 1;
-    }
-    idx
-}
-
-fn extract_s_and_end(interp: &mut Interpreter, val: &Value) -> Result<(String, usize)> {
-    let items = interp.collect_iterable(val)?;
-    if items.len() != 2 {
-        return Err(PyError::named(
-            "ValueError",
-            "expected 2-tuple (s, end)".to_string(),
-        ));
-    }
-    let s = items[0]
-        .as_str()
-        .ok_or_else(|| PyError::named("TypeError", "expected str".to_string()))?
-        .to_string();
-    let end = items[1]
-        .as_int()
-        .ok_or_else(|| PyError::named("TypeError", "expected int".to_string()))?;
-    Ok((s, end.max(0) as usize))
-}
-
-fn is_stop_iteration(interp: &mut Interpreter, err: &PyError) -> Option<usize> {
-    if !err.class_name_is("StopIteration") {
-        return None;
-    }
-    let exc = interp.materialize_pyerror(err.clone()).ok()?;
-    let val = interp.get_attr(&exc, "value").ok()?;
-    val.as_int().map(|n| n.max(0) as usize)
-}
 
 fn make_backslash_dict() -> Value {
     let mut d = PyDict::default();
@@ -237,260 +46,722 @@ fn make_backslash_dict() -> Value {
     Value::dict(d)
 }
 
+const SIG_ERROR_INIT: Sig = Sig {
+    qualname: "JSONDecodeError.__init__",
+    params: &["self", "msg", "doc", "pos"],
+    defaults: 0,
+    kwonly: &[],
+    var_kw: false,
+};
+const SIG_ERROR_REDUCE: Sig = Sig {
+    qualname: "JSONDecodeError.__reduce__",
+    params: &["self"],
+    defaults: 0,
+    kwonly: &[],
+    var_kw: false,
+};
+const SIG_DECODER_INIT: Sig = Sig {
+    qualname: "JSONDecoder.__init__",
+    params: &["self"],
+    defaults: 0,
+    kwonly: &[
+        "object_hook",
+        "parse_float",
+        "parse_int",
+        "parse_constant",
+        "strict",
+        "object_pairs_hook",
+    ],
+    var_kw: false,
+};
+const SIG_DECODE: Sig = Sig {
+    qualname: "JSONDecoder.decode",
+    params: &["self", "s", "_w"],
+    defaults: 1,
+    kwonly: &[],
+    var_kw: false,
+};
+const SIG_RAW_DECODE: Sig = Sig {
+    qualname: "JSONDecoder.raw_decode",
+    params: &["self", "s", "idx"],
+    defaults: 1,
+    kwonly: &[],
+    var_kw: false,
+};
+const SIG_PY_SCANSTRING: Sig = Sig {
+    qualname: "py_scanstring",
+    params: &["s", "end", "strict", "_b", "_m"],
+    defaults: 3,
+    kwonly: &[],
+    var_kw: false,
+};
+const SIG_JSON_OBJECT: Sig = Sig {
+    qualname: "JSONObject",
+    params: &[
+        "s_and_end",
+        "strict",
+        "scan_once",
+        "object_hook",
+        "object_pairs_hook",
+        "memo",
+        "_w",
+        "_ws",
+    ],
+    defaults: 3,
+    kwonly: &[],
+    var_kw: false,
+};
+const SIG_JSON_ARRAY: Sig = Sig {
+    qualname: "JSONArray",
+    params: &["s_and_end", "scan_once", "_w", "_ws"],
+    defaults: 2,
+    kwonly: &[],
+    var_kw: false,
+};
+
+// ── JSONDecodeError ──────────────────────────────────────────────────────────
+
+/// `(doc.count('\n', 0, pos) + 1, pos - doc.rfind('\n', 0, pos))` for a
+/// `str` document and an `int` position.
+fn line_col(doc: &Doc, pos: i64) -> (i64, i64) {
+    let n = doc.char_len() as i64;
+    let end = if pos < 0 {
+        (pos + n).max(0)
+    } else {
+        pos.min(n)
+    };
+    let prefix = &doc.text()[..doc.byte_of(end as usize)];
+    let lineno = prefix.bytes().filter(|&b| b == b'\n').count() as i64 + 1;
+    // Byte search: a `char` pattern would decode CESU-8 surrogates.
+    let last = prefix
+        .as_bytes()
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(-1, |b| doc.char_of(b) as i64);
+    (lineno, pos - last)
+}
+
+/// `JSONDecodeError.__init__(self, msg, doc, pos)`.
+fn decode_error_init(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let mut b = args::bind(&SIG_ERROR_INIT, call_args)?;
+    let this = b.take_or_none(0);
+    let msg = b.take_or_none(1);
+    let doc = b.take_or_none(2);
+    let pos = b.take_or_none(3);
+    let native = match (Doc::new(&doc), pos.kind()) {
+        (Some(text), ValueKind::Int(p)) => Some((text, p)),
+        _ => None,
+    };
+    let (lineno, colno) = match native {
+        Some((text, p)) => {
+            let (line, col) = line_col(&text, p);
+            (Value::int(line), Value::int(col))
+        }
+        None => {
+            let newline = Value::string("\n");
+            let count = support::call_method(
+                interp,
+                &doc,
+                "count",
+                &[newline.clone(), Value::int(0), pos.clone()],
+            )?;
+            let lineno = interp.eval_binary(count, BinaryOp::Add, Value::int(1))?;
+            let found = support::call_method(
+                interp,
+                &doc,
+                "rfind",
+                &[newline, Value::int(0), pos.clone()],
+            )?;
+            let colno = interp.eval_binary(pos.clone(), BinaryOp::Sub, found)?;
+            (lineno, colno)
+        }
+    };
+    let errmsg = match (msg.as_str(), lineno.kind(), colno.kind(), pos.kind()) {
+        (Some(m), ValueKind::Int(l), ValueKind::Int(c), ValueKind::Int(p)) => {
+            Value::string(format!("{m}: line {l} column {c} (char {p})"))
+        }
+        _ => interp.eval_binary(
+            Value::string("%s: line %d column %d (char %d)"),
+            BinaryOp::Mod,
+            Value::tuple(vec![
+                msg.clone(),
+                lineno.clone(),
+                colno.clone(),
+                pos.clone(),
+            ]),
+        )?,
+    };
+    // `ValueError.__init__(self, errmsg)`
+    interp.assign_attr(this.clone(), "args", Value::tuple(vec![errmsg]))?;
+    for (name, value) in [
+        ("msg", msg),
+        ("doc", doc),
+        ("pos", pos),
+        ("lineno", lineno),
+        ("colno", colno),
+    ] {
+        interp.assign_attr(this.clone(), name, value)?;
+    }
+    Ok(Value::none())
+}
+
+// ── scanstring ───────────────────────────────────────────────────────────────
+
+/// `_json.scanstring` at code point `end`, with its bounds check.
+fn c_scanstring_at(
+    interp: &mut Interpreter,
+    doc: &Doc,
+    end: i64,
+    strict: bool,
+) -> Result<(Value, i64)> {
+    if end < 0 || end > doc.char_len() as i64 {
+        return Err(PyError::named(
+            "ValueError",
+            "end is out of bounds".to_string(),
+        ));
+    }
+    let start = doc.byte_of(end as usize);
+    let (piece, next) = scan::scanstring_c(interp, doc, start, strict)?;
+    Ok((piece.into_value(doc.text()), doc.char_of(next) as i64))
+}
+
+/// `_json.scanstring(s, end, strict=True)` (`PyArg_ParseTuple` "On|p").
+fn c_scanstring_call(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    if call_args.iter().any(|a| a.name.is_some()) {
+        return Err(args::type_error("scanstring() takes no keyword arguments"));
+    }
+    let n = call_args.len();
+    if n < 2 {
+        return Err(args::type_error(format!(
+            "scanstring() takes at least 2 arguments ({n} given)"
+        )));
+    }
+    if n > 3 {
+        return Err(args::type_error(format!(
+            "scanstring() takes at most 3 arguments ({n} given)"
+        )));
+    }
+    let s = &call_args[0].value;
+    let end = support::ssize_index(interp, &call_args[1].value)?;
+    let strict = match call_args.get(2) {
+        Some(arg) => interp.truthy_value(&arg.value)?,
+        None => true,
+    };
+    let Some(doc) = Doc::new(s) else {
+        return Err(args::type_error(format!(
+            "first argument must be a string, not {}",
+            support::type_name(s)
+        )));
+    };
+    let (value, next) = c_scanstring_at(interp, &doc, end, strict)?;
+    Ok(Value::tuple(vec![value, Value::int(next)]))
+}
+
+/// The `str` a `re` pattern method would accept as its subject.
+fn pattern_subject(value: &Value) -> Result<Doc> {
+    if let Some(doc) = Doc::new(value) {
+        return Ok(doc);
+    }
+    let bytes_like = matches!(value.kind(), ValueKind::Bytes(_))
+        || pyrust_builtins::bytearray::as_bytearray_rc(value).is_some();
+    Err(args::type_error(if bytes_like {
+        "cannot use a string pattern on a bytes-like object".to_string()
+    } else {
+        format!(
+            "expected string or bytes-like object, got '{}'",
+            support::type_name(value)
+        )
+    }))
+}
+
+/// `json.decoder.py_scanstring(s, end, strict=True)`.
+fn py_scanstring_call(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let mut b = args::bind(&SIG_PY_SCANSTRING, call_args)?;
+    let s = b.take_or_none(0);
+    let end = b.take_or_none(1);
+    let strict = match b.take(2) {
+        Some(flag) => interp.truthy_value(&flag)?,
+        None => true,
+    };
+    let doc = pattern_subject(&s)?;
+    let end = support::ssize_index(interp, &end)?;
+    let (value, next) = scan::scanstring_py(interp, &doc, end, strict)?;
+    Ok(Value::tuple(vec![value, Value::int(next)]))
+}
+
+// ── JSONObject / JSONArray ───────────────────────────────────────────────────
+
+/// `c in WHITESPACE_STR` for a code point.
+fn is_ws_cp(cp: u32) -> bool {
+    matches!(cp, 0x20 | 0x09 | 0x0A | 0x0D)
+}
+
+/// `nextchar in _ws` for `nextchar = s[end:end + 1]` (`''` is in every str).
+fn slice_in_ws(cp: Option<u32>) -> bool {
+    cp.is_none_or(is_ws_cp)
+}
+
+fn s_and_end(interp: &mut Interpreter, value: &Value) -> Result<(Value, Doc, i64)> {
+    let (s, end) = support::unpack2(interp, value)?;
+    pattern_subject(&s)?;
+    let doc = Doc::indexed(&s).expect("checked str");
+    let end = support::ssize_index(interp, &end)?;
+    Ok((s, doc, end))
+}
+
+/// `value, end = scan_once(s, end)` with `StopIteration` turned into
+/// `JSONDecodeError("Expecting value", s, err.value)`.
+fn call_scan_once(
+    interp: &mut Interpreter,
+    scan_once: &Value,
+    s: &Value,
+    end: i64,
+) -> Result<(Value, i64)> {
+    match support::call(interp, scan_once.clone(), &[s.clone(), Value::int(end)]) {
+        Ok(result) => {
+            let (value, end) = support::unpack2(interp, &result)?;
+            Ok((value, support::ssize_index(interp, &end)?))
+        }
+        Err(err) => match support::stop_iteration_value(interp, &err) {
+            Some(pos) => Err(support::decode_error(interp, "Expecting value", s, pos)),
+            None => Err(err),
+        },
+    }
+}
+
+/// `json.decoder.JSONObject(s_and_end, strict, scan_once, object_hook,
+/// object_pairs_hook, memo=None)`.
+fn json_object_call(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let mut b = args::bind(&SIG_JSON_OBJECT, call_args)?;
+    let (s, doc, mut end) = s_and_end(interp, &b.take_or_none(0))?;
+    let strict = b.take_or_none(1);
+    let strict = interp.truthy_value(&strict)?;
+    let scan_once = b.take_or_none(2);
+    let object_hook = b.take_or_none(3);
+    let object_pairs_hook = b.take_or_none(4);
+    let memo = match b.take(5) {
+        Some(memo) if !memo.is_none() => memo,
+        _ => Value::dict(PyDict::default()),
+    };
+    let result = |obj: Value, end: i64| Ok(Value::tuple(vec![obj, Value::int(end)]));
+    let mut pairs: Vec<Value> = Vec::new();
+    let mut nextchar = doc.char_at(end);
+    if nextchar != Some(u32::from(b'"')) {
+        if slice_in_ws(nextchar) {
+            end = doc.ws_end(end);
+            nextchar = doc.char_at(end);
+        }
+        if nextchar == Some(u32::from(b'}')) {
+            if !object_pairs_hook.is_none() {
+                let obj = support::call(interp, object_pairs_hook, &[Value::list(pairs)])?;
+                return result(obj, end + 1);
+            }
+            let mut obj = Value::dict(PyDict::default());
+            if !object_hook.is_none() {
+                obj = support::call(interp, object_hook, &[obj])?;
+            }
+            return result(obj, end + 1);
+        } else if nextchar != Some(u32::from(b'"')) {
+            return Err(doc.error_at(
+                interp,
+                "Expecting property name enclosed in double quotes",
+                end,
+            ));
+        }
+    }
+    end += 1;
+    loop {
+        let (key, next) = c_scanstring_at(interp, &doc, end, strict)?;
+        end = next;
+        let key = support::call_method(interp, &memo, "setdefault", &[key.clone(), key])?;
+        if doc.char_at(end) != Some(u32::from(b':')) {
+            end = doc.ws_end(end);
+            if doc.char_at(end) != Some(u32::from(b':')) {
+                return Err(doc.error_at(interp, "Expecting ':' delimiter", end));
+            }
+        }
+        end += 1;
+        if doc.char_at(end).is_some_and(is_ws_cp) {
+            end += 1;
+            if doc.char_at(end).is_some_and(is_ws_cp) {
+                end = doc.ws_end(end + 1);
+            }
+        }
+        let (value, next) = call_scan_once(interp, &scan_once, &s, end)?;
+        end = next;
+        pairs.push(Value::tuple(vec![key, value]));
+        let mut nextchar = doc.char_at(end);
+        if nextchar.is_some_and(is_ws_cp) {
+            end = doc.ws_end(end + 1);
+            nextchar = doc.char_at(end);
+        }
+        end += 1;
+        if nextchar == Some(u32::from(b'}')) {
+            break;
+        }
+        if nextchar != Some(u32::from(b',')) {
+            return Err(doc.error_at(interp, "Expecting ',' delimiter", end - 1));
+        }
+        end = doc.ws_end(end);
+        let nextchar = doc.char_at(end);
+        end += 1;
+        if nextchar != Some(u32::from(b'"')) {
+            return Err(doc.error_at(
+                interp,
+                "Expecting property name enclosed in double quotes",
+                end - 1,
+            ));
+        }
+    }
+    if !object_pairs_hook.is_none() {
+        let obj = support::call(interp, object_pairs_hook, &[Value::list(pairs)])?;
+        return result(obj, end);
+    }
+    let dict_type = support::builtin(interp, "dict")?;
+    let mut obj = support::call(interp, dict_type, &[Value::list(pairs)])?;
+    if !object_hook.is_none() {
+        obj = support::call(interp, object_hook, &[obj])?;
+    }
+    result(obj, end)
+}
+
+/// `json.decoder.JSONArray(s_and_end, scan_once)`.
+fn json_array_call(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let mut b = args::bind(&SIG_JSON_ARRAY, call_args)?;
+    let (s, doc, mut end) = s_and_end(interp, &b.take_or_none(0))?;
+    let scan_once = b.take_or_none(1);
+    let mut values = Vec::new();
+    let mut nextchar = doc.char_at(end);
+    if slice_in_ws(nextchar) {
+        end = doc.ws_end(end + 1);
+        nextchar = doc.char_at(end);
+    }
+    if nextchar == Some(u32::from(b']')) {
+        return Ok(Value::tuple(vec![Value::list(values), Value::int(end + 1)]));
+    }
+    loop {
+        let (value, next) = call_scan_once(interp, &scan_once, &s, end)?;
+        end = next;
+        values.push(value);
+        let mut nextchar = doc.char_at(end);
+        if slice_in_ws(nextchar) {
+            end = doc.ws_end(end + 1);
+            nextchar = doc.char_at(end);
+        }
+        end += 1;
+        if nextchar == Some(u32::from(b']')) {
+            break;
+        }
+        if nextchar != Some(u32::from(b',')) {
+            return Err(doc.error_at(interp, "Expecting ',' delimiter", end - 1));
+        }
+        if doc.char_at(end).is_some_and(is_ws_cp) {
+            end += 1;
+            if doc.char_at(end).is_some_and(is_ws_cp) {
+                end = doc.ws_end(end + 1);
+            }
+        }
+    }
+    Ok(Value::tuple(vec![Value::list(values), Value::int(end)]))
+}
+
+// ── JSONDecoder ──────────────────────────────────────────────────────────────
+
+/// `json.decoder`'s module object.
+fn decoder_module(interp: &mut Interpreter) -> Result<Value> {
+    interp.load_module("json.decoder")
+}
+
+/// `value or fallback()`.
+fn value_or(
+    interp: &mut Interpreter,
+    value: Value,
+    fallback: impl FnOnce(&mut Interpreter) -> Result<Value>,
+) -> Result<Value> {
+    if interp.truthy_value(&value)? {
+        Ok(value)
+    } else {
+        fallback(interp)
+    }
+}
+
+/// `JSONDecoder.__init__`.
+fn decoder_init(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let mut b = args::bind(&SIG_DECODER_INIT, call_args)?;
+    let this = b.take_or_none(0);
+    let object_hook = b.take_or_none(1);
+    let parse_float = b.take_or_none(2);
+    let parse_int = b.take_or_none(3);
+    let parse_constant = b.take_or_none(4);
+    let strict = b.take_or(5, || Value::bool_(true));
+    let object_pairs_hook = b.take_or_none(6);
+    let module = decoder_module(interp)?;
+    let parse_float = value_or(interp, parse_float, |interp| {
+        support::builtin(interp, "float")
+    })?;
+    let parse_int = value_or(interp, parse_int, |interp| support::builtin(interp, "int"))?;
+    let parse_constant = value_or(interp, parse_constant, |interp| {
+        let constants = interp.get_attr(&module, "_CONSTANTS")?;
+        interp.get_attr(&constants, "__getitem__")
+    })?;
+    let parse_object = interp.get_attr(&module, "JSONObject")?;
+    let parse_array = interp.get_attr(&module, "JSONArray")?;
+    let parse_string = interp.get_attr(&module, "scanstring")?;
+    for (name, value) in [
+        ("object_hook", object_hook),
+        ("parse_float", parse_float),
+        ("parse_int", parse_int),
+        ("parse_constant", parse_constant),
+        ("strict", strict),
+        ("object_pairs_hook", object_pairs_hook),
+        ("parse_object", parse_object),
+        ("parse_array", parse_array),
+        ("parse_string", parse_string),
+        ("memo", Value::dict(PyDict::default())),
+    ] {
+        interp.assign_attr(this.clone(), name, value)?;
+    }
+    let scanner = interp.load_module("json.scanner")?;
+    let make_scanner = interp.get_attr(&scanner, "make_scanner")?;
+    let scan_once = support::call(interp, make_scanner, std::slice::from_ref(&this))?;
+    interp.assign_attr(this, "scan_once", scan_once)?;
+    Ok(Value::none())
+}
+
+/// `WHITESPACE.match(s, pos).end()` for `decode`'s default `_w`.
+fn whitespace_end(interp: &mut Interpreter, s: &Value, pos: &Value) -> Result<Value> {
+    let doc = pattern_subject(s)?;
+    let pos = support::ssize_index(interp, pos)?;
+    Ok(Value::int(doc.ws_end(pos)))
+}
+
+/// `_w(s, pos).end()` for a caller-supplied `_w`.
+fn custom_whitespace_end(
+    interp: &mut Interpreter,
+    w: &Value,
+    s: &Value,
+    pos: Value,
+) -> Result<Value> {
+    let m = support::call(interp, w.clone(), &[s.clone(), pos])?;
+    support::call_method(interp, &m, "end", &[])
+}
+
+/// `JSONDecoder.decode(self, s, _w=WHITESPACE.match)`.
+fn decoder_decode(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let mut b = args::bind(&SIG_DECODE, call_args)?;
+    let this = b.take_or_none(0);
+    let s = b.take_or_none(1);
+    let w = b.take(2);
+    let start = match &w {
+        Some(w) => custom_whitespace_end(interp, w, &s, Value::int(0))?,
+        None => whitespace_end(interp, &s, &Value::int(0))?,
+    };
+    let raw_decode = interp.get_attr(&this, "raw_decode")?;
+    let decoded = support::call_kw(
+        interp,
+        raw_decode,
+        std::slice::from_ref(&s),
+        &[("idx".to_string(), start)],
+    )?;
+    let (obj, end) = support::unpack2(interp, &decoded)?;
+    let end = match &w {
+        Some(w) => custom_whitespace_end(interp, w, &s, end)?,
+        None => whitespace_end(interp, &s, &end)?,
+    };
+    let len = match Doc::new(&s) {
+        Some(doc) => Value::int(doc.char_len() as i64),
+        None => {
+            let len_fn = support::builtin(interp, "len")?;
+            support::call(interp, len_fn, std::slice::from_ref(&s))?
+        }
+    };
+    let ne = interp.eval_binary(end.clone(), BinaryOp::Ne, len)?;
+    if interp.truthy_value(&ne)? {
+        return Err(support::decode_error(interp, "Extra data", &s, end));
+    }
+    Ok(obj)
+}
+
+/// `JSONDecoder.raw_decode(self, s, idx=0)`.
+fn decoder_raw_decode(interp: &mut Interpreter, call_args: &[ExpandedCallArg]) -> Result<Value> {
+    let mut b = args::bind(&SIG_RAW_DECODE, call_args)?;
+    let this = b.take_or_none(0);
+    let s = b.take_or_none(1);
+    let idx = b.take_or(2, || Value::int(0));
+    let scan_once = interp.get_attr(&this, "scan_once")?;
+    let scanned = if json_scanner::is_c_scanner(&scan_once) {
+        let cfg = json_scanner::c_scanner_config(&scan_once)?;
+        let idx = support::ssize_index(interp, &idx)?;
+        match json_scanner::c_scan(interp, &cfg, &s, idx) {
+            Ok((obj, end)) => Ok(Value::tuple(vec![obj, Value::int(end)])),
+            Err(ScanError::Stop(pos)) => {
+                return Err(support::decode_error(
+                    interp,
+                    "Expecting value",
+                    &s,
+                    Value::int(pos as i64),
+                ));
+            }
+            Err(ScanError::Raised(err)) => Err(err),
+        }
+    } else {
+        support::call(interp, scan_once, &[s.clone(), idx])
+    };
+    match scanned {
+        Ok(result) => {
+            let (obj, end) = support::unpack2(interp, &result)?;
+            Ok(Value::tuple(vec![obj, end]))
+        }
+        Err(err) => match support::stop_iteration_value(interp, &err) {
+            Some(pos) => Err(support::decode_error(interp, "Expecting value", &s, pos)),
+            None => Err(err),
+        },
+    }
+}
+
 pub(crate) fn post_load_init(
     interp: &mut Interpreter,
     module: &Rc<RefCell<PyModule>>,
 ) -> Result<()> {
-    // Share canonical classes from `json` so `json.decoder.JSONDecoder is json.JSONDecoder`
-    // and `json.decoder.JSONDecodeError is json.JSONDecodeError`.
-    let json_mod = interp.load_module("json")?;
-    for attr in ["JSONDecoder", "JSONDecodeError"] {
-        if let Ok(v) = interp.get_attr(&json_mod, attr) {
-            module.borrow_mut().insert_attr(attr.to_string(), v);
+    // `NaN = float('nan')` etc. are created once, so every `NaN` token decodes
+    // to the same object (`_CONSTANTS.__getitem__` hands these back).
+    let nan = Value::float(f64::NAN);
+    let pos_inf = Value::float(f64::INFINITY);
+    let neg_inf = Value::float(f64::NEG_INFINITY);
+    let mut constants = PyDict::default();
+    constants.insert(PyKey::str_from("-Infinity"), neg_inf.clone());
+    constants.insert(PyKey::str_from("Infinity"), pos_inf.clone());
+    constants.insert(PyKey::str_from("NaN"), nan.clone());
+    {
+        let mut m = module.borrow_mut();
+        m.insert_attr("NaN".to_string(), nan);
+        m.insert_attr("PosInf".to_string(), pos_inf);
+        m.insert_attr("NegInf".to_string(), neg_inf);
+        m.insert_attr("_CONSTANTS".to_string(), Value::dict(constants));
+        if let Some(scanstring) = m.get_attr_value("scanstring") {
+            m.insert_attr("c_scanstring".to_string(), scanstring);
         }
     }
-    // Compile `WHITESPACE` regex.
     let re_mod = interp.load_module("re")?;
     let compile_fn = interp.get_attr(&re_mod, "compile")?;
-    let flags = interp.get_attr(&re_mod, "VERBOSE")?.as_int().unwrap_or(0)
-        | interp.get_attr(&re_mod, "MULTILINE")?.as_int().unwrap_or(0)
-        | interp.get_attr(&re_mod, "DOTALL")?.as_int().unwrap_or(0);
-    let ws_re = call_pos(
+    // `FLAGS = re.VERBOSE | re.MULTILINE | re.DOTALL` (a `re.RegexFlag`).
+    let verbose = interp.get_attr(&re_mod, "VERBOSE")?;
+    let multiline = interp.get_attr(&re_mod, "MULTILINE")?;
+    let dotall = interp.get_attr(&re_mod, "DOTALL")?;
+    let flags = interp.eval_binary(verbose, BinaryOp::BitOr, multiline)?;
+    let flags = interp.eval_binary(flags, BinaryOp::BitOr, dotall)?;
+    let ws_re = support::call(
         interp,
         compile_fn,
-        &[Value::string(r"[ \t\n\r]*"), Value::int(flags)],
+        &[Value::string(r"[ \t\n\r]*"), flags.clone()],
     )?;
-    module
-        .borrow_mut()
-        .insert_attr("WHITESPACE".to_string(), ws_re);
     let scanner_mod = interp.load_module("json.scanner")?;
-    module
-        .borrow_mut()
-        .insert_attr("scanner".to_string(), scanner_mod);
+    let mut m = module.borrow_mut();
+    m.insert_attr("re".to_string(), re_mod);
+    m.insert_attr("scanner".to_string(), scanner_mod);
+    m.insert_attr("FLAGS".to_string(), flags);
+    m.insert_attr("WHITESPACE".to_string(), ws_re);
+    for name in [
+        "re",
+        "scanner",
+        "c_scanstring",
+        "__all__",
+        "FLAGS",
+        "NaN",
+        "PosInf",
+        "NegInf",
+        "JSONDecodeError",
+        "_CONSTANTS",
+        "BACKSLASH",
+        "py_scanstring",
+        "scanstring",
+        "WHITESPACE",
+        "WHITESPACE_STR",
+        "JSONObject",
+        "JSONArray",
+        "JSONDecoder",
+    ] {
+        if let Some(value) = m.attrs.shift_remove(name) {
+            m.attrs.insert(name.to_string(), value);
+        }
+    }
     Ok(())
 }
 
 pyrust_module! {
     constants {
+        "__doc__" => Value::string(docs::JSON_DECODER_MODULE_DOC),
         "__package__" => Value::string("json"),
         "__all__" => Value::list(vec![
             Value::string("JSONDecoder"),
             Value::string("JSONDecodeError"),
         ]),
         "WHITESPACE_STR" => Value::string(WHITESPACE_STR_VAL),
-        "WHITESPACE" => Value::none(),
         "BACKSLASH" => make_backslash_dict(),
-        "NaN" => Value::float(f64::NAN),
-        "PosInf" => Value::float(f64::INFINITY),
-        "NegInf" => Value::float(f64::NEG_INFINITY),
-        "JSONDecoder" => Value::none(),
-        "JSONDecodeError" => Value::none(),
     }
 
-    fn scanstring(
-        s: PyStr<'_>,
-        end: PyIndex,
-        #[default(true.into())] strict: PyBool,
-    ) -> Result<Value> {
-        let end_i = end.expect_i64(FN_NAME, "end")?;
-        if end_i < 0 {
-            return Err(PyError::named("ValueError", "end is out of bounds".to_string()));
+    class JSONDecodeError("ValueError") {
+        constants {
+            "__doc__" => Value::string(docs::JSON_DECODE_ERROR_DOC),
         }
-        let (decoded, next_idx) = scanstring_impl(_interp, s.0.as_ref(), end_i as usize, strict.0)?;
-        Ok(Value::tuple(vec![
-            Value::string(decoded),
-            Value::int(next_idx as i64),
-        ]))
+
+        fn __init__(args) -> Result<Value> {
+            decode_error_init(_interp, args)
+        }
+
+        fn __reduce__(args) -> Result<Value> {
+            let mut b = args::bind(&SIG_ERROR_REDUCE, args)?;
+            let this = b.take_or_none(0);
+            let cls = _interp.get_attr(&this, "__class__")?;
+            let msg = _interp.get_attr(&this, "msg")?;
+            let doc = _interp.get_attr(&this, "doc")?;
+            let pos = _interp.get_attr(&this, "pos")?;
+            Ok(Value::tuple(vec![cls, Value::tuple(vec![msg, doc, pos])]))
+        }
     }
 
-    fn py_scanstring(
-        s: PyStr<'_>,
-        end: PyIndex,
-        #[default(true.into())] strict: PyBool,
-    ) -> Result<Value> {
-        let end_i = end.expect_i64(FN_NAME, "end")?;
-        if end_i < 0 {
-            return Err(PyError::named("ValueError", "end is out of bounds".to_string()));
-        }
-        let (decoded, next_idx) = scanstring_impl(_interp, s.0.as_ref(), end_i as usize, strict.0)?;
-        Ok(Value::tuple(vec![
-            Value::string(decoded),
-            Value::int(next_idx as i64),
-        ]))
+    // `_json.scanstring` (also bound as `c_scanstring` by `post_load_init`).
+    fn scanstring(args) -> Result<Value> {
+        c_scanstring_call(_interp, args)
     }
 
-    fn c_scanstring(
-        s: PyStr<'_>,
-        end: PyIndex,
-        #[default(true.into())] strict: PyBool,
-    ) -> Result<Value> {
-        let end_i = end.expect_i64(FN_NAME, "end")?;
-        if end_i < 0 {
-            return Err(PyError::named("ValueError", "end is out of bounds".to_string()));
-        }
-        let (decoded, next_idx) = scanstring_impl(_interp, s.0.as_ref(), end_i as usize, strict.0)?;
-        Ok(Value::tuple(vec![
-            Value::string(decoded),
-            Value::int(next_idx as i64),
-        ]))
+    /// Scan the string s for a JSON string. End is the index of the
+    /// character in s after the quote that started the JSON string.
+    /// Unescapes all valid JSON string escape sequences and raises ValueError
+    /// on attempt to decode an invalid string. If strict is False then literal
+    /// control characters are allowed in the string.
+    ///
+    /// Returns a tuple of the decoded string and the index of the character in s
+    /// after the end quote.
+    fn py_scanstring(args) -> Result<Value> {
+        py_scanstring_call(_interp, args)
     }
 
     #[py_name = "JSONObject"]
-    fn json_object(
-        s_and_end: PyValue,
-        strict: PyBool,
-        scan_once: PyValue,
-        object_hook: PyValue,
-        object_pairs_hook: PyValue,
-        #[default(OptionalArg::Omitted)] memo: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] _w: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] _ws: OptValueRef<'_>,
-    ) -> Result<Value> {
-        let (s, end) = extract_s_and_end(_interp, &s_and_end.0)?;
-        let chars: Vec<char> = s.chars().collect();
-        let n = chars.len();
-        let mut idx = skip_ws(&chars, end);
-        let memo_opt = memo.as_value().filter(|v| !v.is_none());
-
-        let finish = |interp: &mut Interpreter,
-                      pairs: Vec<(Value, Value)>,
-                      end_pos: usize|
-         -> Result<Value> {
-            if !object_pairs_hook.0.is_none() {
-                let pair_list = Value::list(
-                    pairs
-                        .into_iter()
-                        .map(|(k, v)| Value::tuple(vec![k, v]))
-                        .collect(),
-                );
-                let result = call_pos(interp, object_pairs_hook.0.clone(), &[pair_list])?;
-                return Ok(Value::tuple(vec![result, Value::int(end_pos as i64)]));
-            }
-            let dict_val = Value::dict(PyDict::default());
-            for (k, v) in pairs {
-                call_method(interp, &dict_val, "__setitem__", &[k, v])?;
-            }
-            let result = if !object_hook.0.is_none() {
-                call_pos(interp, object_hook.0.clone(), &[dict_val])?
-            } else {
-                dict_val
-            };
-            Ok(Value::tuple(vec![result, Value::int(end_pos as i64)]))
-        };
-
-        if idx < n && chars[idx] == '}' {
-            return finish(_interp, Vec::new(), idx + 1);
-        }
-
-        let mut pairs = Vec::new();
-        let s_val = Value::string(&s);
-        loop {
-            if idx >= n || chars[idx] != '"' {
-                return Err(raise_decode_error(
-                    _interp,
-                    "Expecting property name enclosed in double quotes",
-                    &s,
-                    idx,
-                ));
-            }
-            let (key_str, next_idx) = scanstring_impl(_interp, &s, idx + 1, strict.0)?;
-            let mut key_val = Value::string(key_str);
-            if let Some(m) = memo_opt {
-                key_val = call_method(_interp, m, "setdefault", &[key_val.clone(), key_val])?;
-            }
-            idx = skip_ws(&chars, next_idx);
-            if idx >= n || chars[idx] != ':' {
-                return Err(raise_decode_error(_interp, "Expecting ':' delimiter", &s, idx));
-            }
-            idx = skip_ws(&chars, idx + 1);
-            let scanned = match call_pos(
-                _interp,
-                scan_once.0.clone(),
-                &[s_val.clone(), Value::int(idx as i64)],
-            ) {
-                Ok(v) => v,
-                Err(err) => {
-                    if let Some(pos) = is_stop_iteration(_interp, &err) {
-                        return Err(raise_decode_error(_interp, "Expecting value", &s, pos));
-                    }
-                    return Err(err);
-                }
-            };
-            let parts = _interp.collect_iterable(&scanned)?;
-            if parts.len() != 2 {
-                return Err(PyError::named("ValueError", "scanner must return (value, end)".to_string()));
-            }
-            pairs.push((key_val, parts[0].clone()));
-            idx = parts[1].as_int().unwrap_or(0).max(0) as usize;
-            idx = skip_ws(&chars, idx);
-            if idx >= n {
-                return Err(raise_decode_error(_interp, "Expecting ',' delimiter", &s, idx));
-            }
-            let ch = chars[idx];
-            if ch == '}' {
-                return finish(_interp, pairs, idx + 1);
-            }
-            if ch != ',' {
-                return Err(raise_decode_error(_interp, "Expecting ',' delimiter", &s, idx));
-            }
-            idx = skip_ws(&chars, idx + 1);
-        }
+    fn json_object(args) -> Result<Value> {
+        json_object_call(_interp, args)
     }
 
     #[py_name = "JSONArray"]
-    fn json_array(
-        s_and_end: PyValue,
-        scan_once: PyValue,
-        #[default(OptionalArg::Omitted)] _w: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] _ws: OptValueRef<'_>,
-    ) -> Result<Value> {
-        let (s, end) = extract_s_and_end(_interp, &s_and_end.0)?;
-        let chars: Vec<char> = s.chars().collect();
-        let n = chars.len();
-        let mut idx = skip_ws(&chars, end);
-        let mut values = Vec::new();
-        if idx < n && chars[idx] == ']' {
-            return Ok(Value::tuple(vec![
-                Value::list(values),
-                Value::int((idx + 1) as i64),
-            ]));
+    fn json_array(args) -> Result<Value> {
+        json_array_call(_interp, args)
+    }
+
+    class JSONDecoder {
+        constants {
+            "__doc__" => Value::string(docs::JSON_DECODER_DOC),
         }
-        let s_val = Value::string(&s);
-        loop {
-            let scanned = match call_pos(
-                _interp,
-                scan_once.0.clone(),
-                &[s_val.clone(), Value::int(idx as i64)],
-            ) {
-                Ok(v) => v,
-                Err(err) => {
-                    if let Some(pos) = is_stop_iteration(_interp, &err) {
-                        return Err(raise_decode_error(_interp, "Expecting value", &s, pos));
-                    }
-                    return Err(err);
-                }
-            };
-            let parts = _interp.collect_iterable(&scanned)?;
-            if parts.len() != 2 {
-                return Err(PyError::named("ValueError", "scanner must return (value, end)".to_string()));
-            }
-            values.push(parts[0].clone());
-            idx = parts[1].as_int().unwrap_or(0).max(0) as usize;
-            idx = skip_ws(&chars, idx);
-            if idx >= n {
-                return Err(raise_decode_error(_interp, "Expecting ',' delimiter", &s, idx));
-            }
-            let ch = chars[idx];
-            if ch == ']' {
-                return Ok(Value::tuple(vec![
-                    Value::list(values),
-                    Value::int((idx + 1) as i64),
-                ]));
-            }
-            if ch != ',' {
-                return Err(raise_decode_error(_interp, "Expecting ',' delimiter", &s, idx));
-            }
-            idx = skip_ws(&chars, idx + 1);
+
+        fn __init__(args) -> Result<Value> {
+            decoder_init(_interp, args)
+        }
+
+        fn decode(args) -> Result<Value> {
+            decoder_decode(_interp, args)
+        }
+
+        fn raw_decode(args) -> Result<Value> {
+            decoder_raw_decode(_interp, args)
         }
     }
 }
