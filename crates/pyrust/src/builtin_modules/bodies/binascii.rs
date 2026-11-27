@@ -568,120 +568,116 @@ fn qp_push_encoded(out: &mut Vec<u8>, b: u8) {
     out.push(HEX_UPPER[(b & 0x0f) as usize]);
 }
 
-fn encode_qp(data: &[u8], quotetabs: bool, istext: bool, header: bool) -> Vec<u8> {
+/// `binascii.b2a_qp` — a line-by-line port of CPython 3.12's
+/// `binascii_b2a_qp_impl` (`Modules/binascii.c`), including its quirks: the
+/// CRLF flavour is decided by the first `\n` only, a trailing space or tab is
+/// quoted at the end of the data and (when `istext`) before each line break,
+/// and a soft line break is inserted whenever a line would reach
+/// `MAXLINESIZE`.
+pub(crate) fn encode_qp(data: &[u8], quotetabs: bool, istext: bool, header: bool) -> Vec<u8> {
     let n = data.len();
-    // Detect CRLF vs LF line endings when `istext` is True.
-    let mut crlf = false;
-    for i in 0..n {
-        if data[i] == b'\n' {
-            if i > 0 && data[i - 1] == b'\r' {
-                crlf = true;
-            }
-            break;
-        }
-    }
-    let eol: &[u8] = if crlf { b"\r\n" } else { b"\n" };
+    // See if this string is using CRLF line ends.
+    let crlf = match data.iter().position(|&b| b == b'\n') {
+        Some(p) => p > 0 && data[p - 1] == b'\r',
+        None => false,
+    };
 
-    let mut out = Vec::with_capacity(n + n / 8);
+    let mut out: Vec<u8> = Vec::with_capacity(n + n / 8 + 4);
     let mut linelen: usize = 0;
     let mut i = 0usize;
 
+    let soft_break = |out: &mut Vec<u8>| {
+        out.push(b'=');
+        if crlf {
+            out.push(b'\r');
+        }
+        out.push(b'\n');
+    };
+
     while i < n {
         let c = data[i];
-        if istext && c == b'\n' {
-            out.extend_from_slice(eol);
-            linelen = 0;
-            i += 1;
-            continue;
-        }
-        if istext && c == b'\r' && i + 1 < n && data[i + 1] == b'\n' {
-            out.extend_from_slice(eol);
-            linelen = 0;
-            i += 2;
-            continue;
-        }
-
-        let next_is_eol = i + 1 == n
-            || (istext
-                && (data[i + 1] == b'\n'
-                    || (data[i + 1] == b'\r' && i + 2 < n && data[i + 2] == b'\n')));
-
-        if header && c == b' ' && !quotetabs && i + 1 < n {
-            if linelen >= QP_MAXLINESIZE - 1 && !next_is_eol {
-                out.push(b'=');
-                out.extend_from_slice(eol);
-                linelen = 0;
-            }
-            out.push(b'_');
-            linelen += 1;
-            i += 1;
-            continue;
-        }
-
         let needs_quote = c > 126
             || c == b'='
             || (header && c == b'_')
-            || (c < 32 && !(c == b'\t' && !quotetabs) && !(istext && c == b'\r'))
-            || ((c == b' ' || c == b'\t') && (quotetabs || next_is_eol))
-            || (c == b'.' && linelen == 0 && next_is_eol);
-
+            || (c == b'.'
+                && linelen == 0
+                && (i + 1 == n
+                    || data[i + 1] == b'\n'
+                    || data[i + 1] == b'\r'
+                    || data[i + 1] == 0))
+            || (!istext && (c == b'\r' || c == b'\n'))
+            || ((c == b'\t' || c == b' ') && i + 1 == n)
+            || (c < 33 && c != b'\r' && c != b'\n' && (quotetabs || (c != b'\t' && c != b' ')));
         if needs_quote {
-            if (next_is_eol && linelen + 3 > QP_MAXLINESIZE)
-                || (!next_is_eol && linelen + 3 >= QP_MAXLINESIZE)
-            {
-                out.push(b'=');
-                out.extend_from_slice(eol);
+            if linelen + 3 >= QP_MAXLINESIZE {
+                soft_break(&mut out);
                 linelen = 0;
             }
             qp_push_encoded(&mut out, c);
             linelen += 3;
+            i += 1;
+        } else if istext && (c == b'\n' || (i + 1 < n && c == b'\r' && data[i + 1] == b'\n')) {
+            linelen = 0;
+            // Protect against whitespace on end of line.
+            if let Some(&last) = out.last()
+                && (last == b' ' || last == b'\t')
+            {
+                out.pop();
+                qp_push_encoded(&mut out, last);
+            }
+            if crlf {
+                out.push(b'\r');
+            }
+            out.push(b'\n');
+            i += if c == b'\r' { 2 } else { 1 };
         } else {
-            if linelen >= QP_MAXLINESIZE - 1 && !next_is_eol {
-                out.push(b'=');
-                out.extend_from_slice(eol);
+            if i + 1 != n && data[i + 1] != b'\n' && linelen + 1 >= QP_MAXLINESIZE {
+                soft_break(&mut out);
                 linelen = 0;
             }
-            out.push(c);
             linelen += 1;
+            out.push(if header && c == b' ' { b'_' } else { c });
+            i += 1;
         }
-        i += 1;
     }
 
     out
 }
 
-fn decode_qp(data: &[u8], header: bool) -> Vec<u8> {
+/// `binascii.a2b_qp` — a port of CPython 3.12's `binascii_a2b_qp_impl`.
+pub(crate) fn decode_qp(data: &[u8], header: bool) -> Vec<u8> {
     let n = data.len();
     let mut out = Vec::with_capacity(n);
     let mut i = 0usize;
     while i < n {
         let c = data[i];
         if c == b'=' {
-            if i + 1 == n {
+            i += 1;
+            if i >= n {
                 break;
             }
-            if data[i + 1] == b'=' {
+            if data[i] == b'\n' || data[i] == b'\r' {
+                // Soft line break: skip through the next `\n`.
+                if data[i] != b'\n' {
+                    while i < n && data[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                if i < n {
+                    i += 1;
+                }
+            } else if data[i] == b'=' {
+                // Broken case from broken python qp.
                 out.push(b'=');
-                i += 2;
-                continue;
-            }
-            if data[i + 1] == b'\n' {
-                i += 2;
-                continue;
-            }
-            if i + 2 < n && data[i + 1] == b'\r' && data[i + 2] == b'\n' {
-                i += 3;
-                continue;
-            }
-            if i + 2 < n
-                && let (Some(hi), Some(lo)) = (hex_nibble(data[i + 1]), hex_nibble(data[i + 2]))
+                i += 1;
+            } else if i + 1 < n
+                && let (Some(hi), Some(lo)) = (hex_nibble(data[i]), hex_nibble(data[i + 1]))
             {
                 out.push((hi << 4) | lo);
-                i += 3;
-                continue;
+                i += 2;
+            } else {
+                out.push(b'=');
             }
-            out.push(b'=');
-            i += 1;
         } else if header && c == b'_' {
             out.push(b' ');
             i += 1;
@@ -692,6 +688,7 @@ fn decode_qp(data: &[u8], header: bool) -> Vec<u8> {
     }
     out
 }
+
 // ── Shared function bodies ───────────────────────────────────────────────────
 
 /// `b2a_hex` / `hexlify`: validates `data`, then `bytes_per_sep`, then `sep`,
