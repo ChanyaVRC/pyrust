@@ -312,6 +312,7 @@ macro_rules! pyrust_builtin_modules {
                 "html" => return html::post_load_init(interp, module),
                 "quopri" => return quopri::post_load_init(interp, module),
                 "copyreg" => return copyreg::post_load_init(interp, module),
+                "types" => return types::post_load_init(interp, module),
                 "csv" => return csv::post_load_init(interp, module),
                 "fractions" => return fractions::post_load_init(interp, module),
                 #[cfg(unix)]
@@ -573,11 +574,11 @@ pyrust_builtin_modules! {
     // Python-level name is `re`.
     "re" as re_mod @inject,
     // `types` — the type objects for runtime objects without a built-in name
-    // binding (`NoneType`, `FunctionType`, `MappingProxyType`, …).  The native
-    // body supplies the type-object constants and `MappingProxyType`;
-    // `SimpleNamespace` is defined in `types_py.py` and injected by the
-    // `@inject` post-load hook.
-    types @inject,
+    // binding (`NoneType`, `FunctionType`, `MappingProxyType`, …).  100%
+    // native Rust in `types.rs` (issue #3460): the type-object constants, the
+    // class-creation helpers, `DynamicClassAttribute`, `coroutine` and
+    // `SimpleNamespace`, with no Python-source injection.
+    types,
     // `random` (issue #2785): a pure-Python MT19937 generator and the full
     // public API live in `random_py.py`, injected by the `@inject` post-load
     // hook.  The native body is an empty `pyrust_module!` so `import random`
