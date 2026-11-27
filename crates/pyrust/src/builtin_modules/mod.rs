@@ -308,6 +308,7 @@ macro_rules! pyrust_builtin_modules {
                 "numbers" => return numbers::post_load_init(interp, module),
                 "array" => return array::post_load_init(interp, module),
                 "string" => return string::post_load_init(interp, module),
+                "html" => return html::post_load_init(interp, module),
                 "csv" => return csv::post_load_init(interp, module),
                 "fractions" => return fractions::post_load_init(interp, module),
                 #[cfg(unix)]
@@ -707,13 +708,13 @@ pyrust_builtin_modules! {
     "urllib.request" as urllib_request @inject,
     "urllib.robotparser" as urllib_robotparser,
     urllib,
-    // `html.entities`, `html.parser`, and `html` (issue #3149): static HTML4 /
-    // HTML5 character reference tables in `html_entities.rs`, `escape` /
-    // `unescape` injected from `html_py.py`, and streaming `HTMLParser`
-    // injected from `html_parser_py.py`.
+    // `html.entities`, `html.parser`, and `html` (issues #3149, #3446): static
+    // HTML4 / HTML5 character reference tables in `html_entities.rs`, `html`
+    // itself (`escape` / `unescape`) 100% native in `html.rs`, and streaming
+    // `HTMLParser` injected from `html_parser_py.py`.
     "html.entities" as html_entities,
     "html.parser" as html_parser @inject,
-    html @inject,
+    html,
     // `logging` (issue #3151): Python 3.12 standard logging facility —
     // levels, `Logger`/`Manager`/`PlaceHolder`/`LoggerAdapter`, `LogRecord`,
     // `Handler`/`StreamHandler`/`FileHandler`/`NullHandler`/`lastResort`,
