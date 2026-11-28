@@ -312,6 +312,7 @@ macro_rules! pyrust_builtin_modules {
                 "string" => return string::post_load_init(interp, module),
                 "html" => return html::post_load_init(interp, module),
                 "quopri" => return quopri::post_load_init(interp, module),
+                "base64" => return base64::post_load_init(interp, module),
                 "copyreg" => return copyreg::post_load_init(interp, module),
                 "types" => return types::post_load_init(interp, module),
                 "graphlib" => return graphlib::post_load_init(interp, module),
@@ -513,7 +514,9 @@ macro_rules! pyrust_builtin_modules {
 /// `None`: no registered docs for this callable; `Some(None)`: registered, with
 /// no docstring.
 pub(crate) fn native_callable_doc(registry_key: &str) -> Option<Option<&'static str>> {
-    cmd::native_doc(registry_key).or_else(|| shutil::native_doc(registry_key))
+    cmd::native_doc(registry_key)
+        .or_else(|| shutil::native_doc(registry_key))
+        .or_else(|| base64::native_doc(registry_key))
 }
 
 /// Constant function attributes of native callables, looked up by registry
@@ -668,10 +671,10 @@ pyrust_builtin_modules! {
     // CRC-HQX, uu, and quoted-printable codecs plus `Error` / `Incomplete`
     // in `binascii.rs`; no Python-source injection.
     binascii,
-    // `base64` (issue #3145): pure-Python Base16, Base32, Base32hex, Base64,
-    // Base85, Ascii85, and RFC 2045 encoders/decoders injected from
-    // `base64_py.py` by the `@inject` post-load hook.
-    base64 @inject,
+    // `base64` (issues #3145, #3487): 100% native Rust in `base64.rs` (+ `base64/`) —
+    // Base16, Base32, Base32hex, Base64, Base85, Ascii85 and the RFC 2045
+    // legacy interface; no Python-source injection.
+    base64,
     // `hashlib` (issues #3146, #3372): pure-Rust cryptographic hash primitives
     // (MD5, SHA-1, SHA-2, SHA-3/SHAKE, BLAKE2b/s, PBKDF2-HMAC, scrypt) and the
     // whole CPython 3.12 `hashlib` surface implemented 100% natively in Rust.
