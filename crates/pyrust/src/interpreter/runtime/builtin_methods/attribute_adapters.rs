@@ -432,6 +432,9 @@ impl Interpreter {
                 _ => {}
             }
         }
+        if let Some(value) = crate::builtin_registry::native_callable_attr(func_name, name) {
+            return Ok(value);
+        }
         if func_name == "str" {
             match name {
                 "lower" => Ok(Value::builtin_function("str.lower")),

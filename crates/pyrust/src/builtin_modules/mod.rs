@@ -513,7 +513,14 @@ macro_rules! pyrust_builtin_modules {
 /// `None`: no registered docs for this callable; `Some(None)`: registered, with
 /// no docstring.
 pub(crate) fn native_callable_doc(registry_key: &str) -> Option<Option<&'static str>> {
-    cmd::native_doc(registry_key)
+    cmd::native_doc(registry_key).or_else(|| shutil::native_doc(registry_key))
+}
+
+/// Constant function attributes of native callables, looked up by registry
+/// name: the attributes the Python source sets on its functions
+/// (`shutil.rmtree.avoids_symlink_attacks`, ...).
+pub(crate) fn native_callable_attr(registry_key: &str, name: &str) -> Option<Value> {
+    shutil::native_attr(registry_key, name)
 }
 
 pyrust_builtin_modules! {
@@ -707,10 +714,10 @@ pyrust_builtin_modules! {
     // `iglob`, `escape`, `has_magic`, `glob0`, `glob1`) implemented 100%
     // natively in Rust (`glob.rs`) with a lazy `iglob`; no Python injection.
     glob,
-    // `shutil` (issue #3148): high-level file/directory copy, move, rmtree,
-    // `which`, and `get_terminal_size` injected from `shutil_py.py` backed by
-    // minimal native OS helpers in `shutil.rs`.
-    shutil @inject,
+    // `shutil` (issues #3148, #3251, #3486): high-level file/directory copy,
+    // move, rmtree, archiving, `which`, `disk_usage` and `get_terminal_size`
+    // implemented 100% natively in Rust (`shutil.rs`); no Python injection.
+    shutil,
     // `tempfile` (issue #3148): `gettempdir*`, `mkstemp`, `mkdtemp`,
     // `TemporaryFile`, `NamedTemporaryFile`, `SpooledTemporaryFile`, and
     // `TemporaryDirectory` injected from `tempfile_py.py` backed by atomic
