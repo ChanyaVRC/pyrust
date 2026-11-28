@@ -99,16 +99,15 @@ fn copy_aliases_from(
 }
 
 /// Wichura's Algorithm AS 241 for the inverse normal cumulative distribution
-/// function, matching CPython 3.12's `_statistics._normal_dist_inv_cdf`.
-fn normal_dist_inv_cdf(p: f64, mu: f64, sigma: f64) -> Result<f64> {
-    if !(0.0 < p && p < 1.0) {
+/// function, matching CPython 3.12's `_statistics._normal_dist_inv_cdf`
+/// (`Modules/_statisticsmodule.c`): only `p` is range-checked; `sigma` is used
+/// as given (`NormalDist(mu, 0.0).inv_cdf(p)` returns `mu`).
+pub(crate) fn normal_dist_inv_cdf(p: f64, mu: f64, sigma: f64) -> Result<f64> {
+    if p <= 0.0 || p >= 1.0 {
         return Err(PyError::named(
             "ValueError",
-            "p must be in the range 0.0 < p < 1.0",
+            "inv_cdf undefined for these parameters",
         ));
-    }
-    if sigma <= 0.0 {
-        return Err(PyError::named("ValueError", "sigma must be positive"));
     }
     let q = p - 0.5;
     let x = if q.abs() <= 0.425 {
@@ -735,7 +734,10 @@ pub mod _statistics {
         interp: &mut Interpreter,
         module: &Rc<RefCell<PyModule>>,
     ) -> Result<()> {
-        copy_all_from(interp, "statistics", module)
+        // The C `_statistics` module holds only `_normal_dist_inv_cdf`;
+        // `statistics` imports it from here, not the other way around.
+        let _ = (interp, module);
+        Ok(())
     }
 }
 

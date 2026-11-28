@@ -1,0 +1,533 @@
+import _statistics
+import copy
+import math
+import pickle
+import statistics
+from decimal import Decimal as D
+from fractions import Fraction as F
+from statistics import (
+    NormalDist,
+    StatisticsError,
+    correlation,
+    covariance,
+    fmean,
+    geometric_mean,
+    harmonic_mean,
+    linear_regression,
+    mean,
+    median,
+    median_grouped,
+    median_high,
+    median_low,
+    mode,
+    multimode,
+    pstdev,
+    pvariance,
+    quantiles,
+    stdev,
+    variance,
+)
+
+
+def show(func, *args, **kwargs):
+    try:
+        result = func(*args, **kwargs)
+    except Exception as exc:
+        print(func.__name__, "->", type(exc).__name__ + ":", exc)
+    else:
+        print(func.__name__, "->", type(result).__name__, repr(result))
+
+
+def gen(*values):
+    return (v for v in values)
+
+
+# === Module surface ===
+print(statistics.__all__)
+print(issubclass(StatisticsError, ValueError), StatisticsError.__module__)
+print(NormalDist.__module__, statistics.LinearRegression.__module__)
+print(statistics.LinearRegression._fields)
+
+# === mean: exact accumulation, type preservation ===
+show(mean, [1, 2, 3, 4, 5])
+show(mean, [1, 2])
+show(mean, [1, 2, 3, 4, 4])
+show(mean, [1.5, 2.5, 3.0])
+show(mean, [10])
+show(mean, gen(2, 4, 6))
+show(mean, [F(3, 7), F(1, 21), F(5, 3), F(1, 3)])
+show(mean, [D("0.5"), D("0.75"), D("0.625"), D("0.375")])
+show(mean, [D("1"), D("2")])
+show(mean, [1, F(1, 2)])
+show(mean, [1, 2.5])
+show(mean, [F(1, 2), 0.5])
+show(mean, [1e20, 1, -1e20])
+show(mean, [1e20, 1, -1e20] * 1000)
+show(mean, [0.1] * 10)
+show(mean, [True, False, True, True])
+show(mean, [10**30, 10**30 + 1])
+show(mean, [-0.0])
+show(mean, [0.0, -0.0])
+show(mean, [float("inf"), 1.0])
+show(mean, [float("inf"), float("-inf")])
+show(mean, [float("nan"), 1.0])
+show(mean, [D("Infinity"), D(1)])
+show(mean, [D("NaN"), D(1)])
+show(mean, [])
+show(mean, iter([]))
+show(mean, [1, "a"])
+show(mean, ["a", "b"])
+show(mean, [1, D(1)])
+try:
+    # The order of the two types in the message depends on CPython's set order.
+    mean([F(1, 2), D("0.5")])
+except TypeError as exc:
+    print("mean -> TypeError:", str(exc).startswith("don't know how to coerce"))
+show(mean, 5)
+show(mean, [1, 2, None])
+
+# === fmean ===
+show(fmean, [1, 2, 3])
+show(fmean, [3.5, 4.0, 5.25])
+show(fmean, gen(1, 2, 3, 4))
+show(fmean, (1, 2))
+show(fmean, [1e20, 1, -1e20])
+show(fmean, [])
+show(fmean, iter([]))
+show(fmean, [1, 2, 3], [3, 2, 1])
+show(fmean, [1, 2, 3], gen(3, 2, 1))
+show(fmean, [1, 2, 3], weights=(1, 1, 1))
+show(fmean, [1, 2], [1])
+show(fmean, [1, 2], [1, 2, 3])
+show(fmean, [1, 2], [0, 0])
+show(fmean, [1, 2], [-1, 1])
+show(fmean, [1, 2], [])
+show(fmean, [F(1, 2), F(3, 2)])
+show(fmean, ["a"])
+show(fmean, 3)
+
+# === geometric_mean ===
+show(geometric_mean, [54, 24, 36])
+show(geometric_mean, [1, 2, 4])
+show(geometric_mean, gen(4, 9))
+show(geometric_mean, [7])
+show(geometric_mean, [])
+show(geometric_mean, [1, 0, 3])
+show(geometric_mean, [1, -2, 3])
+show(geometric_mean, ["x"])
+show(geometric_mean, [F(1, 2), F(2, 1)])
+
+# === harmonic_mean ===
+show(harmonic_mean, [40, 60])
+show(harmonic_mean, [1, 2, 4])
+show(harmonic_mean, [40, 60], [5, 30])
+show(harmonic_mean, [40, 60], weights=[5, 30])
+show(harmonic_mean, [40, 60], gen(5, 30))
+show(harmonic_mean, gen(40, 60))
+show(harmonic_mean, [5])
+show(harmonic_mean, [5.5])
+show(harmonic_mean, [F(1, 2)])
+show(harmonic_mean, [D("2.5")])
+show(harmonic_mean, [-5])
+show(harmonic_mean, ["a"])
+show(harmonic_mean, [0])
+show(harmonic_mean, [1, 0, 2])
+show(harmonic_mean, [0, 0])
+show(harmonic_mean, [1, 2, 3], [0, 0, 0])
+show(harmonic_mean, [1, 2, 3], [1, 0, 1])
+show(harmonic_mean, [1, 2, 3], [-1, -1, -1])
+show(harmonic_mean, [1, 2, 3], [1, 1])
+show(harmonic_mean, [1, -2, 3])
+show(harmonic_mean, [])
+show(harmonic_mean, [F(1, 2), F(1, 3)])
+show(harmonic_mean, [D("0.5"), D("0.25")])
+show(harmonic_mean, [D("0.5"), D("0.25")], [1, 3])
+show(harmonic_mean, [1.5, 2.5, 4.0])
+show(harmonic_mean, [float("inf"), 1.0])
+show(harmonic_mean, [1, 2], [float("inf"), 1])
+show(harmonic_mean, 7)
+
+# === medians ===
+show(median, [1, 3, 5])
+show(median, [1, 3, 5, 7])
+show(median, [5, 1, 3])
+show(median, gen(3, 1, 2))
+show(median, [1])
+show(median, [1.5, 2.5])
+show(median, [F(1, 2), F(3, 2)])
+show(median, [D("1"), D("2")])
+show(median, [1, 2, 3, 4])
+show(median, [])
+show(median, ["b", "a", "c"])
+show(median, ["a", "b"])
+show(median, [1, "a"])
+show(median_low, [1, 3, 5])
+show(median_low, [1, 3, 5, 7])
+show(median_low, gen(4, 2))
+show(median_low, [])
+show(median_low, ["a", "c", "b", "d"])
+show(median_high, [1, 3, 5])
+show(median_high, [1, 3, 5, 7])
+show(median_high, [])
+show(median_high, [F(1, 2), F(3, 2)])
+show(median_grouped, [1])
+show(median_grouped, [1, 2, 2, 3])
+show(median_grouped, [52, 52, 53, 54])
+show(median_grouped, [1, 3, 3, 5, 7], 2)
+show(median_grouped, [1, 3, 3, 5, 7], interval=2)
+show(median_grouped, [1, 2, 2, 3, 4, 4, 4, 4, 4, 5])
+show(median_grouped, [F(1, 2), F(3, 2), F(3, 2)])
+show(median_grouped, [D("1"), D("2"), D("2")])
+show(median_grouped, [], 1)
+show(median_grouped, ["a", "b"])
+show(median_grouped, [1, 2, 3], "x")
+show(median_grouped, [1, 2, 3], None)
+show(median_grouped, gen(1, 2, 2, 3))
+data = [25] * 172 + [35] * 484 + [45] * 387 + [55] * 22 + [65] * 6
+show(median, data)
+show(median_grouped, data, 10)
+
+# === mode / multimode ===
+show(mode, [1, 1, 2, 3])
+show(mode, [1, 1, 2, 2])
+show(mode, [2, 2, 1, 1])
+show(mode, "aabbbccde")
+show(mode, ["red", "blue", "blue", "red", "green", "red", "red"])
+show(mode, ["red", "red", "green", "blue", "blue"])
+show(mode, [(1, 2), (1, 2), (3, 4)])
+show(mode, [1.0, 1, True, 2])
+show(mode, gen(3, 3, 4))
+show(mode, [])
+show(mode, "")
+show(mode, [[1], [1]])
+show(mode, 5)
+show(multimode, "aabbbbbbbbcc")
+show(multimode, "aabbbbccddddeeffffgg")
+show(multimode, "")
+show(multimode, [])
+show(multimode, [1, 1, 2, 2, 3])
+show(multimode, [3, 3, 2, 2, 1, 1])
+show(multimode, gen("x", "y", "x", "y"))
+show(multimode, [None, None, 1])
+show(multimode, [[1]])
+show(multimode, 5)
+
+# === quantiles ===
+show(quantiles, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+show(quantiles, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], n=2)
+show(quantiles, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], n=10)
+show(quantiles, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], n=4, method="inclusive")
+show(quantiles, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], n=2, method="inclusive")
+show(quantiles, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], n=10, method="inclusive")
+show(quantiles, [10, 3, 7, 1], method="exclusive")
+show(quantiles, [105, 129, 87, 86, 111, 111, 89, 81, 108, 92, 110, 100, 75, 105, 103, 109, 76, 119, 99, 91, 103, 129, 106, 101, 84, 111, 74, 87, 86, 103, 103, 106, 86, 111, 75, 87, 102, 121, 111, 88, 89, 101, 106, 95, 103, 107, 101, 81, 109, 104])
+show(quantiles, gen(4, 1, 3, 2))
+show(quantiles, [F(1, 2), F(3, 2), F(5, 2)])
+show(quantiles, [D("1"), D("2"), D("3")])
+show(quantiles, [1, 2], n=1)
+show(quantiles, [1, 2, 3], n=1, method="inclusive")
+show(quantiles, [1, 2], n=3)
+show(quantiles, [1, 2], n=3, method="inclusive")
+show(quantiles, [1, 2, 3], n=100)
+show(quantiles, [1, 2, 3], n=0)
+show(quantiles, [1, 2, 3], n=-5)
+show(quantiles, [1], n=4)
+show(quantiles, [])
+show(quantiles, [1, 2, 3], method="linear")
+show(quantiles, [1, 2, 3], method=None)
+show(quantiles, [1, 2, 3], n=2.5)
+show(quantiles, [1, 2, 3], n="a")
+show(quantiles, [1, 2, 3], n=True)
+show(quantiles, ["a", "b", "c"])
+
+# === variance / pvariance / stdev / pstdev ===
+show(variance, [2.75, 1.75, 1.25, 0.25, 0.5, 1.25, 3.5])
+show(variance, [1, 2, 3, 4, 5])
+show(variance, [2, 4, 4, 4, 5, 5, 7, 9])
+show(variance, [1, 2])
+show(variance, [D("27.5"), D("30.25"), D("30.25"), D("34.5"), D("41.75")])
+show(variance, [F(1, 6), F(1, 2), F(5, 3)])
+show(variance, [1, 1, 1])
+show(variance, [1e20, 1, -1e20])
+show(variance, [1e9 + 4, 1e9 + 7, 1e9 + 13, 1e9 + 16])
+show(variance, gen(1, 2, 3))
+show(variance, [1, 2, 3, 4], 2.5)
+show(variance, [1, 2, 3, 4], xbar=2)
+show(variance, [1, 2, 3, 4], F(5, 2))
+show(variance, [1.5, 2.5], 2.0)
+show(variance, [F(1, 2), F(3, 2)], F(1, 1))
+show(variance, [D("1"), D("3")], D("2"))
+show(variance, [1], )
+show(variance, [])
+show(variance, [1, "a"])
+show(variance, [1, D(1)])
+show(variance, [float("inf"), 1.0])
+show(variance, [float("nan"), 1.0, 2.0])
+show(variance, [D("Infinity"), D(1)])
+show(variance, 5)
+show(pvariance, [0.0, 0.25, 0.25, 1.25, 1.5, 1.75, 2.75, 3.25])
+show(pvariance, [1, 2, 3, 4, 5])
+show(pvariance, [2, 4, 4, 4, 5, 5, 7, 9])
+show(pvariance, [3])
+show(pvariance, [3.5])
+show(pvariance, [D("27.5"), D("30.25"), D("30.25"), D("34.5"), D("41.75")])
+show(pvariance, [F(1, 4), F(5, 4), F(1, 2)])
+show(pvariance, [1, 2, 3, 4, 5], 3)
+show(pvariance, [1, 2, 3, 4, 5], 3.0)
+show(pvariance, [1, 2, 3, 4, 5], mu=2)
+show(pvariance, [1, 2, 3, 4, 5], None)
+show(pvariance, [])
+show(pvariance, [F(1, 3), F(2, 3)], F(1, 2))
+show(pvariance, [1e20, 1, -1e20])
+show(pvariance, [0.1, 0.2, 0.3])
+show(pvariance, [True, False])
+show(pvariance, [float("inf"), 1.0])
+show(stdev, [1.5, 2.5, 2.5, 2.75, 3.25, 4.75])
+show(stdev, [2, 4, 4, 4, 5, 5, 7, 9])
+show(stdev, [1, 2, 3, 4, 5])
+show(stdev, [D("1.5"), D("2.5"), D("2.5"), D("2.75"), D("3.25"), D("4.75")])
+show(stdev, [F(1, 2), F(3, 2), F(5, 2)])
+show(stdev, [D("1"), D("1")])
+show(stdev, [1, 1, 1])
+show(stdev, [1, 2, 3], 2)
+show(stdev, [10**40, 10**40 + 2])
+show(stdev, [1.0])
+show(stdev, [])
+show(stdev, [float("inf"), 1.0])
+show(stdev, [D("NaN"), D("1")])
+show(stdev, ["a", "b"])
+show(pstdev, [1.5, 2.5, 2.5, 2.75, 3.25, 4.75])
+show(pstdev, [2, 4, 4, 4, 5, 5, 7, 9])
+show(pstdev, [3])
+show(pstdev, [D("1.5"), D("2.5"), D("2.5"), D("2.75"), D("3.25"), D("4.75")])
+show(pstdev, [1, 2, 3, 4], 2.5)
+show(pstdev, [D("3")])
+show(pstdev, [])
+show(pstdev, [float("nan")])
+
+# === covariance / correlation / linear_regression ===
+x = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+y = [1, 2, 3, 1, 2, 3, 1, 2, 3]
+z = [9, 8, 7, 6, 5, 4, 3, 2, 1]
+show(covariance, x, y)
+show(covariance, x, z)
+show(covariance, z, x)
+show(covariance, [1, 2], [3, 4])
+show(covariance, [1], [1])
+show(covariance, [1, 2, 3], [1, 2])
+show(covariance, [], [])
+show(covariance, (1.5, 2.5, 4.0), (2, 3, 7))
+show(covariance, [1, 2, 3], gen(1, 2, 3))
+show(covariance, x=[1, 2], y=[1, 2])
+show(covariance, [1, 2])
+show(correlation, x, x)
+show(correlation, x, z)
+show(correlation, x, y)
+show(correlation, [1, 2, 3], [1, 2, 3.5])
+show(correlation, [1, 2, 3], [1, 1, 1])
+show(correlation, [1, 1, 1], [1, 2, 3])
+show(correlation, [1], [1])
+show(correlation, [1, 2], [1])
+show(correlation, [1, 2], [1, 2], method="linear")
+show(correlation, [1, 2, 3], [1, 2, 3], method="bogus")
+show(correlation, [1, 2, 3], [1, 2, 3], method=[])
+show(correlation, [1, 2, 3], [1, 2, 3], method=None)
+show(correlation, x, y, method="ranked")
+show(correlation, [1, 2, 3, 4, 5], [5, 6, 7, 8, 7], method="ranked")
+show(correlation, [1, 2, 3, 4, 5], [5, 6, 7, 8, 7])
+show(correlation, [1, 2, 2, 3, 3, 3], [10, 20, 20, 25, 25, 25], method="ranked")
+show(correlation, [10, 20, 30, 40], [1, 100, 1000, 10000], method="ranked")
+show(correlation, [10, 20, 30, 40], [1, 100, 1000, 10000])
+show(correlation, [1, 1, 1], [1, 2, 3], method="ranked")
+show(correlation, [4, 4, 4, 4], [1, 2, 3, 4], method="ranked")
+show(correlation, [3, 1, 2], [1, 3, 2], method="ranked")
+show(correlation, ["b", "a", "c"], [2, 1, 3], method="ranked")
+show(correlation, [1, 2], [1, 2], True)
+show(correlation, x=[1, 2], y=[1, 2])
+slope_x = [1, 2, 3, 4, 5]
+slope_y = [2, 4, 5, 4, 5]
+reg = linear_regression(slope_x, slope_y)
+print(reg)
+print(type(reg).__name__, reg.slope, reg.intercept, reg[0], reg[1], tuple(reg))
+slope, intercept = reg
+print(slope, intercept, reg._asdict(), reg == (slope, intercept))
+print(repr(linear_regression([1, 2, 3], [2, 4, 6])))
+print(repr(linear_regression([1, 2, 3], [2, 4, 6], proportional=True)))
+print(repr(linear_regression([1, 2, 3, 4], [2, 4, 5, 9], proportional=True)))
+print(repr(linear_regression([1, 2, 3, 4], [2, 4, 5, 9], proportional=False)))
+print(repr(linear_regression([1.5, 2.5, 4.0], [3, 5, 9])))
+print(repr(linear_regression((1, 2, 3), (2, 4, 6))))
+show(linear_regression, [1, 1, 1], [1, 2, 3])
+show(linear_regression, [0, 0, 0], [1, 2, 3], proportional=True)
+show(linear_regression, [1, 2, 3], [1, 2])
+show(linear_regression, [1], [1])
+show(linear_regression, [], [])
+show(linear_regression, [1, 2, 3], gen(1, 2, 3))
+show(linear_regression, [1, 2, 3], [1, 2, 3], proportional=0)
+show(linear_regression, [1, 2, 3], [1, 2, 3], proportional=[1])
+show(linear_regression, [1, 2, 3], [1, 2, 3], True)
+show(linear_regression, x=[1, 2], y=[1, 2])
+print(statistics.LinearRegression(slope=1.0, intercept=2.0))
+
+# === NormalDist ===
+nd = NormalDist(2, 3)
+print(nd, repr(nd), nd.mean, nd.median, nd.mode, nd.stdev, nd.variance)
+print(NormalDist(), NormalDist(mu=1.5), NormalDist(sigma=2))
+print(NormalDist(F(1, 2), D("2.5")), NormalDist(True, False))
+show(NormalDist, 0, -1)
+show(NormalDist, 0, -0.0)
+show(NormalDist, "a")
+show(NormalDist, 0, "a")
+show(NormalDist, 1, 2, 3)
+show(NormalDist, mu=1, bogus=2)
+print(nd.pdf(2), nd.pdf(0), nd.pdf(F(1, 2)), nd.pdf(2.5), nd.pdf(10**6))
+print(nd.cdf(2), nd.cdf(0), nd.cdf(5), nd.cdf(-100), nd.cdf(1e9), nd.cdf(F(7, 2)))
+print(nd.inv_cdf(0.5), nd.inv_cdf(0.1), nd.inv_cdf(0.975), nd.inv_cdf(0.999999), nd.inv_cdf(1e-10), nd.inv_cdf(F(1, 4)))
+print(nd.zscore(5), nd.zscore(2), nd.zscore(-1), nd.zscore(F(1, 2)))
+print(nd.quantiles(), nd.quantiles(2), nd.quantiles(5), nd.quantiles(1), nd.quantiles(0))
+print(NormalDist(0, 1).quantiles(10))
+zero = NormalDist(5, 0)
+show(zero.pdf, 5)
+show(zero.cdf, 5)
+show(zero.zscore, 5)
+show(zero.inv_cdf, 0.3)
+show(zero.quantiles)
+show(nd.inv_cdf, 0)
+show(nd.inv_cdf, 1)
+show(nd.inv_cdf, -0.5)
+show(nd.inv_cdf, 1.5)
+show(nd.inv_cdf, "a")
+show(nd.pdf, "a")
+show(nd.cdf, None)
+show(nd.quantiles, 2.5)
+show(nd.quantiles, "a")
+N1 = NormalDist(2.4, 1.6)
+N2 = NormalDist(3.2, 2.0)
+print(N1.overlap(N2), N2.overlap(N1), N1.overlap(N1), NormalDist(0, 1).overlap(NormalDist(0, 2)))
+print(NormalDist(0, 1).overlap(NormalDist(5, 1)), NormalDist(1, 1).overlap(NormalDist(1, 1)))
+show(N1.overlap, 5)
+show(N1.overlap, zero)
+show(zero.overlap, N1)
+s = NormalDist.from_samples([2.5, 3.1, 4.2, 5.4, 6.8, 7.1])
+print(s, type(s).__name__)
+print(NormalDist.from_samples([1, 2, 3, 4]), NormalDist.from_samples([F(1, 2), F(3, 2)]))
+print(NormalDist.from_samples(gen(1.0, 2.0, 4.0)))
+show(NormalDist.from_samples, [1])
+show(NormalDist.from_samples, [])
+show(NormalDist.from_samples, [float("inf"), 1.0])
+show(NormalDist.from_samples, ["a", "b"])
+print(NormalDist.from_samples([D("1"), D("2"), D("4")]))
+print(nd.samples(5, seed=42))
+print(NormalDist(100, 15).samples(3, seed=8675309))
+print(len(nd.samples(4)), nd.samples(0, seed=1), nd.samples(2, seed=2**70), nd.samples(2, seed=1.5))
+show(nd.samples, "a")
+show(nd.samples, 3, 4)
+show(nd.samples, 2.5, seed=1)
+print(nd + 1, 1 + nd, nd - 1, 1 - nd, nd * 2, 2 * nd, nd / 2)
+print(nd + 0.5, nd - F(1, 2), nd * -2, nd / -2, nd * 0.5, nd * F(1, 2), nd * D(2) if False else nd)
+print(nd + NormalDist(1, 4), nd - NormalDist(1, 4), NormalDist(1, 4) - nd)
+print(+nd, -nd, -NormalDist(-1, 2), +nd is nd, (+nd) == nd)
+show(nd.__mul__, "a")
+show(nd.__truediv__, 0)
+show(nd.__add__, "a")
+show(nd.__sub__, None)
+show(nd.__truediv__, "a")
+show(nd.__rsub__, "a")
+try:
+    5 / nd
+except TypeError as exc:
+    print("rtruediv", exc)
+try:
+    nd + "a"
+except TypeError as exc:
+    print("add-str", exc)
+try:
+    nd * nd
+except TypeError as exc:
+    print("mul-nd", exc)
+try:
+    nd < nd
+except TypeError as exc:
+    print("lt", exc)
+print(hasattr(NormalDist, "__rtruediv__"), hasattr(NormalDist, "__lt__"))
+print(nd == NormalDist(2, 3), nd == NormalDist(2, 3.5), nd != NormalDist(2, 3), nd == 2, nd != 2)
+print(nd.__eq__(5), nd.__eq__(NormalDist(2, 3)))
+print(hash(nd) == hash(NormalDist(2, 3)), hash(nd) == hash(NormalDist(2, 4)), hash(nd) == hash((2.0, 3.0)))
+print(len({nd, NormalDist(2, 3), NormalDist(0, 1)}))
+print(NormalDist(float("nan")) == NormalDist(float("nan")))
+print(nd.__getstate__(), copy.copy(nd), copy.deepcopy(nd), copy.copy(nd) == nd)
+clone = NormalDist.__new__(NormalDist)
+clone.__setstate__((7.0, 1.5))
+print(clone)
+show(clone.__setstate__, (1,))
+show(clone.__setstate__, (1, 2, 3))
+print(nd._mu, nd._sigma)
+
+
+class Sub(NormalDist):
+    pass
+
+
+sub = Sub(1, 2)
+print(sub, type(sub).__name__, isinstance(sub, NormalDist), type(sub + 1).__name__, type(+sub).__name__)
+print(Sub.from_samples([1, 2, 3]), type(Sub.from_samples([1, 2, 3])).__name__)
+print(sub == NormalDist(1, 2), sub.overlap(nd), nd.overlap(sub))
+print(sub.pdf(1), sub.cdf(1), sub.quantiles(2))
+
+# === Object model: __slots__, pickling, subclasses, the _statistics shim ===
+def attempt(label, func):
+    try:
+        print(label, repr(func()))
+    except Exception as exc:
+        print(label, type(exc).__name__, exc)
+
+
+attempt("vars", lambda: vars(nd))
+attempt("setattr", lambda: setattr(nd, "extra", 1))
+attempt("__slots__", lambda: NormalDist.__slots__)
+attempt("class order", lambda: list(vars(NormalDist)))
+attempt("module order", lambda: [n for n in vars(statistics) if n in statistics.__all__])
+attempt("slot descriptor", lambda: type(NormalDist._mu).__name__)
+attempt("pickle", lambda: pickle.loads(pickle.dumps(nd)))
+attempt("pickle proto 0", lambda: pickle.loads(pickle.dumps(nd, 0)))
+attempt("uninitialised", lambda: NormalDist.__new__(NormalDist).mean)
+attempt("uninitialised repr", lambda: repr(NormalDist.__new__(NormalDist)))
+attempt("mro", lambda: [c.__name__ for c in NormalDist.__mro__])
+attempt("error mro", lambda: [c.__name__ for c in StatisticsError.__mro__])
+attempt("namedtuple", lambda: (statistics.LinearRegression.__mro__[1].__name__, statistics.LinearRegression.__doc__))
+attempt("shim", lambda: _statistics._normal_dist_inv_cdf(0.5, 1.0, 2.0))
+attempt("shim names", lambda: [n for n in dir(_statistics) if not n.startswith("__")])
+attempt("shim p=1", lambda: _statistics._normal_dist_inv_cdf(1.0, 1.0, 2.0))
+attempt("shim p=0", lambda: _statistics._normal_dist_inv_cdf(0.0, 1.0, 2.0))
+attempt("shim sigma=0", lambda: _statistics._normal_dist_inv_cdf(0.3, 1.0, 0.0))
+attempt("shim sigma<0", lambda: _statistics._normal_dist_inv_cdf(0.3, 1.0, -2.0))
+attempt("shim same function", lambda: statistics._normal_dist_inv_cdf is _statistics._normal_dist_inv_cdf)
+
+
+class Narrow(NormalDist):
+    def __init__(self, mu=0.0, sigma=1.0):
+        super().__init__(mu, sigma)
+
+
+attempt("subclass init", lambda: Narrow(3, 4))
+attempt("subclass add", lambda: Narrow(3, 4) + 1)
+attempt("subclass inv_cdf", lambda: Narrow(3, 4).inv_cdf(0.5))
+attempt("subclass attrs", lambda: vars(Narrow(3, 4)))
+
+# === Argument-binding errors ===
+show(mean)
+show(mean, [1], [2])
+show(mean, data=[1, 2])
+show(mean, dat=[1])
+show(fmean, [1], weights=[1], extra=1)
+show(median_grouped, [1], 1, 2)
+show(quantiles, [1, 2, 3], 4)
+show(quantiles, [1, 2, 3], bogus=4)
+show(pvariance, [1, 2], 1, 2)
+show(NormalDist(1, 1).pdf)
+show(NormalDist(1, 1).pdf, 1, 2)
+show(NormalDist.from_samples)
+
+# === Docstrings ===
+print(statistics.__doc__.splitlines()[1])
+print(NormalDist.__doc__)
