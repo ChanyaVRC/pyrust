@@ -442,7 +442,7 @@ mod generator_protocols {
 }
 use generator_protocols::extract_stop_iteration_value;
 pub(crate) use generator_protocols::{
-    is_async_gen_asend_value, is_async_generator_value, is_coroutine_value, is_stop_iteration_error,
+    is_async_generator_value, is_coroutine_value, is_stop_iteration_error,
 };
 
 mod introspection {

@@ -341,6 +341,7 @@ pub(crate) fn inject_python_members(
     let dict = ns
         .as_dict()
         .ok_or_else(|| PyError::runtime("weakref: exec namespace not a dict".into()))?;
+    let mut weak_set = None;
     for name in WEAKREF_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             if let ValueKind::PyClass(cls_rc) = val.kind() {
@@ -357,7 +358,7 @@ pub(crate) fn inject_python_members(
                     }
                     "WeakSet" => {
                         drop(cls);
-                        super::collections_abc::register_virtual_mutable_set(cls_rc);
+                        weak_set = Some(Rc::clone(cls_rc));
                     }
                     _ => {}
                 }
@@ -370,6 +371,10 @@ pub(crate) fn inject_python_members(
     }
     for helper_name in WEAKREF_PRIVATE_HELPERS {
         module.borrow_mut().attrs.shift_remove(*helper_name);
+    }
+    // `_collections_abc.MutableSet.register(WeakSet)`.
+    if let Some(weak_set) = weak_set {
+        super::collections_abc::register_virtual_mutable_set(interp, &weak_set)?;
     }
     Ok(Some(ns.clone()))
 }

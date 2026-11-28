@@ -32,20 +32,33 @@ pub struct GenericAliasState {
 /// Operations table for one GenericAlias semantic family.
 ///
 /// `typing.Union` needs order-independent equality and hashing, while ordinary
-/// PEP 585 aliases are ordered. Encoding that distinction in the zero-sized
-/// operations type keeps the per-alias state to its two visible `Value`s.
-pub struct GenericAliasOps<const TYPING_UNION: bool>;
+/// PEP 585 aliases are ordered. `collections.abc.Callable[[A, B], R]` is
+/// CPython's `_CallableGenericAlias` subclass: ordered like a plain alias, but
+/// rendered with its parameter list re-bracketed. Encoding the family in the
+/// zero-sized operations type keeps the per-alias state to its two visible
+/// `Value`s.
+pub struct GenericAliasOps<const KIND: u8>;
 
-pub const GENERIC_ALIAS_OPS: &GenericAliasOps<false> = &GenericAliasOps;
-const TYPING_UNION_ALIAS_OPS: &GenericAliasOps<true> = &GenericAliasOps;
+/// A plain PEP 585 `types.GenericAlias`.
+const PLAIN: u8 = 0;
+/// The `typing.Union` / `typing.Optional` representation.
+const TYPING_UNION: u8 = 1;
+/// `collections.abc._CallableGenericAlias`.
+const CALLABLE: u8 = 2;
+
+pub const GENERIC_ALIAS_OPS: &GenericAliasOps<PLAIN> = &GenericAliasOps;
+const TYPING_UNION_ALIAS_OPS: &GenericAliasOps<TYPING_UNION> = &GenericAliasOps;
+const CALLABLE_ALIAS_OPS: &GenericAliasOps<CALLABLE> = &GenericAliasOps;
 pub const TYPE_NAME: &str = "types.GenericAlias";
 
 #[inline(always)]
-fn generic_alias_ops_kind(ops: &dyn BuiltinTypeOps) -> Option<bool> {
-    if builtin_ops_is::<GenericAliasOps<false>>(ops) {
-        Some(false)
-    } else if builtin_ops_is::<GenericAliasOps<true>>(ops) {
-        Some(true)
+fn generic_alias_ops_kind(ops: &dyn BuiltinTypeOps) -> Option<u8> {
+    if builtin_ops_is::<GenericAliasOps<PLAIN>>(ops) {
+        Some(PLAIN)
+    } else if builtin_ops_is::<GenericAliasOps<TYPING_UNION>>(ops) {
+        Some(TYPING_UNION)
+    } else if builtin_ops_is::<GenericAliasOps<CALLABLE>>(ops) {
+        Some(CALLABLE)
     } else {
         None
     }
@@ -56,7 +69,19 @@ fn is_generic_alias_ops(ops: &dyn BuiltinTypeOps) -> bool {
     generic_alias_ops_kind(ops).is_some()
 }
 
-impl<const TYPING_UNION: bool> BuiltinTypeOps for GenericAliasOps<TYPING_UNION> {
+/// Plain and callable aliases compare with each other (CPython's
+/// `ga_richcompare` accepts any `GenericAlias` subclass); a `typing.Union`
+/// alias only compares with another union.
+#[inline(always)]
+const fn equality_family(kind: u8) -> u8 {
+    if kind == TYPING_UNION {
+        TYPING_UNION
+    } else {
+        PLAIN
+    }
+}
+
+impl<const KIND: u8> BuiltinTypeOps for GenericAliasOps<KIND> {
     fn type_name(&self) -> &'static str {
         TYPE_NAME
     }
@@ -72,7 +97,7 @@ impl<const TYPING_UNION: bool> BuiltinTypeOps for GenericAliasOps<TYPING_UNION> 
         render_generic_alias_parts(
             &origin,
             &args,
-            TYPING_UNION,
+            KIND,
             &mut (),
             data_only_arg_repr,
             data_only_module_str,
@@ -157,7 +182,8 @@ impl<const TYPING_UNION: bool> BuiltinTypeOps for GenericAliasOps<TYPING_UNION> 
             state: other_state,
         } = other.kind()
         {
-            if generic_alias_ops_kind(other_ops) != Some(TYPING_UNION) {
+            if generic_alias_ops_kind(other_ops).map(equality_family) != Some(equality_family(KIND))
+            {
                 return false;
             }
             let other_borrow = other_state.borrow();
@@ -168,7 +194,7 @@ impl<const TYPING_UNION: bool> BuiltinTypeOps for GenericAliasOps<TYPING_UNION> 
             if s.origin != other_s.origin {
                 return false;
             }
-            if TYPING_UNION {
+            if KIND == TYPING_UNION {
                 return union_args_set_eq(&s.args, &other_s.args);
             }
             s.args == other_s.args
@@ -193,7 +219,7 @@ impl<const TYPING_UNION: bool> BuiltinTypeOps for GenericAliasOps<TYPING_UNION> 
         // consistent with the order-insensitive `eq` above.  XOR of the
         // per-element hashes is commutative, matching frozenset's semantics
         // (args are already de-duplicated by the flatten helper).
-        let args_hash = if TYPING_UNION {
+        let args_hash = if KIND == TYPING_UNION {
             union_args_set_hash(&s.args)?
         } else {
             value_hash_u64(&s.args)?
@@ -209,10 +235,10 @@ impl<const TYPING_UNION: bool> BuiltinTypeOps for GenericAliasOps<TYPING_UNION> 
         // Reconstruct a Value wrapping this same shared state so that
         // `PyKey::Object`'s `PartialEq` (`Value::eq`) dispatches back to
         // our `eq` impl and compares by content rather than by pointer.
-        let ops: &'static dyn BuiltinTypeOps = if TYPING_UNION {
-            TYPING_UNION_ALIAS_OPS
-        } else {
-            GENERIC_ALIAS_OPS
+        let ops: &'static dyn BuiltinTypeOps = match KIND {
+            TYPING_UNION => TYPING_UNION_ALIAS_OPS,
+            CALLABLE => CALLABLE_ALIAS_OPS,
+            _ => GENERIC_ALIAS_OPS,
         };
         let value = Value::builtin_object_shared(ops, state.clone());
         Some(PyKey::Object {
@@ -236,7 +262,7 @@ pub fn render_generic_alias_with<C>(
             "expected GenericAlias value".to_string(),
         ));
     };
-    let Some(typing_union) = generic_alias_ops_kind(ops) else {
+    let Some(kind) = generic_alias_ops_kind(ops) else {
         return Err(pyrust_core::PyError::runtime(
             "expected GenericAlias value".to_string(),
         ));
@@ -251,7 +277,7 @@ pub fn render_generic_alias_with<C>(
     render_generic_alias_parts(
         &origin,
         &args,
-        typing_union,
+        kind,
         context,
         render_other,
         render_module_str,
@@ -261,7 +287,7 @@ pub fn render_generic_alias_with<C>(
 fn render_generic_alias_parts<C>(
     origin: &Value,
     args: &Value,
-    typing_union: bool,
+    kind: u8,
     context: &mut C,
     render_other: fn(&mut C, &Value) -> pyrust_core::Result<String>,
     render_module_str: fn(&mut C, &Value) -> pyrust_core::Result<String>,
@@ -294,6 +320,7 @@ fn render_generic_alias_parts<C>(
     // helper in `typing.rs` always lowers `Optional[...]` to a `Union`
     // origin, so this is the single place the `Optional` spelling is
     // reconstructed.
+    let typing_union = kind == TYPING_UNION;
     if typing_union
         && let ValueKind::Tuple(items) = args.kind()
         && items.len() == 2
@@ -321,6 +348,35 @@ fn render_generic_alias_parts<C>(
     } else {
         ClassTypeArgReprStyle::Pep585
     };
+
+    // `_CallableGenericAlias.__repr__`: unless the alias is `[P, R]` with a
+    // parameter expression `P`, re-bracket the flattened argument list as
+    // `collections.abc.Callable[[A, B], R]` (the prefix is fixed in CPython).
+    if kind == CALLABLE
+        && let ValueKind::Tuple(items) = args.kind()
+        && let Some((result, params)) = items.split_last()
+        && !(items.len() == 2 && is_callable_param_expr(&items[0]))
+    {
+        let render = |context: &mut C, arg: &Value| {
+            repr_type_arg(
+                arg,
+                false,
+                class_style,
+                context,
+                render_other,
+                render_module_str,
+            )
+        };
+        let mut rendered = Vec::with_capacity(params.len());
+        for param in params {
+            rendered.push(render(context, param)?);
+        }
+        let result = render(context, result)?;
+        return Ok(format!(
+            "collections.abc.Callable[[{}], {result}]",
+            rendered.join(", ")
+        ));
+    }
 
     let args_repr = match args.kind() {
         ValueKind::Tuple([]) => "()".to_string(),
@@ -703,7 +759,7 @@ pub fn as_generic_alias_origin_args(v: &Value) -> Option<(Value, Value)> {
 /// like the tuple `(int, str)`, matching CPython 3.12.
 pub fn as_typing_union_args(v: &Value) -> Option<Value> {
     if let ValueKind::BuiltinObject { ops, state } = v.kind()
-        && builtin_ops_is::<GenericAliasOps<true>>(ops)
+        && builtin_ops_is::<GenericAliasOps<TYPING_UNION>>(ops)
     {
         let borrow = state.borrow();
         let alias = borrow.downcast_ref::<GenericAliasState>()?;
@@ -762,6 +818,71 @@ pub fn generic_alias(origin: Value, args: Value) -> Value {
 pub fn typing_union_alias(origin: Value, args: Value) -> Value {
     let state: Box<dyn Any> = Box::new(GenericAliasState { origin, args });
     Value::builtin_object(TYPING_UNION_ALIAS_OPS, state)
+}
+
+/// Construct a `collections.abc._CallableGenericAlias` value.
+///
+/// `args` is the already-flattened argument tuple (`(A, B, R)` for
+/// `Callable[[A, B], R]`, `(..., R)` for `Callable[..., R]`); the caller owns
+/// CPython's argument validation.
+pub fn callable_generic_alias(origin: Value, args: Value) -> Value {
+    let state: Box<dyn Any> = Box::new(GenericAliasState { origin, args });
+    Value::builtin_object(CALLABLE_ALIAS_OPS, state)
+}
+
+/// Whether `v` is a `collections.abc._CallableGenericAlias` value.
+#[inline]
+pub fn is_callable_generic_alias(v: &Value) -> bool {
+    matches!(
+        v.kind(),
+        ValueKind::BuiltinObject { ops, .. } if builtin_ops_is::<GenericAliasOps<CALLABLE>>(ops)
+    )
+}
+
+// Thread-local justification:
+// (a) Why `thread_local!`: Stores the `!Send` `Weak<RefCell<PyClass>>`
+//     identity of `collections.abc._CallableGenericAlias`, so `type()` can
+//     report it without this crate importing the owning module.
+// (b) Multi-interpreter / multi-threaded impact: interpreters on one GIL group
+//     share the `collections.abc` class objects, so they share this identity;
+//     separate threads register their own class.
+pyrust_core::gil_local! {
+    static CALLABLE_ALIAS_CLASS: RefCell<Option<std::rc::Weak<RefCell<PyClass>>>> =
+        const { RefCell::new(None) };
+}
+
+/// Record the class `type()` reports for a callable alias.
+pub fn register_callable_alias_class(class: &Rc<RefCell<PyClass>>) {
+    CALLABLE_ALIAS_CLASS.with(|slot| *slot.borrow_mut() = Some(Rc::downgrade(class)));
+}
+
+/// The registered `_CallableGenericAlias` class when `v` is a callable alias.
+pub fn callable_alias_class_of(v: &Value) -> Option<Rc<RefCell<PyClass>>> {
+    if !is_callable_generic_alias(v) {
+        return None;
+    }
+    CALLABLE_ALIAS_CLASS.with(|slot| slot.borrow().as_ref().and_then(std::rc::Weak::upgrade))
+}
+
+/// CPython's `_collections_abc._is_param_expr` for the data-only cases the
+/// renderer can decide: `...`, a parameter list, a `typing.ParamSpec`, or a
+/// `typing.Concatenate[...]` alias.
+pub fn is_callable_param_expr(value: &Value) -> bool {
+    match value.kind() {
+        ValueKind::Ellipsis | ValueKind::List(_) => true,
+        ValueKind::PyInstance(instance) => {
+            let instance = instance.borrow();
+            let class = instance.class.borrow();
+            class.canonical_tag == Some(CanonicalClassTag::ParamSpec)
+                || (class.name == "_ConcatenateGenericAlias"
+                    && class
+                        .attrs
+                        .get("__module__")
+                        .and_then(Value::as_str)
+                        .is_some_and(|module| module == "typing"))
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

@@ -54,14 +54,3 @@ pub(crate) fn is_async_generator_value(value: &Value) -> bool {
         ValueKind::Generator(cell) if cell.kind() == GeneratorKind::AsyncGenerator
     )
 }
-
-/// True when `value` is an async-generator awaitable (`AsyncGenASend`, returned
-/// by `__anext__` / `asend` / `athrow` / `aclose`).
-pub(crate) fn is_async_gen_asend_value(value: &Value) -> bool {
-    matches!(
-        value.kind(),
-        ValueKind::Generator(cell)
-            if cell.kind() == GeneratorKind::Iterator
-                && cell.try_borrow().is_ok_and(|s| s.is::<AsyncGenASend>())
-    )
-}

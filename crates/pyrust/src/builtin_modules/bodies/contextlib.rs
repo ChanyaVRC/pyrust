@@ -35,7 +35,7 @@ mod async_exit_stack;
 #[path = "contextlib/context_decorator.rs"]
 mod context_decorator;
 #[path = "contextlib/coroutine.rs"]
-mod coroutine;
+pub(crate) mod coroutine;
 #[path = "contextlib/decorators.rs"]
 mod decorators;
 #[path = "contextlib/docs.rs"]

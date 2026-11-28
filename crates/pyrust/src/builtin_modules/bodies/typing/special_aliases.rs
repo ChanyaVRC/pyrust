@@ -465,7 +465,10 @@ pub(super) fn deprecated_instancecheck(
             },
         ],
     )?;
-    special_instancecheck(interp, args)
+    // `self.__subclasscheck__(type(obj))`: a class check, so the origin's own
+    // instance-check warning (`collections.abc.ByteString`) is not raised too.
+    let obj = positional_arg(&args[1..], 0);
+    special_subclasscheck_value(interp, &instance, crate::interpreter::value_class(&obj))
 }
 
 // ── _BaseGenericAlias (shared by both alias families) ───────────────────────

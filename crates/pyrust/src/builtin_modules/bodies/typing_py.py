@@ -184,7 +184,23 @@ def get_args(tp):
     # `NoneType`.  pyrust's native `Optional[X]` carries just `(X,)`.
     if origin is Optional and type(None) not in args:
         return tuple(args) + (type(None),)
-    return tuple(args)
+    args = tuple(args)
+    # `collections.abc.Callable[[A, B], R]` flattens its parameters into
+    # `__args__`; CPython's `_should_unflatten_callable_args` restores them.
+    if (origin is _collections_abc.Callable
+            and not (len(args) == 2 and _is_callable_param_expr(args[0]))):
+        return (list(args[:-1]), args[-1])
+    return args
+
+
+def _is_callable_param_expr(obj):
+    """`_collections_abc._is_param_expr`: `...`, a list, a ParamSpec, or a
+    `Concatenate[...]` alias."""
+    if obj is Ellipsis or isinstance(obj, list):
+        return True
+    obj = type(obj)
+    return obj.__module__ == 'typing' and obj.__name__ in (
+        'ParamSpec', '_ConcatenateGenericAlias')
 
 
 def _resolve(value, globalns, localns):

@@ -463,6 +463,14 @@ pyrust_module! {
             if uses_special_method {
                 let method_val = lookup_class_attr(&class, "__reversed__")
                     .expect("special-method provenance must retain its class slot");
+                // `__reversed__ = None` (e.g. `collections.abc.Mapping`)
+                // explicitly opts out of the protocol.
+                if method_val.is_none() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("'{}' object is not reversible", class.borrow().name),
+                    ));
+                }
                 return invoke_class_method(
                     _interp,
                     method_val,

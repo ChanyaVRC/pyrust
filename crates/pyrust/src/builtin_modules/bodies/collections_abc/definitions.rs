@@ -1,119 +1,93 @@
-//! Canonical `collections.abc` `PyClass` singletons, required-method tables,
-//! and out-of-band virtual subclass storage.
+//! Canonical `collections.abc` class objects, the per-ABC metadata tables
+//! (structural hook methods, abstract methods, docstrings), and the shared
+//! storage both `collections.abc` and `_collections_abc` export.
 
-use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+use std::cell::RefCell;
+use std::rc::Rc;
 
-use indexmap::IndexMap;
-
-use crate::interpreter::{DictViewClass, class_is_subclass_of};
 use crate::value::{PyClass, Value};
 
-/// A virtual subclass registration: `registered` was virtually registered on
-/// `abc` (matching CPython's `ABCMeta.register()`). Stored out-of-band so
-/// registered ABCs NEVER appear in `registered.__bases__` or `__mro__`.
-struct VirtualEntry {
-    abc: Rc<RefCell<PyClass>>,
-    registered: Weak<RefCell<PyClass>>,
-}
+pub(super) type ClassRc = Rc<RefCell<PyClass>>;
 
-macro_rules! abc_class {
-    ($name:expr) => {{
-        let mut attrs = IndexMap::new();
-        attrs.insert("__module__".to_string(), Value::string("collections.abc"));
-        Rc::new(RefCell::new(PyClass::new($name, $name, None, attrs)))
-    }};
-}
-
-// Thread-local justification:
-// (a) Why `thread_local!`: Stores `!Send` `Rc<RefCell<PyClass>>` singletons
-//     for `collections.abc` abstract base classes.
-// (b) Multi-interpreter / multi-threaded impact: Multiple interpreters on one
-//     thread share the `collections.abc` class objects (e.g. `ABC_SEQUENCE`);
-//     separate threads construct independent class singletons.
-pyrust_core::gil_local! {
-    static ABC_CONTAINER:        Rc<RefCell<PyClass>> = abc_class!("Container");
-    static ABC_HASHABLE:         Rc<RefCell<PyClass>> = abc_class!("Hashable");
-    static ABC_ITERABLE:         Rc<RefCell<PyClass>> = abc_class!("Iterable");
-    static ABC_ITERATOR:         Rc<RefCell<PyClass>> = abc_class!("Iterator");
-    static ABC_REVERSIBLE:       Rc<RefCell<PyClass>> = abc_class!("Reversible");
-    static ABC_GENERATOR:        Rc<RefCell<PyClass>> = abc_class!("Generator");
-    static ABC_SIZED:            Rc<RefCell<PyClass>> = abc_class!("Sized");
-    static ABC_COLLECTION:       Rc<RefCell<PyClass>> = abc_class!("Collection");
-    static ABC_CALLABLE:         Rc<RefCell<PyClass>> = abc_class!("Callable");
-    static ABC_SEQUENCE:         Rc<RefCell<PyClass>> = abc_class!("Sequence");
-    static ABC_MUTABLE_SEQUENCE: Rc<RefCell<PyClass>> = abc_class!("MutableSequence");
-    static ABC_SET:              Rc<RefCell<PyClass>> = abc_class!("Set");
-    static ABC_MUTABLE_SET:      Rc<RefCell<PyClass>> = abc_class!("MutableSet");
-    static ABC_MAPPING:          Rc<RefCell<PyClass>> = abc_class!("Mapping");
-    static ABC_MUTABLE_MAPPING:  Rc<RefCell<PyClass>> = abc_class!("MutableMapping");
-    static ABC_MAPPING_VIEW:     Rc<RefCell<PyClass>> = abc_class!("MappingView");
-    static ABC_KEYS_VIEW:        Rc<RefCell<PyClass>> = abc_class!("KeysView");
-    static ABC_ITEMS_VIEW:       Rc<RefCell<PyClass>> = abc_class!("ItemsView");
-    static ABC_VALUES_VIEW:      Rc<RefCell<PyClass>> = abc_class!("ValuesView");
-    static ABC_AWAITABLE:        Rc<RefCell<PyClass>> = abc_class!("Awaitable");
-    static ABC_COROUTINE:        Rc<RefCell<PyClass>> = abc_class!("Coroutine");
-    static ABC_ASYNC_ITERABLE:   Rc<RefCell<PyClass>> = abc_class!("AsyncIterable");
-    static ABC_ASYNC_ITERATOR:   Rc<RefCell<PyClass>> = abc_class!("AsyncIterator");
-    static ABC_ASYNC_GENERATOR:  Rc<RefCell<PyClass>> = abc_class!("AsyncGenerator");
-    static ABC_BUFFER:           Rc<RefCell<PyClass>> = abc_class!("Buffer");
-    static ABC_BYTE_STRING:      Rc<RefCell<PyClass>> = abc_class!("ByteString");
-
-    // Once-per-thread flag: `true` after `init_abc_hierarchy_and_registry` has run.
-    static ABC_REGISTERED: Cell<bool> = const { Cell::new(false) };
-
-    // Once-per-thread flag: `true` after `collections_abc_py.py` mixins are installed.
-    static ABC_MIXINS_INSTALLED: Cell<bool> = const { Cell::new(false) };
-
-    // Out-of-band virtual subclass registrations (CPython `ABCMeta.register()`).
-    static VIRTUAL_REGISTRATIONS: RefCell<Vec<VirtualEntry>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Enumerates every canonical `collections.abc` singleton so module export,
-/// hierarchy wiring, and mixin injection share a single source of truth.
-#[derive(Clone, Copy)]
+/// Every public `collections.abc` ABC, in CPython 3.12's definition order
+/// (each ABC follows all of its bases).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Abc {
-    Container,
     Hashable,
-    Iterable,
-    Iterator,
-    Reversible,
-    Generator,
-    Sized,
-    Collection,
-    Callable,
-    Sequence,
-    MutableSequence,
-    Set,
-    MutableSet,
-    Mapping,
-    MutableMapping,
-    MappingView,
-    KeysView,
-    ItemsView,
-    ValuesView,
     Awaitable,
     Coroutine,
     AsyncIterable,
     AsyncIterator,
     AsyncGenerator,
+    Iterable,
+    Iterator,
+    Reversible,
+    Generator,
+    Sized,
+    Container,
+    Collection,
     Buffer,
+    Callable,
+    Set,
+    MutableSet,
+    Mapping,
+    MappingView,
+    KeysView,
+    ItemsView,
+    ValuesView,
+    MutableMapping,
+    Sequence,
     ByteString,
+    MutableSequence,
 }
 
 impl Abc {
+    /// Definition order (bases before subclasses).
     pub(super) const ALL: [Abc; 26] = [
-        Self::Container,
         Self::Hashable,
+        Self::Awaitable,
+        Self::Coroutine,
+        Self::AsyncIterable,
+        Self::AsyncIterator,
+        Self::AsyncGenerator,
         Self::Iterable,
         Self::Iterator,
         Self::Reversible,
         Self::Generator,
         Self::Sized,
+        Self::Container,
         Self::Collection,
+        Self::Buffer,
         Self::Callable,
+        Self::Set,
+        Self::MutableSet,
+        Self::Mapping,
+        Self::MappingView,
+        Self::KeysView,
+        Self::ItemsView,
+        Self::ValuesView,
+        Self::MutableMapping,
         Self::Sequence,
+        Self::ByteString,
         Self::MutableSequence,
+    ];
+
+    /// CPython's `__all__`, in its source order.
+    pub(super) const EXPORT_ORDER: [Abc; 26] = [
+        Self::Awaitable,
+        Self::Coroutine,
+        Self::AsyncIterable,
+        Self::AsyncIterator,
+        Self::AsyncGenerator,
+        Self::Hashable,
+        Self::Iterable,
+        Self::Iterator,
+        Self::Generator,
+        Self::Reversible,
+        Self::Sized,
+        Self::Container,
+        Self::Callable,
+        Self::Collection,
         Self::Set,
         Self::MutableSet,
         Self::Mapping,
@@ -122,224 +96,231 @@ impl Abc {
         Self::KeysView,
         Self::ItemsView,
         Self::ValuesView,
-        Self::Awaitable,
-        Self::Coroutine,
-        Self::AsyncIterable,
-        Self::AsyncIterator,
-        Self::AsyncGenerator,
-        Self::Buffer,
+        Self::Sequence,
+        Self::MutableSequence,
         Self::ByteString,
+        Self::Buffer,
     ];
 
-    pub(super) fn name(self) -> &'static str {
+    pub(super) const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub(super) const fn name(self) -> &'static str {
         match self {
-            Self::Container => "Container",
             Self::Hashable => "Hashable",
-            Self::Iterable => "Iterable",
-            Self::Iterator => "Iterator",
-            Self::Reversible => "Reversible",
-            Self::Generator => "Generator",
-            Self::Sized => "Sized",
-            Self::Collection => "Collection",
-            Self::Callable => "Callable",
-            Self::Sequence => "Sequence",
-            Self::MutableSequence => "MutableSequence",
-            Self::Set => "Set",
-            Self::MutableSet => "MutableSet",
-            Self::Mapping => "Mapping",
-            Self::MutableMapping => "MutableMapping",
-            Self::MappingView => "MappingView",
-            Self::KeysView => "KeysView",
-            Self::ItemsView => "ItemsView",
-            Self::ValuesView => "ValuesView",
             Self::Awaitable => "Awaitable",
             Self::Coroutine => "Coroutine",
             Self::AsyncIterable => "AsyncIterable",
             Self::AsyncIterator => "AsyncIterator",
             Self::AsyncGenerator => "AsyncGenerator",
+            Self::Iterable => "Iterable",
+            Self::Iterator => "Iterator",
+            Self::Reversible => "Reversible",
+            Self::Generator => "Generator",
+            Self::Sized => "Sized",
+            Self::Container => "Container",
+            Self::Collection => "Collection",
             Self::Buffer => "Buffer",
+            Self::Callable => "Callable",
+            Self::Set => "Set",
+            Self::MutableSet => "MutableSet",
+            Self::Mapping => "Mapping",
+            Self::MappingView => "MappingView",
+            Self::KeysView => "KeysView",
+            Self::ItemsView => "ItemsView",
+            Self::ValuesView => "ValuesView",
+            Self::MutableMapping => "MutableMapping",
+            Self::Sequence => "Sequence",
             Self::ByteString => "ByteString",
+            Self::MutableSequence => "MutableSequence",
         }
     }
 
-    pub(super) fn class(self) -> Rc<RefCell<PyClass>> {
+    /// The methods `cls.__subclasshook__` checks with `_check_methods` when
+    /// `cls` is exactly this ABC, or `None` when the ABC defines no hook of
+    /// its own (it inherits one that answers `NotImplemented` for it).
+    pub(super) const fn hook_methods(self) -> Option<&'static [&'static str]> {
+        Some(match self {
+            Self::Hashable => &["__hash__"],
+            Self::Awaitable => &["__await__"],
+            Self::Coroutine => &["__await__", "send", "throw", "close"],
+            Self::AsyncIterable => &["__aiter__"],
+            Self::AsyncIterator => &["__anext__", "__aiter__"],
+            Self::AsyncGenerator => &["__aiter__", "__anext__", "asend", "athrow", "aclose"],
+            Self::Iterable => &["__iter__"],
+            Self::Iterator => &["__iter__", "__next__"],
+            Self::Reversible => &["__reversed__", "__iter__"],
+            Self::Generator => &["__iter__", "__next__", "send", "throw", "close"],
+            Self::Sized => &["__len__"],
+            Self::Container => &["__contains__"],
+            Self::Collection => &["__len__", "__iter__", "__contains__"],
+            Self::Buffer => &["__buffer__"],
+            Self::Callable => &["__call__"],
+            _ => return None,
+        })
+    }
+
+    /// The `@abstractmethod`s this ABC defines in its own namespace.
+    pub(super) const fn own_abstract_methods(self) -> &'static [&'static str] {
         match self {
-            Self::Container => ABC_CONTAINER.with(Rc::clone),
-            Self::Hashable => ABC_HASHABLE.with(Rc::clone),
-            Self::Iterable => ABC_ITERABLE.with(Rc::clone),
-            Self::Iterator => ABC_ITERATOR.with(Rc::clone),
-            Self::Reversible => ABC_REVERSIBLE.with(Rc::clone),
-            Self::Generator => ABC_GENERATOR.with(Rc::clone),
-            Self::Sized => ABC_SIZED.with(Rc::clone),
-            Self::Collection => ABC_COLLECTION.with(Rc::clone),
-            Self::Callable => ABC_CALLABLE.with(Rc::clone),
-            Self::Sequence => ABC_SEQUENCE.with(Rc::clone),
-            Self::MutableSequence => ABC_MUTABLE_SEQUENCE.with(Rc::clone),
-            Self::Set => ABC_SET.with(Rc::clone),
-            Self::MutableSet => ABC_MUTABLE_SET.with(Rc::clone),
-            Self::Mapping => ABC_MAPPING.with(Rc::clone),
-            Self::MutableMapping => ABC_MUTABLE_MAPPING.with(Rc::clone),
-            Self::MappingView => ABC_MAPPING_VIEW.with(Rc::clone),
-            Self::KeysView => ABC_KEYS_VIEW.with(Rc::clone),
-            Self::ItemsView => ABC_ITEMS_VIEW.with(Rc::clone),
-            Self::ValuesView => ABC_VALUES_VIEW.with(Rc::clone),
-            Self::Awaitable => ABC_AWAITABLE.with(Rc::clone),
-            Self::Coroutine => ABC_COROUTINE.with(Rc::clone),
-            Self::AsyncIterable => ABC_ASYNC_ITERABLE.with(Rc::clone),
-            Self::AsyncIterator => ABC_ASYNC_ITERATOR.with(Rc::clone),
-            Self::AsyncGenerator => ABC_ASYNC_GENERATOR.with(Rc::clone),
-            Self::Buffer => ABC_BUFFER.with(Rc::clone),
-            Self::ByteString => ABC_BYTE_STRING.with(Rc::clone),
+            Self::Hashable => &["__hash__"],
+            Self::Awaitable => &["__await__"],
+            Self::Coroutine => &["send", "throw"],
+            Self::AsyncIterable => &["__aiter__"],
+            Self::AsyncIterator => &["__anext__"],
+            Self::AsyncGenerator => &["asend", "athrow"],
+            Self::Iterable => &["__iter__"],
+            Self::Iterator => &["__next__"],
+            Self::Reversible => &["__reversed__"],
+            Self::Generator => &["send", "throw"],
+            Self::Sized => &["__len__"],
+            Self::Container => &["__contains__"],
+            Self::Buffer => &["__buffer__"],
+            Self::Callable => &["__call__"],
+            Self::MutableSet => &["add", "discard"],
+            Self::Mapping => &["__getitem__"],
+            Self::MutableMapping => &["__setitem__", "__delitem__"],
+            Self::Sequence => &["__getitem__"],
+            Self::MutableSequence => &["__setitem__", "__delitem__", "insert"],
+            _ => &[],
         }
     }
-}
 
-pub(super) fn is_registered() -> bool {
-    ABC_REGISTERED.with(Cell::get)
-}
-
-pub(super) fn mark_registered() {
-    ABC_REGISTERED.with(|f| f.set(true));
-}
-
-pub(super) fn are_mixins_installed() -> bool {
-    ABC_MIXINS_INSTALLED.with(Cell::get)
-}
-
-pub(super) fn mark_mixins_installed() {
-    ABC_MIXINS_INSTALLED.with(|f| f.set(true));
-}
-
-// ── Required-method table (mirrors CPython's __subclasshook__ impls) ──────────
-
-const ABC_REQUIRED_METHODS: &[(&str, &[&str])] = &[
-    ("Hashable", &["__hash__"]),
-    ("Iterable", &["__iter__"]),
-    ("Iterator", &["__iter__", "__next__"]),
-    ("Reversible", &["__reversed__", "__iter__"]),
-    (
-        "Generator",
-        &["__iter__", "__next__", "send", "throw", "close"],
-    ),
-    ("Sized", &["__len__"]),
-    ("Container", &["__contains__"]),
-    ("Collection", &["__len__", "__iter__", "__contains__"]),
-    ("Callable", &["__call__"]),
-    ("Buffer", &["__buffer__"]),
-    ("Awaitable", &["__await__"]),
-    ("Coroutine", &["__await__", "send", "throw", "close"]),
-    ("AsyncIterable", &["__aiter__"]),
-    ("AsyncIterator", &["__anext__", "__aiter__"]),
-    (
-        "AsyncGenerator",
-        &["__aiter__", "__anext__", "asend", "athrow", "aclose"],
-    ),
-];
-
-/// Required methods for an ABC, or `None` if the ABC has no structural hook.
-pub(super) fn required_methods(abc_name: &str) -> Option<&'static [&'static str]> {
-    ABC_REQUIRED_METHODS
-        .iter()
-        .find(|(name, _)| *name == abc_name)
-        .map(|(_, methods)| *methods)
-}
-
-/// Return the immutable semantic name for one of the canonical structural ABCs.
-pub(super) fn canonical_structural_abc_name(class: &Rc<RefCell<PyClass>>) -> Option<&'static str> {
-    macro_rules! identify {
-        ($($class_key:ident => $name:literal),+ $(,)?) => {
-            $(
-                if $class_key.with(|candidate| Rc::ptr_eq(class, candidate)) {
-                    return Some($name);
-                }
-            )+
-        };
-    }
-    identify! {
-        ABC_HASHABLE => "Hashable",
-        ABC_ITERABLE => "Iterable",
-        ABC_ITERATOR => "Iterator",
-        ABC_REVERSIBLE => "Reversible",
-        ABC_GENERATOR => "Generator",
-        ABC_SIZED => "Sized",
-        ABC_CONTAINER => "Container",
-        ABC_COLLECTION => "Collection",
-        ABC_CALLABLE => "Callable",
-        ABC_BUFFER => "Buffer",
-        ABC_AWAITABLE => "Awaitable",
-        ABC_COROUTINE => "Coroutine",
-        ABC_ASYNC_ITERABLE => "AsyncIterable",
-        ABC_ASYNC_ITERATOR => "AsyncIterator",
-        ABC_ASYNC_GENERATOR => "AsyncGenerator",
-    }
-    None
-}
-
-/// CPython registers the dictionary-view families with the collections ABCs
-/// virtually. Ordered views share their corresponding plain view's ABC shape.
-pub(super) fn dict_view_is_virtual_abc(kind: DictViewClass, abc: &Rc<RefCell<PyClass>>) -> bool {
-    let is = |candidate: &'static pyrust_core::GilLocalKey<Rc<RefCell<PyClass>>>| {
-        candidate.with(|class| Rc::ptr_eq(class, abc))
-    };
-    let common = is(&ABC_MAPPING_VIEW)
-        || is(&ABC_COLLECTION)
-        || is(&ABC_ITERABLE)
-        || is(&ABC_SIZED)
-        || is(&ABC_CONTAINER)
-        || is(&ABC_REVERSIBLE);
-    match kind {
-        DictViewClass::Keys | DictViewClass::OrderedKeys => {
-            common || is(&ABC_KEYS_VIEW) || is(&ABC_SET)
+    /// The ABC's `__slots__` (all are `()` except `MappingView`).
+    pub(super) const fn slots(self) -> &'static [&'static str] {
+        match self {
+            Self::MappingView => &["_mapping"],
+            _ => &[],
         }
-        DictViewClass::Items | DictViewClass::OrderedItems => {
-            common || is(&ABC_ITEMS_VIEW) || is(&ABC_SET)
-        }
-        DictViewClass::Values | DictViewClass::OrderedValues => common || is(&ABC_VALUES_VIEW),
     }
-}
 
-pub(super) fn dict_view_instance_is_virtual_abc(value: &Value, abc: &Rc<RefCell<PyClass>>) -> bool {
-    pyrust_builtins::dict_views::view_kind(value)
-        .map(|kind| {
-            DictViewClass::from_view(kind, pyrust_builtins::dict_views::is_ordered_view(value))
+    /// The class docstring, or `None` for the ABCs CPython leaves undocumented.
+    pub(super) const fn doc(self) -> Option<&'static str> {
+        match self {
+            Self::Set => Some(SET_DOC),
+            Self::MutableSet => Some(MUTABLE_SET_DOC),
+            Self::Mapping => Some(MAPPING_DOC),
+            Self::MutableMapping => Some(MUTABLE_MAPPING_DOC),
+            Self::Sequence => Some(SEQUENCE_DOC),
+            Self::ByteString => Some(BYTE_STRING_DOC),
+            Self::MutableSequence => Some(MUTABLE_SEQUENCE_DOC),
+            _ => None,
+        }
+    }
+
+    pub(super) fn class(self) -> ClassRc {
+        CANONICAL.with(|canonical| {
+            let canonical = canonical.borrow();
+            let canonical = canonical
+                .as_ref()
+                .expect("collections.abc classes are initialised before use");
+            Rc::clone(&canonical.classes[self.index()])
         })
-        .is_some_and(|kind| dict_view_is_virtual_abc(kind, abc))
+    }
+
+    pub(super) fn value(self) -> Value {
+        Value::py_class(self.class())
+    }
 }
 
-/// Register `registered` as a virtual subclass of `abc` without mutating
-/// `registered.extra_bases` or `abc.subclasses`.
-pub(super) fn register_virtual_subclass(
-    abc: &Rc<RefCell<PyClass>>,
-    registered: &Rc<RefCell<PyClass>>,
-) {
-    VIRTUAL_REGISTRATIONS.with(|regs| {
-        let mut regs = regs.borrow_mut();
-        regs.retain(|entry| entry.registered.strong_count() > 0);
-        if regs.iter().any(|entry| {
-            Rc::ptr_eq(&entry.abc, abc)
-                && entry
-                    .registered
-                    .upgrade()
-                    .is_some_and(|existing| Rc::ptr_eq(&existing, registered))
-        }) {
-            return;
-        }
-        regs.push(VirtualEntry {
-            abc: Rc::clone(abc),
-            registered: Rc::downgrade(registered),
-        });
-    });
+pub(super) const MODULE_DOC: &str = "Abstract Base Classes (ABCs) for collections, according to PEP 3119.\n\n\
+     Unit tests are in test_collections.\n";
+
+const SET_DOC: &str = "A set is a finite, iterable container.\n\n    \
+This class provides concrete generic implementations of all\n    \
+methods except for __contains__, __iter__ and __len__.\n\n    \
+To override the comparisons (presumably for speed, as the\n    \
+semantics are fixed), redefine __le__ and __ge__,\n    \
+then the other operations will automatically follow suit.\n    ";
+
+const MUTABLE_SET_DOC: &str = "A mutable set is a finite, iterable container.\n\n    \
+This class provides concrete generic implementations of all\n    \
+methods except for __contains__, __iter__, __len__,\n    \
+add(), and discard().\n\n    \
+To override the comparisons (presumably for speed, as the\n    \
+semantics are fixed), all you have to do is redefine __le__ and\n    \
+then the other operations will automatically follow suit.\n    ";
+
+const MAPPING_DOC: &str = "A Mapping is a generic container for associating key/value\n    \
+pairs.\n\n    \
+This class provides concrete generic implementations of all\n    \
+methods except for __getitem__, __iter__, and __len__.\n    ";
+
+const MUTABLE_MAPPING_DOC: &str = "A MutableMapping is a generic container for associating\n    \
+key/value pairs.\n\n    \
+This class provides concrete generic implementations of all\n    \
+methods except for __getitem__, __setitem__, __delitem__,\n    \
+__iter__, and __len__.\n    ";
+
+const SEQUENCE_DOC: &str = "All the operations on a read-only sequence.\n\n    \
+Concrete subclasses must override __new__ or __init__,\n    \
+__getitem__, and __len__.\n    ";
+
+const BYTE_STRING_DOC: &str = "This unifies bytes and bytearray.\n\n    \
+XXX Should add all their methods.\n    ";
+
+const MUTABLE_SEQUENCE_DOC: &str = "All the operations on a read-write sequence.\n\n    \
+Concrete subclasses must provide __new__ or __init__,\n    \
+__getitem__, __setitem__, __delitem__, __len__, and insert().\n    ";
+
+/// The class objects and shared values every `collections.abc` /
+/// `_collections_abc` module of this GIL group exports.
+pub(super) struct Canonical {
+    /// Indexed by [`Abc::index`].
+    pub(super) classes: Vec<ClassRc>,
+    /// The hidden `@abstractmethod` descriptor class and its bound form.
+    pub(super) abstract_method: ClassRc,
+    pub(super) bound_abstract_method: ClassRc,
+    pub(super) callable_alias: ClassRc,
+    pub(super) deprecate_meta: ClassRc,
+    /// `MutableMapping._MutableMapping__marker`.
+    pub(super) marker: Value,
+    /// The `__all__` list both modules share.
+    pub(super) all: Value,
+    /// The private type objects `_collections_abc` exposes
+    /// (`bytes_iterator`, `dict_keys`, `generator`, …), in CPython's order.
+    pub(super) private_types: Vec<(&'static str, Value)>,
 }
 
-/// True iff `cls` is a virtual subclass of `abc` via `VIRTUAL_REGISTRATIONS`.
-pub(super) fn is_virtual_subclass(cls: &Rc<RefCell<PyClass>>, abc: &Rc<RefCell<PyClass>>) -> bool {
-    VIRTUAL_REGISTRATIONS.with(|regs| {
-        let mut regs = regs.borrow_mut();
-        regs.retain(|entry| entry.registered.strong_count() > 0);
-        regs.iter().any(|entry| {
-            entry.registered.upgrade().is_some_and(|registered| {
-                class_is_subclass_of(&entry.abc, abc) && class_is_subclass_of(cls, &registered)
-            })
-        })
+// Thread-local justification:
+// (a) Why `thread_local!`: the canonical ABCs are `!Send` `Rc<RefCell<PyClass>>`
+//     objects shared by `collections.abc`, `_collections_abc`, and the native
+//     modules that register virtual subclasses on them.
+// (b) Multi-interpreter / multi-threaded impact: interpreters on one GIL group
+//     share one set of ABC objects (as the previous singletons did), so
+//     `isinstance` checks agree across them; separate threads build their own.
+pyrust_core::gil_local! {
+    static CANONICAL: RefCell<Option<Rc<Canonical>>> = const { RefCell::new(None) };
+}
+
+pub(super) fn is_initialized() -> bool {
+    CANONICAL.with(|canonical| canonical.borrow().is_some())
+}
+
+pub(super) fn install(canonical: Canonical) {
+    CANONICAL.with(|slot| *slot.borrow_mut() = Some(Rc::new(canonical)));
+}
+
+/// The canonical state; only valid after initialisation.
+pub(super) fn canonical() -> Rc<Canonical> {
+    CANONICAL.with(|canonical| {
+        Rc::clone(
+            canonical
+                .borrow()
+                .as_ref()
+                .expect("collections.abc classes are initialised before use"),
+        )
+    })
+}
+
+/// The ABC `class` is, by identity, if it is one of the canonical ABCs.
+pub(super) fn abc_of(class: &ClassRc) -> Option<Abc> {
+    CANONICAL.with(|canonical| {
+        let canonical = canonical.borrow();
+        let canonical = canonical.as_ref()?;
+        Abc::ALL
+            .into_iter()
+            .find(|abc| Rc::ptr_eq(&canonical.classes[abc.index()], class))
     })
 }

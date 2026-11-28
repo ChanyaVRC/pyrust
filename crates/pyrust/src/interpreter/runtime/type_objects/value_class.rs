@@ -98,6 +98,12 @@ pub(crate) fn value_class(value: &Value) -> Value {
                 return Value::builtin_function("method-wrapper");
             }
             if pyrust_builtins::generic_alias::is_generic_alias(value) {
+                // `collections.abc.Callable[...]` is CPython's
+                // `_CallableGenericAlias` subclass of `types.GenericAlias`.
+                if let Some(class) = pyrust_builtins::generic_alias::callable_alias_class_of(value)
+                {
+                    return Value::py_class(class);
+                }
                 return Value::py_class(generic_alias_class_singleton());
             }
             // Issue #3000: `slice` is a real class in CPython, so `type(a[1:2])`

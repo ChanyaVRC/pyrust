@@ -1,313 +1,582 @@
-//! ABC inheritance hierarchy wiring, virtual primitive registrations, and
-//! Python mixin injection for `collections.abc`.
+//! One-time wiring of the canonical ABCs and the two module namespaces.
+//!
+//! [`ensure_initialized`] adopts the classes of one `module()` build as the
+//! canonical set and then does what `ABCMeta.__new__` and the module body of
+//! `Lib/_collections_abc.py` do for them: install the metaclass, `__slots__`,
+//! `_abc_impl`, the `@abstractmethod` descriptors and `__abstractmethods__`,
+//! and every `register()` call, in CPython's order.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use indexmap::{IndexMap, IndexSet};
+
+use crate::ast::BinaryOp;
+use crate::builtin_modules::macros::link_class_bases;
 use crate::error::{PyError, Result};
 use crate::interpreter::{
-    Interpreter, function_type_singleton, method_type_singleton, object_class_singleton,
-    primitive_class_by_name, range_class_singleton, type_class_singleton,
+    ExpandedCallArg, Interpreter, function_type_singleton, generic_alias_class_singleton,
+    lookup_exc_class, make_iterator, object_class_singleton, type_class_singleton, value_class,
 };
-use crate::value::{PyClass, PyKey, Value, ValueKind};
+use crate::value::{PyDict, PyModule, Value, ValueKind};
 
-use super::definitions::{
-    Abc, are_mixins_installed, is_registered, mark_mixins_installed, mark_registered,
-    register_virtual_subclass,
-};
+use super::definitions::{self, Abc, Canonical, ClassRc, MODULE_DOC, canonical};
+use super::support::{call, call_method};
 
-const COLLECTIONS_ABC_PY_SOURCE: &str = include_str!("../collections_abc_py.py");
-
-const ABC_INSTANCECHECK_FN: &str = "collections.abc.__instancecheck__";
-const ABC_SUBCLASSHOOK_FN: &str = "collections.abc.__subclasshook__";
-const ABC_SUBCLASSCHECK_FN: &str = "collections.abc.__subclasscheck__";
-
-/// Ensure the canonical ABC hierarchy and virtual registrations have been
-/// initialised once on this thread.
-pub(super) fn ensure_abc_initialized() {
-    if !is_registered() {
-        init_abc_hierarchy_and_registry();
-        mark_registered();
-    }
+/// State of an `@abstractmethod` descriptor wrapping a native method.
+pub(crate) struct AbstractMethodState {
+    pub(crate) func: Value,
+    pub(crate) name: String,
+    pub(crate) qualname: String,
 }
 
-/// Trigger one-time initialisation and return the canonical `Container` ABC.
-pub(super) fn make_abc_module() -> Value {
-    ensure_abc_initialized();
-    Value::py_class(Abc::Container.class())
+/// State of an `@abstractmethod` bound to an instance.
+pub(crate) struct BoundAbstractMethodState {
+    pub(crate) func: Value,
+    pub(crate) instance: Value,
 }
 
-/// Register a class (e.g. `collections.deque`) as a virtual subclass of
-/// `collections.abc.MutableSequence`.
-pub(crate) fn register_virtual_mutable_sequence(class: &Rc<RefCell<PyClass>>) {
-    ensure_abc_initialized();
-    let mut_seq = Abc::MutableSequence.class();
-    register_virtual_subclass(&mut_seq, class);
-}
+// ── Canonical initialisation ─────────────────────────────────────────────────
 
-/// Register a class (e.g. `weakref.WeakSet`) as a virtual subclass of
-/// `collections.abc.MutableSet`.
-pub(crate) fn register_virtual_mutable_set(class: &Rc<RefCell<PyClass>>) {
-    ensure_abc_initialized();
-    let mut_set = Abc::MutableSet.class();
-    register_virtual_subclass(&mut_set, class);
-}
-
-fn set_bases(sub: &Rc<RefCell<PyClass>>, bases: &[&Rc<RefCell<PyClass>>]) {
-    let Some((first, rest)) = bases.split_first() else {
-        return;
-    };
-    {
-        let mut borrowed = sub.borrow_mut();
-        borrowed.base = Some(Rc::clone(first));
-        borrowed.extra_bases = rest.iter().map(|b| Rc::clone(b)).collect();
-    }
-    for parent in bases {
-        let parent_borrowed = parent.borrow();
-        let mut subs = parent_borrowed.subclasses.borrow_mut();
-        if !subs.iter().any(|w| {
-            w.upgrade()
-                .is_some_and(|existing| Rc::ptr_eq(&existing, sub))
-        }) {
-            subs.push(Rc::downgrade(sub));
-        }
-    }
-}
-
-fn add_dunder_methods(abc: &Rc<RefCell<PyClass>>) {
-    let mut borrowed = abc.borrow_mut();
-    for (dunder, target) in [
-        ("__instancecheck__", ABC_INSTANCECHECK_FN),
-        ("__subclasshook__", ABC_SUBCLASSHOOK_FN),
-        ("__subclasscheck__", ABC_SUBCLASSCHECK_FN),
-    ] {
-        borrowed.attrs.entry(dunder.to_string()).or_insert_with(|| {
-            pyrust_builtins::classmethod::class_method_any(Value::builtin_function(target))
-        });
-    }
-}
-
-fn init_abc_hierarchy_and_registry() {
-    let container = Abc::Container.class();
-    let hashable = Abc::Hashable.class();
-    let iterable = Abc::Iterable.class();
-    let iterator = Abc::Iterator.class();
-    let reversible = Abc::Reversible.class();
-    let generator = Abc::Generator.class();
-    let sized = Abc::Sized.class();
-    let collection = Abc::Collection.class();
-    let callable = Abc::Callable.class();
-    let sequence = Abc::Sequence.class();
-    let mut_sequence = Abc::MutableSequence.class();
-    let set_abc = Abc::Set.class();
-    let mut_set = Abc::MutableSet.class();
-    let mapping = Abc::Mapping.class();
-    let mut_mapping = Abc::MutableMapping.class();
-    let mapping_view = Abc::MappingView.class();
-    let keys_view = Abc::KeysView.class();
-    let items_view = Abc::ItemsView.class();
-    let values_view = Abc::ValuesView.class();
-    let awaitable = Abc::Awaitable.class();
-    let coroutine = Abc::Coroutine.class();
-    let async_iterable = Abc::AsyncIterable.class();
-    let async_iterator = Abc::AsyncIterator.class();
-    let async_generator = Abc::AsyncGenerator.class();
-    let buffer_abc = Abc::Buffer.class();
-    let byte_string = Abc::ByteString.class();
-
-    // Real ABC-to-ABC inheritance hierarchy (CPython 3.12).
-    set_bases(&coroutine, &[&awaitable]);
-    set_bases(&async_iterator, &[&async_iterable]);
-    set_bases(&async_generator, &[&async_iterator]);
-    set_bases(&iterator, &[&iterable]);
-    set_bases(&reversible, &[&iterable]);
-    set_bases(&generator, &[&iterator]);
-    set_bases(&collection, &[&sized, &iterable, &container]);
-    set_bases(&set_abc, &[&collection]);
-    set_bases(&mut_set, &[&set_abc]);
-    set_bases(&mapping, &[&collection]);
-    set_bases(&mut_mapping, &[&mapping]);
-    set_bases(&mapping_view, &[&sized]);
-    set_bases(&keys_view, &[&mapping_view, &set_abc]);
-    set_bases(&items_view, &[&mapping_view, &set_abc]);
-    set_bases(&values_view, &[&mapping_view, &collection]);
-    set_bases(&sequence, &[&reversible, &collection]);
-    set_bases(&mut_sequence, &[&sequence]);
-    // Deprecated since 3.12 (slated for removal in 3.14) but still exported;
-    // `typing.ByteString` uses it as its origin.
-    set_bases(&byte_string, &[&sequence]);
-
-    // CPython defines `__class_getitem__ = classmethod(GenericAlias)` directly
-    // on these ABCs; every other generic ABC (`Sequence`, `Mapping`, …) and
-    // their subclasses inherit it, so `Sequence[int]` is a `types.GenericAlias`
-    // (issue #3326). `Hashable`, `Sized`, and `Buffer` stay unsubscriptable;
-    // `Callable` needs CPython's dedicated `_CallableGenericAlias`.
-    for (abc, sentinel) in [
-        (&awaitable, "Awaitable.__class_getitem__"),
-        (&async_iterable, "AsyncIterable.__class_getitem__"),
-        (&iterable, "Iterable.__class_getitem__"),
-        (&container, "Container.__class_getitem__"),
-        (&mapping_view, "MappingView.__class_getitem__"),
-    ] {
-        abc.borrow_mut().attrs.insert(
-            "__class_getitem__".to_string(),
-            Value::builtin_function(sentinel),
-        );
-    }
-
-    pyrust_builtins::abc_marker::register(&mapping, pyrust_builtins::abc_marker::AbcKind::Mapping);
-
-    for abc in Abc::ALL {
-        add_dunder_methods(&abc.class());
-    }
-
-    // Virtual subclass registrations (CPython Lib/_collections_abc.py).
-    let _obj_cls = object_class_singleton();
-    let fn_type = function_type_singleton();
-    let meth_type = method_type_singleton();
-    let type_cls = type_class_singleton();
-    let range_cls = range_class_singleton();
-
-    let reg_prim = |abc: &Rc<RefCell<PyClass>>, name: &str| {
-        if let Some(cls) = primitive_class_by_name(name) {
-            register_virtual_subclass(abc, &cls);
-        }
-    };
-
-    reg_prim(&mut_mapping, "dict");
-    reg_prim(&mapping, "mappingproxy");
-    reg_prim(&reversible, "dict");
-    reg_prim(&reversible, "mappingproxy");
-    reg_prim(&mut_sequence, "list");
-    reg_prim(&mut_sequence, "bytearray");
-    reg_prim(&sequence, "tuple");
-    reg_prim(&sequence, "str");
-    reg_prim(&sequence, "bytes");
-    reg_prim(&sequence, "memoryview");
-    register_virtual_subclass(&sequence, &range_cls);
-    reg_prim(&byte_string, "bytes");
-    reg_prim(&byte_string, "bytearray");
-    reg_prim(&buffer_abc, "bytes");
-    reg_prim(&buffer_abc, "bytearray");
-    reg_prim(&buffer_abc, "memoryview");
-    reg_prim(&mut_set, "set");
-    reg_prim(&set_abc, "frozenset");
-
-    for name in [
-        "int",
-        "float",
-        "complex",
-        "str",
-        "bytes",
-        "memoryview",
-        "tuple",
-        "frozenset",
-        "bool",
-        "NoneType",
-        "NotImplementedType",
-        "ellipsis",
-    ] {
-        reg_prim(&hashable, name);
-    }
-    register_virtual_subclass(&hashable, &range_cls);
-    register_virtual_subclass(&hashable, &fn_type);
-    register_virtual_subclass(&hashable, &meth_type);
-    register_virtual_subclass(&hashable, &type_cls);
-
-    register_virtual_subclass(&callable, &fn_type);
-    register_virtual_subclass(&callable, &meth_type);
-    register_virtual_subclass(&callable, &type_cls);
-}
-
-const MIXIN_TARGETS: [Abc; 12] = [
-    Abc::Iterator,
-    Abc::Generator,
-    Abc::MappingView,
-    Abc::KeysView,
-    Abc::ItemsView,
-    Abc::ValuesView,
-    Abc::Mapping,
-    Abc::MutableMapping,
-    Abc::Set,
-    Abc::MutableSet,
-    Abc::Sequence,
-    Abc::MutableSequence,
-];
-
-/// Populate all canonical `collections.abc` ABC singletons onto `module`
-/// (used by `_collections_abc` without eagerly importing `collections.abc`).
-pub(crate) fn populate_abc_exports(module: &Rc<RefCell<crate::value::PyModule>>) {
-    ensure_abc_initialized();
-    let mut m = module.borrow_mut();
-    for abc in Abc::ALL {
-        m.insert_attr(abc.name().to_string(), Value::py_class(abc.class()));
-    }
-}
-
-/// Install the concrete Python mixin methods from `collections_abc_py.py` onto
-/// the canonical `collections.abc` `PyClass` singletons once per thread.
-pub(crate) fn ensure_mixins_initialized(interp: &mut Interpreter) -> Result<()> {
-    ensure_abc_initialized();
-    if are_mixins_installed() {
+/// Build and wire the canonical ABCs once per GIL group.
+pub(crate) fn ensure_initialized(interp: &mut Interpreter) -> Result<()> {
+    if definitions::is_initialized() {
         return Ok(());
     }
-
-    let ns = Value::dict(crate::value::PyDict::default());
-    ns.dict_insert(
-        PyKey::str_from("__name__"),
-        Value::string("collections.abc"),
-    )?;
-    interp.exec_source(COLLECTIONS_ABC_PY_SOURCE, Some(ns.clone()), None)?;
-
-    {
-        let dict = ns
-            .as_dict()
-            .ok_or_else(|| PyError::runtime("collections.abc: exec namespace not a dict".into()))?;
-        for abc in MIXIN_TARGETS {
-            if let Some(carrier_val) = dict.get(&PyKey::str_from(abc.name()))
-                && let ValueKind::PyClass(carrier_cls) = carrier_val.kind()
-            {
-                let copied: Vec<(String, Value)> = carrier_cls
-                    .borrow()
-                    .attrs
-                    .iter()
-                    .filter(|(k, _)| {
-                        !matches!(
-                            k.as_str(),
-                            "__module__"
-                                | "__doc__"
-                                | "__dict__"
-                                | "__weakref__"
-                                | "__annotations__"
-                        )
-                    })
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                let target = abc.class();
-                let mut target_mut = target.borrow_mut();
-                for (k, v) in copied {
-                    target_mut.attrs.insert(k, v);
-                }
-                target_mut.bump_mutation_version();
-            }
+    let private_types = private_types(interp)?;
+    let carrier = super::module();
+    let ValueKind::PyModule(module) = carrier.kind() else {
+        return Err(internal("module() did not build a module"));
+    };
+    let class_named = |name: &str| -> Result<ClassRc> {
+        match module.borrow().attrs.get(name).map(Value::kind) {
+            Some(ValueKind::PyClass(class)) => Ok(Rc::clone(class)),
+            _ => Err(internal(&format!("missing class {name}"))),
         }
-    }
-
-    // Rebind every ABC name in the exec namespace to the canonical singleton so
-    // mixin bodies resolve the real canonical classes.
-    for abc in Abc::ALL {
-        ns.dict_insert(PyKey::str_from(abc.name()), Value::py_class(abc.class()))?;
-    }
-
-    mark_mixins_installed();
+    };
+    let classes = Abc::ALL
+        .iter()
+        .map(|abc| class_named(abc.name()))
+        .collect::<Result<Vec<_>>>()?;
+    let abstract_method = class_named("_AbstractMethod")?;
+    let bound_abstract_method = class_named("_BoundAbstractMethod")?;
+    let callable_alias = class_named("_CallableGenericAlias")?;
+    let deprecate_meta = class_named("_DeprecateByteStringMeta")?;
+    let marker = call(interp, Value::py_class(object_class_singleton()), &[])?;
+    let all = Value::list(
+        Abc::EXPORT_ORDER
+            .iter()
+            .map(|abc| Value::string(abc.name()))
+            .collect(),
+    );
+    definitions::install(Canonical {
+        classes,
+        abstract_method,
+        bound_abstract_method,
+        callable_alias,
+        deprecate_meta,
+        marker,
+        all,
+        private_types,
+    });
+    wire_classes(interp)?;
+    register_builtin_types(interp)?;
     Ok(())
 }
 
-/// Post-load `@inject` entry point for `collections.abc`.
-pub(crate) fn inject_python_members(
+fn internal(message: &str) -> PyError {
+    PyError::runtime(format!("internal: collections.abc: {message}"))
+}
+
+/// Turn the declared classes into ABCs, in definition order so every base is
+/// complete before its subclasses compute `__abstractmethods__`.
+fn wire_classes(interp: &mut Interpreter) -> Result<()> {
+    let abc_module = interp.load_module("abc")?;
+    let abc_meta_value = interp.get_attr(&abc_module, "ABCMeta")?;
+    let ValueKind::PyClass(abc_meta) = abc_meta_value.kind() else {
+        return Err(internal("abc.ABCMeta is not a class"));
+    };
+    let abc_meta = Rc::clone(abc_meta);
+    let state = canonical();
+
+    // `class _DeprecateByteStringMeta(ABCMeta)`.
+    link_class_bases(&state.deprecate_meta, vec![Rc::clone(&abc_meta)]);
+    // `class _CallableGenericAlias(GenericAlias)`.
+    link_class_bases(&state.callable_alias, vec![generic_alias_class_singleton()]);
+    state.callable_alias.borrow_mut().slots = Some(IndexSet::new());
+    pyrust_builtins::generic_alias::register_callable_alias_class(&state.callable_alias);
+
+    for abc in Abc::ALL {
+        let class = abc.class();
+        {
+            let mut cls = class.borrow_mut();
+            cls.metatype = Some(if abc == Abc::ByteString {
+                Rc::clone(&state.deprecate_meta)
+            } else {
+                Rc::clone(&abc_meta)
+            });
+            cls.slots = Some(abc.slots().iter().map(|slot| (*slot).to_string()).collect());
+            cls.attrs.insert(
+                "__doc__".to_string(),
+                abc.doc().map_or_else(Value::none, Value::string),
+            );
+            cls.attrs.insert(
+                "__slots__".to_string(),
+                Value::tuple(
+                    abc.slots()
+                        .iter()
+                        .map(|slot| Value::string(*slot))
+                        .collect(),
+                ),
+            );
+            cls.attrs.insert(
+                "_abc_impl".to_string(),
+                crate::builtin_modules::abc::new_abc_impl(),
+            );
+        }
+        // `@classmethod` in a Python module: a plain `classmethod` object
+        // (with `__func__`) that binds to a `method`, rather than the native
+        // `classmethod_descriptor` the class macro installs.
+        let class_methods: Vec<(String, Value)> = class
+            .borrow()
+            .attrs
+            .iter()
+            .filter_map(|(name, value)| {
+                pyrust_builtins::classmethod::with_class_method_any(value, |state| {
+                    state.wrapped.clone()
+                })
+                .map(|wrapped| (name.clone(), wrapped))
+            })
+            .collect();
+        for (name, wrapped) in class_methods {
+            class.borrow_mut().attrs.insert(
+                name,
+                pyrust_builtins::classmethod::class_method_any(wrapped),
+            );
+        }
+        for slot in abc.slots() {
+            let descriptor = pyrust_builtins::member_descriptor::member_descriptor(slot, &class);
+            class
+                .borrow_mut()
+                .attrs
+                .insert((*slot).to_string(), descriptor);
+        }
+        for &method in abc.own_abstract_methods() {
+            let func = class.borrow().attrs.get(method).cloned();
+            let Some(func) = func else {
+                return Err(internal(&format!(
+                    "{}.{method} is not declared",
+                    abc.name()
+                )));
+            };
+            let wrapped = call(
+                interp,
+                Value::py_class(Rc::clone(&state.abstract_method)),
+                &[
+                    func,
+                    Value::string(method),
+                    Value::string(format!("{}.{method}", abc.name())),
+                ],
+            )?;
+            class.borrow_mut().attrs.insert(method.to_string(), wrapped);
+        }
+        match abc {
+            Abc::Set => {
+                // `__rand__ = __and__`, `__ror__ = __or__`, `__rxor__ = __xor__`.
+                let mut cls = class.borrow_mut();
+                for (alias, target) in [
+                    ("__rand__", "__and__"),
+                    ("__ror__", "__or__"),
+                    ("__rxor__", "__xor__"),
+                ] {
+                    if let Some(method) = cls.attrs.get(target).cloned() {
+                        cls.attrs.insert(alias.to_string(), method);
+                    }
+                }
+            }
+            Abc::MutableMapping => {
+                class
+                    .borrow_mut()
+                    .attrs
+                    .insert("_MutableMapping__marker".to_string(), state.marker.clone());
+            }
+            Abc::Mapping => {
+                pyrust_builtins::abc_marker::register(
+                    &class,
+                    pyrust_builtins::abc_marker::AbcKind::Mapping,
+                );
+            }
+            _ => {}
+        }
+        crate::builtin_modules::abc::compute_protocol_abstract_methods(interp, &class)?;
+        class.borrow_mut().bump_mutation_version();
+    }
+    Ok(())
+}
+
+/// The type objects `_collections_abc` names at module level, computed the
+/// way CPython does (`type(iter(b''))`, `type({}.keys())`, …).
+fn private_types(interp: &mut Interpreter) -> Result<Vec<(&'static str, Value)>> {
+    let builtin = Value::builtin_function;
+    let empty_dict = || Value::dict(PyDict::default());
+    let iter_type = |interp: &mut Interpreter, value: Value| -> Result<Value> {
+        let iterator = make_iterator(interp, &value)?;
+        Ok(value_class(&iterator))
+    };
+    let bytes_value = Value::bytes(Vec::new());
+    let bytearray_value = call(interp, builtin("bytearray"), &[])?;
+    let keys = call_method(interp, &empty_dict(), "keys", &[])?;
+    let values = call_method(interp, &empty_dict(), "values", &[])?;
+    let items = call_method(interp, &empty_dict(), "items", &[])?;
+    let reversed_list = call(interp, builtin("reversed"), &[Value::list(Vec::new())])?;
+    let empty_range = call(interp, builtin("range"), &[Value::int(0)])?;
+    let huge = interp.eval_binary(Value::int(1), BinaryOp::LShift, Value::int(1000))?;
+    let long_range = call(interp, builtin("range"), &[huge])?;
+    let empty_set = call(interp, builtin("set"), &[])?;
+    let empty_zip = call(interp, builtin("zip"), &[])?;
+    let type_dict = interp.get_attr(&Value::py_class(type_class_singleton()), "__dict__")?;
+
+    Ok(vec![
+        ("bytes_iterator", iter_type(interp, bytes_value)?),
+        ("bytearray_iterator", iter_type(interp, bytearray_value)?),
+        ("dict_keyiterator", iter_type(interp, keys.clone())?),
+        ("dict_valueiterator", iter_type(interp, values.clone())?),
+        ("dict_itemiterator", iter_type(interp, items.clone())?),
+        ("list_iterator", iter_type(interp, Value::list(Vec::new()))?),
+        ("list_reverseiterator", iter_type(interp, reversed_list)?),
+        ("range_iterator", iter_type(interp, empty_range)?),
+        ("longrange_iterator", iter_type(interp, long_range)?),
+        ("set_iterator", iter_type(interp, empty_set)?),
+        ("str_iterator", iter_type(interp, Value::string(""))?),
+        (
+            "tuple_iterator",
+            iter_type(interp, Value::tuple(Vec::new()))?,
+        ),
+        ("zip_iterator", iter_type(interp, empty_zip)?),
+        ("dict_keys", value_class(&keys)),
+        ("dict_values", value_class(&values)),
+        ("dict_items", value_class(&items)),
+        ("mappingproxy", value_class(&type_dict)),
+        // Generator, coroutine, and async-generator objects report these
+        // name tokens as their type.
+        ("generator", builtin("generator")),
+        ("coroutine", builtin("coroutine")),
+        ("async_generator", builtin("async_generator")),
+    ])
+}
+
+/// `ABC.register(subclass)` through `ABCMeta.register`.
+fn register(interp: &mut Interpreter, abc: Abc, subclass: Value) -> Result<()> {
+    call_method(interp, &abc.value(), "register", &[subclass])?;
+    Ok(())
+}
+
+/// The registrations of `Lib/_collections_abc.py`, in source order.
+fn register_builtin_types(interp: &mut Interpreter) -> Result<()> {
+    let state = canonical();
+    let private = |name: &str| -> Value {
+        state
+            .private_types
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(Value::none)
+    };
+    let builtin_class = |name: &'static str| -> Value {
+        crate::interpreter::primitive_class_by_name(name)
+            .map(Value::py_class)
+            .unwrap_or_else(|| Value::builtin_function(name))
+    };
+    register(interp, Abc::Coroutine, private("coroutine"))?;
+    register(interp, Abc::AsyncGenerator, private("async_generator"))?;
+    for name in [
+        "bytes_iterator",
+        "bytearray_iterator",
+        "dict_keyiterator",
+        "dict_valueiterator",
+        "dict_itemiterator",
+        "list_iterator",
+        "list_reverseiterator",
+        "range_iterator",
+        "longrange_iterator",
+        "set_iterator",
+        "str_iterator",
+        "tuple_iterator",
+        "zip_iterator",
+    ] {
+        register(interp, Abc::Iterator, private(name))?;
+    }
+    register(interp, Abc::Generator, private("generator"))?;
+    register(interp, Abc::Set, builtin_class("frozenset"))?;
+    register(interp, Abc::MutableSet, builtin_class("set"))?;
+    register(interp, Abc::Mapping, private("mappingproxy"))?;
+    register(interp, Abc::KeysView, private("dict_keys"))?;
+    register(interp, Abc::ItemsView, private("dict_items"))?;
+    register(interp, Abc::ValuesView, private("dict_values"))?;
+    register(interp, Abc::MutableMapping, builtin_class("dict"))?;
+    for name in ["tuple", "str", "range", "memoryview"] {
+        register(interp, Abc::Sequence, builtin_class(name))?;
+    }
+    for name in ["bytes", "bytearray"] {
+        register(interp, Abc::ByteString, builtin_class(name))?;
+    }
+    for name in ["list", "bytearray"] {
+        register(interp, Abc::MutableSequence, builtin_class(name))?;
+    }
+    Ok(())
+}
+
+/// `collections.abc.MutableSequence.register(class)` for a native class
+/// (`collections.deque`, `array.array`).
+pub(crate) fn register_virtual_mutable_sequence(
     interp: &mut Interpreter,
-    _module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<Option<Value>> {
-    ensure_mixins_initialized(interp)?;
-    Ok(None)
+    class: &ClassRc,
+) -> Result<()> {
+    ensure_initialized(interp)?;
+    register(
+        interp,
+        Abc::MutableSequence,
+        Value::py_class(Rc::clone(class)),
+    )
+}
+
+/// `collections.abc.MutableSet.register(class)` for a native class
+/// (`weakref.WeakSet`).
+pub(crate) fn register_virtual_mutable_set(
+    interp: &mut Interpreter,
+    class: &ClassRc,
+) -> Result<()> {
+    ensure_initialized(interp)?;
+    register(interp, Abc::MutableSet, Value::py_class(Rc::clone(class)))
+}
+
+// ── Module namespaces ────────────────────────────────────────────────────────
+
+/// Names `pyrust_module!` builds that are not part of `collections.abc`.
+const CARRIER_ONLY: [&str; 6] = [
+    "_check_methods",
+    "_is_param_expr",
+    "_type_repr",
+    "_AbstractMethod",
+    "_BoundAbstractMethod",
+    "_DeprecateByteStringMeta",
+];
+
+/// Finish `collections.abc`: export the canonical ABCs in CPython's order —
+/// `Lib/collections/abc.py` is `from _collections_abc import *`, `__all__`,
+/// and `_CallableGenericAlias` — and drop the carrier-only helpers.
+pub(crate) fn post_load_init(
+    interp: &mut Interpreter,
+    module: &Rc<RefCell<PyModule>>,
+) -> Result<()> {
+    ensure_initialized(interp)?;
+    let state = canonical();
+    let mut module = module.borrow_mut();
+    for name in CARRIER_ONLY {
+        module.attrs.shift_remove(name);
+    }
+    for abc in Abc::ALL {
+        module.attrs.shift_remove(abc.name());
+    }
+    module.attrs.shift_remove("_CallableGenericAlias");
+    module.attrs.shift_remove("__all__");
+    // `collections/abc.py` has no docstring.
+    module.attrs.insert("__doc__".to_string(), Value::none());
+    for abc in Abc::EXPORT_ORDER {
+        module.attrs.insert(abc.name().to_string(), abc.value());
+    }
+    module
+        .attrs
+        .insert("__all__".to_string(), state.all.clone());
+    module.attrs.insert(
+        "_CallableGenericAlias".to_string(),
+        Value::py_class(Rc::clone(&state.callable_alias)),
+    );
+    Ok(())
+}
+
+/// Populate `_collections_abc` the way its module body leaves it.
+pub(crate) fn populate_private_module(
+    interp: &mut Interpreter,
+    module: &Rc<RefCell<PyModule>>,
+) -> Result<()> {
+    ensure_initialized(interp)?;
+    let state = canonical();
+    let abc_module = interp.load_module("abc")?;
+    let abc_meta = interp.get_attr(&abc_module, "ABCMeta")?;
+    let abstractmethod = interp.get_attr(&abc_module, "abstractmethod")?;
+    let sys = interp.load_module("sys")?;
+    let function = |name: &'static str| Value::builtin_function(qualified(name));
+
+    let mut entries: Vec<(String, Value)> = vec![
+        // The module body rebinds `__name__ = "collections.abc"` (CPython
+        // issue #19218) so its classes report that module.
+        ("__name__".into(), Value::string("collections.abc")),
+        ("__doc__".into(), Value::string(MODULE_DOC)),
+        ("ABCMeta".into(), abc_meta),
+        ("abstractmethod".into(), abstractmethod),
+        ("sys".into(), sys),
+        (
+            "GenericAlias".into(),
+            Value::py_class(generic_alias_class_singleton()),
+        ),
+        ("EllipsisType".into(), value_class(&Value::ellipsis())),
+        (
+            "FunctionType".into(),
+            Value::py_class(function_type_singleton()),
+        ),
+        ("__all__".into(), state.all.clone()),
+    ];
+    for (name, value) in &state.private_types {
+        entries.push(((*name).to_string(), value.clone()));
+    }
+    entries.push(("_check_methods".into(), function("_check_methods")));
+    for abc in Abc::ALL {
+        entries.push((abc.name().to_string(), abc.value()));
+        match abc {
+            Abc::Buffer => {
+                entries.push((
+                    "_CallableGenericAlias".into(),
+                    Value::py_class(Rc::clone(&state.callable_alias)),
+                ));
+                entries.push(("_is_param_expr".into(), function("_is_param_expr")));
+                entries.push(("_type_repr".into(), function("_type_repr")));
+            }
+            Abc::Sequence => entries.push((
+                "_DeprecateByteStringMeta".into(),
+                Value::py_class(Rc::clone(&state.deprecate_meta)),
+            )),
+            _ => {}
+        }
+    }
+    let mut module = module.borrow_mut();
+    for (name, value) in entries {
+        module.attrs.shift_remove(&name);
+        module.attrs.insert(name, value);
+    }
+    Ok(())
+}
+
+/// The registry name of a module-level function of this body.
+fn qualified(name: &'static str) -> &'static str {
+    match name {
+        "_check_methods" => "collections.abc._check_methods",
+        "_is_param_expr" => "collections.abc._is_param_expr",
+        "_type_repr" => "collections.abc._type_repr",
+        _ => name,
+    }
+}
+
+// ── `@abstractmethod` descriptor support ─────────────────────────────────────
+
+/// `_AbstractMethod.__get__(obj)`: a bound abstract method.
+pub(crate) fn bind_abstract_method(
+    _interp: &mut Interpreter,
+    func: Value,
+    instance: &Value,
+) -> Result<Value> {
+    let state = canonical();
+    let bound = Value::py_instance(Rc::new(RefCell::new(crate::value::PyInstance {
+        class: Rc::clone(&state.bound_abstract_method),
+        attrs: crate::value::InstanceAttrs::new(),
+    })));
+    crate::builtin_modules::macros::native_state::set_native_state(
+        &bound,
+        BoundAbstractMethodState {
+            func,
+            instance: instance.clone(),
+        },
+    )?;
+    Ok(bound)
+}
+
+/// `func(*([receiver] + args), **kwargs)`.
+pub(crate) fn call_with(
+    interp: &mut Interpreter,
+    func: Value,
+    receiver: Option<Value>,
+    args: &[Value],
+    kwargs: IndexMap<String, Value>,
+) -> Result<Value> {
+    let mut expanded: Vec<ExpandedCallArg> = Vec::with_capacity(args.len() + kwargs.len() + 1);
+    if let Some(receiver) = receiver {
+        expanded.push(ExpandedCallArg {
+            name: None,
+            value: receiver,
+        });
+    }
+    expanded.extend(
+        args.iter()
+            .cloned()
+            .map(|value| ExpandedCallArg { name: None, value }),
+    );
+    expanded.extend(kwargs.into_iter().map(|(name, value)| ExpandedCallArg {
+        name: Some(name),
+        value,
+    }));
+    interp.call_function_expanded(func, &expanded)
+}
+
+// ── `_DeprecateByteStringMeta` ───────────────────────────────────────────────
+
+/// `warnings._deprecated("collections.abc.ByteString", remove=(3, 14))`.
+fn warn_byte_string_deprecated(interp: &mut Interpreter) -> Result<()> {
+    let warnings = interp.load_module("warnings")?;
+    let warn = interp.get_attr(&warnings, "warn")?;
+    let category = lookup_exc_class("DeprecationWarning")
+        .map(Value::py_class)
+        .ok_or_else(|| internal("DeprecationWarning is missing"))?;
+    interp.call_function_expanded(
+        warn,
+        &[
+            ExpandedCallArg {
+                name: None,
+                value: Value::string(
+                    "'collections.abc.ByteString' is deprecated and slated for removal in \
+                     Python 3.14",
+                ),
+            },
+            ExpandedCallArg {
+                name: None,
+                value: category,
+            },
+            ExpandedCallArg {
+                name: Some("stacklevel".into()),
+                value: Value::int(1),
+            },
+        ],
+    )?;
+    Ok(())
+}
+
+/// `_DeprecateByteStringMeta.__new__(cls, name, bases, namespace, **kwargs)`.
+pub(crate) fn deprecate_meta_new(
+    interp: &mut Interpreter,
+    mcls: &Value,
+    args: &[Value],
+    kwargs: IndexMap<String, Value>,
+) -> Result<Value> {
+    if args.first().and_then(Value::as_str) != Some("ByteString") {
+        warn_byte_string_deprecated(interp)?;
+    }
+    let abc_module = interp.load_module("abc")?;
+    let abc_meta = interp.get_attr(&abc_module, "ABCMeta")?;
+    let new = interp.get_attr(&abc_meta, "__new__")?;
+    let mut full = Vec::with_capacity(args.len() + 1);
+    full.push(mcls.clone());
+    full.extend_from_slice(args);
+    call_with(interp, new, None, &full, kwargs)
+}
+
+/// `_DeprecateByteStringMeta.__instancecheck__(cls, instance)`.
+pub(crate) fn deprecate_meta_instancecheck(
+    interp: &mut Interpreter,
+    cls: &Value,
+    instance: &Value,
+) -> Result<Value> {
+    warn_byte_string_deprecated(interp)?;
+    let abc_module = interp.load_module("abc")?;
+    let abc_meta = interp.get_attr(&abc_module, "ABCMeta")?;
+    let check = interp.get_attr(&abc_meta, "__instancecheck__")?;
+    call(interp, check, &[cls.clone(), instance.clone()])
 }
