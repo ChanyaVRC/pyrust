@@ -233,6 +233,28 @@ pub(super) fn slot_mod(lhs: &NumericSlot<'_>, rhs: &NumericSlot<'_>) -> Result<V
     }
 }
 
+/// CPython's `float_pow` message when the platform `pow` overflows:
+/// `PyErr_SetFromErrno(PyExc_OverflowError)` with `errno == ERANGE`, whose
+/// text is the C library's `strerror(ERANGE)`.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const FLOAT_POW_OVERFLOW: &str = "(34, 'Numerical result out of range')";
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const FLOAT_POW_OVERFLOW: &str = "(34, 'Result too large')";
+
+/// Whether `a ** b == result` is a range error: finite operands whose power
+/// overflowed (`_Py_ADJUST_ERANGE1` sets `ERANGE` for an infinite result).
+fn float_pow_overflows(a: f64, b: f64, result: f64) -> bool {
+    result.is_infinite() && a.is_finite() && b.is_finite() && a != 0.0
+}
+
+/// The `OverflowError` itself, out of line so the error formatting does not
+/// grow the numeric dispatch that LTO inlines into the interpreter loop.
+#[cold]
+#[inline(never)]
+fn float_pow_overflow_error() -> crate::errors::PyError {
+    crate::overflow_err!("{}", FLOAT_POW_OVERFLOW)
+}
+
 pub(super) fn slot_pow(lhs: &NumericSlot<'_>, rhs: &NumericSlot<'_>) -> Result<Value> {
     if lhs.is_complex() || rhs.is_complex() {
         let (zr, zi) = lhs.to_complex()?;
@@ -274,6 +296,8 @@ pub(super) fn slot_pow(lhs: &NumericSlot<'_>, rhs: &NumericSlot<'_>) -> Result<V
                 let abs_val = a.abs().powf(b);
                 let angle = std::f64::consts::PI * b;
                 Ok(Value::complex(abs_val * angle.cos(), abs_val * angle.sin()))
+            } else if float_pow_overflows(a, b, result) {
+                Err(float_pow_overflow_error())
             } else {
                 Ok(Value::float(result))
             }

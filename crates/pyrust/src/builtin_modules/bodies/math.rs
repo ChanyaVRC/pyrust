@@ -33,6 +33,12 @@ mod trig_hyperbolic;
 
 use self::floating::{unary_checked, unary_overflow, unary_pred, unary_raw};
 
+// The float kernels behind `math.sqrt` / `math.log` / ... and `math.lgamma`,
+// shared with `random`'s native distributions so both report identical
+// results and errors.
+pub(crate) use self::float_algorithms::check_math_result;
+pub(crate) use self::special_functions::m_lgamma;
+
 pyrust_module! {
     constants {
         "pi"  => Value::float(std::f64::consts::PI),

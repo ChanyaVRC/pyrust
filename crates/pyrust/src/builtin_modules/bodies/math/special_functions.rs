@@ -246,7 +246,7 @@ pub(super) fn m_tgamma(x: f64) -> Result<f64> {
 /// positive branch, then apply the reflection formula on that same `r` when
 /// `x < 0`) so the last-ULP rounding agrees; the `log` calls go through libm for
 /// the same reason.
-pub(super) fn m_lgamma(x: f64) -> Result<f64> {
+pub(crate) fn m_lgamma(x: f64) -> Result<f64> {
     // log(pi) — CPython's `logpi` constant from mathmodule.c.
     const LOGPI: f64 = 1.144729885849400174143427351353058711647;
     if x.is_nan() {

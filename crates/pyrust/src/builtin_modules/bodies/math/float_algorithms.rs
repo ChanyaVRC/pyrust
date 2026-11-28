@@ -13,7 +13,7 @@ use crate::error::{PyError, Result};
 /// in the underlying C math function, such as `sin(inf)` / `cos(inf)` / `tan(inf)`.
 /// Those are domain errors even though the input itself is not finite.
 #[inline]
-pub(super) fn check_math_result(arg: f64, result: f64) -> Result<f64> {
+pub(crate) fn check_math_result(arg: f64, result: f64) -> Result<f64> {
     if result.is_infinite() && arg.is_finite() {
         if result > 0.0 {
             return Err(PyError::named(

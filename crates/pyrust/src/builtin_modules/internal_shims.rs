@@ -881,12 +881,6 @@ define_reexport_shims! {
         }
     },
 
-    _random {
-        init(interp, module) {
-            copy_selected_from(interp, "random", &["Random"], module)
-        }
-    },
-
     _bisect {
         init(interp, module) {
             copy_selected_from(
@@ -1211,7 +1205,6 @@ register_shim_dispatch!(
     _csv,
     _json,
     _pickle,
-    _random,
     _bisect,
     _heapq,
     _datetime,

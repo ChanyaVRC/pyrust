@@ -255,6 +255,14 @@ pub(crate) fn hex_digest(bytes: &[u8]) -> String {
     hex_encode(bytes)
 }
 
+/// Compute a one-shot SHA-512 digest in native Rust (`random.seed` folds a
+/// `str` / `bytes` seed through it).
+pub(crate) fn sha512_digest(data: &[u8]) -> Vec<u8> {
+    let mut state = HashState::from_name("sha512").expect("sha512 hash algorithm must exist");
+    state.update(data);
+    state.digest()
+}
+
 /// Compute a one-shot lowercase hexadecimal MD5 digest in native Rust.
 pub(crate) fn md5_hexdigest(data: &[u8]) -> String {
     let mut state = HashState::from_name("md5").expect("md5 hash algorithm must exist");
