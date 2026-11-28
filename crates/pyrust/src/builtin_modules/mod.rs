@@ -860,13 +860,14 @@ pyrust_builtin_modules! {
     platform,
     atexit,
     signal @inject,
-    // `http`, `http.client`, `http.server`, and `http.cookies` (issue #3207):
+    // `http`, `http.client`, `http.server`, and `http.cookies` (issue #3207;
+    // `http.cookies` is 100% native Rust in `http_cookies.rs`, issue #3478):
     // Python 3.12 HTTP enums (`HTTPStatus`, `HTTPMethod`), HTTP/1.1 client,
     // socket-backed HTTP server and static file handler, and RFC cookie
     // serialization/parsing.
     "http.client" as http_client @inject,
     "http.server" as http_server @inject,
-    "http.cookies" as http_cookies @inject,
+    "http.cookies" as http_cookies,
     "http.cookiejar" as http_cookiejar,
     http @inject,
     // `email` (`email.utils`, `email.header`, `email.policy`, `email.message`,
