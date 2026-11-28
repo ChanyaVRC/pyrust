@@ -65,9 +65,9 @@ const PATH_SEPARATORS: &str = "\\/";
 #[cfg(not(windows))]
 const PATH_SEPARATORS: &str = "/";
 #[cfg(windows)]
-const PATH_SEP: char = '\\';
+pub(crate) const PATH_SEP: char = '\\';
 #[cfg(not(windows))]
-const PATH_SEP: char = '/';
+pub(crate) const PATH_SEP: char = '/';
 
 // The `def`s of `util.py` / `_bootstrap*.py`: CPython reports arity errors for
 // these in the interpreter's `initialize_locals` wording.
@@ -165,7 +165,7 @@ const SIG_FIND_SPEC: Sig = Sig {
 
 // ── Small interpreter helpers ────────────────────────────────────────────────
 
-fn type_error(message: impl Into<String>) -> PyError {
+pub(crate) fn type_error(message: impl Into<String>) -> PyError {
     PyError::named("TypeError", message.into())
 }
 
@@ -173,15 +173,15 @@ fn value_error(message: impl Into<String>) -> PyError {
     PyError::named("ValueError", message.into())
 }
 
-fn s(text: &str) -> Value {
+pub(crate) fn s(text: &str) -> Value {
     Value::string(text)
 }
 
-fn call(interp: &mut Interpreter, callee: &Value, values: &[Value]) -> Result<Value> {
+pub(crate) fn call(interp: &mut Interpreter, callee: &Value, values: &[Value]) -> Result<Value> {
     call_kw(interp, callee, values, &[])
 }
 
-fn call_kw(
+pub(crate) fn call_kw(
     interp: &mut Interpreter,
     callee: &Value,
     values: &[Value],
@@ -199,7 +199,7 @@ fn call_kw(
     interp.call_function_expanded(callee.clone(), &expanded)
 }
 
-fn call_method(
+pub(crate) fn call_method(
     interp: &mut Interpreter,
     receiver: &Value,
     name: &str,
@@ -211,7 +211,7 @@ fn call_method(
 
 /// Whether `error` is an instance of the named builtin exception class
 /// (`except OSError:`), plus an equivalent error to re-raise.
-fn error_is(
+pub(crate) fn error_is(
     interp: &mut Interpreter,
     error: PyError,
     name: &str,
@@ -225,7 +225,11 @@ fn error_is(
 }
 
 /// `getattr(obj, name)` that treats `AttributeError` as "absent".
-fn get_attr_opt(interp: &mut Interpreter, obj: &Value, name: &str) -> Result<Option<Value>> {
+pub(crate) fn get_attr_opt(
+    interp: &mut Interpreter,
+    obj: &Value,
+    name: &str,
+) -> Result<Option<Value>> {
     match interp.get_attr(obj, name) {
         Ok(value) => Ok(Some(value)),
         Err(error) => {
@@ -241,7 +245,7 @@ fn get_attr_or_none(interp: &mut Interpreter, obj: &Value, name: &str) -> Result
 }
 
 /// `hasattr(obj, name)`.
-fn has_attr(interp: &mut Interpreter, obj: &Value, name: &str) -> Result<bool> {
+pub(crate) fn has_attr(interp: &mut Interpreter, obj: &Value, name: &str) -> Result<bool> {
     Ok(get_attr_opt(interp, obj, name)?.is_some())
 }
 
@@ -277,7 +281,7 @@ fn from_none(interp: &mut Interpreter, error: PyError) -> PyError {
 }
 
 /// `raise <error> from <cause>`.
-fn from_cause(interp: &mut Interpreter, error: PyError, cause: Value) -> PyError {
+pub(crate) fn from_cause(interp: &mut Interpreter, error: PyError, cause: Value) -> PyError {
     let Ok(exception) = interp.materialize_pyerror(error) else {
         return PyError::runtime("importlib.util: could not build exception".to_string());
     };
@@ -290,12 +294,12 @@ fn from_cause(interp: &mut Interpreter, error: PyError, cause: Value) -> PyError
     PyError::raised(exception)
 }
 
-fn repr_of(interp: &mut Interpreter, value: &Value) -> Result<String> {
+pub(crate) fn repr_of(interp: &mut Interpreter, value: &Value) -> Result<String> {
     render_value_repr(interp, value)
 }
 
 /// `str(value)`.
-fn str_of(interp: &mut Interpreter, value: &Value) -> Result<String> {
+pub(crate) fn str_of(interp: &mut Interpreter, value: &Value) -> Result<String> {
     if let Some(text) = value.as_str() {
         return Ok(text.to_string());
     }
@@ -306,7 +310,7 @@ fn str_of(interp: &mut Interpreter, value: &Value) -> Result<String> {
     Ok(result.as_str().unwrap_or_default().to_string())
 }
 
-fn sys_attr(interp: &mut Interpreter, name: &str) -> Result<Value> {
+pub(crate) fn sys_attr(interp: &mut Interpreter, name: &str) -> Result<Value> {
     let sys = interp.load_module("sys")?;
     interp.get_attr(&sys, name)
 }
@@ -366,7 +370,7 @@ fn is_sep(c: char) -> bool {
 }
 
 /// `_path_split(path)` — `os.path.split` for a single trailing component.
-fn path_split(path: &str) -> (&str, &str) {
+pub(crate) fn path_split(path: &str) -> (&str, &str) {
     match path.rfind(is_sep) {
         None => ("", path),
         Some(i) => (&path[..i], &path[i + 1..]),
@@ -375,7 +379,7 @@ fn path_split(path: &str) -> (&str, &str) {
 
 /// `_path_join(*path_parts)` on Windows.
 #[cfg(windows)]
-fn path_join(parts: &[&str]) -> String {
+pub(crate) fn path_join(parts: &[&str]) -> String {
     if parts.is_empty() {
         return String::new();
     }
@@ -423,7 +427,7 @@ fn path_join(parts: &[&str]) -> String {
 
 /// `_path_join(*path_parts)` on POSIX.
 #[cfg(not(windows))]
-fn path_join(parts: &[&str]) -> String {
+pub(crate) fn path_join(parts: &[&str]) -> String {
     parts
         .iter()
         .filter(|part| !part.is_empty())
@@ -433,7 +437,7 @@ fn path_join(parts: &[&str]) -> String {
 }
 
 #[cfg(windows)]
-fn path_isabs(path: &str) -> bool {
+pub(crate) fn path_isabs(path: &str) -> bool {
     if path.is_empty() {
         return false;
     }
@@ -443,12 +447,12 @@ fn path_isabs(path: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-fn path_isabs(path: &str) -> bool {
+pub(crate) fn path_isabs(path: &str) -> bool {
     path.starts_with(is_sep)
 }
 
 /// `_path_abspath(path)` — a cheap `os.path.abspath` that never normalises.
-fn path_abspath(interp: &mut Interpreter, path: &str) -> Result<String> {
+pub(crate) fn path_abspath(interp: &mut Interpreter, path: &str) -> Result<String> {
     if path_isabs(path) {
         return Ok(path.to_string());
     }
@@ -466,7 +470,7 @@ fn path_abspath(interp: &mut Interpreter, path: &str) -> Result<String> {
 ///
 /// CPython feeds a `bytes` path to `_path_split`, whose `path.rfind('/')`
 /// raises this `TypeError`.
-fn fspath_str(interp: &mut Interpreter, path: &Value) -> Result<String> {
+pub(crate) fn fspath_str(interp: &mut Interpreter, path: &Value) -> Result<String> {
     match fspath_resolve(interp, path)? {
         PathValue::Str(text) => Ok(text),
         PathValue::Bytes(_) => Err(type_error(
@@ -493,7 +497,7 @@ fn pycache_prefix(interp: &mut Interpreter) -> Result<Option<String>> {
 
 // ── `cache_from_source` / `source_from_cache` / `decode_source` ──────────────
 
-fn cache_from_source_impl(
+pub(crate) fn cache_from_source_impl(
     interp: &mut Interpreter,
     path: &Value,
     debug_override: &Value,
@@ -637,7 +641,7 @@ fn translate_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn decode_source_impl(interp: &mut Interpreter, source_bytes: &Value) -> Result<Value> {
+pub(crate) fn decode_source_impl(interp: &mut Interpreter, source_bytes: &Value) -> Result<Value> {
     let io = interp.load_module("io")?;
     let bytes_io = interp.get_attr(&io, "BytesIO")?;
     // `_io.BytesIO(None)` is an empty stream, and a `str` is refused with the
@@ -773,7 +777,7 @@ fn builtin_spec(interp: &mut Interpreter, name: &str) -> Result<Value> {
 
 /// `spec_from_file_location`; `submodule_search_locations` is `None` for the
 /// `_POPULATE` default.
-fn spec_from_file_location_impl(
+pub(crate) fn spec_from_file_location_impl(
     interp: &mut Interpreter,
     name: &Value,
     location: Option<Value>,
@@ -893,7 +897,7 @@ fn spec_from_file_location_impl(
     Ok(spec)
 }
 
-fn spec_from_loader_impl(
+pub(crate) fn spec_from_loader_impl(
     interp: &mut Interpreter,
     name: &Value,
     loader: &Value,
@@ -939,7 +943,7 @@ fn spec_from_loader_impl(
 
 // ── Module construction ──────────────────────────────────────────────────────
 
-fn init_module_attrs_impl(
+pub(crate) fn init_module_attrs_impl(
     interp: &mut Interpreter,
     spec: &Value,
     module: &Value,
@@ -958,9 +962,11 @@ fn init_module_attrs_impl(
             // A backward compatibility hack.
             let locations = interp.get_attr(spec, "submodule_search_locations")?;
             if !locations.is_none() {
-                let namespace_loader = machinery_attr(interp, "NamespaceLoader")?;
-                let name = interp.get_attr(spec, "name")?;
-                loader = call(interp, &namespace_loader, &[name, locations, Value::none()])?;
+                // `NamespaceLoader.__new__(NamespaceLoader)` with `_path` set
+                // directly: `__init__` would wrap the locations again.
+                loader = crate::builtin_modules::importlib_machinery::bare_namespace_loader(
+                    interp, locations,
+                )?;
                 interp.assign_attr(spec.clone(), "loader", loader.clone())?;
                 // Namespace packages have no location, but their
                 // `__spec__.origin` is `None`, so `__file__` is too.
@@ -1039,7 +1045,7 @@ fn new_module(interp: &mut Interpreter, spec: &Value, name: &Value) -> Result<Va
     Ok(module)
 }
 
-fn module_from_spec_impl(interp: &mut Interpreter, spec: &Value) -> Result<Value> {
+pub(crate) fn module_from_spec_impl(interp: &mut Interpreter, spec: &Value) -> Result<Value> {
     // Typically loaders will not implement `create_module()`.
     let mut module = Value::none();
     let loader = interp.get_attr(spec, "loader")?;
@@ -1104,7 +1110,9 @@ fn synthesize_loaded_module_spec(
     if file_attr.is_none() && !pkg_path.is_none() {
         let locations = Value::list(interp.collect_iterable(&pkg_path)?);
         let namespace_loader = machinery_attr(interp, "NamespaceLoader")?;
+        // `_NamespacePath` recalculates through `PathFinder._get_spec`.
         let path_finder = machinery_attr(interp, "PathFinder")?;
+        let path_finder = interp.get_attr(&path_finder, "_get_spec")?;
         let loader = call(
             interp,
             &namespace_loader,

@@ -703,27 +703,11 @@ impl Interpreter {
 
         let mut effective_loader = loader.clone();
         if attr_missing_or_none(self, &module, "__loader__") {
+            // `NamespaceLoader.__new__(NamespaceLoader)` with `_path` set to
+            // the spec's locations, as `_bootstrap._init_module_attrs` does.
             if effective_loader.is_none()
                 && !smsl.is_none()
-                && let Ok(machinery) = self.load_module("importlib.machinery")
-                && let Ok(ns_loader_cls) = self.get_attr(&machinery, "NamespaceLoader")
-                && let Ok(ns_loader) = self.call_function_expanded(
-                    ns_loader_cls,
-                    &[
-                        ExpandedCallArg {
-                            name: None,
-                            value: Value::string(&spec_name),
-                        },
-                        ExpandedCallArg {
-                            name: None,
-                            value: smsl.clone(),
-                        },
-                        ExpandedCallArg {
-                            name: None,
-                            value: Value::none(),
-                        },
-                    ],
-                )
+                && let Ok(ns_loader) = self.bare_namespace_loader(smsl.clone())
             {
                 effective_loader = ns_loader.clone();
                 let _ = self.assign_attr(spec.clone(), "loader", ns_loader);
@@ -814,6 +798,56 @@ impl Interpreter {
         Ok(final_module)
     }
 
+    /// `NamespaceLoader.__new__(NamespaceLoader)` with `loader._path = path`,
+    /// the loader `_bootstrap._init_module_attrs` gives a spec without one.
+    fn bare_namespace_loader(&mut self, path: Value) -> Result<Value> {
+        let machinery = self.load_module("importlib.machinery")?;
+        let loader_class = self.get_attr(&machinery, "NamespaceLoader")?;
+        let object = Value::py_class(crate::interpreter::object_class_singleton());
+        let object_new = self.get_attr(&object, "__new__")?;
+        let loader = self.call_function_expanded(
+            object_new,
+            &[ExpandedCallArg {
+                name: None,
+                value: loader_class,
+            }],
+        )?;
+        self.assign_attr(loader.clone(), "_path", path)?;
+        Ok(loader)
+    }
+
+    /// `NamespaceLoader(name, path, PathFinder._get_spec)`, whose `_path` is a
+    /// `_NamespacePath` that recalculates through `PathFinder._get_spec`; a
+    /// [`Self::bare_namespace_loader`] when the parent path is not readable.
+    fn namespace_package_loader(
+        &mut self,
+        machinery: &Value,
+        name: &str,
+        path: Value,
+    ) -> Result<Value> {
+        let loader_class = self.get_attr(machinery, "NamespaceLoader")?;
+        let path_finder = self.get_attr(machinery, "PathFinder")?;
+        let get_spec = self.get_attr(&path_finder, "_get_spec")?;
+        let args = [
+            ExpandedCallArg {
+                name: None,
+                value: Value::string(name),
+            },
+            ExpandedCallArg {
+                name: None,
+                value: path.clone(),
+            },
+            ExpandedCallArg {
+                name: None,
+                value: get_spec,
+            },
+        ];
+        match self.call_function_expanded(loader_class, &args) {
+            Ok(loader) => Ok(loader),
+            Err(_) => self.bare_namespace_loader(path),
+        }
+    }
+
     /// Construct and register a PEP 420 implicit namespace package spanning
     /// `namespace_dirs`.
     fn create_namespace_package(
@@ -826,30 +860,10 @@ impl Interpreter {
         let path_list = Value::list(namespace_dirs.into_iter().map(Value::string).collect());
 
         let (loader_val, spec_val) = if let Ok(machinery) = self.load_module("importlib.machinery")
-            && let Ok(ns_loader_cls) = self.get_attr(&machinery, "NamespaceLoader")
             && let Ok(spec_cls) = self.get_attr(&machinery, "ModuleSpec")
         {
-            let path_finder = self
-                .get_attr(&machinery, "PathFinder")
-                .unwrap_or_else(|_| Value::none());
             let loader = self
-                .call_function_expanded(
-                    ns_loader_cls,
-                    &[
-                        ExpandedCallArg {
-                            name: None,
-                            value: Value::string(name),
-                        },
-                        ExpandedCallArg {
-                            name: None,
-                            value: path_list.clone(),
-                        },
-                        ExpandedCallArg {
-                            name: None,
-                            value: path_finder,
-                        },
-                    ],
-                )
+                .namespace_package_loader(&machinery, name, path_list.clone())
                 .unwrap_or_else(|_| Value::none());
             let spec = self
                 .call_function_expanded(
