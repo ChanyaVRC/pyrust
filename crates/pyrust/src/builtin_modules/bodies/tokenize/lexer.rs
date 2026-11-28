@@ -182,17 +182,51 @@ pub(crate) struct StatefulLexer {
     /// Track indentation style for TabError detection: (spaces_count, tabs_count) per level.
     indent_styles: Vec<(usize, usize)>,
     /// Whether to raise `TabError` on mixed tabs/spaces (enabled for `ast.parse`,
-    /// disabled for `tokenize.generate_tokens` and `tabnanny` matching CPython 3.12).
+    /// disabled for `tabnanny`).
     check_tabs: bool,
+    /// `tokenize`-module mode: reproduce what CPython 3.12.3's C tokenizer
+    /// (driven with `extra_tokens=True`) reports, including its error
+    /// messages and `(lineno, offset)` positions, instead of the more
+    /// lenient behaviour `ast` and `tabnanny` rely on.
+    exact: bool,
+    /// Parallel to `indents`: the indentation width with tabs counted as one
+    /// column (CPython's `altcol`), for the exact-mode `TabError` check.
+    alt_indents: Vec<usize>,
+    /// An exact-mode error found while scanning the current line: the tokens
+    /// before it are still returned by `feed_line`, and the error is handed
+    /// out afterwards by [`StatefulLexer::take_deferred_error`], so a
+    /// consumer sees them in CPython's order (tokens first, then the error).
+    deferred_error: Option<LexError>,
 }
 
 impl StatefulLexer {
-    pub(crate) fn new() -> Self {
-        Self::with_tab_check(false)
+    /// The lexer behind `tokenize.generate_tokens` / `tokenize.tokenize`.
+    pub(crate) fn for_tokenize() -> Self {
+        let mut lexer = Self::with_tab_check(false);
+        lexer.exact = true;
+        lexer
+    }
+
+    /// The error found on the line just fed, if any (exact mode only).
+    pub(crate) fn take_deferred_error(&mut self) -> Option<LexError> {
+        self.deferred_error.take()
+    }
+
+    /// 1-based number of the last physical line fed.
+    pub(crate) fn line_number(&self) -> u32 {
+        self.lnum
+    }
+
+    /// Where the outermost still-open f-string, bracket or string started.
+    pub(crate) fn open_origin(&self) -> Option<(u32, u32)> {
+        self.paren_start
     }
 
     pub(crate) fn with_tab_check(check_tabs: bool) -> Self {
         Self {
+            exact: false,
+            alt_indents: vec![0],
+            deferred_error: None,
             lnum: 0,
             indents: vec![0],
             has_logical_token: false,
@@ -265,6 +299,14 @@ impl StatefulLexer {
         self.last_line_byte_len = line_byte_len;
         self.last_ended_with_nl = line.ends_with('\n') || line.ends_with('\r');
 
+        if self.exact && chars.contains(&'\0') {
+            return Err(LexError::TokenError {
+                msg: "source code cannot contain null bytes".to_string(),
+                line: lnum,
+                col: 0,
+            });
+        }
+
         let mut pos: usize = 0;
 
         // If we are inside a multi-line triple-quoted string or f-string literal,
@@ -297,23 +339,27 @@ impl StatefulLexer {
             // unless this is a blank or comment-only line.
             let mut col_idx = 0usize;
             let mut visual_col = 0usize;
+            let mut alt_col = 0usize;
             let mut spaces = 0usize;
             let mut tabs = 0usize;
             while col_idx < chars.len() {
                 match chars[col_idx] {
                     ' ' => {
                         visual_col += 1;
+                        alt_col += 1;
                         spaces += 1;
                         col_idx += 1;
                     }
                     '\t' => {
                         visual_col = (visual_col / 8 + 1) * 8;
+                        alt_col += 1;
                         tabs += 1;
                         col_idx += 1;
                     }
                     '\x0C' => {
                         // Form feed resets column to 0 in CPython.
                         visual_col = 0;
+                        alt_col = 0;
                         col_idx += 1;
                     }
                     _ => break,
@@ -368,7 +414,16 @@ impl StatefulLexer {
             let current_indent = *self.indents.last().unwrap();
             if visual_col > current_indent {
                 // Check for inconsistent tab/space mixing with previous level.
-                if self.check_tabs
+                if self.exact {
+                    if alt_col <= self.alt_indents.last().copied().unwrap_or(0) {
+                        return Err(LexError::TabError {
+                            msg: "inconsistent use of tabs and spaces in indentation".to_string(),
+                            line: lnum,
+                            col: pos as u32,
+                            text: line.to_string(),
+                        });
+                    }
+                } else if self.check_tabs
                     && let Some(&(prev_s, prev_t)) = self.indent_styles.last()
                     && ((prev_s > 0 && tabs > 0 && spaces < prev_s)
                         || (prev_t > 0 && spaces > 0 && tabs < prev_t))
@@ -382,6 +437,7 @@ impl StatefulLexer {
                 }
                 self.indents.push(visual_col);
                 self.indent_styles.push((spaces, tabs));
+                self.alt_indents.push(alt_col);
                 let indent_str: String = chars[0..pos].iter().collect();
                 out.push(LexToken {
                     tok_type: TOK_INDENT,
@@ -399,6 +455,7 @@ impl StatefulLexer {
                 while visual_col < *self.indents.last().unwrap() {
                     self.indents.pop();
                     self.indent_styles.pop();
+                    self.alt_indents.pop();
                     out.push(LexToken {
                         tok_type: TOK_DEDENT,
                         exact_type: TOK_DEDENT,
@@ -421,7 +478,16 @@ impl StatefulLexer {
                     });
                 }
                 // Check same indent column with mixed tabs/spaces.
-                if self.check_tabs
+                if self.exact {
+                    if alt_col != self.alt_indents.last().copied().unwrap_or(0) {
+                        return Err(LexError::TabError {
+                            msg: "inconsistent use of tabs and spaces in indentation".to_string(),
+                            line: lnum,
+                            col: pos as u32,
+                            text: line.to_string(),
+                        });
+                    }
+                } else if self.check_tabs
                     && let Some(&(prev_s, prev_t)) = self.indent_styles.last()
                     && (spaces, tabs) != (prev_s, prev_t)
                     && (tabs > 0 || prev_t > 0)
@@ -440,6 +506,9 @@ impl StatefulLexer {
 
         // Main per-line token scanning loop.
         while pos < chars.len() {
+            if self.deferred_error.is_some() {
+                break;
+            }
             match self.modes.last().unwrap().clone() {
                 LexMode::FStringText {
                     quote,
@@ -545,6 +614,15 @@ impl StatefulLexer {
                             self.continued = true;
                             break;
                         }
+                        if self.exact {
+                            self.deferred_error = Some(LexError::TokenError {
+                                msg: "unexpected character after line continuation character"
+                                    .to_string(),
+                                line: lnum,
+                                col: line_char_len,
+                            });
+                            break;
+                        }
                         // Stray backslash not followed by newline -> ERRORTOKEN.
                         self.has_logical_token = true;
                         out.push(LexToken {
@@ -568,6 +646,16 @@ impl StatefulLexer {
                         || (c == '.' && chars.get(pos + 1).is_some_and(char::is_ascii_digit))
                     {
                         let start = pos;
+                        if self.exact
+                            && let Some((msg, offset)) = number_error(&chars, pos)
+                        {
+                            self.deferred_error = Some(LexError::TokenError {
+                                msg,
+                                line: lnum,
+                                col: offset as u32,
+                            });
+                            break;
+                        }
                         pos = scan_number(&chars, pos);
                         let text: String = chars[start..pos].iter().collect();
                         self.has_logical_token = true;
@@ -642,11 +730,16 @@ impl StatefulLexer {
                         }
                     }
 
-                    // Identifier / keyword.
-                    if is_ident_start(c) {
+                    // Identifier / keyword.  CPython's C tokenizer treats every
+                    // non-ASCII character as an identifier character (the
+                    // parser validates the name later), unlike the `ast` path.
+                    let exact = self.exact;
+                    if is_ident_start(c) || (exact && !c.is_ascii()) {
                         let start = pos;
                         pos += 1;
-                        while pos < chars.len() && is_ident_continue(chars[pos]) {
+                        while pos < chars.len()
+                            && (is_ident_continue(chars[pos]) || (exact && !chars[pos].is_ascii()))
+                        {
                             pos += 1;
                         }
                         let text: String = chars[start..pos].iter().collect();
@@ -666,8 +759,14 @@ impl StatefulLexer {
                         continue;
                     }
 
-                    // Operators and delimiters.
-                    if let Some((op_len, exact_type)) = match_operator(&chars, pos) {
+                    // Operators and delimiters.  The C tokenizer also accepts
+                    // `<>` (`NOTEQUAL`, for `barry_as_FLUFL`).
+                    let operator = if self.exact && c == '<' && chars.get(pos + 1) == Some(&'>') {
+                        Some((2, TOK_NOTEQUAL))
+                    } else {
+                        match_operator(&chars, pos)
+                    };
+                    if let Some((op_len, exact_type)) = operator {
                         let start = pos;
                         let end = pos + op_len;
                         let text: String = chars[start..end].iter().collect();
@@ -787,6 +886,33 @@ impl StatefulLexer {
 
                     // Any unrecognized character -> ERRORTOKEN.
                     self.has_logical_token = true;
+                    if self.exact {
+                        if matches!(c, '$' | '?' | '`') {
+                            // The C tokenizer hands these out as plain operators.
+                            out.push(LexToken {
+                                tok_type: TOK_OP,
+                                exact_type: TOK_OP,
+                                string: c.to_string(),
+                                start_line: lnum,
+                                start_col: pos as u32,
+                                start_byte_col: char_to_byte[pos],
+                                end_line: lnum,
+                                end_col: (pos + 1) as u32,
+                                end_byte_col: char_to_byte[pos + 1],
+                                line: line.to_string(),
+                            });
+                            pos += 1;
+                            continue;
+                        }
+                        if c.is_ascii_control() {
+                            self.deferred_error = Some(LexError::TokenError {
+                                msg: format!("invalid non-printable character U+{:04X}", c as u32),
+                                line: lnum,
+                                col: pos as u32 + 1,
+                            });
+                            break;
+                        }
+                    }
                     out.push(LexToken {
                         tok_type: TOK_ERRORTOKEN,
                         exact_type: TOK_ERRORTOKEN,
@@ -817,10 +943,59 @@ impl StatefulLexer {
         let mut out = Vec::new();
 
         if let Some(accum) = self.multiline.take() {
+            if self.exact {
+                // An f-string's middle starts after its prefix and quote; the
+                // error is reported at the whole f-string's start.
+                let (line, col) = match self.paren_start {
+                    Some(origin) if accum.is_fstring_middle => origin,
+                    _ => (accum.start_line, accum.start_col),
+                };
+                let msg = match (accum.is_fstring_middle, accum.is_triple) {
+                    (false, true) => "EOF in multi-line string".to_string(),
+                    (false, false) => {
+                        format!(
+                            "unterminated string literal (detected at line {})",
+                            self.lnum
+                        )
+                    }
+                    (true, true) => format!(
+                        "unterminated triple-quoted f-string literal (detected at line {})",
+                        self.lnum
+                    ),
+                    (true, false) => {
+                        format!(
+                            "unterminated f-string literal (detected at line {})",
+                            self.lnum
+                        )
+                    }
+                };
+                return Err(LexError::TokenError {
+                    msg,
+                    line,
+                    col: col + 1,
+                });
+            }
             return Err(LexError::TokenError {
                 msg: "EOF in multi-line string".to_string(),
                 line: accum.start_line,
                 col: accum.start_col,
+            });
+        }
+
+        if self.exact && (self.in_implicit_continuation() || self.continued) {
+            // The offset is the length of the line when a backslash
+            // continuation runs into EOF after some code, else 0.
+            let line_len = self.last_line_char_len + u32::from(!self.last_ended_with_nl);
+            let col =
+                if self.continued && (self.has_logical_token || self.in_implicit_continuation()) {
+                    line_len
+                } else {
+                    0
+                };
+            return Err(LexError::TokenError {
+                msg: "unexpected EOF in multi-line statement".to_string(),
+                line: self.lnum.max(1),
+                col,
             });
         }
 
@@ -855,6 +1030,7 @@ impl StatefulLexer {
         while self.indents.len() > 1 {
             self.indents.pop();
             self.indent_styles.pop();
+            self.alt_indents.pop();
             out.push(LexToken {
                 tok_type: TOK_DEDENT,
                 exact_type: TOK_DEDENT,
@@ -916,8 +1092,12 @@ impl StatefulLexer {
                 break;
             }
             if !is_triple && (c == '\n' || c == '\r') {
-                // Unterminated single-line string: emit ERRORTOKEN for the opening char,
-                // matching CPython's tokenize behavior (or keep error for ast).
+                if self.exact {
+                    self.deferred_error = Some(unterminated_string(lnum, lnum, str_start));
+                    return pos;
+                }
+                // Unterminated single-line string: emit ERRORTOKEN for the opening char
+                // (the `ast` path turns it into a syntax error).
                 out.push(LexToken {
                     tok_type: TOK_ERRORTOKEN,
                     exact_type: TOK_ERRORTOKEN,
@@ -969,6 +1149,9 @@ impl StatefulLexer {
                 lines_accum: line.to_string(),
             });
             chars.len()
+        } else if self.exact {
+            self.deferred_error = Some(unterminated_string(lnum, lnum, str_start));
+            chars.len()
         } else {
             out.push(LexToken {
                 tok_type: TOK_ERRORTOKEN,
@@ -1013,6 +1196,14 @@ impl StatefulLexer {
                 break;
             }
             if !accum.is_triple && (c == '\n' || c == '\r') {
+                if self.exact {
+                    self.deferred_error = Some(unterminated_string(
+                        accum.start_line,
+                        lnum,
+                        accum.start_col as usize,
+                    ));
+                    return Some(pos);
+                }
                 // Unterminated continued single-line string.
                 accum.content.extend(&chars[..pos]);
                 accum.lines_accum.push_str(line);
@@ -1664,6 +1855,146 @@ fn tokenize_source_impl(src: &str, check_tabs: bool) -> Result<Vec<LexToken>, Le
 
     all.extend(lexer.finish()?);
     Ok(all)
+}
+
+/// The exact-mode error for a single-quoted string that is not closed on its
+/// last line: reported at the string's start (1-based offset), naming the line
+/// the tokenizer was on when it noticed.
+fn unterminated_string(start_line: u32, detected_line: u32, start_col: usize) -> LexError {
+    LexError::TokenError {
+        msg: format!("unterminated string literal (detected at line {detected_line})"),
+        line: start_line,
+        col: start_col as u32 + 1,
+    }
+}
+
+/// The `SyntaxError` CPython 3.12.3's C tokenizer raises for a malformed
+/// numeric literal starting at `chars[start]`, as `(message, offset)`, or
+/// `None` when the literal is accepted (the `tokenize` module hands out
+/// `1a`, `09` and the like as separate tokens).  `offset` is the index of the
+/// first character the tokenizer had not consumed yet (`tok->cur`), except
+/// for the "invalid digit" errors, which point just past the offending digit.
+fn number_error(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let at = |i: usize| chars.get(i).copied();
+    let digit = |i: usize| at(i).is_some_and(|c| c.is_ascii_digit());
+    let decimal = |at_index: usize| ("invalid decimal literal".to_string(), at_index);
+
+    // `tok_decimal_tail`: digits with single underscores between them.
+    let decimal_tail = |mut cur: usize| -> std::result::Result<usize, (String, usize)> {
+        loop {
+            while digit(cur) {
+                cur += 1;
+            }
+            if at(cur) != Some('_') {
+                return Ok(cur);
+            }
+            cur += 1;
+            if !digit(cur) {
+                return Err(decimal(cur));
+            }
+        }
+    };
+
+    // Everything after the integer part: `.fraction`, `e` exponent.
+    let after_integer =
+        |mut cur: usize, mut in_fraction: bool| -> std::result::Result<(), (String, usize)> {
+            if !in_fraction && at(cur) == Some('.') {
+                cur += 1;
+                in_fraction = true;
+            }
+            if in_fraction && digit(cur) {
+                cur = decimal_tail(cur)?;
+            }
+            if matches!(at(cur), Some('e' | 'E')) {
+                cur += 1;
+                if matches!(at(cur), Some('+' | '-')) {
+                    cur += 1;
+                    if !digit(cur) {
+                        return Err(decimal(cur));
+                    }
+                } else if !digit(cur) {
+                    // Not an exponent: the number ends before the `e`.
+                    return Ok(());
+                }
+                decimal_tail(cur)?;
+            }
+            Ok(())
+        };
+
+    // `0x` / `0o` / `0b` digit runs; `digit_ok` accepts the radix's digits.
+    let radix_run = |mut cur: usize,
+                     digit_ok: &dyn Fn(char) -> bool,
+                     kind: &str|
+     -> std::result::Result<(), (String, usize)> {
+        loop {
+            if at(cur) == Some('_') {
+                cur += 1;
+            }
+            match at(cur) {
+                Some(c) if digit_ok(c) => {}
+                Some(c) if kind != "hexadecimal" && c.is_ascii_digit() => {
+                    return Err((format!("invalid digit '{c}' in {kind} literal"), cur + 1));
+                }
+                _ => return Err((format!("invalid {kind} literal"), cur)),
+            }
+            while at(cur).is_some_and(digit_ok) {
+                cur += 1;
+            }
+            if at(cur) != Some('_') {
+                break;
+            }
+        }
+        if kind != "hexadecimal"
+            && let Some(c) = at(cur)
+            && c.is_ascii_digit()
+        {
+            return Err((format!("invalid digit '{c}' in {kind} literal"), cur + 1));
+        }
+        Ok(())
+    };
+
+    let result = if chars[start] == '.' {
+        // `.5`: a fraction.
+        after_integer(start + 1, true)
+    } else if chars[start] == '0' {
+        match at(start + 1) {
+            Some('x' | 'X') => radix_run(start + 2, &|c| c.is_ascii_hexdigit(), "hexadecimal"),
+            Some('o' | 'O') => radix_run(start + 2, &|c| ('0'..='7').contains(&c), "octal"),
+            Some('b' | 'B') => radix_run(start + 2, &|c| matches!(c, '0' | '1'), "binary"),
+            _ => {
+                // Zeros (with underscores), then maybe more decimal digits.
+                let mut cur = start + 1;
+                let mut failed = None;
+                loop {
+                    if at(cur) == Some('_') {
+                        cur += 1;
+                        if !digit(cur) {
+                            failed = Some(decimal(cur));
+                            break;
+                        }
+                    }
+                    if at(cur) != Some('0') {
+                        break;
+                    }
+                    cur += 1;
+                }
+                match failed {
+                    Some(err) => Err(err),
+                    None => {
+                        let tail = if digit(cur) {
+                            decimal_tail(cur)
+                        } else {
+                            Ok(cur)
+                        };
+                        tail.and_then(|cur| after_integer(cur, false))
+                    }
+                }
+            }
+        }
+    } else {
+        decimal_tail(start).and_then(|cur| after_integer(cur, false))
+    };
+    result.err()
 }
 
 fn is_ident_start(c: char) -> bool {

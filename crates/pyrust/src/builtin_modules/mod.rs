@@ -317,6 +317,7 @@ macro_rules! pyrust_builtin_modules {
                 "platform" => return platform::post_load_init(interp, module),
                 "csv" => return csv::post_load_init(interp, module),
                 "fractions" => return fractions::post_load_init(interp, module),
+                "tokenize" => return tokenize::post_load_init(interp, module),
                 "contextvars" => return contextvars::post_load_init(interp, module),
                 #[cfg(unix)]
                 "posix" => return posix::post_load_init(interp, module),
@@ -825,11 +826,12 @@ pyrust_builtin_modules! {
     // binary/text transform codecs.
     codecs @inject,
     // `token` (issues #3204, #3348): 100% native Rust token constants in
-    // `token.rs`.  `tokenize` and `ast` (issue #3204): stateful native PEP 701
-    // tokenizer (`tokenize/lexer.rs`) and full Python 3.12 AST parser, class
-    // hierarchy, visitors, literal_eval, and unparser.
+    // `token.rs`.  `tokenize` (issues #3204, #3479) is 100% native Rust in
+    // `tokenize.rs` on top of the stateful PEP 701 lexer
+    // (`tokenize/lexer.rs`); `ast` (issue #3204) is the full Python 3.12 AST
+    // parser, class hierarchy, visitors, literal_eval, and unparser.
     token,
-    tokenize @inject,
+    tokenize,
     ast @inject,
     // `ipaddress`, `socket`, and `selectors` (issues #3205, #3453): Python 3.12
     // networking foundation modules — IPv4/IPv6 address/network/interface

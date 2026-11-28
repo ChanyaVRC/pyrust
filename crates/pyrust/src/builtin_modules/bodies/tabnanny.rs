@@ -16,7 +16,7 @@ use super::tokenize::lexer::{
 };
 use crate::error::{PyError, Result};
 use crate::interpreter::builtin_args::{PyIndex, PyPath, PyStr, PyValue, PyValueRef};
-use crate::interpreter::{ExpandedCallArg, Interpreter};
+use crate::interpreter::{ExpandedCallArg, Interpreter, is_stop_iteration_error, make_iterator};
 use crate::value::{Value, ValueKind};
 
 // ── Exact CPython `Whitespace` indentation model ─────────────────────────────
@@ -539,7 +539,23 @@ pyrust_module! {
     }
 
     fn process_tokens(tokens: PyValue) -> Result<Value> {
-        let items = _interp.collect_iterable(&tokens.0)?;
+        // Tokens are consumed in order; a `TabError` raised by the tokenizer
+        // ends the stream, but only after the tokens before it were checked
+        // (`process_tokens` turns it into a `NannyNag`).
+        let iterator = make_iterator(_interp, &tokens.0)?;
+        let mut items = Vec::new();
+        let mut tab_error = None;
+        loop {
+            match _interp.call_next(&iterator, None) {
+                Ok(item) => items.push(item),
+                Err(err) if is_stop_iteration_error(&err) => break,
+                Err(err) if err.class_name_is("TabError") => {
+                    tab_error = Some(err);
+                    break;
+                }
+                Err(err) => return Err(err),
+            }
+        }
         let mut records = Vec::with_capacity(items.len());
         for item in items {
             let fields = _interp.collect_iterable(&item)?;
@@ -571,6 +587,22 @@ pyrust_module! {
             });
         }
         run_token_check(_interp, &records)?;
+        if let Some(err) = tab_error {
+            // raise NannyNag(e.lineno, e.msg, e.text)
+            let exc = match err.kind() {
+                pyrust_core::PyErrorKind::Raised(exc) => exc.clone(),
+                _ => return Err(err),
+            };
+            let lineno = _interp.get_attr(&exc, "lineno")?.as_int().unwrap_or(0);
+            let msg = _interp.get_attr(&exc, "msg")?;
+            let text = _interp.get_attr(&exc, "text")?;
+            return Err(raise_nanny_nag(
+                _interp,
+                lineno,
+                msg.as_str().unwrap_or_default().to_string(),
+                text.as_str().unwrap_or_default().to_string(),
+            ));
+        }
         Ok(Value::none())
     }
 
