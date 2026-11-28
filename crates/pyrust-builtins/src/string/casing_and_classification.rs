@@ -418,6 +418,13 @@ pub fn is_python_alnum(c: char) -> bool {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Python's `str.isdecimal()` (and the `\d` of a `str` regex): Unicode Nd
+/// (DecimalNumber) category as of Unicode 15.0.
+pub fn is_python_decimal(c: char) -> bool {
+    !unicode_data::is_assigned_after_15_0(c)
+        && c.general_category() == GeneralCategory::DecimalNumber
+}
+
 /// Python's str.isdigit(): Unicode Nd (DecimalNumber) category plus all codepoints with
 /// Numeric_Type=Digit (category No). Authoritative list from CPython 3.12 / Unicode 15.
 fn is_python_digit(c: char) -> bool {
