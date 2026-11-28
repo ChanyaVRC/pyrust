@@ -313,6 +313,7 @@ macro_rules! pyrust_builtin_modules {
                 "html" => return html::post_load_init(interp, module),
                 "quopri" => return quopri::post_load_init(interp, module),
                 "base64" => return base64::post_load_init(interp, module),
+                "textwrap" => return textwrap::post_load_init(interp, module),
                 "copyreg" => return copyreg::post_load_init(interp, module),
                 "types" => return types::post_load_init(interp, module),
                 "graphlib" => return graphlib::post_load_init(interp, module),
@@ -517,6 +518,7 @@ pub(crate) fn native_callable_doc(registry_key: &str) -> Option<Option<&'static 
     cmd::native_doc(registry_key)
         .or_else(|| shutil::native_doc(registry_key))
         .or_else(|| base64::native_doc(registry_key))
+        .or_else(|| textwrap::native_doc(registry_key))
 }
 
 /// Constant function attributes of native callables, looked up by registry
@@ -617,10 +619,10 @@ pyrust_builtin_modules! {
     // calendar conversions; `struct_time` is a native `pyrust_struct_seq!`
     // type (issue #3307) — no `@inject` Python body.
     time,
-    // `textwrap` (issue #2786): a pure-Python module (`textwrap_py.py`) —
-    // `TextWrapper`, `wrap`, `fill`, `shorten`, `dedent`, `indent` — injected
-    // by the `@inject` post-load hook; the native body is empty.
-    textwrap @inject,
+    // `textwrap` (issues #2786, #3488): 100% native Rust in `textwrap.rs`
+    // (+ `textwrap/`) — `TextWrapper`, `wrap`, `fill`, `shorten`, `dedent`,
+    // `indent`; no Python-source injection.
+    textwrap,
     // `bisect` (issues #2784, #3310): 100% native array-bisection algorithms
     // (`bisect_left` / `bisect_right` / `insort_left` / `insort_right` plus the
     // `bisect` / `insort` aliases) in `bisect.rs`; no Python-source injection.
