@@ -802,9 +802,7 @@ define_reexport_shims! {
 
     _collections_abc {
         init(interp, module) {
-            crate::builtin_modules::collections_abc::ensure_mixins_initialized(interp)?;
-            crate::builtin_modules::collections_abc::populate_abc_exports(module);
-            Ok(())
+            crate::builtin_modules::collections_abc::populate_private_module(interp, module)
         }
     },
 

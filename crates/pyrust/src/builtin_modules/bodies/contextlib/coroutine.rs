@@ -21,7 +21,7 @@ use crate::value::{InstanceAttrs, PyInstance, Value};
 use super::registry::coroutine_class;
 
 /// What a native coroutine does next.
-pub(super) enum Flow {
+pub(crate) enum Flow {
     /// `return value`.
     Return(Value),
     /// `await awaitable`, then continue with the continuation.
@@ -29,7 +29,7 @@ pub(super) enum Flow {
 }
 
 /// Continuation run with the result of an `await` (or the error it raised).
-pub(super) type Cont = Box<dyn FnOnce(&mut Interpreter, Result<Value>) -> Result<Flow>>;
+pub(crate) type Cont = Box<dyn FnOnce(&mut Interpreter, Result<Value>) -> Result<Flow>>;
 
 type Start = Box<dyn FnOnce(&mut Interpreter) -> Result<Flow>>;
 
@@ -105,7 +105,7 @@ impl ExternalCoroBody for ChainBody {
 }
 
 /// Create a native coroutine object whose body is `start`.
-pub(super) fn coroutine(
+pub(crate) fn coroutine(
     start: impl FnOnce(&mut Interpreter) -> Result<Flow> + 'static,
 ) -> Result<Value> {
     let instance = Value::py_instance(Rc::new(RefCell::new(PyInstance {

@@ -1,200 +1,143 @@
-//! Structural subtyping hooks (`__instancecheck__`, `__subclasshook__`,
-//! `__subclasscheck__`) and primitive protocol lookup for `collections.abc`.
+//! CPython's `_check_methods` and the structural `__subclasshook__`s of the
+//! one-trick-pony ABCs (`Hashable`, `Iterable`, `Sized`, …).
+//!
+//! `_check_methods(C, *methods)` walks `C.__mro__` and inspects each class
+//! `__dict__`. The runtime's built-in types do not all expose their slots in a
+//! class dictionary yet (and several are still `BuiltinFunction` name tokens
+//! rather than class objects), so the lookups below combine the class
+//! dictionaries with the method tables of those built-in types.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
-use pyrust_core::GeneratorKind;
-
-use crate::error::{PyError, Result};
+use crate::error::Result;
 use crate::interpreter::{
-    DictViewClass, ExpandedCallArg, class_hash_inherits_builtin_none, class_is_subclass_of,
-    is_async_gen_asend_value, lookup_class_attr,
+    Interpreter, class_hash_inherits_builtin_none, function_type_singleton, lookup_class_attr,
+    method_type_singleton, type_class_singleton,
 };
-use crate::value::{PyClass, Value, ValueKind};
+use crate::value::{Value, ValueKind};
 
-use super::definitions::{
-    canonical_structural_abc_name, dict_view_instance_is_virtual_abc, dict_view_is_virtual_abc,
-    is_virtual_subclass, required_methods,
-};
+use super::definitions::{ClassRc, abc_of};
 
-fn primitive_value_has_dunder(value: &Value, dunder: &str) -> bool {
-    match value.kind() {
-        ValueKind::Str(_)
-        | ValueKind::Tuple(_)
-        | ValueKind::Range { .. }
-        | ValueKind::BigRange { .. } => matches!(
-            dunder,
-            "__iter__" | "__len__" | "__contains__" | "__hash__" | "__reversed__"
-        ),
-
-        ValueKind::Bytes(_) => matches!(
-            dunder,
-            "__iter__" | "__len__" | "__contains__" | "__hash__" | "__reversed__" | "__buffer__"
-        ),
-
-        ValueKind::List(_) | ValueKind::Dict(_) => matches!(
-            dunder,
-            "__iter__" | "__len__" | "__contains__" | "__reversed__"
-        ),
-
-        ValueKind::Set(_) => matches!(dunder, "__iter__" | "__len__" | "__contains__"),
-
-        ValueKind::Int(_)
-        | ValueKind::BigInt(_)
-        | ValueKind::Bool(_)
-        | ValueKind::Float(_)
-        | ValueKind::Complex(_, _)
-        | ValueKind::None
-        | ValueKind::NotImplemented
-        | ValueKind::Ellipsis => dunder == "__hash__",
-
-        ValueKind::Generator(cell) => match cell.kind() {
-            GeneratorKind::Generator => {
-                matches!(dunder, "__iter__" | "__next__" | "send" | "throw" | "close")
-            }
-            GeneratorKind::Coroutine => {
-                matches!(dunder, "__await__" | "send" | "throw" | "close")
-            }
-            GeneratorKind::AsyncGenerator => matches!(
-                dunder,
-                "__aiter__" | "__anext__" | "asend" | "athrow" | "aclose"
-            ),
-            GeneratorKind::Iterator => {
-                if cell.try_borrow().is_ok_and(|state| {
-                    state
-                        .downcast_ref::<crate::interpreter::AnextAwaitable>()
-                        .is_some()
-                }) {
-                    matches!(
-                        dunder,
-                        "__await__" | "__iter__" | "__next__" | "send" | "throw" | "close"
-                    )
-                } else if is_async_gen_asend_value(value) {
-                    matches!(dunder, "__await__" | "send" | "throw" | "close")
-                } else {
-                    matches!(dunder, "__iter__" | "__next__")
-                }
-            }
-        },
-
-        ValueKind::BuiltinObject { ops, .. } => {
-            if let Some(kind) = pyrust_builtins::dict_views::view_kind(value) {
-                match kind {
-                    pyrust_builtins::dict_views::DictViewKind::Values => {
-                        matches!(dunder, "__iter__" | "__len__" | "__reversed__" | "__hash__")
-                    }
-                    pyrust_builtins::dict_views::DictViewKind::Keys
-                    | pyrust_builtins::dict_views::DictViewKind::Items => matches!(
-                        dunder,
-                        "__iter__" | "__len__" | "__reversed__" | "__contains__"
-                    ),
-                }
-            } else if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) {
-                matches!(
-                    dunder,
-                    "__iter__" | "__len__" | "__contains__" | "__reversed__" | "__buffer__"
-                )
-            } else if ops.canonical_class_tag()
-                == Some(pyrust_core::CanonicalClassTag::MappingProxy)
-            {
-                matches!(
-                    dunder,
-                    "__iter__" | "__len__" | "__contains__" | "__reversed__"
-                )
-            } else if pyrust_builtins::memoryview::is_memoryview_ops(ops) {
-                matches!(
-                    dunder,
-                    "__iter__"
-                        | "__len__"
-                        | "__contains__"
-                        | "__hash__"
-                        | "__reversed__"
-                        | "__buffer__"
-                )
-            } else if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) {
-                matches!(dunder, "__iter__" | "__len__" | "__contains__" | "__hash__")
-            } else if pyrust_builtins::bound_method::is_bound_method(value) {
-                matches!(dunder, "__call__" | "__hash__")
-            } else {
-                false
-            }
-        }
-
-        ValueKind::BuiltinFunction(_)
-        | ValueKind::UserFunction(_)
-        | ValueKind::BoundMethod { .. }
-        | ValueKind::ClassBoundMethod { .. }
-        | ValueKind::PyClass(_) => matches!(dunder, "__call__" | "__hash__"),
-
-        _ => false,
-    }
+/// How one method name resolves along a class's MRO.
+enum Lookup {
+    Found,
+    /// Explicitly set to `None` (`__hash__ = None`, `__reversed__ = None`).
+    Blocked,
+    Missing,
 }
 
-fn class_mro_has_method(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<bool> {
-    if name == "__hash__" && class_hash_inherits_builtin_none(class) {
-        return Some(false);
-    }
-    match lookup_class_attr(class, name) {
-        Some(v) if v.is_none() => Some(false),
-        Some(_) => Some(true),
-        None => None,
-    }
+/// `cls.__subclasshook__(C)` for the ABCs that define one.
+pub(super) fn subclasshook(
+    interp: &mut Interpreter,
+    cls: &Value,
+    subclass: &Value,
+) -> Result<Value> {
+    let ValueKind::PyClass(class) = cls.kind() else {
+        return Ok(Value::not_implemented());
+    };
+    let Some(methods) = abc_of(class).and_then(|abc| abc.hook_methods()) else {
+        return Ok(Value::not_implemented());
+    };
+    check_methods(interp, subclass, methods)
 }
 
-/// `__subclasshook__`-style structural subtyping check for an *instance*.
-fn abc_subclasshook(abc_name: &str, value: &Value) -> Option<bool> {
-    let required = required_methods(abc_name)?;
-    match value.kind() {
-        ValueKind::PyInstance(inst) => {
-            let class = Rc::clone(&inst.borrow().class);
-            abc_subclasshook_for_class(abc_name, &class)
+/// `_check_methods(C, *methods)`: `True` when every method resolves to a
+/// non-`None` value, otherwise `NotImplemented`.
+pub(super) fn check_methods(
+    interp: &mut Interpreter,
+    subclass: &Value,
+    methods: &[&str],
+) -> Result<Value> {
+    let resolved = match subclass.kind() {
+        ValueKind::PyClass(class) => methods
+            .iter()
+            .all(|method| matches!(class_lookup(class, method), Lookup::Found)),
+        ValueKind::BuiltinFunction(token) => {
+            methods.iter().all(|method| token_has_method(token, method))
         }
         _ => {
-            for &method in required {
-                if !primitive_value_has_dunder(value, method) {
-                    return Some(false);
+            // `C.__mro__` on a non-class raises `AttributeError`; an object
+            // that does provide an MRO is inspected entry by entry.
+            let mro = interp.get_attr(subclass, "__mro__")?;
+            let mro = interp.collect_iterable(&mro)?;
+            methods.iter().all(|method| {
+                for base in &mro {
+                    if let ValueKind::PyClass(base) = base.kind() {
+                        match base.borrow().attrs.get(*method) {
+                            Some(value) => return !value.is_none(),
+                            None => continue,
+                        }
+                    }
                 }
-            }
-            Some(true)
+                false
+            })
         }
+    };
+    Ok(if resolved {
+        Value::bool_(true)
+    } else {
+        Value::not_implemented()
+    })
+}
+
+fn class_lookup(class: &ClassRc, method: &str) -> Lookup {
+    if method == "__hash__" && class_hash_inherits_builtin_none(class) {
+        return Lookup::Blocked;
+    }
+    match lookup_class_attr(class, method) {
+        Some(value) if value.is_none() => Lookup::Blocked,
+        Some(_) => Lookup::Found,
+        None if builtin_class_has_method(class, method) => Lookup::Found,
+        None => Lookup::Missing,
     }
 }
 
-fn abc_subclasshook_for_class(abc_name: &str, class: &Rc<RefCell<PyClass>>) -> Option<bool> {
-    let required = required_methods(abc_name)?;
-    for &method in required {
-        match class_mro_has_method(class, method) {
-            Some(true) => {}
-            Some(false) => return Some(false),
-            None => return None,
-        }
+/// Slots of built-in class objects that their class dictionary does not
+/// (yet) expose.
+fn builtin_class_has_method(class: &ClassRc, method: &str) -> bool {
+    let is = |candidate: ClassRc| Rc::ptr_eq(class, &candidate);
+    if is(function_type_singleton()) || is(method_type_singleton()) {
+        return matches!(method, "__call__" | "__get__" | "__hash__");
     }
-    Some(true)
+    if is(type_class_singleton()) {
+        return matches!(method, "__call__" | "__hash__");
+    }
+    false
 }
 
-fn abc_subclasshook_for_builtin_token(abc_name: &str, type_name: &str) -> Option<bool> {
-    let required = required_methods(abc_name)?;
-    let has_dunder = |dunder: &str| match type_name {
-        "generator" => Some(matches!(
-            dunder,
-            "__iter__" | "__next__" | "send" | "throw" | "close"
-        )),
-        "coroutine" | "async_generator_asend" | "async_generator_athrow" => {
-            Some(matches!(dunder, "__await__" | "send" | "throw" | "close"))
+/// Whether the built-in type a `BuiltinFunction` name token stands for
+/// defines `method`.
+///
+/// Every such type keeps `object.__hash__`; the remaining slots are those of
+/// CPython's generator, coroutine, iterator, and callable types.
+fn token_has_method(token: &str, method: &str) -> bool {
+    if method == "__hash__" {
+        return true;
+    }
+    match token {
+        "generator" | "coroutine_wrapper" => {
+            matches!(method, "__iter__" | "__next__" | "send" | "throw" | "close")
         }
-        "anext_awaitable" => Some(matches!(
-            dunder,
-            "__await__" | "__iter__" | "__next__" | "send" | "throw" | "close"
-        )),
-        "async_generator" => Some(matches!(
-            dunder,
+        "coroutine" => matches!(method, "__await__" | "send" | "throw" | "close"),
+        "async_generator" => matches!(
+            method,
             "__aiter__" | "__anext__" | "asend" | "athrow" | "aclose"
-        )),
+        ),
+        "async_generator_asend" | "async_generator_athrow" | "anext_awaitable" => matches!(
+            method,
+            "__await__" | "__iter__" | "__next__" | "send" | "throw" | "close"
+        ),
+        "builtin_function_or_method"
+        | "method_descriptor"
+        | "wrapper_descriptor"
+        | "method-wrapper"
+        | "classmethod_descriptor"
+        | "staticmethod" => method == "__call__",
         "map"
         | "filter"
         | "zip"
         | "enumerate"
+        | "reversed"
         | "iterator"
         | "callable_iterator"
         | "list_iterator"
@@ -203,6 +146,7 @@ fn abc_subclasshook_for_builtin_token(abc_name: &str, type_name: &str) -> Option
         | "str_iterator"
         | "str_ascii_iterator"
         | "bytes_iterator"
+        | "bytearray_iterator"
         | "range_iterator"
         | "longrange_iterator"
         | "set_iterator"
@@ -211,123 +155,9 @@ fn abc_subclasshook_for_builtin_token(abc_name: &str, type_name: &str) -> Option
         | "dict_itemiterator"
         | "dict_reversekeyiterator"
         | "dict_reversevalueiterator"
-        | "dict_reverseitemiterator" => Some(matches!(dunder, "__iter__" | "__next__")),
-        _ => None,
-    };
-    for &method in required {
-        if !has_dunder(method)? {
-            return None;
-        }
-    }
-    Some(true)
-}
-
-fn parse_abc_check_args<'a>(
-    args: &'a [ExpandedCallArg],
-    fn_name: &str,
-) -> Result<(Rc<RefCell<PyClass>>, &'a Value)> {
-    if args.len() != 2 {
-        return Err(PyError::named(
-            "TypeError",
-            format!(
-                "{fn_name}() takes exactly 2 arguments ({} given)",
-                args.len()
-            ),
-        ));
-    }
-    let abc_class = match args[0].value.kind() {
-        ValueKind::PyClass(rc) => Rc::clone(rc),
-        _ => {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{fn_name}() first argument must be a class"),
-            ));
-        }
-    };
-    Ok((abc_class, &args[1].value))
-}
-
-pub(super) fn instancecheck(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    let (abc_class, instance) = parse_abc_check_args(args, fn_name)?;
-
-    if dict_view_instance_is_virtual_abc(instance, &abc_class) {
-        return Ok(Value::bool_(true));
-    }
-
-    if let Some(abc_name) = canonical_structural_abc_name(&abc_class)
-        && let Some(result) = abc_subclasshook(abc_name, instance)
-    {
-        return Ok(Value::bool_(result));
-    }
-
-    let actual_class = match instance.kind() {
-        ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
-        ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
-            Some(crate::interpreter::method_type_singleton())
-        }
-        ValueKind::UserFunction(_) => Some(crate::interpreter::function_type_singleton()),
-        ValueKind::PyClass(cls_rc) => {
-            let meta = cls_rc.borrow().metatype.clone();
-            Some(meta.unwrap_or_else(crate::interpreter::type_class_singleton))
-        }
-        _ => crate::interpreter::value_class_object(instance),
-    };
-
-    if let Some(actual) = actual_class {
-        return Ok(Value::bool_(
-            class_is_subclass_of(&actual, &abc_class) || is_virtual_subclass(&actual, &abc_class),
-        ));
-    }
-
-    Ok(Value::bool_(false))
-}
-
-pub(super) fn subclasshook_method(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    let (abc_class, c_val) = parse_abc_check_args(args, fn_name)?;
-    let Some(abc_name) = canonical_structural_abc_name(&abc_class) else {
-        return Ok(Value::not_implemented());
-    };
-    match c_val.kind() {
-        ValueKind::PyClass(c_rc) => match abc_subclasshook_for_class(abc_name, c_rc) {
-            Some(result) => Ok(Value::bool_(result)),
-            None => Ok(Value::not_implemented()),
-        },
-        ValueKind::BuiltinFunction(type_name) => {
-            match abc_subclasshook_for_builtin_token(abc_name, type_name) {
-                Some(result) => Ok(Value::bool_(result)),
-                None => Ok(Value::not_implemented()),
-            }
-        }
-        _ => Ok(Value::not_implemented()),
-    }
-}
-
-pub(super) fn subclasscheck(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    let (abc_class, subclass_val) = parse_abc_check_args(args, fn_name)?;
-    match subclass_val.kind() {
-        ValueKind::PyClass(c_rc) => {
-            if DictViewClass::from_class(c_rc)
-                .is_some_and(|kind| dict_view_is_virtual_abc(kind, &abc_class))
-            {
-                return Ok(Value::bool_(true));
-            }
-            if let Some(abc_name) = canonical_structural_abc_name(&abc_class)
-                && let Some(result) = abc_subclasshook_for_class(abc_name, c_rc)
-            {
-                return Ok(Value::bool_(result));
-            }
-            Ok(Value::bool_(
-                class_is_subclass_of(c_rc, &abc_class) || is_virtual_subclass(c_rc, &abc_class),
-            ))
-        }
-        ValueKind::BuiltinFunction(type_name) => {
-            if let Some(abc_name) = canonical_structural_abc_name(&abc_class)
-                && let Some(result) = abc_subclasshook_for_builtin_token(abc_name, type_name)
-            {
-                return Ok(Value::bool_(result));
-            }
-            Ok(Value::bool_(false))
-        }
-        _ => Ok(Value::bool_(false)),
+        | "dict_reverseitemiterator"
+        | "odict_iterator"
+        | "memory_iterator" => matches!(method, "__iter__" | "__next__"),
+        _ => false,
     }
 }

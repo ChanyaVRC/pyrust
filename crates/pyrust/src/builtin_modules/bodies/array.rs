@@ -2316,8 +2316,7 @@ pub(crate) fn post_load_init(
     // CPython's `array_modexec` imports `collections.abc` and calls
     // `MutableSequence.register(array)`.
     interp.load_module("collections.abc")?;
-    super::collections_abc::register_virtual_mutable_sequence(array_rc);
-    Ok(())
+    super::collections_abc::register_virtual_mutable_sequence(interp, array_rc)
 }
 
 pyrust_module! {

@@ -116,12 +116,80 @@ impl WeakClassSet {
 }
 
 /// Per-ABC state: CPython's `_abc_data`.
+///
+/// Types the runtime still models as `BuiltinFunction` name tokens
+/// (`generator`, `list_iterator`, `builtin_function_or_method`, …) cannot be
+/// held weakly; they are immortal, so their verdicts are cached by name.
 #[derive(Default)]
 struct AbcData {
     registry: WeakClassSet,
+    /// Registered types that are still name tokens, in registration order.
+    token_registry: indexmap::IndexSet<&'static str, rustc_hash::FxBuildHasher>,
     cache: WeakClassSet,
     negative_cache: WeakClassSet,
+    token_cache: rustc_hash::FxHashSet<&'static str>,
+    token_negative_cache: rustc_hash::FxHashSet<&'static str>,
     negative_cache_version: u64,
+}
+
+/// What `ABCMeta`'s caches can remember a subclass by.
+enum CacheKey {
+    Class(ClassRc),
+    Token(&'static str),
+    Uncacheable,
+}
+
+impl CacheKey {
+    fn of(value: &Value) -> Self {
+        match value.kind() {
+            ValueKind::PyClass(class) => Self::Class(Rc::clone(class)),
+            ValueKind::BuiltinFunction(name) => Self::Token(name),
+            _ => Self::Uncacheable,
+        }
+    }
+}
+
+impl AbcData {
+    fn cached_positive(&self, key: &CacheKey) -> bool {
+        match key {
+            CacheKey::Class(class) => self.cache.contains(class),
+            CacheKey::Token(name) => self.token_cache.contains(name),
+            CacheKey::Uncacheable => false,
+        }
+    }
+
+    fn cached_negative(&self, key: &CacheKey) -> bool {
+        match key {
+            CacheKey::Class(class) => self.negative_cache.contains(class),
+            CacheKey::Token(name) => self.token_negative_cache.contains(name),
+            CacheKey::Uncacheable => false,
+        }
+    }
+
+    fn remember(&mut self, key: &CacheKey, positive: bool) {
+        match (key, positive) {
+            (CacheKey::Class(class), true) => self.cache.insert(class),
+            (CacheKey::Class(class), false) => self.negative_cache.insert(class),
+            (CacheKey::Token(name), true) => {
+                self.token_cache.insert(name);
+            }
+            (CacheKey::Token(name), false) => {
+                self.token_negative_cache.insert(name);
+            }
+            (CacheKey::Uncacheable, _) => {}
+        }
+    }
+
+    fn clear_negative(&mut self) {
+        self.negative_cache.clear();
+        self.token_negative_cache.clear();
+    }
+
+    fn clear_caches(&mut self) {
+        self.cache.clear();
+        self.token_cache.clear();
+        self.clear_negative();
+    }
 }
 
 // Thread-local justification:
@@ -258,8 +326,16 @@ fn is_abstract(interp: &mut Interpreter, value: &Value) -> Result<bool> {
 }
 
 /// `isinstance(value, type)`.
+///
+/// A `BuiltinFunction` name token is what `type(x)` yields for the types the
+/// runtime has not migrated to class objects (`type(gen())`, `type(len)`,
+/// `type(iter([]))`, …), so it counts as a class here, matching the generic
+/// `issubclass` builtin.
 fn is_class(interp: &mut Interpreter, value: &Value) -> Result<bool> {
-    if matches!(value.kind(), ValueKind::PyClass(_)) {
+    if matches!(
+        value.kind(),
+        ValueKind::PyClass(_) | ValueKind::BuiltinFunction(_)
+    ) {
         return Ok(true);
     }
     let result = interp.call_function_expanded(
@@ -461,8 +537,16 @@ fn abc_register(interp: &mut Interpreter, cls: &Value, subclass: &Value) -> Resu
             "Refusing to create an inheritance cycle",
         ));
     }
-    if let ValueKind::PyClass(registered) = subclass.kind() {
-        with_abc_data(&class, |data| data.registry.insert(registered))?;
+    match subclass.kind() {
+        ValueKind::PyClass(registered) => {
+            with_abc_data(&class, |data| data.registry.insert(registered))?;
+        }
+        ValueKind::BuiltinFunction(name) => {
+            with_abc_data(&class, |data| {
+                data.token_registry.insert(name);
+            })?;
+        }
+        _ => {}
     }
     // Invalidate negative cache.
     ABC_INVALIDATION_COUNTER.with(|counter| counter.set(counter.get() + 1));
@@ -485,14 +569,15 @@ fn abc_instancecheck(interp: &mut Interpreter, cls: &Value, instance: &Value) ->
     let same_type = values_are_identical(&subclass, &subtype);
 
     // Inline the cache checking.
-    if let ValueKind::PyClass(subclass_rc) = subclass.kind() {
+    let key = CacheKey::of(&subclass);
+    if !matches!(key, CacheKey::Uncacheable) {
         let verdict = with_abc_data(&class, |data| {
-            if data.cache.contains(subclass_rc) {
+            if data.cached_positive(&key) {
                 return Some(true);
             }
             if same_type
                 && data.negative_cache_version == invalidation_counter()
-                && data.negative_cache.contains(subclass_rc)
+                && data.cached_negative(&key)
             {
                 return Some(false);
             }
@@ -537,21 +622,12 @@ fn abc_subclasscheck(interp: &mut Interpreter, cls: &Value, subclass: &Value) ->
             "issubclass() arg 1 must be a class",
         ));
     }
-    // Only real class objects can be held weakly; any other class-like value
-    // is checked every time without touching the caches.
-    let cacheable = match subclass.kind() {
-        ValueKind::PyClass(subclass) => Some(Rc::clone(subclass)),
-        _ => None,
-    };
-    let remember = |cacheable: &Option<ClassRc>, positive: bool| -> Result<()> {
-        if let Some(subclass) = cacheable {
-            with_abc_data(&class, |data| {
-                if positive {
-                    data.cache.insert(subclass);
-                } else {
-                    data.negative_cache.insert(subclass);
-                }
-            })?;
+    // Real class objects are held weakly and name tokens by name; any other
+    // class-like value is checked every time without touching the caches.
+    let cacheable = CacheKey::of(subclass);
+    let remember = |cacheable: &CacheKey, positive: bool| -> Result<()> {
+        if !matches!(cacheable, CacheKey::Uncacheable) {
+            with_abc_data(&class, |data| data.remember(cacheable, positive))?;
         }
         Ok(())
     };
@@ -559,18 +635,14 @@ fn abc_subclasscheck(interp: &mut Interpreter, cls: &Value, subclass: &Value) ->
     // 1. Check cache.  2. Check negative cache; may have to invalidate.
     let counter = invalidation_counter();
     let cached = with_abc_data(&class, |data| {
-        if let Some(subclass) = &cacheable
-            && data.cache.contains(subclass)
-        {
+        if data.cached_positive(&cacheable) {
             return Some(true);
         }
         if data.negative_cache_version < counter {
             // Invalidate the negative cache.
-            data.negative_cache.clear();
+            data.clear_negative();
             data.negative_cache_version = counter;
-        } else if let Some(subclass) = &cacheable
-            && data.negative_cache.contains(subclass)
-        {
+        } else if data.cached_negative(&cacheable) {
             return Some(false);
         }
         None
@@ -605,15 +677,23 @@ fn abc_subclasscheck(interp: &mut Interpreter, cls: &Value, subclass: &Value) ->
     // 5. Check if it's a subclass of a registered class (recursive).  The
     //    registry is snapshotted first: the checks below run arbitrary code.
     let registered = with_abc_data(&class, |data| match &cacheable {
-        Some(subclass) if data.registry.contains(subclass) => None,
-        _ => Some(data.registry.live()),
+        CacheKey::Class(subclass) if data.registry.contains(subclass) => None,
+        CacheKey::Token(name) if data.token_registry.contains(name) => None,
+        _ => Some((
+            data.registry.live(),
+            data.token_registry.iter().copied().collect::<Vec<_>>(),
+        )),
     })?;
-    let Some(registered) = registered else {
+    let Some((registered, registered_tokens)) = registered else {
         // Fast path: the class itself is registered.
         return Ok(Value::bool_(true));
     };
-    for entry in registered {
-        if is_subclass(interp, subclass, &Value::py_class(entry))? {
+    let entries = registered
+        .into_iter()
+        .map(Value::py_class)
+        .chain(registered_tokens.into_iter().map(Value::builtin_function));
+    for entry in entries {
+        if is_subclass(interp, subclass, &entry)? {
             remember(&cacheable, true)?;
             return Ok(Value::bool_(true));
         }
@@ -848,17 +928,17 @@ pyrust_module! {
         /// Clear the registry (for debugging or testing).
         fn _abc_registry_clear(#[positional_only] cls: PyValueRef<'_>) -> Result<Value> {
             let class = expect_abc(cls.0, "_abc_registry_clear")?;
-            with_abc_data(&class, |data| data.registry.clear())?;
+            with_abc_data(&class, |data| {
+                data.registry.clear();
+                data.token_registry.clear();
+            })?;
             Ok(Value::none())
         }
 
         /// Clear the caches (for debugging or testing).
         fn _abc_caches_clear(#[positional_only] cls: PyValueRef<'_>) -> Result<Value> {
             let class = expect_abc(cls.0, "_abc_caches_clear")?;
-            with_abc_data(&class, |data| {
-                data.cache.clear();
-                data.negative_cache.clear();
-            })?;
+            with_abc_data(&class, AbcData::clear_caches)?;
             Ok(Value::none())
         }
     }

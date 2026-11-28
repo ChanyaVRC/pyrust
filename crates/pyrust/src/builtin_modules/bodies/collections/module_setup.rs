@@ -158,6 +158,13 @@ pub(crate) fn inject_python_members(
         }
     }
     tag_public_classes(module, chain_class.as_ref());
+    // `_collections_abc.MutableSequence.register(deque)`.
+    let deque = module.borrow().attrs.get("deque").cloned();
+    if let Some(deque) = deque
+        && let ValueKind::PyClass(deque) = deque.kind()
+    {
+        super::collections_abc::register_virtual_mutable_sequence(interp, deque)?;
+    }
     Ok(Some(ns.clone()))
 }
 
@@ -220,7 +227,6 @@ fn tag_public_classes(
                         );
                     }
                     register_canonical_collection_class(CanonicalCollectionKind::Deque, cls_rc);
-                    super::collections_abc::register_virtual_mutable_sequence(cls_rc);
                 }
                 "defaultdict" => {
                     {

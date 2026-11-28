@@ -306,6 +306,7 @@ macro_rules! pyrust_builtin_modules {
             match name {
                 "os" => return os::post_load_init(interp, module),
                 "numbers" => return numbers::post_load_init(interp, module),
+                "collections.abc" => return collections_abc::post_load_init(interp, module),
                 "selectors" => return selectors::post_load_init(interp, module),
                 "array" => return array::post_load_init(interp, module),
                 "string" => return string::post_load_init(interp, module),
@@ -541,7 +542,10 @@ pyrust_builtin_modules! {
     // `@inject` hook; `inject_python_members` also tags the public classes
     // with `__module__` / `__class_getitem__` (issues #2228 / #2603).
     collections @inject,
-    "collections.abc" as collections_abc @inject,
+    // `collections.abc` (issue #3480): 100% native Rust in
+    // `bodies/collections_abc.rs`; the canonical ABCs are wired by its
+    // `post_load_init` hook, with no Python-source injection.
+    "collections.abc" as collections_abc,
     // native `IOBase` family plus `StringIO` / `BytesIO` (issue #3342).
     io,
     // `typing` Python-source members (issue #2516) injected via `@inject`.
