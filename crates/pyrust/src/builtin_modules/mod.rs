@@ -504,6 +504,16 @@ macro_rules! pyrust_builtin_modules {
 //   2. Add one line here.
 // That's it — `env.rs`, `builtin_registry.rs`, and the body file itself
 // need no name knowledge beyond what's declared on this line.
+/// The docstring of a native-Rust callable (`cmd.Cmd.do_help`), by registry
+/// name.  The `pyrust_module!` callables carry no `__doc__` of their own;
+/// modules whose behaviour depends on docstrings (`cmd`'s `help`) register
+/// them here so the callable's `__doc__` reads back what CPython shows.
+/// `None`: no registered docs for this callable; `Some(None)`: registered, with
+/// no docstring.
+pub(crate) fn native_callable_doc(registry_key: &str) -> Option<Option<&'static str>> {
+    cmd::native_doc(registry_key)
+}
+
 pyrust_builtin_modules! {
     math,
     sys,
@@ -938,12 +948,12 @@ pyrust_builtin_modules! {
     timeit @inject,
     opcode,
     dis @inject,
-    // `codeop`, `code`, `cmd`, and `rlcompleter` (issue #3228): Python 3.12
-    // interactive interpreter, command-shell, and readline-completion stdlib
-    // modules.
+    // `codeop`, `code`, and `rlcompleter` (issue #3228): Python 3.12
+    // interactive interpreter and readline-completion stdlib modules.  `cmd`
+    // (issues #3228, #3477) is 100% native Rust in `cmd.rs`.
     codeop @inject,
     code @inject,
-    cmd @inject,
+    cmd,
     rlcompleter @inject,
     // `zoneinfo` (PEP 615), `locale`, and `gettext` (issue #3226): Python 3.12
     // IANA time zone support (TZif v1/v2/v3 parser + POSIX TZ rules), locale

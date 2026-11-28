@@ -395,6 +395,13 @@ static TIER1: [BuiltinReg; TIER1_LEN] = sorted_regs(
     crate::builtin_modules::TIER1_EXTRA_REGS,
 );
 
+/// The docstring of a native-Rust callable (`cmd.Cmd.do_help`), by registry
+/// name: `None` when no docs are registered for it, `Some(None)` when it is
+/// registered and has no docstring.
+pub(crate) fn native_callable_doc(registry_key: &str) -> Option<Option<&'static str>> {
+    crate::builtin_modules::native_callable_doc(registry_key)
+}
+
 const MODULE_COUNT: usize = count_modules(crate::builtin_modules::MODULE_REG_TABLES, &[]);
 
 /// Tier 2: one row per built-in module that registers native callables,

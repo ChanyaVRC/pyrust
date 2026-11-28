@@ -1,5 +1,19 @@
 // Attribute surfaces owned by concrete builtin callable/object adapters.
 
+/// `__doc__` of a native-Rust bound method (`Cmd().do_help`): the docstring
+/// registered for the callable the receiver's class resolves `method_name` to.
+fn native_bound_method_doc(method_name: &str, receiver: &Value) -> Option<&'static str> {
+    let ValueKind::PyInstance(instance) = receiver.kind() else {
+        return None;
+    };
+    let class = Rc::clone(&instance.borrow().class);
+    let callable = lookup_class_attr(&class, method_name)?;
+    let ValueKind::BuiltinFunction(registry_key) = callable.kind() else {
+        return None;
+    };
+    crate::builtin_registry::native_callable_doc(registry_key).flatten()
+}
+
 /// Bind class-level attributes whose behavior is specific to a concrete
 /// built-in rather than to Python's generic descriptor protocol.
 pub(crate) fn bind_builtin_class_special(
@@ -366,6 +380,11 @@ impl Interpreter {
                 .expect("BuiltinFunction must carry Rc<UserFunction>");
             return Ok(function.module_value_with_default(metadata.python_module()));
         }
+        if name == "__doc__"
+            && let Some(doc) = crate::builtin_registry::native_callable_doc(func_name)
+        {
+            return Ok(doc.map_or_else(Value::none, Value::string));
+        }
         if name == "__call__" && !is_legacy_type_token {
             // Issue #2550: builtin functions (`len`, `print`) and method
             // descriptors (`str.upper`) are callable, so CPython exposes
@@ -524,7 +543,10 @@ impl Interpreter {
                         "'method-wrapper' object has no attribute '__module__'"
                     ));
                 }
-                "__doc__" => return Ok(Value::none()),
+                "__doc__" => {
+                    return Ok(native_bound_method_doc(&method_name, &receiver)
+                        .map_or_else(Value::none, Value::string));
+                }
                 "__call__" => {
                     // Issue #2550: a builtin bound method (`[].append`) is
                     // callable; CPython's `l.append.__call__` is a
