@@ -761,7 +761,7 @@ try:
         os.chdir(base)
         try:
             show("which-relative-direct", shutil.which("./tool"))
-            show("which-no-curdir", shutil.which("tool", path=other))
+            show("which-no-curdir", rel(shutil.which("tool", path=other)))
         finally:
             os.chdir(here)
     os.mkdir(os.path.join(base, "adir"))
