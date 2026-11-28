@@ -316,6 +316,7 @@ macro_rules! pyrust_builtin_modules {
                 "textwrap" => return textwrap::post_load_init(interp, module),
                 "_random" => return _random::post_load_init(interp, module),
                 "random" => return random::post_load_init(interp, module),
+                "secrets" => return secrets::post_load_init(interp, module),
                 "copyreg" => return copyreg::post_load_init(interp, module),
                 "types" => return types::post_load_init(interp, module),
                 "graphlib" => return graphlib::post_load_init(interp, module),
@@ -693,10 +694,10 @@ pyrust_builtin_modules! {
     // (`HMAC`, `new`, `digest`, `compare_digest`) implemented 100% natively in
     // Rust on top of the `hashlib` engine.
     hmac,
-    // `secrets` (issue #3146): cryptographically strong token and random
-    // helpers built on `base64`, `hmac.compare_digest`, and `random.SystemRandom`
-    // injected from `secrets_py.py`.
-    secrets @inject,
+    // `secrets` (issues #3146, #3495): cryptographically strong token and
+    // random helpers built on `base64`, `hmac.compare_digest`, and
+    // `random.SystemRandom`, implemented 100% natively in Rust.
+    secrets,
     // `traceback` (issue #3152): pure-Python stack/exception extraction and
     // formatting (`FrameSummary`, `StackSummary`, `TracebackException`,
     // `format_exception`, `format_exc`, `extract_tb`, `extract_stack`, …)
