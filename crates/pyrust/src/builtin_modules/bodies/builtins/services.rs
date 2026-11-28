@@ -227,6 +227,15 @@ pyrust_module! {
     fn input(
         #[positional_only] #[default(OptionalArg::Omitted)] prompt: OptValueRef,
     ) -> Result<Value> {
+        // A redirected `sys.stdin` / `sys.stdout` (`io.StringIO`, a custom file
+        // object, ...) takes CPython's non-console path: the prompt goes
+        // through `sys.stdout.write`, then `sys.stdout.flush()`, and the line
+        // comes from `sys.stdin.readline()`.
+        if _interp.redirected_std_stream("stdin").is_some()
+            || _interp.redirected_std_stream("stdout").is_some()
+        {
+            return _interp.input_via_streams(prompt.as_value());
+        }
         // Print the prompt (if any) to stdout without a trailing newline, then flush.
         if let Some(prompt_val) = prompt.as_value() {
             let prompt_str = render_instance_str(_interp, prompt_val)?;
