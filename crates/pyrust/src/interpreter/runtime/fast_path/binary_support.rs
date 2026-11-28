@@ -302,6 +302,26 @@ fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
 ///
 /// NaN comparisons are handled correctly: Rust float comparisons with NaN
 /// always return `false`, matching CPython's `float('nan') < x == False`.
+/// `float ** float`, or `None` for the results CPython reports as errors
+/// (the slow path raises them): `0.0 ** negative` (`ZeroDivisionError`;
+/// Rust returns ±inf) and an overflow from finite operands (`OverflowError`,
+/// ERANGE).
+///
+/// Kept out of line: `float_float_fast` is inlined into every binop handler
+/// of the dispatch loop, and `powf` is a libm call anyway.
+#[inline(never)]
+fn float_pow_fast(a: f64, b: f64) -> Option<Value> {
+    if a == 0.0 && b < 0.0 {
+        return None;
+    }
+    let result = a.powf(b);
+    if result.is_infinite() && a.is_finite() && b.is_finite() {
+        None
+    } else {
+        Some(Value::float(result))
+    }
+}
+
 #[inline(always)]
 fn float_float_fast(a: f64, b: f64, op: BinaryOp) -> Option<Value> {
     match op {
@@ -342,21 +362,7 @@ fn float_float_fast(a: f64, b: f64, op: BinaryOp) -> Option<Value> {
                 Some(Value::float(r))
             }
         }
-        BinaryOp::Pow => {
-            // 0.0 ** negative → ZeroDivisionError in CPython; Rust returns ±inf.
-            if a == 0.0 && b < 0.0 {
-                None
-            } else {
-                let result = a.powf(b);
-                // An overflow from finite operands is CPython's
-                // `OverflowError` (ERANGE): let the slow path raise it.
-                if result.is_infinite() && a.is_finite() && b.is_finite() {
-                    None
-                } else {
-                    Some(Value::float(result))
-                }
-            }
-        }
+        BinaryOp::Pow => float_pow_fast(a, b),
         BinaryOp::Eq => Some(Value::bool_(a == b)),
         BinaryOp::Ne => Some(Value::bool_(a != b)),
         BinaryOp::Lt => Some(Value::bool_(a < b)),
