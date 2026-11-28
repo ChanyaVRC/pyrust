@@ -314,6 +314,8 @@ macro_rules! pyrust_builtin_modules {
                 "quopri" => return quopri::post_load_init(interp, module),
                 "base64" => return base64::post_load_init(interp, module),
                 "textwrap" => return textwrap::post_load_init(interp, module),
+                "_random" => return _random::post_load_init(interp, module),
+                "random" => return random::post_load_init(interp, module),
                 "copyreg" => return copyreg::post_load_init(interp, module),
                 "types" => return types::post_load_init(interp, module),
                 "graphlib" => return graphlib::post_load_init(interp, module),
@@ -613,11 +615,14 @@ pyrust_builtin_modules! {
     // class-creation helpers, `DynamicClassAttribute`, `coroutine` and
     // `SimpleNamespace`, with no Python-source injection.
     types,
-    // `random` (issue #2785): a pure-Python MT19937 generator and the full
-    // public API live in `random_py.py`, injected by the `@inject` post-load
-    // hook.  The native body is an empty `pyrust_module!` so `import random`
-    // resolves to a real `PyModule`.
-    random @inject,
+    // `random` (issues #2785, #3494): 100% native Rust in `random.rs`
+    // (+ `random/`) — `Random` over the `_random` MT19937 core, `SystemRandom`
+    // and the module-level functions bound to `_inst`; `post_load_init` links
+    // the `_random.Random` base.  No Python-source injection.
+    random,
+    // `_random` (issue #3494): the native MT19937 `Random` core
+    // (`Modules/_randommodule.c`) that `random.Random` subclasses.
+    _random,
     // `time` (issue #2787): native clock / sleep functions and the libc-backed
     // calendar conversions; `struct_time` is a native `pyrust_struct_seq!`
     // type (issue #3307) — no `@inject` Python body.

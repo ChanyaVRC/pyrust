@@ -347,7 +347,14 @@ fn float_float_fast(a: f64, b: f64, op: BinaryOp) -> Option<Value> {
             if a == 0.0 && b < 0.0 {
                 None
             } else {
-                Some(Value::float(a.powf(b)))
+                let result = a.powf(b);
+                // An overflow from finite operands is CPython's
+                // `OverflowError` (ERANGE): let the slow path raise it.
+                if result.is_infinite() && a.is_finite() && b.is_finite() {
+                    None
+                } else {
+                    Some(Value::float(result))
+                }
             }
         }
         BinaryOp::Eq => Some(Value::bool_(a == b)),

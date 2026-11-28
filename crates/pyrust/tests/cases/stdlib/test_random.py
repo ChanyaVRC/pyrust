@@ -1,10 +1,10 @@
-# random module — parity (issue #2785).
+# random module — parity (issues #2785, #3494).
 #
-# pyrust ships a pure-Python MT19937 with CPython's exact int-seed algorithm, so
-# for int/float/None seeds the numeric stream is bit-identical to CPython.  This
+# pyrust's native `random` / `_random` use CPython's exact MT19937 seeding for
+# every seed type, so the numeric stream is bit-identical to CPython.  This
 # fixture asserts the exact draws for fixed int seeds (the critical guarantee),
 # plus the version-stable contract: types, ranges, reproducibility, uniqueness,
-# and the error wording.
+# and the error wording.  `test_random_native.py` covers the rest of the API.
 import random
 
 # --- bit-exact MT19937 stream (must byte-match CPython 3.12) ----------------
