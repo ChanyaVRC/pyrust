@@ -609,11 +609,11 @@ pyrust_builtin_modules! {
     // `PrettyPrinter`, `isreadable`, `isrecursive`, `saferepr`, `pp` — injected
     // by the `@inject` post-load hook.  The native body is empty.
     pprint @inject,
-    // `statistics` (issue #2811): a float-based adaptation of CPython's pure-
-    // Python `statistics` module — `mean` / `median` / `mode` / `variance` /
-    // `stdev` / `NormalDist` / … — defined in `statistics_py.py` and injected
-    // by the `@inject` post-load hook; the native body is empty.
-    statistics @inject,
+    // `statistics` (issues #2811, #3472): the whole CPython 3.12.3 `statistics`
+    // module — exact `_sum` / `_ss` arithmetic, the averages, medians, modes,
+    // `quantiles`, measures of spread, `covariance` / `correlation` /
+    // `linear_regression` and `NormalDist` — implemented 100% natively.
+    statistics,
     // `csv` (issues #2808, #3340, #3400): the whole CPython 3.12 `csv` /
     // `_csv` surface — the `_csv.c` reader state machine and writer, the
     // dialect type and registry, `field_size_limit`, the `Dialect` family,
