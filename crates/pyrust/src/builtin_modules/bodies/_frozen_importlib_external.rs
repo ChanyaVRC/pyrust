@@ -31,11 +31,25 @@ pub(crate) fn post_load_init(
         "DEBUG_BYTECODE_SUFFIXES",
         "OPTIMIZED_BYTECODE_SUFFIXES",
         "EXTENSION_SUFFIXES",
-        "ALL_SUFFIXES",
+        "WindowsRegistryFinder",
     ] {
         if let Ok(val) = interp.get_attr(&machinery, name) {
             module.borrow_mut().insert_attr(name.to_string(), val);
         }
+    }
+    // The `_bootstrap_external` internals `importlib.machinery` keeps private.
+    for name in crate::builtin_modules::importlib_machinery::HIDDEN_CLASS_NAMES {
+        if name.starts_with("_FileFinder") {
+            continue;
+        }
+        let class = crate::builtin_modules::importlib_machinery::hidden_class(interp, name)?;
+        module.borrow_mut().insert_attr((*name).to_string(), class);
+    }
+    // `_NamespaceLoader = NamespaceLoader`, kept for `module_from_spec()`.
+    if let Ok(val) = interp.get_attr(&machinery, "NamespaceLoader") {
+        module
+            .borrow_mut()
+            .insert_attr("_NamespaceLoader".to_string(), val);
     }
     let util = interp.load_module("importlib.util")?;
     for name in [

@@ -325,6 +325,9 @@ macro_rules! pyrust_builtin_modules {
                 #[cfg(unix)]
                 "posix" => return posix::post_load_init(interp, module),
                 "importlib.abc" => return importlib_abc::post_load_init(interp, module),
+                "importlib.machinery" => {
+                    return importlib_machinery::post_load_init(interp, module);
+                }
                 "importlib.util" => return importlib_util::post_load_init(interp, module),
                 "importlib.resources.abc" => {
                     return importlib_resources_abc::post_load_init(interp, module);
@@ -812,8 +815,9 @@ pyrust_builtin_modules! {
     // `importlib`, `importlib.machinery`, `importlib.util`, `importlib.abc`,
     // `importlib.resources` (`.abc`, `.readers`, `.simple`), `importlib.readers`,
     // `importlib.simple`, `importlib.metadata`, and `_frozen_importlib*`
-    // (issues #3189, #3244). All new submodules are 100% native Rust (no `@inject`).
-    "importlib.machinery" as importlib_machinery @inject,
+    // (issues #3189, #3244, #3493). All but `importlib` itself are 100% native
+    // Rust (no `@inject`).
+    "importlib.machinery" as importlib_machinery,
     "importlib.util" as importlib_util,
     "importlib.resources.abc" as importlib_resources_abc,
     "importlib.resources.readers" as importlib_resources_readers,
