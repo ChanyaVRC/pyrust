@@ -451,13 +451,28 @@ pub(crate) fn nt_getdiskusage(path: PyPath) -> Result<Value> {
     let mut total: u64 = 0;
     let mut total_free: u64 = 0;
     // SAFETY: `wide` is NUL-terminated and all output pointers are valid.
-    let ok =
+    let mut ok =
         unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_avail, &mut total, &mut total_free) };
+    let mut err = std::io::Error::last_os_error();
+    // A file, not a directory (`ERROR_DIRECTORY`): like CPython, retry with
+    // the path cut at its last separator (`_dirnameW`).
+    const ERROR_DIRECTORY: i32 = 267;
+    if ok == 0 && err.raw_os_error() == Some(ERROR_DIRECTORY) {
+        let len = wide.len() - 1;
+        let cut = (1..len)
+            .rev()
+            .find(|&i| wide[i] == u16::from(b'\\') || wide[i] == u16::from(b'/'))
+            .unwrap_or(0);
+        let mut dir = wide[..cut].to_vec();
+        dir.push(0);
+        // SAFETY: `dir` is NUL-terminated and all output pointers are valid.
+        ok = unsafe {
+            GetDiskFreeSpaceExW(dir.as_ptr(), &mut free_avail, &mut total, &mut total_free)
+        };
+        err = std::io::Error::last_os_error();
+    }
     if ok == 0 {
-        return Err(PyError::from_io_error(
-            &std::io::Error::last_os_error(),
-            Some(&p_disp),
-        ));
+        return Err(PyError::from_io_error(&err, Some(&p_disp)));
     }
     Ok(Value::tuple(vec![
         u64_to_py_int(total),

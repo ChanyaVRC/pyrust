@@ -402,6 +402,13 @@ pub(crate) fn native_callable_doc(registry_key: &str) -> Option<Option<&'static 
     crate::builtin_modules::native_callable_doc(registry_key)
 }
 
+/// A constant attribute the Python source sets on a function that is a
+/// native-Rust callable here (`shutil.rmtree.avoids_symlink_attacks`), by
+/// registry name and attribute name.
+pub(crate) fn native_callable_attr(registry_key: &str, name: &str) -> Option<crate::value::Value> {
+    crate::builtin_modules::native_callable_attr(registry_key, name)
+}
+
 const MODULE_COUNT: usize = count_modules(crate::builtin_modules::MODULE_REG_TABLES, &[]);
 
 /// Tier 2: one row per built-in module that registers native callables,

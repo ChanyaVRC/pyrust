@@ -1,111 +1,63 @@
-// `shutil` module — body for the `shutil @inject` entry in
-// `pyrust_builtin_modules!` (issue #3148).
+// `shutil` module — 100% native Rust implementation of CPython 3.12.3's
+// `Lib/shutil.py` (issues #3148, #3251, #3486).
 //
-// Minimal native Rust helpers handle streaming file copy, metadata timestamp
-// preservation, FIFO detection, and tty terminal-size probing; the public
-// CPython 3.12 `shutil` surface lives in `shutil_py.py` and is injected by
-// `inject_python_members`.
+// The module mirrors the CPython source: the exception classes, `__all__`,
+// the module constants, every public function and the private helpers other
+// code reaches for (`_samefile`, `_copytree`, `_rmtree_unsafe`,
+// `_make_tarball`, `_ARCHIVE_FORMATS`, ...).  Like the source, the functions
+// resolve their dependencies (`os`, `sys`, `stat`, `fnmatch`, ...) and each
+// other (`Error`, `copy2`, `COPY_BUFSIZE`) as module globals at call time,
+// and every file-system step goes through the `os` / `os.path` function the
+// source calls, so patching `shutil.os` or `os.rename` behaves the same way.
 //
-// Reference: <https://docs.python.org/3/library/shutil.html>
+// - `shutil/support.rs`: module state (`gil_local!`), lookups, call helpers
+//   and the `try` / `except` emulation.
+// - `shutil/copy.rs`: `copyfileobj` ... `copy2`, `ignore_patterns`,
+//   `copytree`.
+// - `shutil/tree.rs`: `rmtree` (fd-based on Unix) and `move`.
+// - `shutil/archives.rs`: the archive / unpack registries, `make_archive`,
+//   `unpack_archive` and the built-in archivers.
+// - `shutil/system.rs`: `disk_usage`, `chown`, `get_terminal_size`, `which`.
+// - `shutil/docs.rs`: the source's docstrings.
+//
+// Reference: <https://docs.python.org/3.12/library/shutil.html>
 
-use std::cell::RefCell;
-use std::io::IsTerminal;
 use std::rc::Rc;
 
-use crate::error::{PyError, Result};
-use crate::interpreter::builtin_args::{OptValueRef, OptionalArg, PyPath, PyStr, PyValue};
-use crate::interpreter::{
-    ExpandedCallArg, Interpreter, reject_keyword_args_expanded, value_type_name_str,
-};
-use crate::value::{PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
-#[path = "shutil/archives_disk.rs"]
-mod archives_disk;
+use crate::error::Result;
+use crate::interpreter::{ExpandedCallArg, Interpreter};
+use crate::value::{Value, ValueKind};
 
-/// Python-source definitions for the `shutil` module.
-const SHUTIL_PY_SOURCE: &str = include_str!("shutil_py.py");
+#[path = "shutil/archives.rs"]
+mod archives;
+#[path = "shutil/copy.rs"]
+mod copy;
+#[path = "shutil/docs.rs"]
+mod docs;
+#[path = "shutil/support.rs"]
+mod support;
+#[path = "shutil/system.rs"]
+mod system;
+#[path = "shutil/tree.rs"]
+mod tree;
 
-/// Private native helpers moved into the exec namespace and hidden from
-/// `dir(shutil)` so the module surface stays clean.
-const SHUTIL_NATIVE_HELPERS: [&str; 4] = [
-    "_copyfile_native",
-    "_copystat_times",
-    "_is_fifo",
-    "_query_terminal_size",
-];
-
-/// Public attributes exported onto the `shutil` module.
-const SHUTIL_PY_EXPORTS: [&str; 18] = [
-    "Error",
-    "SameFileError",
-    "SpecialFileError",
-    "ExecError",
-    "ReadError",
-    "COPY_BUFSIZE",
-    "copyfileobj",
-    "copyfile",
-    "copymode",
-    "copystat",
-    "copy",
-    "copy2",
-    "ignore_patterns",
-    "copytree",
-    "rmtree",
-    "move",
-    "which",
-    "get_terminal_size",
-];
-
-/// Execute `SHUTIL_PY_SOURCE` once, wire its wrappers to the native helpers,
-/// hide private helper names from `dir(shutil)`, and export the public
-/// CPython 3.12 `shutil` surface onto `module`.
-pub(crate) fn inject_python_members(
-    interp: &mut Interpreter,
-    module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<Option<Value>> {
-    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
-    {
-        let mut module_ref = module.borrow_mut();
-        for helper in SHUTIL_NATIVE_HELPERS {
-            if let Some(func) = module_ref.attrs.shift_remove(helper) {
-                ns.dict_insert(PyKey::str_from(helper), func)?;
-            }
-        }
-    }
-    interp.exec_source(SHUTIL_PY_SOURCE, Some(ns.clone()), None)?;
-    let dict = ns
-        .as_dict()
-        .ok_or_else(|| PyError::runtime("shutil: exec namespace not a dict".into()))?;
-    for name in SHUTIL_PY_EXPORTS {
-        if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            if let ValueKind::PyClass(cls_rc) = val.kind() {
-                let mut class = cls_rc.borrow_mut();
-                class
-                    .attrs
-                    .insert("__module__".to_string(), Value::string("shutil"));
-                class.error_name = match name {
-                    "Error" => Some("shutil.Error"),
-                    "SameFileError" => Some("shutil.SameFileError"),
-                    "SpecialFileError" => Some("shutil.SpecialFileError"),
-                    "ExecError" => Some("shutil.ExecError"),
-                    "ReadError" => Some("shutil.ReadError"),
-                    _ => None,
-                };
-            }
-            module
-                .borrow_mut()
-                .attrs
-                .insert(name.to_string(), val.clone());
-        }
-    }
-    archives_disk::init_format_registries(module);
-    // Append native archive/disk API exports to `__all__` in the exec namespace
-    // so `publish_exec_dunder_all` publishes the complete CPython 3.12 `__all__`.
-    if let Some(all_val) = dict.get(&PyKey::str_from("__all__")) {
-        #[allow(unused_mut)]
-        let mut extra = vec![
-            "RegistryError",
+fn all_list() -> Value {
+    Value::list(
+        [
+            "copyfileobj",
+            "copyfile",
+            "copymode",
+            "copystat",
+            "copy",
+            "copy2",
+            "copytree",
+            "move",
+            "rmtree",
+            "Error",
+            "SpecialFileError",
+            "ExecError",
             "make_archive",
             "get_archive_formats",
             "register_archive_format",
@@ -114,424 +66,545 @@ pub(crate) fn inject_python_members(
             "register_unpack_format",
             "unregister_unpack_format",
             "unpack_archive",
+            "ignore_patterns",
+            "chown",
+            "which",
+            "get_terminal_size",
+            "SameFileError",
+            // disk_usage is added later, if available on the platform
             "disk_usage",
-        ];
-        #[cfg(unix)]
-        extra.push("chown");
-        for sym in extra {
-            let _ = archives_disk::call_method(interp, all_val, "append", &[Value::string(sym)]);
+        ]
+        .into_iter()
+        .map(Value::string)
+        .collect(),
+    )
+}
+
+/// `__doc__` of the `shutil` callable `registry_key` (`shutil.copy`, ...).
+pub(crate) fn native_doc(registry_key: &str) -> Option<Option<&'static str>> {
+    docs::function_doc(registry_key.strip_prefix("shutil.")?)
+}
+
+/// The function attributes the source sets: `rmtree.avoids_symlink_attacks`
+/// and `_make_tarball.supports_root_dir` / `_make_zipfile.supports_root_dir`.
+pub(crate) fn native_attr(registry_key: &str, name: &str) -> Option<Value> {
+    match (registry_key, name) {
+        // Allow introspection of whether or not the hardening against
+        // symlink attacks is supported on the current platform
+        ("shutil.rmtree", "avoids_symlink_attacks") => Some(Value::bool_(cfg!(unix))),
+        ("shutil._make_tarball" | "shutil._make_zipfile", "supports_root_dir") => {
+            Some(Value::bool_(true))
+        }
+        _ => None,
+    }
+}
+
+/// The module namespace in the source's definition order.
+const NAMESPACE_ORDER: &[&str] = &[
+    "__doc__",
+    "os",
+    "sys",
+    "stat",
+    "fnmatch",
+    "errno",
+    "warnings",
+    "_ZLIB_SUPPORTED",
+    "_BZ2_SUPPORTED",
+    "_LZMA_SUPPORTED",
+    "_WINDOWS",
+    "posix",
+    "nt",
+    "_winapi",
+    "COPY_BUFSIZE",
+    "_USE_CP_SENDFILE",
+    "_HAS_FCOPYFILE",
+    "_WIN_DEFAULT_PATHEXT",
+    "__all__",
+    "Error",
+    "SameFileError",
+    "SpecialFileError",
+    "ExecError",
+    "ReadError",
+    "RegistryError",
+    "_GiveupOnFastCopy",
+    "copyfileobj",
+    "_samefile",
+    "_stat",
+    "_islink",
+    "copyfile",
+    "copymode",
+    "_copyxattr",
+    "copystat",
+    "copy",
+    "copy2",
+    "ignore_patterns",
+    "_copytree",
+    "copytree",
+    "_rmtree_islink",
+    "_rmtree_unsafe",
+    "_use_fd_functions",
+    "rmtree",
+    "_basename",
+    "move",
+    "_destinsrc",
+    "_is_immutable",
+    "_get_gid",
+    "_get_uid",
+    "_make_tarball",
+    "_make_zipfile",
+    "_ARCHIVE_FORMATS",
+    "get_archive_formats",
+    "register_archive_format",
+    "unregister_archive_format",
+    "make_archive",
+    "get_unpack_formats",
+    "_check_unpack_options",
+    "register_unpack_format",
+    "unregister_unpack_format",
+    "_ensure_directory",
+    "_unpack_zipfile",
+    "_unpack_tarfile",
+    "_UNPACK_FORMATS",
+    "_find_unpack_format",
+    "unpack_archive",
+    "disk_usage",
+    "chown",
+    "get_terminal_size",
+    "_access_check",
+    "_win_path_needs_curdir",
+    "which",
+];
+
+/// Wire what the source gets from its module-level imports and statements:
+/// the dependency modules, the platform constants, the exception docstrings,
+/// the format registries, and the hidden classes standing in for the
+/// source's closures; then record the module state for the native functions.
+pub(crate) fn prepare_module(interp: &mut Interpreter, module: &Value) {
+    let ValueKind::PyModule(module_rc) = module.kind() else {
+        return;
+    };
+    let module_rc = Rc::clone(module_rc);
+    for name in ["os", "sys", "stat", "fnmatch", "errno", "warnings"] {
+        if let Ok(dep) = interp.load_module(name) {
+            module_rc.borrow_mut().insert_attr(name.to_string(), dep);
         }
     }
-    Ok(Some(ns.clone()))
-}
+    let os = module_rc.borrow().get_attr_value("os");
+    let os_has = |interp: &mut Interpreter, name: &str| {
+        os.as_ref()
+            .is_some_and(|os| interp.get_attr(os, name).is_ok())
+    };
+    let use_cp_sendfile = cfg!(target_os = "linux") && os_has(interp, "sendfile");
 
-fn require_str(fn_name: &str, value: &Value, what: &str) -> Result<String> {
-    match value.kind() {
-        ValueKind::Str(s) => Ok(s.to_string()),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "{fn_name}() {what} must be str, not {}",
-                value_type_name_str(value),
-            ),
-        )),
-    }
-}
-
-fn copyfile_native_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    if args.len() != 2 {
-        return Err(PyError::named(
-            "TypeError",
-            format!(
-                "{fn_name}() takes exactly 2 arguments ({} given)",
-                args.len()
-            ),
-        ));
-    }
-    let src = require_str(fn_name, &args[0].value, "src")?;
-    let dst = require_str(fn_name, &args[1].value, "dst")?;
-    let mut reader =
-        std::fs::File::open(&src).map_err(|e| PyError::from_io_error(&e, Some(&src)))?;
-    let mut writer =
-        std::fs::File::create(&dst).map_err(|e| PyError::from_io_error(&e, Some(&dst)))?;
-    std::io::copy(&mut reader, &mut writer)
-        .map_err(|e| PyError::from_io_error2(&e, Some(&src), Some(&dst)))?;
-    Ok(Value::none())
-}
-
-fn copystat_times_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    if args.len() != 3 {
-        return Err(PyError::named(
-            "TypeError",
-            format!(
-                "{fn_name}() takes exactly 3 arguments ({} given)",
-                args.len()
-            ),
-        ));
-    }
-    let src = require_str(fn_name, &args[0].value, "src")?;
-    let dst = require_str(fn_name, &args[1].value, "dst")?;
-    let follow = match args[2].value.kind() {
-        ValueKind::Bool(b) => b,
-        ValueKind::Int(n) => n != 0,
-        ValueKind::None => false,
-        _ => true,
+    // `posix = nt = None`, then the platform's module; `_winapi` is not
+    // provided by the runtime.
+    let posix = if cfg!(unix) {
+        interp
+            .load_module("posix")
+            .unwrap_or_else(|_| Value::none())
+    } else {
+        Value::none()
+    };
+    let nt = if cfg!(windows) {
+        interp.load_module("nt").unwrap_or_else(|_| Value::none())
+    } else {
+        Value::none()
+    };
+    // `posix and hasattr(posix, "_fcopyfile")`
+    let has_fcopyfile = if posix.is_none() {
+        Value::none()
+    } else {
+        Value::bool_(interp.get_attr(&posix, "_fcopyfile").is_ok())
     };
 
-    let meta = if follow {
-        std::fs::metadata(&src)
-    } else {
-        std::fs::symlink_metadata(&src)
-    }
-    .map_err(|e| PyError::from_io_error(&e, Some(&src)))?;
+    let function = |name: &str| {
+        module_rc
+            .borrow()
+            .get_attr_value(name)
+            .unwrap_or_else(Value::none)
+    };
+    let (archive_formats, unpack_formats) = archives::initial_registries(
+        function("_make_tarball"),
+        function("_make_zipfile"),
+        function("_unpack_tarfile"),
+        function("_unpack_zipfile"),
+    );
 
-    let atime = meta.accessed().ok();
-    let mtime = meta.modified().ok();
-
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        use std::time::UNIX_EPOCH;
-
-        fn to_timespec(t: Option<std::time::SystemTime>) -> libc::timespec {
-            match t.and_then(|st| st.duration_since(UNIX_EPOCH).ok()) {
-                Some(dur) => libc::timespec {
-                    tv_sec: dur.as_secs() as libc::time_t,
-                    tv_nsec: dur.subsec_nanos() as libc::c_long,
-                },
-                None => libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: libc::UTIME_OMIT,
-                },
-            }
+    let hidden_class = |name: &str| {
+        let removed = module_rc.borrow_mut().attrs.shift_remove(name);
+        match removed.as_ref().map(Value::kind) {
+            Some(ValueKind::PyClass(class)) => Some(Rc::clone(class)),
+            _ => None,
         }
+    };
+    let ignore_class = hidden_class("_IgnorePatterns");
+    let owner_filter_class = hidden_class("_SetUidGid");
 
-        let c_dst = CString::new(dst.as_str())
-            .map_err(|_| PyError::named("ValueError", "embedded null byte in path".to_string()))?;
-        let times = [to_timespec(atime), to_timespec(mtime)];
-        let flags = if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
-        // SAFETY: `c_dst` is NUL-terminated and `times` is a valid 2-element array.
-        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_dst.as_ptr(), times.as_ptr(), flags) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            return Err(PyError::from_io_error(&err, Some(&dst)));
+    {
+        let mut module = module_rc.borrow_mut();
+        for (name, value) in [
+            ("posix", posix),
+            ("nt", nt),
+            ("_winapi", Value::none()),
+            ("_USE_CP_SENDFILE", Value::bool_(use_cp_sendfile)),
+            ("_HAS_FCOPYFILE", has_fcopyfile),
+            ("_ARCHIVE_FORMATS", archive_formats.clone()),
+            ("_UNPACK_FORMATS", unpack_formats.clone()),
+        ] {
+            module.insert_attr(name.to_string(), value);
         }
     }
 
-    #[cfg(not(unix))]
-    {
-        let dst_path = std::path::Path::new(&dst);
-        if !dst_path.is_dir() {
-            let mut times = std::fs::FileTimes::new();
-            if let Some(a) = atime {
-                times = times.set_accessed(a);
-            }
-            if let Some(m) = mtime {
-                times = times.set_modified(m);
-            }
-            if let Ok(file) = std::fs::OpenOptions::new().write(true).open(dst_path) {
-                let _ = file.set_times(times);
-            }
+    for (name, error_name, doc) in [
+        ("Error", "shutil.Error", None),
+        (
+            "SameFileError",
+            "shutil.SameFileError",
+            Some(docs::DOC_CLASS_SAMEFILEERROR),
+        ),
+        (
+            "SpecialFileError",
+            "shutil.SpecialFileError",
+            Some(docs::DOC_CLASS_SPECIALFILEERROR),
+        ),
+        (
+            "ExecError",
+            "shutil.ExecError",
+            Some(docs::DOC_CLASS_EXECERROR),
+        ),
+        (
+            "ReadError",
+            "shutil.ReadError",
+            Some(docs::DOC_CLASS_READERROR),
+        ),
+        (
+            "RegistryError",
+            "shutil.RegistryError",
+            Some(docs::DOC_CLASS_REGISTRYERROR),
+        ),
+        (
+            "_GiveupOnFastCopy",
+            "shutil._GiveupOnFastCopy",
+            Some(docs::DOC_CLASS_GIVEUPONFASTCOPY),
+        ),
+    ] {
+        let class = module_rc.borrow().get_attr_value(name);
+        if let Some(ValueKind::PyClass(class)) = class.as_ref().map(Value::kind) {
+            let mut class = class.borrow_mut();
+            class.error_name = Some(error_name);
+            class.attrs.insert(
+                "__doc__".to_string(),
+                doc.map_or_else(Value::none, Value::string),
+            );
         }
     }
 
-    Ok(Value::none())
-}
+    support::install_state(support::State {
+        module: Rc::clone(&module_rc),
+        archive_formats,
+        unpack_formats,
+        ignore_class,
+        owner_filter_class,
+        ntuple_diskusage: None,
+    });
 
-fn is_fifo_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    if args.len() != 1 {
-        return Err(PyError::named(
-            "TypeError",
-            format!(
-                "{fn_name}() takes exactly 1 argument ({} given)",
-                args.len()
-            ),
-        ));
-    }
-    let path = require_str(fn_name, &args[0].value, "path")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        let is_fifo = std::fs::metadata(&path).is_ok_and(|m| m.file_type().is_fifo());
-        Ok(Value::bool_(is_fifo))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(Value::bool_(false))
-    }
-}
-
-fn query_terminal_size_impl(fn_name: &str, args: &[ExpandedCallArg]) -> Result<Value> {
-    reject_keyword_args_expanded(fn_name, args)?;
-    if !args.is_empty() {
-        return Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}() takes no arguments ({} given)", args.len()),
-        ));
-    }
-    if !std::io::stdout().is_terminal() {
-        return Err(PyError::named(
-            "OSError",
-            "Inappropriate ioctl for device".to_string(),
-        ));
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: `winsize` is POD and `TIOCGWINSZ` writes into it.
-        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-        let rc = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
-        if rc == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-            return Ok(Value::tuple(vec![
-                Value::int(ws.ws_col as i64),
-                Value::int(ws.ws_row as i64),
-            ]));
+    let mut module = module_rc.borrow_mut();
+    for name in NAMESPACE_ORDER {
+        if let Some(value) = module.attrs.shift_remove(*name) {
+            module.attrs.insert((*name).to_string(), value);
         }
-        Err(PyError::named(
-            "OSError",
-            "Inappropriate ioctl for device".to_string(),
-        ))
-    }
-    #[cfg(not(unix))]
-    {
-        Err(PyError::named(
-            "OSError",
-            "terminal size query unavailable".to_string(),
-        ))
     }
 }
 
 pyrust_module! {
     constants {
-        "usage" => archives_disk::usage::class(),
+        "__doc__" => Value::string(docs::MODULE_DOC),
+        "_ZLIB_SUPPORTED" => Value::bool_(true),
+        "_BZ2_SUPPORTED" => Value::bool_(true),
+        "_LZMA_SUPPORTED" => Value::bool_(true),
+        "_WINDOWS" => Value::bool_(cfg!(windows)),
+        "COPY_BUFSIZE" => Value::int(copy::COPY_BUFSIZE),
+        "_WIN_DEFAULT_PATHEXT" => Value::string(system::WIN_DEFAULT_PATHEXT),
+        "__all__" => all_list(),
+        "_use_fd_functions" => Value::bool_(cfg!(unix)),
     }
 
-    /// Raised when a registry operation fails (e.g. duplicate unpack extension).
+    exception Error(OSError);
+    exception SameFileError(Error);
+    exception SpecialFileError(OSError);
+    exception ExecError(OSError);
+    exception ReadError(OSError);
     exception RegistryError;
+    exception _GiveupOnFastCopy;
 
-    fn _copyfile_native(args) -> Result<Value> {
-        copyfile_native_impl(FN_NAME, args)
+    fn copyfileobj(args) -> Result<Value> {
+        copy::copyfileobj_entry(_interp, args)
     }
 
-    fn _copystat_times(args) -> Result<Value> {
-        copystat_times_impl(FN_NAME, args)
+    fn _samefile(args) -> Result<Value> {
+        copy::samefile_entry(_interp, args)
     }
 
-    fn _is_fifo(args) -> Result<Value> {
-        is_fifo_impl(FN_NAME, args)
+    fn _stat(args) -> Result<Value> {
+        copy::stat_entry(_interp, args)
     }
 
-    fn _query_terminal_size(args) -> Result<Value> {
-        query_terminal_size_impl(FN_NAME, args)
+    fn _islink(args) -> Result<Value> {
+        copy::islink_entry(_interp, args)
     }
 
-    fn disk_usage(path: PyPath) -> Result<Value> {
-        archives_disk::disk_usage_impl(path.as_path())
+    fn copyfile(args) -> Result<Value> {
+        copy::copyfile_entry(_interp, args)
     }
 
-    #[cfg(unix)]
-    fn chown(
-        path: PyPath,
-        #[default(OptionalArg::Omitted)] user: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] group: OptValueRef<'_>,
-    ) -> Result<Value> {
-        archives_disk::chown_impl(path.as_path(), user.as_value(), group.as_value())
+    fn copymode(args) -> Result<Value> {
+        copy::copymode_entry(_interp, args)
     }
 
-    fn get_archive_formats() -> Result<Value> {
-        archives_disk::get_archive_formats_impl(_interp)
+    fn _copyxattr(args) -> Result<Value> {
+        copy::copyxattr_entry(_interp, args)
     }
 
-    fn register_archive_format(
-        name: PyStr<'_>,
-        function: PyValue,
-        #[default(OptionalArg::Omitted)] extra_args: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] description: OptValueRef<'_>,
-    ) -> Result<Value> {
-        let desc = match description.as_value() {
-            None => String::new(),
-            Some(v) => v
-                .as_str()
-                .ok_or_else(|| {
-                    PyError::named(
-                        "TypeError",
-                        format!(
-                            "description must be str, not {}",
-                            value_type_name_str(v)
-                        ),
-                    )
-                })?
-                .to_string(),
-        };
-        archives_disk::register_archive_format_impl(
-            _interp,
-            name.0.as_ref(),
-            function.0,
-            extra_args.as_value(),
-            &desc,
-        )
+    fn copystat(args) -> Result<Value> {
+        copy::copystat_entry(_interp, args)
     }
 
-    fn unregister_archive_format(name: PyStr<'_>) -> Result<Value> {
-        archives_disk::unregister_archive_format_impl(_interp, name.0.as_ref())
+    fn copy(args) -> Result<Value> {
+        copy::copy_entry(_interp, args)
     }
 
-    fn get_unpack_formats() -> Result<Value> {
-        archives_disk::get_unpack_formats_impl(_interp)
+    fn copy2(args) -> Result<Value> {
+        copy::copy2_entry(_interp, args)
     }
 
-    fn register_unpack_format(
-        name: PyStr<'_>,
-        extensions: PyValue,
-        function: PyValue,
-        #[default(OptionalArg::Omitted)] extra_args: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] description: OptValueRef<'_>,
-    ) -> Result<Value> {
-        let desc = match description.as_value() {
-            None => String::new(),
-            Some(v) => v
-                .as_str()
-                .ok_or_else(|| {
-                    PyError::named(
-                        "TypeError",
-                        format!(
-                            "description must be str, not {}",
-                            value_type_name_str(v)
-                        ),
-                    )
-                })?
-                .to_string(),
-        };
-        archives_disk::register_unpack_format_impl(
-            _interp,
-            name.0.as_ref(),
-            extensions.0,
-            function.0,
-            extra_args.as_value(),
-            &desc,
-        )
+    fn ignore_patterns(args) -> Result<Value> {
+        copy::ignore_patterns_entry(_interp, args)
     }
 
-    fn unregister_unpack_format(name: PyStr<'_>) -> Result<Value> {
-        archives_disk::unregister_unpack_format_impl(_interp, name.0.as_ref())
+    fn _copytree(args) -> Result<Value> {
+        copy::copytree_entries_entry(_interp, args)
     }
 
-    fn _make_tarball(
-        base_name: PyPath,
-        base_dir: PyPath,
-        #[default(OptionalArg::Omitted)] compress: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] _verbose: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] dry_run: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] owner: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] group: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] logger: OptValueRef<'_>,
-    ) -> Result<Value> {
-        let comp = match compress.as_value() {
-            None => Some("gzip"),
-            Some(v) if v.is_none() => None,
-            Some(v) => Some(v.as_str().ok_or_else(|| {
-                PyError::named(
-                    "TypeError",
-                    format!("compress must be str or None, not {}", value_type_name_str(v)),
-                )
-            })?),
-        };
-        let is_dry = match dry_run.as_value() {
-            None => false,
-            Some(v) => _interp.truthy_value(v)?,
-        };
-        let bn = base_name.as_path().to_string_lossy().into_owned();
-        let bd = base_dir.as_path().to_string_lossy().into_owned();
-        archives_disk::make_tarball_impl(
-            _interp,
-            &bn,
-            &bd,
-            comp,
-            is_dry,
-            owner.as_value(),
-            group.as_value(),
-            logger.as_value(),
-        )
+    fn copytree(args) -> Result<Value> {
+        copy::copytree_entry(_interp, args)
     }
 
-    fn _make_zipfile(
-        base_name: PyPath,
-        base_dir: PyPath,
-        #[default(OptionalArg::Omitted)] _verbose: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] dry_run: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] logger: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] _owner: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] _group: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] _root_dir: OptValueRef<'_>,
-    ) -> Result<Value> {
-        let is_dry = match dry_run.as_value() {
-            None => false,
-            Some(v) => _interp.truthy_value(v)?,
-        };
-        let bn = base_name.as_path().to_string_lossy().into_owned();
-        let bd = base_dir.as_path().to_string_lossy().into_owned();
-        archives_disk::make_zipfile_impl(_interp, &bn, &bd, is_dry, logger.as_value())
+    fn _rmtree_islink(args) -> Result<Value> {
+        tree::rmtree_islink_entry(_interp, args)
     }
 
-    fn _unpack_tarfile(
-        filename: PyPath,
-        extract_dir: PyPath,
-        #[keyword_only] #[default(OptionalArg::Omitted)] filter: OptValueRef<'_>,
-    ) -> Result<Value> {
-        let fn_s = filename.as_path().to_string_lossy().into_owned();
-        let ed_s = extract_dir.as_path().to_string_lossy().into_owned();
-        archives_disk::unpack_tarfile_impl(_interp, &fn_s, &ed_s, filter.as_value())
+    fn _rmtree_unsafe(args) -> Result<Value> {
+        tree::rmtree_unsafe_entry(_interp, args)
     }
 
-    fn _unpack_zipfile(filename: PyPath, extract_dir: PyPath) -> Result<Value> {
-        let fn_s = filename.as_path().to_string_lossy().into_owned();
-        let ed_s = extract_dir.as_path().to_string_lossy().into_owned();
-        archives_disk::unpack_zipfile_impl(_interp, &fn_s, &ed_s)
+    fn rmtree(args) -> Result<Value> {
+        tree::rmtree_entry(_interp, args)
     }
 
-    fn make_archive(
-        base_name: PyPath,
-        format: PyStr<'_>,
-        #[default(None)] root_dir: Option<PyPath>,
-        #[default(None)] base_dir: Option<PyPath>,
-        #[default(OptionalArg::Omitted)] _verbose: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] dry_run: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] owner: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] group: OptValueRef<'_>,
-        #[default(OptionalArg::Omitted)] logger: OptValueRef<'_>,
-    ) -> Result<Value> {
-        let is_dry = match dry_run.as_value() {
-            None => false,
-            Some(v) => _interp.truthy_value(v)?,
-        };
-        archives_disk::make_archive_impl(
-            _interp,
-            base_name.as_path(),
-            format.0.as_ref(),
-            root_dir.as_ref().map(PyPath::as_path),
-            base_dir.as_ref().map(PyPath::as_path),
-            is_dry,
-            owner.as_value(),
-            group.as_value(),
-            logger.as_value(),
-        )
+    fn _basename(args) -> Result<Value> {
+        tree::basename_entry(_interp, args)
     }
 
-    fn unpack_archive(
-        filename: PyPath,
-        #[default(None)] extract_dir: Option<PyPath>,
-        #[default(None)] format: Option<PyStr<'_>>,
-        #[keyword_only] #[default(OptionalArg::Omitted)] filter: OptValueRef<'_>,
-    ) -> Result<Value> {
-        archives_disk::unpack_archive_impl(
-            _interp,
-            filename.as_path(),
-            extract_dir.as_ref().map(PyPath::as_path),
-            format.as_ref().map(|s| s.0.as_ref()),
-            filter.as_value(),
-        )
+    #[py_name = "move"]
+    fn move_(args) -> Result<Value> {
+        tree::move_entry(_interp, args)
+    }
+
+    fn _destinsrc(args) -> Result<Value> {
+        tree::destinsrc_entry(_interp, args)
+    }
+
+    fn _is_immutable(args) -> Result<Value> {
+        tree::is_immutable_entry(_interp, args)
+    }
+
+    fn _get_gid(args) -> Result<Value> {
+        system::get_gid_entry(_interp, args)
+    }
+
+    fn _get_uid(args) -> Result<Value> {
+        system::get_uid_entry(_interp, args)
+    }
+
+    fn _make_tarball(args) -> Result<Value> {
+        archives::make_tarball_entry(_interp, args)
+    }
+
+    fn _make_zipfile(args) -> Result<Value> {
+        archives::make_zipfile_entry(_interp, args)
+    }
+
+    fn get_archive_formats(args) -> Result<Value> {
+        archives::get_archive_formats_entry(_interp, args)
+    }
+
+    fn register_archive_format(args) -> Result<Value> {
+        archives::register_archive_format_entry(_interp, args)
+    }
+
+    fn unregister_archive_format(args) -> Result<Value> {
+        archives::unregister_archive_format_entry(_interp, args)
+    }
+
+    fn make_archive(args) -> Result<Value> {
+        archives::make_archive_entry(_interp, args)
+    }
+
+    fn get_unpack_formats(args) -> Result<Value> {
+        archives::get_unpack_formats_entry(_interp, args)
+    }
+
+    fn _check_unpack_options(args) -> Result<Value> {
+        archives::check_unpack_options_entry(_interp, args)
+    }
+
+    fn register_unpack_format(args) -> Result<Value> {
+        archives::register_unpack_format_entry(_interp, args)
+    }
+
+    fn unregister_unpack_format(args) -> Result<Value> {
+        archives::unregister_unpack_format_entry(_interp, args)
+    }
+
+    fn _ensure_directory(args) -> Result<Value> {
+        archives::ensure_directory_entry(_interp, args)
+    }
+
+    fn _unpack_zipfile(args) -> Result<Value> {
+        archives::unpack_zipfile_entry(_interp, args)
+    }
+
+    fn _unpack_tarfile(args) -> Result<Value> {
+        archives::unpack_tarfile_entry(_interp, args)
+    }
+
+    fn _find_unpack_format(args) -> Result<Value> {
+        archives::find_unpack_format_entry(_interp, args)
+    }
+
+    fn unpack_archive(args) -> Result<Value> {
+        archives::unpack_archive_entry(_interp, args)
+    }
+
+    fn disk_usage(args) -> Result<Value> {
+        system::disk_usage_entry(_interp, args)
+    }
+
+    fn chown(args) -> Result<Value> {
+        system::chown_entry(_interp, args)
+    }
+
+    fn get_terminal_size(args) -> Result<Value> {
+        system::get_terminal_size_entry(_interp, args)
+    }
+
+    fn _access_check(args) -> Result<Value> {
+        system::access_check_entry(_interp, args)
+    }
+
+    fn _win_path_needs_curdir(args) -> Result<Value> {
+        system::win_path_needs_curdir_entry(_interp, args)
+    }
+
+    fn which(args) -> Result<Value> {
+        system::which_entry(_interp, args)
+    }
+
+    /// The callable `ignore_patterns` returns (the source's
+    /// `_ignore_patterns` closure); detached from the module namespace in
+    /// `prepare_module`.
+    class _IgnorePatterns {
+        fn __call__(args) -> Result<Value> {
+            copy::ignore_patterns_call(_interp, args)
+        }
+
+        fn __repr__(args) -> Result<Value> {
+            let _ = _interp;
+            copy::ignore_patterns_repr(args)
+        }
+    }
+
+    /// The `_set_uid_gid` tar filter `_make_tarball` builds when an owner or
+    /// group is requested; detached from the module namespace in
+    /// `prepare_module`.
+    class _SetUidGid {
+        fn __call__(args) -> Result<Value> {
+            archives::owner_filter_call(_interp, args)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::interpreter::Interpreter;
+
+    /// Run `src` in a fresh interpreter on its own thread (its own GIL
+    /// context, so its own `shutil` state).
+    fn run_on_fresh_thread(src: &'static str) -> std::result::Result<(), String> {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let mut interp = Interpreter::default();
+                interp
+                    .exec_source(src, None, None)
+                    .map(|_| ())
+                    .map_err(|err| format!("{err:?}"))
+            })
+            .expect("spawn interpreter thread")
+            .join()
+            .expect("interpreter thread must not panic")
+    }
+
+    #[test]
+    fn copies_moves_and_removes_trees() {
+        let src = r#"
+import os, shutil, tempfile
+
+with tempfile.TemporaryDirectory() as tmp:
+    src = os.path.join(tmp, "src")
+    os.makedirs(os.path.join(src, "sub"))
+    for name in ("a.txt", os.path.join("sub", "b.txt"), "skip.tmp"):
+        with open(os.path.join(src, name), "w") as f:
+            f.write(name)
+    dst = shutil.copytree(src, os.path.join(tmp, "dst"), ignore=shutil.ignore_patterns("*.tmp"))
+    assert sorted(os.listdir(dst)) == ["a.txt", "sub"], os.listdir(dst)
+    moved = shutil.move(dst, os.path.join(tmp, "moved"))
+    assert os.path.isfile(os.path.join(moved, "sub", "b.txt"))
+    calls = []
+    shutil.rmtree(os.path.join(tmp, "missing"), onexc=lambda *a: calls.append(a[0].__name__))
+    assert calls, calls
+    shutil.rmtree(moved)
+    assert not os.path.exists(moved)
+    try:
+        shutil.copyfile(os.path.join(src, "a.txt"), os.path.join(src, "a.txt"))
+    except shutil.SameFileError:
+        pass
+    else:
+        raise AssertionError("expected SameFileError")
+"#;
+        run_on_fresh_thread(src).expect("copytree / move / rmtree should work");
+    }
+
+    #[test]
+    fn format_registries_are_per_interpreter() {
+        // Registering formats in one interpreter must not leak into another.
+        let registering = r#"
+import shutil
+shutil.register_archive_format("only_here", lambda *a, **k: None, description="local")
+shutil.register_unpack_format("only_here", [".onlyhere"], lambda *a, **k: None)
+assert "only_here" in dict(shutil.get_archive_formats())
+assert shutil._find_unpack_format("x.onlyhere") == "only_here"
+shutil.unregister_archive_format("zip")
+assert "zip" not in shutil._ARCHIVE_FORMATS
+"#;
+        run_on_fresh_thread(registering).expect("registration should succeed");
+        let fresh = r#"
+import shutil
+names = [name for name, _ in shutil.get_archive_formats()]
+assert names == ["bztar", "gztar", "tar", "xztar", "zip"], names
+assert shutil._find_unpack_format("x.onlyhere") is None
+assert shutil._ARCHIVE_FORMATS["zip"][0] is shutil._make_zipfile
+"#;
+        run_on_fresh_thread(fresh).expect("a fresh interpreter sees only the built-in formats");
     }
 }
