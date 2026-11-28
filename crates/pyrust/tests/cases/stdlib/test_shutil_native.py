@@ -365,7 +365,9 @@ try:
         os.symlink(target, link)
         out = os.path.join(base, "copied_link.txt")
         shutil.copyfile(link, out, follow_symlinks=False)
-        show("copyfile-nofollow", os.path.islink(out), os.readlink(out) == target)
+        # (CPython's Windows os.readlink returns a \\?\-prefixed target, the
+        # runtime's a plain path; compare where the link points instead.)
+        show("copyfile-nofollow", os.path.islink(out), os.path.samefile(out, target))
         out2 = os.path.join(base, "copied_target.txt")
         shutil.copyfile(link, out2)
         show("copyfile-follow", os.path.islink(out2), read(out2))
